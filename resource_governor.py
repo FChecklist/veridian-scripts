@@ -1,0 +1,753 @@
+#!/usr/bin/env python3
+"""resource_governor.py -- SERVER RESOURCE GOVERNOR (Owner directive, 2026-07-27).
+See ai-os/SERVER_RESOURCE_GOVERNOR_2026-07-27.md for the full design doc.
+
+Direct, evidenced response to a real incident found and fixed the same day:
+veridian-task-watchdog.timer ran unstopped for 9h18m, firing every 60s with no
+"is a worker already active for this issue" check, spawning duplicate
+recovery/escalation actions for the same stalled task and driving load average
+to 32 on this 8-core box. scripts/dispatch_core.py (PR #101) already closes the
+COUNT-based half of this (one shared flock + CONCURRENCY_CAP across every real
+spawn call site) -- this module sits IN FRONT of dispatch_core.py, not instead
+of it, and closes the two gaps dispatch_core.py's own docstring does not cover:
+(1) per-identity de-duplication of SEQUENTIAL submissions (dispatch_core.py
+only ever sees concurrent unit COUNT, never "is this exact task already
+queued"), and (2) real RAM/disk-I/O/network visibility (dispatch_core.py has
+none -- only an implicit CPU-adjacent proxy via unit count).
+
+Every real spawn still goes through dispatch_core.acquire_dispatch_lock() +
+has_free_slot() + a real systemctl/veridian-task.py call, unmodified -- this
+module never bypasses that gate, it only decides WHEN something is even
+allowed to reach it.
+"""
+import argparse
+import contextlib
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+VERIDIAN_ROOT = os.environ.get("VERIDIAN_ROOT", "/opt/veridian")
+AI_OS = os.environ.get("VERIDIAN_AI_OS_DIR", f"{VERIDIAN_ROOT}/ai-os")
+SCRIPTS = os.environ.get("VERIDIAN_SCRIPTS_DIR", f"{VERIDIAN_ROOT}/scripts")
+LOCKS_DIR = os.environ.get("VERIDIAN_DISPATCH_LOCK_DIR", f"{AI_OS}/locks")
+ATTENTION_PATH = os.environ.get("VERIDIAN_GOVERNOR_ATTENTION_PATH", f"{AI_OS}/logs/ATTENTION.md")
+
+METRIC_STATE_PATH = os.environ.get(
+    "VERIDIAN_GOVERNOR_METRIC_STATE", f"{LOCKS_DIR}/resource-governor-metric-state.json")
+EMERGENCY_STATE_PATH = os.environ.get(
+    "VERIDIAN_GOVERNOR_EMERGENCY_STATE", f"{LOCKS_DIR}/resource-governor-emergency-state.json")
+EMERGENCY_STOP_PATH = os.environ.get(
+    "VERIDIAN_GOVERNOR_EMERGENCY_STOP", f"{LOCKS_DIR}/resource-governor-EMERGENCY_STOP")
+
+PROC_STAT_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_STAT", "/proc/stat")
+PROC_MEMINFO_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_MEMINFO", "/proc/meminfo")
+PROC_DISKSTATS_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_DISKSTATS", "/proc/diskstats")
+PROC_NETDEV_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_NETDEV", "/proc/net/dev")
+
+# The one hard cap this whole module exists to enforce, independently per
+# metric -- any ONE of the four hitting this freezes the queue (SCOPE
+# objective, literal "any one hitting 99% freezes the queue"). Overridable
+# for tests only.
+METRIC_THRESHOLD_PERCENT = float(os.environ.get("VERIDIAN_GOVERNOR_METRIC_THRESHOLD", "99.0"))
+
+# Network is a raw cumulative /proc counter with no natural 0-100% ceiling
+# (unlike CPU/RAM) -- normalized against a configured per-box capacity
+# baseline. This is a conservative placeholder default; replace via env with
+# this box's own measured real baseline (see design doc, Metric measurement
+# section).
+#
+# disk_io is NOT normalized against a throughput baseline (see
+# ROOT-CAUSE-2026-07-30 at read_disk_io_ticks/disk_io_percent below) --
+# raw sector-throughput-vs-assumed-capacity produced 3 real false
+# EMERGENCY_STOPs on 2026-07-29/30, each logging disk_io=100.0 while sar -d's
+# real %util for the same timestamps (independently re-derived from
+# /var/log/sysstat/sa29) was 26-65%, nowhere near saturated. Fixed to use
+# /proc/diskstats field 13 (io_ticks -- ms with >=1 IO in flight), the same
+# field iostat -x's %util is computed from, which has a real device-relative
+# 100% ceiling by construction (dt_seconds itself IS the ceiling).
+NETWORK_CAPACITY_BYTES_PER_SEC = float(os.environ.get("VERIDIAN_GOVERNOR_NET_CAPACITY_BPS", str(int(100 * 1024 * 1024 / 8))))
+
+TIER_MIN, TIER_MAX = 0, 4
+DEFAULT_TIER = 2
+
+# Anti-starvation aging (design doc "Dynamic realignment"): a queued item's
+# effective priority is max(0, tier - age_seconds // this interval).
+AGING_PROMOTION_INTERVAL_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_AGING_INTERVAL_S", str(15 * 60)))
+
+# Stuck-task protocol: timeout -> SIGTERM -> grace period -> SIGKILL.
+STUCK_TASK_TIMEOUT_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_STUCK_TIMEOUT_S", str(60 * 60)))
+SIGTERM_TO_SIGKILL_GRACE_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_SIGKILL_GRACE_S", "60"))
+
+# Emergency fail-safe cascade (design doc Section 7).
+EMERGENCY_CONSECUTIVE_TICKS_SHED = int(os.environ.get("VERIDIAN_GOVERNOR_EMERGENCY_SHED_TICKS", "3"))
+EMERGENCY_CONSECUTIVE_TICKS_HARDSTOP = int(os.environ.get("VERIDIAN_GOVERNOR_EMERGENCY_HARDSTOP_TICKS", "6"))
+
+METRIC_NAMES = ("cpu", "ram", "disk_io", "network")
+
+
+def _run(cmd, **kw):
+    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def _utcnow():
+    return datetime.now(timezone.utc)
+
+
+def _now_iso():
+    return _utcnow().isoformat()
+
+
+# ---------------------------------------------------------------------------
+# superboss-register.py integration -- in-process importlib load, same
+# pattern dispatch_core.py._superboss_register() already established (the
+# filename has a hyphen, so it cannot be a plain `import`).
+# ---------------------------------------------------------------------------
+
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_governor", os.path.join(SCRIPTS, "superboss-register.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+_dc = None
+
+
+def _dispatch_core():
+    """dispatch_core.py IS a plain-importable module name -- but it is loaded
+    via importlib here too (not `import dispatch_core`), so a test copy of
+    this whole script tree (tests/_dispatch_consolidation_fixtures.py-style
+    fixture, tmp_path/scripts/) is always the one actually exercised, never
+    whatever dispatch_core happens to be import-resolvable on sys.path."""
+    global _dc
+    if _dc is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "dispatch_core_governor", os.path.join(SCRIPTS, "dispatch_core.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _dc = _mod
+    return _dc
+
+
+# ---------------------------------------------------------------------------
+# Real /proc metric reads -- each is a pure function of (path) -> raw sample;
+# converting a raw sample (or pair of samples) into a percent is a separate
+# pure function below, so both halves are independently testable against
+# fixture files/dicts, never a real live /proc read in tests.
+# ---------------------------------------------------------------------------
+
+def read_cpu_times(path=None):
+    path = path or PROC_STAT_PATH
+    with open(path) as f:
+        for line in f:
+            if line.startswith("cpu "):
+                parts = [int(x) for x in line.split()[1:]]
+                idle = parts[3] + (parts[4] if len(parts) > 4 else 0)  # idle + iowait
+                total = sum(parts)
+                return {"idle": idle, "total": total}
+    raise ValueError(f"no 'cpu ' line found in {path}")
+
+
+def cpu_percent(prev, curr):
+    d_total = curr["total"] - prev["total"]
+    d_idle = curr["idle"] - prev["idle"]
+    if d_total <= 0:
+        return 0.0
+    return max(0.0, min(100.0, 100.0 * (1 - d_idle / d_total)))
+
+
+def read_mem_percent(path=None):
+    path = path or PROC_MEMINFO_PATH
+    vals = {}
+    with open(path) as f:
+        for line in f:
+            key, _, rest = line.partition(":")
+            if key in ("MemTotal", "MemAvailable"):
+                vals[key] = int(rest.strip().split()[0])
+    total = vals.get("MemTotal", 0)
+    avail = vals.get("MemAvailable", total)
+    if total <= 0:
+        return 0.0
+    return max(0.0, min(100.0, 100.0 * (1 - avail / total)))
+
+
+def _real_whole_disk_names(sys_block_path=None):
+    """Names of real whole-disk devices (e.g. 'sda'), from /sys/block --
+    partitions (sda1, sda14, sda15, ...) do NOT get their own /sys/block
+    entry, only their parent whole-disk does. Returns None (meaning: no
+    filtering) if /sys/block can't be read, so callers degrade to the old
+    loop/ram-only exclusion rather than crash."""
+    path = sys_block_path or "/sys/block"
+    try:
+        return set(os.listdir(path))
+    except OSError:
+        return None
+
+
+def read_disk_io_ticks(path=None, whole_disk_names=None):
+    """Sum of /proc/diskstats field 13 (0-indexed 12) -- 'milliseconds spent
+    doing I/Os' aka io_ticks -- across every real WHOLE-disk block device.
+    This is the exact counter iostat -x's %util is derived from (see
+    Documentation/admin-guide/iostats.rst field 13, and sysstat's iostat.c:
+    %util = delta(io_ticks) / delta(ms elapsed) * 100). It measures the
+    FRACTION OF TIME the device had >=1 I/O outstanding -- a real,
+    device-relative percentage with a natural 100% ceiling (dt_ms itself is
+    the ceiling), unlike raw sector throughput (ROOT-CAUSE-2026-07-30, see
+    disk_io_percent below and DISK_IO_CAPACITY comment at top of file).
+
+    Only whole-disk devices are summed (loopN/ramN excluded as before, AND
+    partitions like sda1/sda14/sda15 excluded too) -- summing a partition's
+    io_ticks on top of its parent whole-disk's io_ticks double/triple-counts
+    the same underlying I/O (verified live 2026-07-30: sda1's io_ticks !=
+    sda's io_ticks, so this is not even a redundant-but-harmless sum, it is
+    actively wrong). On this box there is exactly one real whole disk (sda),
+    so the sum-of-whole-disks approach is exact here, not an approximation
+    left untested for the multi-disk case."""
+    path = path or PROC_DISKSTATS_PATH
+    names = whole_disk_names if whole_disk_names is not None else _real_whole_disk_names()
+    total = 0
+    with open(path) as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 14:
+                continue
+            name = parts[2]
+            if name.startswith("loop") or name.startswith("ram"):
+                continue
+            if names is not None and name not in names:
+                continue
+            total += int(parts[12])
+    return total
+
+
+def disk_io_percent(prev_ticks, curr_ticks, dt_seconds):
+    """%util-equivalent: delta io_ticks (ms device was busy) over the real
+    sampling window (ms), exactly matching iostat -x's %util formula --
+    NOT raw sector throughput normalized against an assumed capacity
+    constant (the pre-2026-07-30 bug: see ROOT-CAUSE-2026-07-30 comment on
+    read_disk_io_ticks above). min/max-clamped the same way the old function
+    was, since a busy-time fraction can't go negative and shouldn't exceed
+    100% except for the same kind of ms-rounding/multi-CPU-accounting noise
+    iostat itself clamps for."""
+    if dt_seconds <= 0:
+        return 0.0
+    dt_ms = dt_seconds * 1000.0
+    delta = max(0.0, curr_ticks - prev_ticks)
+    return max(0.0, min(100.0, 100.0 * delta / dt_ms))
+
+
+def read_net_bytes(path=None):
+    """Sum of rx+tx bytes across every real interface (lo excluded).
+    /proc/net/dev: 2 header lines, then 'iface: rx_bytes ... (8 fields)
+    tx_bytes ... (8 fields)'."""
+    path = path or PROC_NETDEV_PATH
+    total = 0
+    with open(path) as f:
+        lines = f.readlines()
+    for line in lines[2:]:
+        if ":" not in line:
+            continue
+        iface, _, rest = line.partition(":")
+        if iface.strip() == "lo":
+            continue
+        fields = rest.split()
+        if len(fields) < 16:
+            continue
+        total += int(fields[0]) + int(fields[8])
+    return total
+
+
+def network_percent(prev_bytes, curr_bytes, dt_seconds, capacity_bytes_per_sec=None):
+    capacity = NETWORK_CAPACITY_BYTES_PER_SEC if capacity_bytes_per_sec is None else capacity_bytes_per_sec
+    if dt_seconds <= 0 or capacity <= 0:
+        return 0.0
+    rate = max(0.0, (curr_bytes - prev_bytes) / dt_seconds)
+    return max(0.0, min(100.0, 100.0 * rate / capacity))
+
+
+def _load_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def _save_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+
+
+def sample_metrics(now=None):
+    """Real, delta-based sample of all 4 metrics against the PREVIOUSLY
+    persisted raw sample (resource-governor-metric-state.json) -- delta-based
+    so a single-shot tick invocation (cron, not just a long-lived loop) still
+    computes a real rate, not just an instantaneous (and for disk/net,
+    meaningless) counter value. First-ever call (no prior state) seeds state
+    and reports 0% for the three delta-based metrics -- never freezes the
+    queue on cold-start noise."""
+    now = now or _utcnow()
+    curr_cpu = read_cpu_times()
+    curr_disk_ticks = read_disk_io_ticks()
+    curr_net = read_net_bytes()
+    ram = read_mem_percent()
+
+    prev = _load_json(METRIC_STATE_PATH)
+    state = {"ts": now.isoformat(), "cpu": curr_cpu, "disk_io_ticks": curr_disk_ticks, "net_bytes": curr_net}
+    _save_json(METRIC_STATE_PATH, state)
+
+    if prev is None:
+        return {"cpu": 0.0, "ram": ram, "disk_io": 0.0, "network": 0.0}
+
+    dt = (now - datetime.fromisoformat(prev["ts"])).total_seconds()
+    # ROOT-CAUSE-2026-07-30 migration: the persisted state key was renamed
+    # disk_sectors -> disk_io_ticks (raw-throughput formula replaced with the
+    # real io-ticks/%util formula, see disk_io_percent/read_disk_io_ticks
+    # above). A state file written by the OLD code won't have the new key --
+    # treat that single tick as disk_io cold-start (report 0.0, same as the
+    # genuine first-ever-run case) rather than KeyError or silently reading a
+    # stale/wrong value; cpu/ram/network are unaffected since their state
+    # keys did not change.
+    prev_disk_ticks = prev.get("disk_io_ticks")
+    disk_io = 0.0 if prev_disk_ticks is None else disk_io_percent(prev_disk_ticks, curr_disk_ticks, dt)
+    return {
+        "cpu": cpu_percent(prev["cpu"], curr_cpu),
+        "ram": ram,
+        "disk_io": disk_io,
+        "network": network_percent(prev["net_bytes"], curr_net, dt),
+    }
+
+
+def over_threshold_metrics(metrics, threshold=None):
+    threshold = METRIC_THRESHOLD_PERCENT if threshold is None else threshold
+    return [name for name in METRIC_NAMES if metrics.get(name, 0.0) >= threshold]
+
+
+# ---------------------------------------------------------------------------
+# Submission API + de-duplication (SCOPE items 2 and 4)
+# ---------------------------------------------------------------------------
+
+def submit(task_spec, tier, source_trigger):
+    """Real submission entrypoint -- writes to the umr_tasks queue table
+    instead of calling systemctl/veridian-task.py directly. Every scheduled
+    trigger (cron, systemd timer, systemd worker spawn) must call this.
+
+    task_spec: {
+      "task_identity": str,   REQUIRED -- the real target task/issue identity
+                               used for de-duplication (e.g. a stalled
+                               task_id, or "rca-<task_id>" for a new
+                               escalation). Two submissions with the same
+                               task_identity while the first is still
+                               queued/dispatched/running are never both let
+                               through.
+      "task_kind": "systemctl_action" | "veridian_task_create",
+      "unit_name": str,        (systemctl_action) the real unit to act on
+      "inputs": {
+        "action": "start"|"restart"|"reset_failed_and_start",   (systemctl_action)
+        "repo": str, "title": str, "prompt": str,                (veridian_task_create)
+        ...arbitrary extra input fields recorded verbatim on the UMR row...
+      },
+    }
+    Returns {"accepted": bool, "umr_id": str, "reason": str}. Never raises for
+    a normal duplicate rejection -- that is a real, logged outcome, not an
+    error.
+    """
+    if not (TIER_MIN <= tier <= TIER_MAX):
+        raise ValueError(f"tier must be an int {TIER_MIN}..{TIER_MAX}, got {tier!r}")
+    task_identity = task_spec["task_identity"]
+
+    sbr = _superboss_register()
+    with sbr._write_lock():
+        conn = sbr._connect()
+        sbr._ensure_umr_table(conn)
+        existing = sbr.find_active_umr_by_identity(conn, task_identity)
+        if existing:
+            reason = (
+                f"duplicate submission rejected: task_identity={task_identity!r} already "
+                f"{existing['status']} as umr_id={existing['umr_id']} "
+                f"(source_trigger={existing['source_trigger']!r}, tier={existing['tier']})"
+            )
+            umr_id = sbr.upsert_umr_task(conn, {
+                "task_identity": task_identity,
+                "tier": tier,
+                "status": "rejected_duplicate",
+                "source_trigger": source_trigger,
+                "task_kind": task_spec.get("task_kind", "systemctl_action"),
+                "unit_name": task_spec.get("unit_name"),
+                "inputs": task_spec.get("inputs", {}),
+                "reason": reason,
+            })
+            conn.commit()
+            conn.close()
+            return {"accepted": False, "umr_id": umr_id, "reason": reason}
+
+        umr_id = sbr.upsert_umr_task(conn, {
+            "task_identity": task_identity,
+            "tier": tier,
+            "status": "queued",
+            "source_trigger": source_trigger,
+            "task_kind": task_spec.get("task_kind", "systemctl_action"),
+            "unit_name": task_spec.get("unit_name"),
+            "inputs": task_spec.get("inputs", {}),
+            "reason": "queued",
+        })
+        conn.commit()
+        conn.close()
+    return {"accepted": True, "umr_id": umr_id, "reason": "queued"}
+
+
+# ---------------------------------------------------------------------------
+# Dynamic realignment (anti-starvation aging) + dispatcher
+# ---------------------------------------------------------------------------
+
+def effective_priority(row, now=None):
+    now = now or _utcnow()
+    ts_submitted = row["ts_submitted"]
+    if isinstance(ts_submitted, str):
+        ts_submitted = datetime.fromisoformat(ts_submitted)
+    age_seconds = max(0.0, (now - ts_submitted).total_seconds())
+    promotions = int(age_seconds // AGING_PROMOTION_INTERVAL_SECONDS)
+    return max(TIER_MIN, row["tier"] - promotions)
+
+
+def next_queued_task(conn, now=None):
+    now = now or _utcnow()
+    rows = conn.execute("SELECT * FROM umr_tasks WHERE status='queued'").fetchall()
+    if not rows:
+        return None
+    ranked = sorted(rows, key=lambda r: (effective_priority(dict(r), now), r["ts_submitted"]))
+    return dict(ranked[0])
+
+
+def _perform_spawn(row):
+    """The real spawn -- systemctl/veridian-task.py, unchanged calls, gated
+    by dispatch_core.py exactly as every other consolidated tick script
+    already does. Returns {"status", "unit_name", "outputs"}."""
+    task_kind = row["task_kind"]
+    inputs = row.get("inputs_json")
+    inputs = json.loads(inputs) if isinstance(inputs, str) else (inputs or {})
+
+    if task_kind == "systemctl_action":
+        unit = row["unit_name"]
+        action = inputs.get("action", "start")
+        if action == "reset_failed_and_start":
+            _run(["systemctl", "--user", "reset-failed", unit])
+            r = _run(["systemctl", "--user", "start", unit])
+        elif action == "restart":
+            r = _run(["systemctl", "--user", "restart", unit])
+        else:
+            r = _run(["systemctl", "--user", "start", unit])
+        status = "running" if r.returncode == 0 else "failed"
+        return {"status": status, "unit_name": unit, "outputs": {"returncode": r.returncode, "stderr": r.stderr[:500]}}
+
+    if task_kind == "veridian_task_create":
+        cmd = ["python3", os.path.join(SCRIPTS, "veridian-task.py"), "create",
+               "--title", inputs["title"], "--repo", inputs.get("repo", "claude-control"),
+               "--prompt", inputs["prompt"]]
+        r = _run(cmd)
+        m = re.search(r"^CREATED: (\S+)", r.stdout, re.MULTILINE)
+        new_task_id = m.group(1) if m else None
+        unit_name = f"veridian-worker@{new_task_id}.service" if new_task_id else None
+        if unit_name:
+            _run(["systemctl", "--user", "start", unit_name])
+        status = "running" if new_task_id else "failed"
+        return {"status": status, "unit_name": unit_name,
+                "outputs": {"new_task_id": new_task_id, "returncode": r.returncode, "stderr": r.stderr[:500]}}
+
+    return {"status": "failed", "unit_name": row.get("unit_name"), "outputs": {"error": f"unknown task_kind {task_kind!r}"}}
+
+
+def dispatch_one(dry_run=False, now=None):
+    """Checks all 4 real metrics, and only if NONE are at/over threshold,
+    acquires dispatch_core's shared lock and does EVERYTHING else --
+    selecting the next queued row, the free-slot check, and the real spawn
+    -- from inside that one critical section. Selecting the row before
+    acquiring the lock (an earlier version of this function did that) let
+    two concurrent callers both pick the SAME 'queued' row before either had
+    claimed it, so both proceeded to spawn it: exactly the TOCTOU race
+    dispatch_core.has_free_slot()'s own docstring already warns about
+    ("callers must check this WHILE holding acquire_dispatch_lock(), never
+    before/after"). Never raises for a normal 'nothing to do'/'frozen'
+    outcome."""
+    if os.path.exists(EMERGENCY_STOP_PATH):
+        return {"action": "emergency_stopped",
+                "detail": "EMERGENCY_STOP sentinel present -- clear via --clear-emergency-stop"}
+
+    metrics = sample_metrics(now=now)
+    over = over_threshold_metrics(metrics)
+    _record_emergency_tick(over)
+    if over:
+        return {"action": "frozen", "detail": f"metric(s) at/over {METRIC_THRESHOLD_PERCENT}%: {over}",
+                "metrics": metrics}
+
+    dc = _dispatch_core()
+    sbr = _superboss_register()
+
+    with dc.acquire_dispatch_lock():
+        conn = sbr._connect()
+        sbr._ensure_umr_table(conn)
+        row = next_queued_task(conn, now=now)
+        if row is None:
+            conn.close()
+            return {"action": "idle", "detail": "queue empty", "metrics": metrics}
+
+        if not dc.has_free_slot():
+            conn.close()
+            return {"action": "deferred", "detail": "no free concurrency slot under dispatch_core's shared cap",
+                     "umr_id": row["umr_id"], "metrics": metrics}
+
+        if dry_run:
+            conn.close()
+            return {"action": "would_dispatch", "umr_id": row["umr_id"], "metrics": metrics}
+
+        result = _perform_spawn(row)
+        with sbr._write_lock():
+            sbr.update_umr_task(
+                conn, row["umr_id"], status=result["status"],
+                unit_name=result.get("unit_name") or row["unit_name"],
+                ts_dispatched=_now_iso(), outputs=result.get("outputs", {}), metric_snapshot=metrics,
+            )
+            conn.commit()
+        if result["status"] == "running":
+            dc.record_dispatch_event(
+                task_id=row["task_identity"], dispatched_by=f"resource_governor:{row['source_trigger']}",
+                source_queue_or_plan="umr_tasks", worker_unit=result.get("unit_name") or row["unit_name"] or "",
+            )
+        conn.close()
+    return {"action": "dispatched", "umr_id": row["umr_id"], "result": result, "metrics": metrics}
+
+
+def run_tick(max_dispatches=None, now=None):
+    """One full governor pass: stuck-task scan, then priority-ordered
+    dispatch until the queue is empty, a slot/metric limit stops it, or
+    max_dispatches is reached."""
+    results = {"stuck_task_actions": scan_stuck_tasks(now=now), "dispatches": []}
+    while max_dispatches is None or len(results["dispatches"]) < max_dispatches:
+        r = dispatch_one(now=now)
+        results["dispatches"].append(r)
+        if r["action"] != "dispatched":
+            break
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Stuck-task SIGTERM/SIGKILL protocol
+# ---------------------------------------------------------------------------
+
+def _unit_active_enter_timestamp(unit):
+    """Real systemd ActiveEnterTimestamp for `unit` -- the same source of
+    truth veridian-task-watchdog.py already trusts for checkpoint staleness,
+    never a self-tracked approximation. Returns None if the unit is
+    inactive/unknown or the timestamp can't be parsed."""
+    r = _run(["systemctl", "--user", "show", unit, "-p", "ActiveEnterTimestamp", "--value"])
+    ts = r.stdout.strip()
+    if not ts or ts in ("n/a", ""):
+        return None
+    for fmt in ("%a %Y-%m-%d %H:%M:%S %Z", "%Y-%m-%d %H:%M:%S %Z", "%a %Y-%m-%d %H:%M:%S %z"):
+        try:
+            parsed = datetime.strptime(ts, fmt)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def scan_stuck_tasks(now=None):
+    """timeout -> SIGTERM -> SIGTERM_TO_SIGKILL_GRACE_SECONDS -> SIGKILL,
+    using each unit's real ActiveEnterTimestamp to measure elapsed time.
+    Returns the list of actions actually taken this call (empty if nothing
+    was stuck)."""
+    now = now or _utcnow()
+    sbr = _superboss_register()
+    conn = sbr._connect()
+    sbr._ensure_umr_table(conn)
+    actions = []
+
+    running = conn.execute(
+        "SELECT * FROM umr_tasks WHERE status='running' AND unit_name IS NOT NULL"
+    ).fetchall()
+    for row in running:
+        row = dict(row)
+        started = _unit_active_enter_timestamp(row["unit_name"])
+        if started is None:
+            continue
+        elapsed = (now - started).total_seconds()
+        if elapsed >= STUCK_TASK_TIMEOUT_SECONDS:
+            _run(["systemctl", "--user", "kill", "-s", "SIGTERM", row["unit_name"]])
+            with sbr._write_lock():
+                sbr.update_umr_task(conn, row["umr_id"], status="sigterm_sent", ts_sigterm=_now_iso())
+                conn.commit()
+            actions.append({"umr_id": row["umr_id"], "unit_name": row["unit_name"], "action": "SIGTERM",
+                             "elapsed_s": elapsed})
+
+    sigtermed = conn.execute("SELECT * FROM umr_tasks WHERE status='sigterm_sent'").fetchall()
+    for row in sigtermed:
+        row = dict(row)
+        if not row.get("ts_sigterm"):
+            continue
+        since_sigterm = (now - datetime.fromisoformat(row["ts_sigterm"])).total_seconds()
+        if since_sigterm >= SIGTERM_TO_SIGKILL_GRACE_SECONDS:
+            _run(["systemctl", "--user", "kill", "-s", "SIGKILL", row["unit_name"]])
+            with sbr._write_lock():
+                sbr.update_umr_task(conn, row["umr_id"], status="killed", ts_completed=_now_iso())
+                conn.commit()
+            actions.append({"umr_id": row["umr_id"], "unit_name": row["unit_name"], "action": "SIGKILL",
+                             "since_sigterm_s": since_sigterm})
+
+    conn.close()
+    return actions
+
+
+# ---------------------------------------------------------------------------
+# Emergency fail-safe cascade (design doc Section 7)
+# ---------------------------------------------------------------------------
+
+def _append_attention(message):
+    os.makedirs(os.path.dirname(ATTENTION_PATH), exist_ok=True)
+    with open(ATTENTION_PATH, "a") as f:
+        f.write(f"\n## {_now_iso()} -- SERVER RESOURCE GOVERNOR\n{message}\n")
+
+
+def _shed_load(state):
+    """Stage 2: SIGTERM the governor's own lowest-tier-priority currently
+    running tracked unit, freeing real resources instead of just refusing new
+    work. Returns the unit_name shed, or None if there was nothing to shed."""
+    sbr = _superboss_register()
+    conn = sbr._connect()
+    sbr._ensure_umr_table(conn)
+    running = conn.execute(
+        "SELECT * FROM umr_tasks WHERE status='running' AND unit_name IS NOT NULL "
+        "ORDER BY tier DESC, ts_dispatched ASC"
+    ).fetchall()
+    if not running:
+        conn.close()
+        _append_attention(f"CRITICAL: sustained metric overload {state}, but no governor-tracked "
+                           f"running unit available to shed load from.")
+        return None
+
+    victim = dict(running[0])
+    _run(["systemctl", "--user", "kill", "-s", "SIGTERM", victim["unit_name"]])
+    with sbr._write_lock():
+        sbr.update_umr_task(conn, victim["umr_id"], status="sigterm_sent", ts_sigterm=_now_iso())
+        conn.commit()
+    conn.close()
+    _append_attention(
+        f"CRITICAL: sustained metric overload {state} -- shed load by SIGTERM to lowest-tier "
+        f"running unit {victim['unit_name']} (umr_id={victim['umr_id']}, tier={victim['tier']})."
+    )
+    return victim["unit_name"]
+
+
+def _write_emergency_stop(state):
+    _save_json(EMERGENCY_STOP_PATH, {"ts": _now_iso(), "state": state})
+    _append_attention(
+        f"EMERGENCY STOP: metrics stayed at/over {METRIC_THRESHOLD_PERCENT}% for "
+        f"{EMERGENCY_CONSECUTIVE_TICKS_HARDSTOP} consecutive governor ticks ({state}). All new "
+        f"dispatch is halted until an operator runs "
+        f"`python3 scripts/resource_governor.py --clear-emergency-stop`."
+    )
+
+
+def _record_emergency_tick(over_metrics):
+    """Per-metric consecutive-over-threshold counter, reset to 0 the instant a
+    metric drops back under threshold. Escalates through shed-load (Stage 2)
+    then hard-stop (Stage 3) as the max consecutive count crosses each
+    threshold. Returns the updated state dict."""
+    state = _load_json(EMERGENCY_STATE_PATH) or {}
+    max_consecutive = 0
+    for metric in METRIC_NAMES:
+        count = state.get(metric, 0)
+        count = count + 1 if metric in over_metrics else 0
+        state[metric] = count
+        max_consecutive = max(max_consecutive, count)
+    _save_json(EMERGENCY_STATE_PATH, state)
+
+    if max_consecutive >= EMERGENCY_CONSECUTIVE_TICKS_HARDSTOP:
+        _write_emergency_stop(state)
+    elif max_consecutive >= EMERGENCY_CONSECUTIVE_TICKS_SHED:
+        _shed_load(state)
+    return state
+
+
+def clear_emergency_stop():
+    if os.path.exists(EMERGENCY_STOP_PATH):
+        os.remove(EMERGENCY_STOP_PATH)
+    _save_json(EMERGENCY_STATE_PATH, {})
+    return True
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--tick", action="store_true",
+                     help="run one full dispatcher pass: stuck-task scan + priority-ordered dispatch "
+                          "under the 4-metric 99%% gate")
+    ap.add_argument("--submit", action="store_true", help="submit one task_spec (--spec-file) to the queue")
+    ap.add_argument("--spec-file", default=None, help="path to a JSON file matching submit()'s task_spec shape")
+    ap.add_argument("--tier", type=int, default=DEFAULT_TIER, help="0 (highest) .. 4 (lowest)")
+    ap.add_argument("--source-trigger", default="manual")
+    ap.add_argument("--scan-stuck", action="store_true", help="run only the stuck-task SIGTERM/SIGKILL scan")
+    ap.add_argument("--query-umr", action="store_true", help="search/list umr_tasks rows")
+    ap.add_argument("--limit", type=int, default=20)
+    ap.add_argument("--status", default=None)
+    ap.add_argument("--search", default=None, help="free-text FTS5 query over task_identity/source_trigger/logs_ref")
+    ap.add_argument("--task-identity", dest="task_identity", default=None)
+    ap.add_argument("--clear-emergency-stop", action="store_true")
+    args = ap.parse_args()
+
+    if args.clear_emergency_stop:
+        clear_emergency_stop()
+        print(json.dumps({"ok": True, "cleared": True}))
+        return
+
+    if args.query_umr:
+        sbr = _superboss_register()
+        conn = sbr._connect()
+        sbr._ensure_umr_table(conn)
+        rows = sbr.query_umr_tasks(conn, limit=args.limit, status=args.status,
+                                    task_identity=args.task_identity, query_text=args.search)
+        conn.close()
+        print(json.dumps({"count": len(rows), "matches": rows}, indent=2, default=str))
+        return
+
+    if args.submit:
+        if not args.spec_file:
+            print(json.dumps({"error": "--submit requires --spec-file"}))
+            sys.exit(1)
+        with open(args.spec_file) as f:
+            task_spec = json.load(f)
+        result = submit(task_spec, args.tier, args.source_trigger)
+        print(json.dumps(result))
+        return
+
+    if args.scan_stuck:
+        print(json.dumps({"actions": scan_stuck_tasks()}, default=str))
+        return
+
+    if args.tick:
+        print(json.dumps(run_tick(), default=str))
+        return
+
+    ap.print_help()
+
+
+if __name__ == "__main__":
+    main()

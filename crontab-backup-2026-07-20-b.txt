@@ -1,0 +1,9 @@
+XDG_RUNTIME_DIR=/run/user/1000
+0 */2 * * * /opt/veridian/scripts/run-logged.sh "sync-repos" /opt/veridian/scripts/sync-repos.sh
+5 */2 * * * /opt/veridian/scripts/run-logged.sh "sync-vercel-env" /opt/veridian/scripts/sync-vercel-env.sh
+0 3 * * * /opt/veridian/scripts/run-logged.sh "sync-verdian-ai-data" /opt/veridian/scripts/sync-verdian-ai-data.sh
+#DISABLED-2026-07-18 */15 * * * * /opt/veridian/scripts/supervisor-sweep.sh
+*/30 * * * * /opt/veridian/scripts/run-logged.sh "sync-controller-back" /opt/veridian/scripts/sync-controller-back.py >> /opt/veridian/logs/sync-controller-back.log 2>&1
+*/10 * * * * /opt/veridian/scripts/run-logged.sh "queue-dispatcher" /usr/bin/python3 /opt/veridian/scripts/queue-dispatcher.py >> /opt/veridian/logs/queue-dispatcher.log 2>&1
+*/15 * * * * /opt/veridian/scripts/run-logged.sh "health-check-15min" /usr/bin/python3 /opt/veridian/scripts/health-check-15min.py >> /opt/veridian/ai-os/logs/health-check-cron.log 2>&1
+0 * * * * /opt/veridian/scripts/run-logged.sh "cost-usage-60min" /usr/bin/python3 /opt/veridian/scripts/cost-usage-60min.py >> /opt/veridian/ai-os/logs/cost-usage-cron.log 2>&1

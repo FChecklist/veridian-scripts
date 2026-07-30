@@ -1,0 +1,890 @@
+{
+  "source_doc": "/opt/veridian/ai-os/tasks/task-20260725-104606-owner-engine-document-accuracy-convergen/workspace/ai-os/owner-attachments/VERIDIAN_Architecture_v2.0_extracted.txt",
+  "total_items": 165,
+  "counts_by_category": {
+    "headings": 53,
+    "engines": 74,
+    "technologies": 23,
+    "numeric_facts": 15
+  },
+  "items": [
+    {
+      "category": "headings",
+      "text": "Executive Summary",
+      "meta": "H1",
+      "source_line": 11
+    },
+    {
+      "category": "headings",
+      "text": "Part I: Gap Analysis of the Original Architecture",
+      "meta": "H1",
+      "source_line": 17
+    },
+    {
+      "category": "headings",
+      "text": "1.1 Missing Browser AI APIs and Technologies",
+      "meta": "H2",
+      "source_line": 21
+    },
+    {
+      "category": "headings",
+      "text": "1.2 Missing Prompt Engineering Concepts",
+      "meta": "H2",
+      "source_line": 26
+    },
+    {
+      "category": "headings",
+      "text": "1.3 Missing Pipeline Stages",
+      "meta": "H2",
+      "source_line": 31
+    },
+    {
+      "category": "headings",
+      "text": "1.4 Missing Engines",
+      "meta": "H2",
+      "source_line": 36
+    },
+    {
+      "category": "headings",
+      "text": "1.5 Incomplete Performance Specifications",
+      "meta": "H2",
+      "source_line": 41
+    },
+    {
+      "category": "headings",
+      "text": "1.6 Summary of Identified Gaps",
+      "meta": "H2",
+      "source_line": 46
+    },
+    {
+      "category": "headings",
+      "text": "Part II: The Improved VERIDIAN Architecture",
+      "meta": "H1",
+      "source_line": 64
+    },
+    {
+      "category": "headings",
+      "text": "2.1 Complete Engine Catalog",
+      "meta": "H2",
+      "source_line": 67
+    },
+    {
+      "category": "headings",
+      "text": "Prompt Core Engines (12 engines)",
+      "meta": "H3",
+      "source_line": 71
+    },
+    {
+      "category": "headings",
+      "text": "Intelligence and Matching Engines (10 engines)",
+      "meta": "H3",
+      "source_line": 91
+    },
+    {
+      "category": "headings",
+      "text": "Business and Policy Engines (8 engines)",
+      "meta": "H3",
+      "source_line": 109
+    },
+    {
+      "category": "headings",
+      "text": "Security and Quality Engines (6 engines)",
+      "meta": "H3",
+      "source_line": 125
+    },
+    {
+      "category": "headings",
+      "text": "Browser Execution Engines (10 engines)",
+      "meta": "H3",
+      "source_line": 139
+    },
+    {
+      "category": "headings",
+      "text": "Caching and Data Engines (8 engines)",
+      "meta": "H3",
+      "source_line": 157
+    },
+    {
+      "category": "headings",
+      "text": "Learning, Escalation, and Distribution Engines (8 engines)",
+      "meta": "H3",
+      "source_line": 173
+    },
+    {
+      "category": "headings",
+      "text": "Synchronization and Infrastructure Engines (12 engines)",
+      "meta": "H3",
+      "source_line": 189
+    },
+    {
+      "category": "headings",
+      "text": "2.2 Improved Prompt Compiler Pipeline",
+      "meta": "H2",
+      "source_line": 209
+    },
+    {
+      "category": "headings",
+      "text": "Stage 1: Input Acquisition Layer (Stages 1-2)",
+      "meta": "H3",
+      "source_line": 213
+    },
+    {
+      "category": "headings",
+      "text": "Stage 2: Lightweight Analysis Layer (Stages 3-7)",
+      "meta": "H3",
+      "source_line": 217
+    },
+    {
+      "category": "headings",
+      "text": "Stage 3: Context Assembly Layer (Stages 8-12)",
+      "meta": "H3",
+      "source_line": 221
+    },
+    {
+      "category": "headings",
+      "text": "Stage 4: Prompt Construction Layer (Stages 13-18)",
+      "meta": "H3",
+      "source_line": 225
+    },
+    {
+      "category": "headings",
+      "text": "Stage 5: Verification Layer (Stages 19-25)",
+      "meta": "H3",
+      "source_line": 229
+    },
+    {
+      "category": "headings",
+      "text": "Stage 6: Pre-Execution Guardrails (Stages 26-29)",
+      "meta": "H3",
+      "source_line": 233
+    },
+    {
+      "category": "headings",
+      "text": "Stage 7: Execution Layer (Stages 30-34)",
+      "meta": "H3",
+      "source_line": 237
+    },
+    {
+      "category": "headings",
+      "text": "Stage 8: Post-Execution Layer (Stages 35-41)",
+      "meta": "H3",
+      "source_line": 241
+    },
+    {
+      "category": "headings",
+      "text": "Pipeline Performance Summary",
+      "meta": "H3",
+      "source_line": 245
+    },
+    {
+      "category": "headings",
+      "text": "2.3 Enhanced Multi-Level Cache Architecture",
+      "meta": "H2",
+      "source_line": 261
+    },
+    {
+      "category": "headings",
+      "text": "Cache Hit Path Optimization",
+      "meta": "H3",
+      "source_line": 280
+    },
+    {
+      "category": "headings",
+      "text": "2.4 Complete Technology Stack",
+      "meta": "H2",
+      "source_line": 285
+    },
+    {
+      "category": "headings",
+      "text": "Browser Compute Tier",
+      "meta": "H3",
+      "source_line": 289
+    },
+    {
+      "category": "headings",
+      "text": "Storage Tier",
+      "meta": "H3",
+      "source_line": 304
+    },
+    {
+      "category": "headings",
+      "text": "Parallelism and Background Processing",
+      "meta": "H3",
+      "source_line": 318
+    },
+    {
+      "category": "headings",
+      "text": "Security and Guardrails Stack",
+      "meta": "H3",
+      "source_line": 333
+    },
+    {
+      "category": "headings",
+      "text": "Prompt Engineering Stack",
+      "meta": "H3",
+      "source_line": 348
+    },
+    {
+      "category": "headings",
+      "text": "2.5 Performance Budget Framework",
+      "meta": "H2",
+      "source_line": 364
+    },
+    {
+      "category": "headings",
+      "text": "Memory and Storage Budgets",
+      "meta": "H3",
+      "source_line": 388
+    },
+    {
+      "category": "headings",
+      "text": "2.6 Prompt Metadata Schema (200+ Fields)",
+      "meta": "H2",
+      "source_line": 403
+    },
+    {
+      "category": "headings",
+      "text": "2.7 Modular YCML Specification Catalog (40 Specs)",
+      "meta": "H2",
+      "source_line": 430
+    },
+    {
+      "category": "headings",
+      "text": "2.8 Defense-in-Depth Security Architecture",
+      "meta": "H2",
+      "source_line": 479
+    },
+    {
+      "category": "headings",
+      "text": "Layer 1: Input Sanitization",
+      "meta": "H3",
+      "source_line": 483
+    },
+    {
+      "category": "headings",
+      "text": "Layer 2: System Prompt Hardening",
+      "meta": "H3",
+      "source_line": 487
+    },
+    {
+      "category": "headings",
+      "text": "Layer 3: Runtime Guardrails",
+      "meta": "H3",
+      "source_line": 491
+    },
+    {
+      "category": "headings",
+      "text": "Layer 4: Output Filtering and Monitoring",
+      "meta": "H3",
+      "source_line": 495
+    },
+    {
+      "category": "headings",
+      "text": "2.9 Governance and Compliance Framework",
+      "meta": "H2",
+      "source_line": 499
+    },
+    {
+      "category": "headings",
+      "text": "Prompt Lifecycle Governance",
+      "meta": "H3",
+      "source_line": 503
+    },
+    {
+      "category": "headings",
+      "text": "GitOps Workflow Integration",
+      "meta": "H3",
+      "source_line": 507
+    },
+    {
+      "category": "headings",
+      "text": "Part III: Research References and Technology Verification",
+      "meta": "H1",
+      "source_line": 511
+    },
+    {
+      "category": "headings",
+      "text": "3.1 Browser AI Frameworks",
+      "meta": "H2",
+      "source_line": 515
+    },
+    {
+      "category": "headings",
+      "text": "3.2 Browser APIs",
+      "meta": "H2",
+      "source_line": 528
+    },
+    {
+      "category": "headings",
+      "text": "3.3 Prompt Engineering Tools",
+      "meta": "H2",
+      "source_line": 544
+    },
+    {
+      "category": "headings",
+      "text": "3.4 Key Research Findings",
+      "meta": "H2",
+      "source_line": 562
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Registry Engine",
+      "source_line": 76
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Version Engine",
+      "source_line": 77
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Lifecycle Engine",
+      "source_line": 78
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Compiler Engine",
+      "source_line": 79
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Optimizer Engine",
+      "source_line": 80
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Compression Engine",
+      "source_line": 81
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Expansion Engine",
+      "source_line": 82
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Validation Engine",
+      "source_line": 83
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Testing Engine",
+      "source_line": 84
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Benchmark Engine",
+      "source_line": 85
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Portability Engine",
+      "source_line": 86
+    },
+    {
+      "category": "engines",
+      "text": "Prompt A/B Engine",
+      "source_line": 87
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Ranking Engine",
+      "source_line": 96
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Recommendation Engine",
+      "source_line": 97
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Similarity Engine",
+      "source_line": 98
+    },
+    {
+      "category": "engines",
+      "text": "Intent Engine",
+      "source_line": 99
+    },
+    {
+      "category": "engines",
+      "text": "Entity Engine",
+      "source_line": 100
+    },
+    {
+      "category": "engines",
+      "text": "Variable Engine",
+      "source_line": 101
+    },
+    {
+      "category": "engines",
+      "text": "Context Engine",
+      "source_line": 102
+    },
+    {
+      "category": "engines",
+      "text": "Workflow Engine",
+      "source_line": 103
+    },
+    {
+      "category": "engines",
+      "text": "Capability Engine",
+      "source_line": 104
+    },
+    {
+      "category": "engines",
+      "text": "Confidence Engine",
+      "source_line": 105
+    },
+    {
+      "category": "engines",
+      "text": "Business Rule Engine",
+      "source_line": 114
+    },
+    {
+      "category": "engines",
+      "text": "Dependency Engine",
+      "source_line": 115
+    },
+    {
+      "category": "engines",
+      "text": "Permission Engine",
+      "source_line": 116
+    },
+    {
+      "category": "engines",
+      "text": "Policy Engine",
+      "source_line": 117
+    },
+    {
+      "category": "engines",
+      "text": "Compliance Engine",
+      "source_line": 118
+    },
+    {
+      "category": "engines",
+      "text": "Governance Engine",
+      "source_line": 119
+    },
+    {
+      "category": "engines",
+      "text": "Audit Engine",
+      "source_line": 120
+    },
+    {
+      "category": "engines",
+      "text": "Cost Optimization Engine",
+      "source_line": 121
+    },
+    {
+      "category": "engines",
+      "text": "Defense-in-Depth Engine",
+      "source_line": 130
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Security Engine",
+      "source_line": 131
+    },
+    {
+      "category": "engines",
+      "text": "Red Team Engine",
+      "source_line": 132
+    },
+    {
+      "category": "engines",
+      "text": "Quality Engine",
+      "source_line": 133
+    },
+    {
+      "category": "engines",
+      "text": "Telemetry Engine",
+      "source_line": 134
+    },
+    {
+      "category": "engines",
+      "text": "Analytics Engine",
+      "source_line": 135
+    },
+    {
+      "category": "engines",
+      "text": "Browser Execution Engine",
+      "source_line": 144
+    },
+    {
+      "category": "engines",
+      "text": "Browser Lite LLM Engine",
+      "source_line": 145
+    },
+    {
+      "category": "engines",
+      "text": "Browser NPU Engine",
+      "source_line": 146
+    },
+    {
+      "category": "engines",
+      "text": "Browser Built-in AI Engine",
+      "source_line": 147
+    },
+    {
+      "category": "engines",
+      "text": "Browser MCP Engine",
+      "source_line": 148
+    },
+    {
+      "category": "engines",
+      "text": "Browser Function Engine",
+      "source_line": 149
+    },
+    {
+      "category": "engines",
+      "text": "Browser Storage Engine",
+      "source_line": 150
+    },
+    {
+      "category": "engines",
+      "text": "Browser Sync Engine",
+      "source_line": 151
+    },
+    {
+      "category": "engines",
+      "text": "Browser Worker Engine",
+      "source_line": 152
+    },
+    {
+      "category": "engines",
+      "text": "Browser Transformers Engine",
+      "source_line": 153
+    },
+    {
+      "category": "engines",
+      "text": "L0 Memory Cache Engine",
+      "source_line": 162
+    },
+    {
+      "category": "engines",
+      "text": "L1 Browser Cache Engine",
+      "source_line": 163
+    },
+    {
+      "category": "engines",
+      "text": "L2 IndexedDB Engine",
+      "source_line": 164
+    },
+    {
+      "category": "engines",
+      "text": "L3 OPFS Engine",
+      "source_line": 165
+    },
+    {
+      "category": "engines",
+      "text": "L4 Context Cache Engine",
+      "source_line": 166
+    },
+    {
+      "category": "engines",
+      "text": "L5 Semantic Cache Engine",
+      "source_line": 167
+    },
+    {
+      "category": "engines",
+      "text": "L8 Server Cache Engine",
+      "source_line": 168
+    },
+    {
+      "category": "engines",
+      "text": "L9 Knowledge Cache Engine",
+      "source_line": 169
+    },
+    {
+      "category": "engines",
+      "text": "AI Learning Engine",
+      "source_line": 178
+    },
+    {
+      "category": "engines",
+      "text": "Server Escalation Engine",
+      "source_line": 179
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Translation Engine",
+      "source_line": 180
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Localization Engine",
+      "source_line": 181
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Marketplace Engine",
+      "source_line": 182
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Export Engine",
+      "source_line": 183
+    },
+    {
+      "category": "engines",
+      "text": "Prompt Import Engine",
+      "source_line": 184
+    },
+    {
+      "category": "engines",
+      "text": "DSPy Integration Engine",
+      "source_line": 185
+    },
+    {
+      "category": "engines",
+      "text": "Gateway Integration Engine",
+      "source_line": 194
+    },
+    {
+      "category": "engines",
+      "text": "Knowledge Sync Engine",
+      "source_line": 195
+    },
+    {
+      "category": "engines",
+      "text": "Model Selection Engine",
+      "source_line": 196
+    },
+    {
+      "category": "engines",
+      "text": "Execution Planner Engine",
+      "source_line": 197
+    },
+    {
+      "category": "engines",
+      "text": "L6 Workflow Cache Engine",
+      "source_line": 198
+    },
+    {
+      "category": "engines",
+      "text": "L7 Metadata Cache Engine",
+      "source_line": 199
+    },
+    {
+      "category": "engines",
+      "text": "Testing and Regression Engine",
+      "source_line": 200
+    },
+    {
+      "category": "engines",
+      "text": "Performance Profiling Engine",
+      "source_line": 201
+    },
+    {
+      "category": "engines",
+      "text": "Memory Management Engine",
+      "source_line": 202
+    },
+    {
+      "category": "engines",
+      "text": "Storage Quota Engine",
+      "source_line": 203
+    },
+    {
+      "category": "engines",
+      "text": "Network Resilience Engine",
+      "source_line": 204
+    },
+    {
+      "category": "engines",
+      "text": "Observability Engine",
+      "source_line": 205
+    },
+    {
+      "category": "technologies",
+      "text": "WebLLM",
+      "source_line": 520
+    },
+    {
+      "category": "technologies",
+      "text": "Transformers.js",
+      "source_line": 521
+    },
+    {
+      "category": "technologies",
+      "text": "ONNX Runtime Web",
+      "source_line": 522
+    },
+    {
+      "category": "technologies",
+      "text": "BrowserMCP",
+      "source_line": 523
+    },
+    {
+      "category": "technologies",
+      "text": "LocalMode.dev",
+      "source_line": 524
+    },
+    {
+      "category": "technologies",
+      "text": "WebGPU",
+      "source_line": 533
+    },
+    {
+      "category": "technologies",
+      "text": "WebNN (navigator.ml)",
+      "source_line": 534
+    },
+    {
+      "category": "technologies",
+      "text": "Built-in AI (window.ai)",
+      "source_line": 535
+    },
+    {
+      "category": "technologies",
+      "text": "OPFS (sync handles)",
+      "source_line": 536
+    },
+    {
+      "category": "technologies",
+      "text": "SharedArrayBuffer",
+      "source_line": 537
+    },
+    {
+      "category": "technologies",
+      "text": "BroadcastChannel",
+      "source_line": 538
+    },
+    {
+      "category": "technologies",
+      "text": "Shape Detection API",
+      "source_line": 539
+    },
+    {
+      "category": "technologies",
+      "text": "Web Codecs API",
+      "source_line": 540
+    },
+    {
+      "category": "technologies",
+      "text": "DSPy",
+      "source_line": 549
+    },
+    {
+      "category": "technologies",
+      "text": "NeMo Guardrails",
+      "source_line": 550
+    },
+    {
+      "category": "technologies",
+      "text": "Llama Guard 3",
+      "source_line": 551
+    },
+    {
+      "category": "technologies",
+      "text": "promptfoo",
+      "source_line": 552
+    },
+    {
+      "category": "technologies",
+      "text": "DeepEval",
+      "source_line": 553
+    },
+    {
+      "category": "technologies",
+      "text": "Garak",
+      "source_line": 554
+    },
+    {
+      "category": "technologies",
+      "text": "PyRIT",
+      "source_line": 555
+    },
+    {
+      "category": "technologies",
+      "text": "Presidio",
+      "source_line": 556
+    },
+    {
+      "category": "technologies",
+      "text": "Prompt Guard (Meta)",
+      "source_line": 557
+    },
+    {
+      "category": "technologies",
+      "text": "LangSmith / LangFuse",
+      "source_line": 558
+    },
+    {
+      "category": "numeric_facts",
+      "text": "Engine catalog expanded from 44 to 74 engines (30 added)",
+      "source_line": 69
+    },
+    {
+      "category": "numeric_facts",
+      "text": "Pipeline expanded from 25 stages to 41 stages (16 added)",
+      "source_line": 211
+    },
+    {
+      "category": "numeric_facts",
+      "text": "Prompt metadata payload spanning 18 categories and 200+ fields",
+      "source_line": 405
+    },
+    {
+      "category": "numeric_facts",
+      "text": "YCML specification catalog expanded from 30 to 40 specs",
+      "source_line": 430
+    },
+    {
+      "category": "numeric_facts",
+      "text": "Cache architecture defines 10 levels, L0 through L9",
+      "source_line": 261
+    },
+    {
+      "category": "numeric_facts",
+      "text": "Four-layer defense-in-depth security architecture",
+      "source_line": 479
+    },
+    {
+      "category": "numeric_facts",
+      "text": "Total browser-execution budget: 500ms for cached/confident prompts",
+      "source_line": 43
+    },
+    {
+      "category": "numeric_facts",
+      "text": "Total execution budget: 3 seconds maximum for full LLM inference",
+      "source_line": 239
+    },
+    {
+      "category": "numeric_facts",
+      "text": "Server escalation budget: 10 seconds with progressive loading",
+      "source_line": 366
+    },
+    {
+      "category": "numeric_facts",
+      "text": "OPFS model weight storage capped at 4GB",
+      "source_line": 44
+    },
+    {
+      "category": "numeric_facts",
+      "text": "Total browser tab memory footprint must stay under 2GB",
+      "source_line": 44
+    },
+    {
+      "category": "numeric_facts",
+      "text": "L5 Semantic Cache: similarity greater than 0.95 returns cached response immediately",
+      "source_line": 282
+    },
+    {
+      "category": "numeric_facts",
+      "text": "NPU inference (Tier 1) target under 30ms",
+      "source_line": 239
+    },
+    {
+      "category": "numeric_facts",
+      "text": "Lightweight Analysis Layer (Stages 3-7) must complete within 15ms total",
+      "source_line": 219
+    },
+    {
+      "category": "numeric_facts",
+      "text": "Semantic caching can eliminate up to 80% of LLM inference calls",
+      "source_line": 282
+    }
+  ]
+}

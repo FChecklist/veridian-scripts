@@ -141,6 +141,31 @@ def _dispatch_core():
     return _dc
 
 
+_pg = None
+
+
+def _plan_generator():
+    """Phase 7 (reuse-check-enforcement-gate, 2026-07-30): loaded the same
+    importlib-by-file-path way as _superboss_register()/_dispatch_core()
+    above, for the same reason (a test copy of this whole script tree is
+    always the one actually exercised, never whatever plan_generator happens
+    to be import-resolvable on sys.path). Provides
+    check_reuse_before_dispatch() -- the single shared "check
+    capability_registry/wiring_registry/knowledge_engine/system_index before
+    creating new work" enforcement point, called from submit() below so it
+    runs for every real task creation, not only for callers whose own prompt
+    happened to say to check first."""
+    global _pg
+    if _pg is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "plan_generator_governor", os.path.join(SCRIPTS, "plan_generator.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _pg = _mod
+    return _pg
+
+
 # ---------------------------------------------------------------------------
 # Real /proc metric reads -- each is a pure function of (path) -> raw sample;
 # converting a raw sample (or pair of samples) into a percent is a separate
@@ -366,10 +391,54 @@ def submit(task_spec, tier, source_trigger):
     Returns {"accepted": bool, "umr_id": str, "reason": str}. Never raises for
     a normal duplicate rejection -- that is a real, logged outcome, not an
     error.
+
+    Phase 7 (reuse-check-enforcement-gate, 2026-07-30): also runs
+    plan_generator.check_reuse_before_dispatch() against
+    capability_registry/wiring_registry/knowledge_engine/system_index
+    BEFORE the task row is written, and records the full structured result
+    on the row itself (metadata_json.reuse_check_result), for both the
+    accepted and rejected_duplicate outcomes. This is the one, real,
+    software-enforced reuse check for this entrypoint specifically because
+    it is the lowest-level real task-creation path everything else
+    (task-gateway.py cmd_submit, directive_engine.py submit_task) funnels
+    into -- unlike those two callers, which already run their own
+    check-duplicate/search/query-knowledge/lookup-capability battery before
+    ever reaching here, a caller that constructs a task_spec and calls this
+    function directly (or via `resource_governor.py --submit`) previously
+    had no such check unless its own prompt/author happened to remember to
+    run one by hand. Advisory only, same fail-open philosophy as
+    directive_engine.py's find_in_flight_duplicate()/
+    run_check_duplicate_battery(): a low-confidence or no-match result (or
+    a broken check) never blocks the submission, it is only recorded for
+    accountability.
     """
     if not (TIER_MIN <= tier <= TIER_MAX):
         raise ValueError(f"tier must be an int {TIER_MIN}..{TIER_MAX}, got {tier!r}")
     task_identity = task_spec["task_identity"]
+
+    inputs_for_reuse_check = task_spec.get("inputs", {}) or {}
+    intent_text = (
+        inputs_for_reuse_check.get("prompt")
+        or inputs_for_reuse_check.get("title")
+        or inputs_for_reuse_check.get("action")
+        or task_spec.get("unit_name")
+        or task_identity
+    )
+    try:
+        reuse_check_result = _plan_generator().check_reuse_before_dispatch(
+            intent_text, task_identity=task_identity)
+    except Exception as e:
+        # Fail-open -- a broken reuse-check must never block a real,
+        # legitimate submission (same philosophy as directive_engine.py's
+        # find_in_flight_duplicate()/run_check_duplicate_battery()).
+        reuse_check_result = {
+            "error": f"reuse-check failed, fail-open: {e}",
+            "intent_text": intent_text,
+            "task_identity": task_identity,
+            "recommendation": "proceed",
+            "confidence": 0.0,
+            "reuse_candidates": [],
+        }
 
     sbr = _superboss_register()
     with sbr._write_lock():
@@ -391,10 +460,12 @@ def submit(task_spec, tier, source_trigger):
                 "unit_name": task_spec.get("unit_name"),
                 "inputs": task_spec.get("inputs", {}),
                 "reason": reason,
+                "metadata": {"reuse_check_result": reuse_check_result},
             })
             conn.commit()
             conn.close()
-            return {"accepted": False, "umr_id": umr_id, "reason": reason}
+            return {"accepted": False, "umr_id": umr_id, "reason": reason,
+                     "reuse_check_result": reuse_check_result}
 
         umr_id = sbr.upsert_umr_task(conn, {
             "task_identity": task_identity,
@@ -405,10 +476,12 @@ def submit(task_spec, tier, source_trigger):
             "unit_name": task_spec.get("unit_name"),
             "inputs": task_spec.get("inputs", {}),
             "reason": "queued",
+            "metadata": {"reuse_check_result": reuse_check_result},
         })
         conn.commit()
         conn.close()
-    return {"accepted": True, "umr_id": umr_id, "reason": "queued"}
+    return {"accepted": True, "umr_id": umr_id, "reason": "queued",
+             "reuse_check_result": reuse_check_result}
 
 
 # ---------------------------------------------------------------------------

@@ -57,17 +57,9 @@ METRIC_THRESHOLD_PERCENT = float(os.environ.get("VERIDIAN_GOVERNOR_METRIC_THRESH
 # (unlike CPU/RAM) -- normalized against a configured per-box capacity
 # baseline. This is a conservative placeholder default; replace via env with
 # this box's own measured real baseline (see design doc, Metric measurement
-# section).
-#
-# disk_io is NOT normalized against a throughput baseline (see
-# ROOT-CAUSE-2026-07-30 at read_disk_io_ticks/disk_io_percent below) --
-# raw sector-throughput-vs-assumed-capacity produced 3 real false
-# EMERGENCY_STOPs on 2026-07-29/30, each logging disk_io=100.0 while sar -d's
-# real %util for the same timestamps (independently re-derived from
-# /var/log/sysstat/sa29) was 26-65%, nowhere near saturated. Fixed to use
-# /proc/diskstats field 13 (io_ticks -- ms with >=1 IO in flight), the same
-# field iostat -x's %util is computed from, which has a real device-relative
-# 100% ceiling by construction (dt_seconds itself IS the ceiling).
+# section). Disk I/O does NOT use a capacity baseline -- see disk_io_percent()
+# and read_disk_io_ticks(), which compute real %util directly from
+# /proc/diskstats io-ticks (no arbitrary throughput ceiling needed).
 NETWORK_CAPACITY_BYTES_PER_SEC = float(os.environ.get("VERIDIAN_GOVERNOR_NET_CAPACITY_BPS", str(int(100 * 1024 * 1024 / 8))))
 
 TIER_MIN, TIER_MAX = 0, 4
@@ -141,6 +133,31 @@ def _dispatch_core():
     return _dc
 
 
+_pg = None
+
+
+def _plan_generator():
+    """Phase 7 (reuse-check-enforcement-gate, 2026-07-30): loaded the same
+    importlib-by-file-path way as _superboss_register()/_dispatch_core()
+    above, for the same reason (a test copy of this whole script tree is
+    always the one actually exercised, never whatever plan_generator happens
+    to be import-resolvable on sys.path). Provides
+    check_reuse_before_dispatch() -- the single shared "check
+    capability_registry/wiring_registry/knowledge_engine/system_index before
+    creating new work" enforcement point, called from submit() below so it
+    runs for every real task creation, not only for callers whose own prompt
+    happened to say to check first."""
+    global _pg
+    if _pg is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "plan_generator_governor", os.path.join(SCRIPTS, "plan_generator.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _pg = _mod
+    return _pg
+
+
 # ---------------------------------------------------------------------------
 # Real /proc metric reads -- each is a pure function of (path) -> raw sample;
 # converting a raw sample (or pair of samples) into a percent is a separate
@@ -183,40 +200,19 @@ def read_mem_percent(path=None):
     return max(0.0, min(100.0, 100.0 * (1 - avail / total)))
 
 
-def _real_whole_disk_names(sys_block_path=None):
-    """Names of real whole-disk devices (e.g. 'sda'), from /sys/block --
-    partitions (sda1, sda14, sda15, ...) do NOT get their own /sys/block
-    entry, only their parent whole-disk does. Returns None (meaning: no
-    filtering) if /sys/block can't be read, so callers degrade to the old
-    loop/ram-only exclusion rather than crash."""
-    path = sys_block_path or "/sys/block"
-    try:
-        return set(os.listdir(path))
-    except OSError:
-        return None
-
-
-def read_disk_io_ticks(path=None, whole_disk_names=None):
-    """Sum of /proc/diskstats field 13 (0-indexed 12) -- 'milliseconds spent
-    doing I/Os' aka io_ticks -- across every real WHOLE-disk block device.
-    This is the exact counter iostat -x's %util is derived from (see
-    Documentation/admin-guide/iostats.rst field 13, and sysstat's iostat.c:
-    %util = delta(io_ticks) / delta(ms elapsed) * 100). It measures the
-    FRACTION OF TIME the device had >=1 I/O outstanding -- a real,
-    device-relative percentage with a natural 100% ceiling (dt_ms itself is
-    the ceiling), unlike raw sector throughput (ROOT-CAUSE-2026-07-30, see
-    disk_io_percent below and DISK_IO_CAPACITY comment at top of file).
-
-    Only whole-disk devices are summed (loopN/ramN excluded as before, AND
-    partitions like sda1/sda14/sda15 excluded too) -- summing a partition's
-    io_ticks on top of its parent whole-disk's io_ticks double/triple-counts
-    the same underlying I/O (verified live 2026-07-30: sda1's io_ticks !=
-    sda's io_ticks, so this is not even a redundant-but-harmless sum, it is
-    actively wrong). On this box there is exactly one real whole disk (sda),
-    so the sum-of-whole-disks approach is exact here, not an approximation
-    left untested for the multi-disk case."""
+def read_disk_io_ticks(path=None):
+    """Sum of field-13 'time spent doing I/Os' (ms, monotonic counter of time
+    the device had >=1 I/O outstanding) across every real WHOLE-disk device --
+    loopN/ramN excluded (not real disk I/O), and PARTITIONS excluded too
+    (sda1/sda14/sda15 etc double-count the same I/O their parent whole-disk
+    sda already reports). Whole-disk names on this box don't end in a digit
+    (sda, vda) -- that's the partition filter. /proc/diskstats fields (1-indexed
+    per Documentation/admin-guide/iostats.rst): field 13 = parts[12] (0-indexed).
+    This is the SAME calculation `iostat -x`'s %util column uses -- NOT raw
+    sector throughput, which has no real device-independent "100%" meaning and
+    was the root cause of 3 false EMERGENCY_STOP trips on 2026-07-29/30 (see
+    instruction INS-20260730-043122-260a)."""
     path = path or PROC_DISKSTATS_PATH
-    names = whole_disk_names if whole_disk_names is not None else _real_whole_disk_names()
     total = 0
     with open(path) as f:
         for line in f:
@@ -226,26 +222,21 @@ def read_disk_io_ticks(path=None, whole_disk_names=None):
             name = parts[2]
             if name.startswith("loop") or name.startswith("ram"):
                 continue
-            if names is not None and name not in names:
-                continue
+            if name[-1].isdigit():
+                continue  # partition (sda1, sda14, nvme0n1p1, ...), not a whole disk
             total += int(parts[12])
     return total
 
 
-def disk_io_percent(prev_ticks, curr_ticks, dt_seconds):
-    """%util-equivalent: delta io_ticks (ms device was busy) over the real
-    sampling window (ms), exactly matching iostat -x's %util formula --
-    NOT raw sector throughput normalized against an assumed capacity
-    constant (the pre-2026-07-30 bug: see ROOT-CAUSE-2026-07-30 comment on
-    read_disk_io_ticks above). min/max-clamped the same way the old function
-    was, since a busy-time fraction can't go negative and shouldn't exceed
-    100% except for the same kind of ms-rounding/multi-CPU-accounting noise
-    iostat itself clamps for."""
+def disk_io_percent(prev_io_ticks_ms, curr_io_ticks_ms, dt_seconds):
+    """Real %util: fraction of the sampling window the disk had >=1 I/O
+    outstanding. dt_seconds is wall-clock elapsed time between samples;
+    io_ticks is already in ms, so convert dt to ms for the ratio."""
     if dt_seconds <= 0:
         return 0.0
     dt_ms = dt_seconds * 1000.0
-    delta = max(0.0, curr_ticks - prev_ticks)
-    return max(0.0, min(100.0, 100.0 * delta / dt_ms))
+    delta_ticks = max(0.0, curr_io_ticks_ms - prev_io_ticks_ms)
+    return max(0.0, min(100.0, 100.0 * delta_ticks / dt_ms))
 
 
 def read_net_bytes(path=None):
@@ -303,32 +294,27 @@ def sample_metrics(now=None):
     queue on cold-start noise."""
     now = now or _utcnow()
     curr_cpu = read_cpu_times()
-    curr_disk_ticks = read_disk_io_ticks()
+    curr_disk = read_disk_io_ticks()
     curr_net = read_net_bytes()
     ram = read_mem_percent()
 
     prev = _load_json(METRIC_STATE_PATH)
-    state = {"ts": now.isoformat(), "cpu": curr_cpu, "disk_io_ticks": curr_disk_ticks, "net_bytes": curr_net}
+    state = {"ts": now.isoformat(), "cpu": curr_cpu, "disk_io_ticks_ms": curr_disk, "net_bytes": curr_net}
     _save_json(METRIC_STATE_PATH, state)
 
     if prev is None:
         return {"cpu": 0.0, "ram": ram, "disk_io": 0.0, "network": 0.0}
 
     dt = (now - datetime.fromisoformat(prev["ts"])).total_seconds()
-    # ROOT-CAUSE-2026-07-30 migration: the persisted state key was renamed
-    # disk_sectors -> disk_io_ticks (raw-throughput formula replaced with the
-    # real io-ticks/%util formula, see disk_io_percent/read_disk_io_ticks
-    # above). A state file written by the OLD code won't have the new key --
-    # treat that single tick as disk_io cold-start (report 0.0, same as the
-    # genuine first-ever-run case) rather than KeyError or silently reading a
-    # stale/wrong value; cpu/ram/network are unaffected since their state
-    # keys did not change.
-    prev_disk_ticks = prev.get("disk_io_ticks")
-    disk_io = 0.0 if prev_disk_ticks is None else disk_io_percent(prev_disk_ticks, curr_disk_ticks, dt)
+    # Older state files (pre-fix) used "disk_sectors" -- if we see that key,
+    # this is a cold-start-equivalent for disk_io specifically (0%), not a
+    # crash, since the two metrics aren't comparable.
+    prev_disk_ticks = prev.get("disk_io_ticks_ms")
+    disk_io_value = 0.0 if prev_disk_ticks is None else disk_io_percent(prev_disk_ticks, curr_disk, dt)
     return {
         "cpu": cpu_percent(prev["cpu"], curr_cpu),
         "ram": ram,
-        "disk_io": disk_io,
+        "disk_io": disk_io_value,
         "network": network_percent(prev["net_bytes"], curr_net, dt),
     }
 
@@ -366,10 +352,54 @@ def submit(task_spec, tier, source_trigger):
     Returns {"accepted": bool, "umr_id": str, "reason": str}. Never raises for
     a normal duplicate rejection -- that is a real, logged outcome, not an
     error.
+
+    Phase 7 (reuse-check-enforcement-gate, 2026-07-30): also runs
+    plan_generator.check_reuse_before_dispatch() against
+    capability_registry/wiring_registry/knowledge_engine/system_index
+    BEFORE the task row is written, and records the full structured result
+    on the row itself (metadata_json.reuse_check_result), for both the
+    accepted and rejected_duplicate outcomes. This is the one, real,
+    software-enforced reuse check for this entrypoint specifically because
+    it is the lowest-level real task-creation path everything else
+    (task-gateway.py cmd_submit, directive_engine.py submit_task) funnels
+    into -- unlike those two callers, which already run their own
+    check-duplicate/search/query-knowledge/lookup-capability battery before
+    ever reaching here, a caller that constructs a task_spec and calls this
+    function directly (or via `resource_governor.py --submit`) previously
+    had no such check unless its own prompt/author happened to remember to
+    run one by hand. Advisory only, same fail-open philosophy as
+    directive_engine.py's find_in_flight_duplicate()/
+    run_check_duplicate_battery(): a low-confidence or no-match result (or
+    a broken check) never blocks the submission, it is only recorded for
+    accountability.
     """
     if not (TIER_MIN <= tier <= TIER_MAX):
         raise ValueError(f"tier must be an int {TIER_MIN}..{TIER_MAX}, got {tier!r}")
     task_identity = task_spec["task_identity"]
+
+    inputs_for_reuse_check = task_spec.get("inputs", {}) or {}
+    intent_text = (
+        inputs_for_reuse_check.get("prompt")
+        or inputs_for_reuse_check.get("title")
+        or inputs_for_reuse_check.get("action")
+        or task_spec.get("unit_name")
+        or task_identity
+    )
+    try:
+        reuse_check_result = _plan_generator().check_reuse_before_dispatch(
+            intent_text, task_identity=task_identity)
+    except Exception as e:
+        # Fail-open -- a broken reuse-check must never block a real,
+        # legitimate submission (same philosophy as directive_engine.py's
+        # find_in_flight_duplicate()/run_check_duplicate_battery()).
+        reuse_check_result = {
+            "error": f"reuse-check failed, fail-open: {e}",
+            "intent_text": intent_text,
+            "task_identity": task_identity,
+            "recommendation": "proceed",
+            "confidence": 0.0,
+            "reuse_candidates": [],
+        }
 
     sbr = _superboss_register()
     with sbr._write_lock():
@@ -391,10 +421,12 @@ def submit(task_spec, tier, source_trigger):
                 "unit_name": task_spec.get("unit_name"),
                 "inputs": task_spec.get("inputs", {}),
                 "reason": reason,
+                "metadata": {"reuse_check_result": reuse_check_result},
             })
             conn.commit()
             conn.close()
-            return {"accepted": False, "umr_id": umr_id, "reason": reason}
+            return {"accepted": False, "umr_id": umr_id, "reason": reason,
+                     "reuse_check_result": reuse_check_result}
 
         umr_id = sbr.upsert_umr_task(conn, {
             "task_identity": task_identity,
@@ -405,10 +437,12 @@ def submit(task_spec, tier, source_trigger):
             "unit_name": task_spec.get("unit_name"),
             "inputs": task_spec.get("inputs", {}),
             "reason": "queued",
+            "metadata": {"reuse_check_result": reuse_check_result},
         })
         conn.commit()
         conn.close()
-    return {"accepted": True, "umr_id": umr_id, "reason": "queued"}
+    return {"accepted": True, "umr_id": umr_id, "reason": "queued",
+             "reuse_check_result": reuse_check_result}
 
 
 # ---------------------------------------------------------------------------

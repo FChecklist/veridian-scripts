@@ -114,7 +114,31 @@ if [ -f package.json ]; then
     run_gate lint "$PKG_MGR run lint"
   fi
   if grep -q '"build"' package.json; then
-    run_gate build "$PKG_MGR run build"
+    # Root-caused 2026-07-31 (task-20260730-183017-rebase--ci-green--and-merge-pr-639
+    # RCA, 3rd occurrence of the same host-wide-contention root cause after the
+    # 2026-07-26 OOM fix and 2026-07-27 hang-timeout fix above): confirmed LIVE
+    # that with several veridian-worker tasks each running their own unbounded
+    # `next build` at the same instant, the host's 15Gi RAM + 4Gi swap saturates
+    # (swap 100% exhausted, 1-min load average as high as 180) and manifests as a
+    # THIRD distinct failure shape: Turbopack's own internal IPC to a worker
+    # subprocess times out ("failed to receive message ... deadline has
+    # elapsed") well before this script's 900s watchdog even fires. Caught in
+    # the act: 6+ concurrent `claude -p` build-shaped processes plus a sibling
+    # `timeout ... bun run build` from a different task were all live on this
+    # box at the same moment this failure was captured. Per-process heap
+    # capping (2026-07-26) and wall-clock bounding (2026-07-27) don't touch
+    # this, because the exhausted resource is host-wide RAM/swap/CPU shared
+    # across ALL concurrent builds, not any single build's own footprint.
+    # Serializing the `build` step itself across every worker task via a
+    # host-wide flock -- so at most one `next build` runs at a time instead of
+    # N of them thrashing the same swap simultaneously -- fixes that shared
+    # root cause directly without weakening what the gate checks: the build
+    # command, its exit code, and pass/fail semantics are all unchanged;
+    # concurrent callers now queue for a turn instead of all failing together.
+    # `-w` bounds the wait so a genuinely deep backlog still fails honestly (a
+    # real capacity limit) instead of hanging forever, and the existing outer
+    # `timeout` in run_gate remains the hard backstop on total wall-clock time.
+    run_gate build "flock -w 700 /tmp/veridian-quality-gate-build.lock -c '$PKG_MGR run build'"
   fi
   if grep -q '"test"' package.json; then
     run_gate test "$PKG_MGR test -- --run 2>/dev/null || $PKG_MGR test"

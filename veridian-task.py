@@ -315,12 +315,32 @@ def cmd_create(args):
     _sync_to_app(task, extra_note=f"repo={args.repo}")
 
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
-    # enable (not just start): survives server reboot via linger + WantedBy=default.target
-    subprocess.run(["systemctl", "--user", "enable", task["service"]], check=True)
+    # 2026-08-01 RCA fix (24-unit OOM-kill incident): this used to also call
+    # `systemctl --user enable`, on the theory that a `WantedBy=default.target`
+    # unit "surviving a reboot" was a good thing -- it is, for the queued/
+    # in-progress WORK, but not for how systemd carries that out. `enable`
+    # doesn't give a task a gated, one-at-a-time restart; it hands systemd a
+    # standing instruction to start EVERY enabled unit, in parallel, the
+    # instant the box boots -- completely bypassing dispatch_core.py's shared
+    # lock/CONCURRENCY_CAP that gates every other spawn path on this box. On
+    # 2026-08-01, 24 accumulated worker units did exactly that in parallel
+    # against an 11GB cap and OOM-killed the box. A worker unit must now only
+    # ever be started explicitly (this `start` call here, or a later
+    # `systemctl --user start` from a dispatch_core-gated tick script) --
+    # never via systemd's own boot activation. Surviving a reboot mid-task is
+    # still handled, just the right way: see
+    # dispatch-tick.py:resume_interrupted_workers_tick(), which notices an
+    # interrupted task.yaml after a reboot and re-submits it through
+    # resource_governor.py's submit()/umr_tasks queue -- the SAME cap/lock as
+    # any other new task, so N interrupted tasks trickle back in at the
+    # existing cap instead of all firing at once. (See also this unit's own
+    # template, veridian-worker@.service, which no longer declares
+    # `[Install] WantedBy=default.target` at all -- `enable` would be a no-op
+    # against it now even if some other call site tried.)
     subprocess.run(["systemctl", "--user", "start", task["service"]], check=True)
 
     print(f"CREATED: {task_id}")
-    print(f"service: {task['service']} (enabled — will auto-start on server reboot)")
+    print(f"service: {task['service']} (started; NOT boot-enabled -- see resume_interrupted_workers_tick for reboot recovery)")
     print(f"workspace: {workspace}")
 
 

@@ -1490,6 +1490,26 @@ def _ensure_knowledge_engine_table(conn):
     END""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_engine_type ON knowledge_engine(artifact_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_engine_path ON knowledge_engine(artifact_path)")
+    # Structural duplicate-artifact constraint (task-20260731-074406, real
+    # #634-vs-#639 / #641-vs-#629 duplicate-task incidents this session):
+    # a bare UNIQUE(content_hash) is wrong -- confirmed against live data
+    # that content_hash legitimately repeats (15 rows share the 'n/a'
+    # no-hash placeholder; 13 distinct real artifacts share the
+    # sha256-of-empty-string hash). (content_hash, artifact_path) is the
+    # real key: querying GROUP BY on the live DB found exactly 2 genuine
+    # accidental duplicate registrations (same content_hash+artifact_path+
+    # artifact_type+secondary_path, minutes apart) and zero false positives
+    # against legitimate same-path-different-content re-registrations. Only
+    # created here if the 2 known pre-existing duplicates have already been
+    # removed by migrate_2026-07-31_dedup_constraints.py -- if a future DB
+    # rebuild from an older backup ever reintroduces old duplicate rows,
+    # this CREATE UNIQUE INDEX will fail loudly at startup rather than
+    # silently skipping; re-run that migration script to fix it (it is
+    # idempotent and safe to re-run).
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_engine_content_hash_path "
+        "ON knowledge_engine(content_hash, artifact_path)"
+    )
     conn.commit()
     _migrate_knowledge_engine_fts(conn)
     _migrate_knowledge_engine_utm(conn)
@@ -1657,17 +1677,36 @@ def register_knowledge(args):
     # left NULL when the caller doesn't know/supply them.
     utm_term = ",".join(tags_list) if tags_list else getattr(args, "utm_term", None)
 
-    conn.execute(
-        "INSERT INTO knowledge_engine (artifact_id, ts, artifact_path, content_hash, artifact_type, "
-        "secondary_path, exists_on_disk, purpose, tags, entity_relationships, last_verified_ts, "
-        "verification_status, metadata_json, utm_source, utm_medium, utm_campaign, utm_content, utm_term) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (aid, now, args.path, content_hash, args.artifact_type, args.secondary_path,
-         1 if exists else 0, args.purpose, json.dumps(tags_list), json.dumps(entity_relationships),
-         now, verification_status, json.dumps(json.loads(args.metadata) if args.metadata else {}),
-         getattr(args, "utm_source", None), getattr(args, "utm_medium", None),
-         getattr(args, "utm_campaign", None), getattr(args, "utm_content", None), utm_term),
-    )
+    try:
+        conn.execute(
+            "INSERT INTO knowledge_engine (artifact_id, ts, artifact_path, content_hash, artifact_type, "
+            "secondary_path, exists_on_disk, purpose, tags, entity_relationships, last_verified_ts, "
+            "verification_status, metadata_json, utm_source, utm_medium, utm_campaign, utm_content, utm_term) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (aid, now, args.path, content_hash, args.artifact_type, args.secondary_path,
+             1 if exists else 0, args.purpose, json.dumps(tags_list), json.dumps(entity_relationships),
+             now, verification_status, json.dumps(json.loads(args.metadata) if args.metadata else {}),
+             getattr(args, "utm_source", None), getattr(args, "utm_medium", None),
+             getattr(args, "utm_campaign", None), getattr(args, "utm_content", None), utm_term),
+        )
+    except sqlite3.IntegrityError:
+        # Structural duplicate hit (task-20260731-074406): the real fix for
+        # #634-vs-#639/#641-vs-#629 -- this used to be an uncaught traceback
+        # from the plain INSERT above (nothing enforced content_hash+path
+        # uniqueness before idx_knowledge_engine_content_hash_path existed).
+        # A clear, structured signal now, not a crash.
+        existing = conn.execute(
+            "SELECT artifact_id, ts FROM knowledge_engine WHERE content_hash=? AND artifact_path=?",
+            (content_hash, args.path),
+        ).fetchone()
+        conn.close()
+        print(json.dumps({
+            "error": "duplicate_artifact", "duplicate": True,
+            "artifact_path": args.path, "content_hash": content_hash,
+            "existing_artifact_id": existing["artifact_id"] if existing else None,
+            "existing_ts": existing["ts"] if existing else None,
+        }, indent=2, default=str))
+        sys.exit(1)
     conn.commit()
     conn.close()
     print(json.dumps({
@@ -1877,14 +1916,33 @@ def upsert_knowledge_fragment(args):
     else:
         artifact_id = _new_id("KE")
         status = "VERIFIED_MATCH"
-        conn.execute(
-            "INSERT INTO knowledge_engine (artifact_id, ts, artifact_path, content_hash, artifact_type, "
-            "secondary_path, exists_on_disk, purpose, tags, entity_relationships, last_verified_ts, "
-            "verification_status, metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (artifact_id, now, args.path, new_hash, args.artifact_type, args.secondary_path, 1,
-             args.purpose, json.dumps(tags_list), "[]", now, status,
-             json.dumps(json.loads(args.metadata) if args.metadata else {})),
-        )
+        try:
+            conn.execute(
+                "INSERT INTO knowledge_engine (artifact_id, ts, artifact_path, content_hash, artifact_type, "
+                "secondary_path, exists_on_disk, purpose, tags, entity_relationships, last_verified_ts, "
+                "verification_status, metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (artifact_id, now, args.path, new_hash, args.artifact_type, args.secondary_path, 1,
+                 args.purpose, json.dumps(tags_list), "[]", now, status,
+                 json.dumps(json.loads(args.metadata) if args.metadata else {})),
+            )
+        except sqlite3.IntegrityError:
+            # The SELECT-then-INSERT above isn't atomic -- two concurrent
+            # callers can both see "no row" and both reach this INSERT
+            # (task-20260731-074406). idx_knowledge_engine_content_hash_path
+            # now catches that race structurally instead of racing to a
+            # silent duplicate row.
+            existing = conn.execute(
+                "SELECT artifact_id, ts FROM knowledge_engine WHERE content_hash=? AND artifact_path=?",
+                (new_hash, args.path),
+            ).fetchone()
+            conn.close()
+            print(json.dumps({
+                "error": "duplicate_artifact", "duplicate": True,
+                "artifact_path": args.path, "content_hash": new_hash,
+                "existing_artifact_id": existing["artifact_id"] if existing else None,
+                "existing_ts": existing["ts"] if existing else None,
+            }, indent=2, default=str))
+            sys.exit(1)
         created = True
 
     conn.commit()
@@ -1912,6 +1970,96 @@ def list_knowledge(args):
     if getattr(args, "tag", None):
         matches = [r for r in matches if args.tag in json.loads(r["tags"] or "[]")]
     print(json.dumps({"count": len(matches), "matches": matches}, indent=2, default=str))
+
+
+def _ensure_task_claims_table(conn):
+    """Structural duplicate-TASK lease table (task-20260731-074406), separate
+    from knowledge_engine's ARTIFACT constraint above -- work_items has no
+    single stable per-task column (software_task_id/ai_task_id each repeat
+    multiple times per real task, one row per lifecycle event), so a
+    lease/claim concept needed its own table rather than a constraint bolted
+    onto work_items. task_key is a stable, title-derived identity (see
+    task-gateway.py's _slugify_title -- the SAME algorithm veridian-task.py's
+    cmd_create uses for its task_id slug, minus the timestamp prefix), NOT
+    task_id itself (task_id can never collide by construction, since it's
+    timestamp-prefixed -- that's exactly why two concurrent dispatches of
+    "the same" task get two different task_ids and nothing before this
+    caught them). UNIQUE(task_key) via a real index (not a Python-side
+    SELECT-then-INSERT check) so a concurrent duplicate claim raises
+    sqlite3.IntegrityError instead of racing past a check."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS task_claims (
+        claim_id TEXT PRIMARY KEY,
+        task_key TEXT NOT NULL,
+        ts TEXT NOT NULL,
+        task_id TEXT,
+        title TEXT,
+        utm_source TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}'
+    )""")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_task_claims_task_key ON task_claims(task_key)")
+    conn.commit()
+
+
+def claim_task_key(args):
+    """Atomic lease insert -- the real fix behind task-20260731-074406's real
+    #634-vs-#639 / #641-vs-#629 duplicate-dispatch incidents. Called by
+    task-gateway.py cmd_start immediately before veridian-task.py create
+    actually spends real resources (worktree/branch/systemd unit) on a new
+    task. Catches sqlite3.IntegrityError from the UNIQUE(task_key) index
+    (see _ensure_task_claims_table) and returns a clear, structured
+    duplicate signal instead of an uncaught traceback -- callers treat
+    claimed=false as a hard block, not a crash."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_task_claims_table(conn)
+    cid = _new_id("CLM")
+    now = _now_iso()
+    try:
+        conn.execute(
+            "INSERT INTO task_claims (claim_id, task_key, ts, task_id, title, utm_source, metadata_json) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (cid, args.task_key, now, getattr(args, "task_id", None), getattr(args, "title", None),
+             getattr(args, "source", None), "{}"),
+        )
+        conn.commit()
+        conn.close()
+        print(json.dumps({"claimed": True, "claim_id": cid, "task_key": args.task_key}, indent=2, default=str))
+    except sqlite3.IntegrityError:
+        existing = conn.execute(
+            "SELECT claim_id, ts, task_id, title FROM task_claims WHERE task_key=?",
+            (args.task_key,),
+        ).fetchone()
+        conn.close()
+        print(json.dumps({
+            "claimed": False, "task_key": args.task_key, "error": "duplicate_task_key",
+            "existing_claim_id": existing["claim_id"] if existing else None,
+            "existing_task_id": existing["task_id"] if existing else None,
+            "existing_title": existing["title"] if existing else None,
+            "existing_ts": existing["ts"] if existing else None,
+        }, indent=2, default=str))
+
+
+def check_task_key(args):
+    """Read-only lookup (no _write_lock needed -- same convention as
+    search/query-knowledge/list-knowledge in main()'s dispatch table below).
+    Used by task-gateway.py cmd_submit as an early advisory signal before a
+    real title/task_id exists to actually claim (submit only has --text, not
+    --title, so it cannot itself make the real atomic claim -- that happens
+    in cmd_start once a title is known)."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_task_claims_table(conn)
+    row = conn.execute(
+        "SELECT claim_id, ts, task_id, title FROM task_claims WHERE task_key=?",
+        (args.task_key,),
+    ).fetchone()
+    conn.close()
+    print(json.dumps({
+        "task_key": args.task_key, "already_claimed": row is not None,
+        "existing_task_id": row["task_id"] if row else None,
+        "existing_title": row["title"] if row else None,
+        "existing_ts": row["ts"] if row else None,
+    }, indent=2, default=str))
 
 
 def _ensure_capability_registry_table(conn):
@@ -3184,6 +3332,17 @@ if __name__ == "__main__":
                           help="engine|gateway|supabase_table|function|route|file|script|cron_job|"
                                "ai_role|vercel_project|github_repo|browser_component")
 
+    # Structural duplicate-task lease (task-20260731-074406) -- see
+    # _ensure_task_claims_table's docstring for task_key vs task_id.
+    p_claimtk = sub.add_parser("claim-task-key")
+    p_claimtk.add_argument("--task-key", dest="task_key", required=True)
+    p_claimtk.add_argument("--task-id", dest="task_id", default=None)
+    p_claimtk.add_argument("--title", default=None)
+    p_claimtk.add_argument("--source", default=None, help="who's claiming: owner|ai_agent|software (optional)")
+
+    p_checktk = sub.add_parser("check-task-key")
+    p_checktk.add_argument("--task-key", dest="task_key", required=True)
+
     args = p.parse_args()
     if args.cmd == "init":
         with _write_lock():
@@ -3266,3 +3425,8 @@ if __name__ == "__main__":
         lookup_entity(args)
     elif args.cmd == "list-entities":
         list_entities(args)
+    elif args.cmd == "claim-task-key":
+        with _write_lock():
+            claim_task_key(args)
+    elif args.cmd == "check-task-key":
+        check_task_key(args)

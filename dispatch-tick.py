@@ -40,6 +40,23 @@ already relies on that external redirect + run-logged.sh instead of managing
 its own log file. This script follows that same, already-majority convention;
 its proposed cron entry (see PR body) redirects to logs/dispatch-tick.log like
 the others.
+
+4. resume_interrupted_workers_tick (added 2026-08-01, RCA fix for the 24-unit
+   OOM-kill incident): veridian-worker@ units are no longer `systemctl --user
+   enable`d (see veridian-task.py's cmd_create and veridian-worker@.service's
+   own comments for the full root cause), so a task that was `in_progress` at
+   the moment of a reboot/crash no longer auto-restarts on its own -- nothing
+   in systemd's boot sequence knows to start it. This tick notices exactly
+   that: any task.yaml with status in {"pending", "in_progress"} whose
+   veridian-worker@ unit is NOT currently active, and re-submits it through
+   resource_governor.py's submit()/umr_tasks queue (task_kind=
+   "systemctl_action", action=start or reset_failed_and_start) -- never a
+   direct `systemctl start` here. Going through the queue means N interrupted
+   tasks after a reboot are subject to the exact same dispatch_core cap/lock
+   and resource_governor 4-metric gate as any brand-new task, so they trickle
+   back in at the existing concurrency cap instead of all firing at once
+   (the same shape of bug this whole RCA fix closes, just for "many tasks
+   resume at once" instead of "many tasks boot at once").
 """
 import argparse
 import contextlib
@@ -54,11 +71,21 @@ import sys
 import yaml
 
 import dispatch_core
+import resource_governor
 
 VERIDIAN_ROOT = dispatch_core.VERIDIAN_ROOT
 AI_OS = dispatch_core.AI_OS
 SCRIPTS = dispatch_core.SCRIPTS
 TASKS_DIR = dispatch_core.TASKS_DIR
+
+# Non-terminal task.yaml statuses: work that was still live (or about to
+# start) and is therefore a candidate for resume-after-interruption if its
+# unit isn't currently running. Deliberately excludes "blocked"/"failed"
+# (worker-entrypoint.sh already `systemctl --user disable`s the unit itself
+# on those -- a human decision is needed, not an automatic resume) and
+# "pending_review"/"awaiting_human_approval" (the work is already done;
+# supervisor_sweep_tick above is what re-triggers those, not this).
+RESUMABLE_STATUSES = {"pending", "in_progress"}
 
 GAP_QUEUE_PATH = os.environ.get("VERIDIAN_GAP_QUEUE_PATH", f"{AI_OS}/gap_queue.yaml")
 GAP_QUEUE_LOCK = os.environ.get("VERIDIAN_GAP_QUEUE_LOCK", f"{AI_OS}/.gap_queue.lock")
@@ -121,6 +148,70 @@ def supervisor_sweep_tick(tasks):
             source_queue_or_plan="supervisor_sweep_discovery",
             worker_unit=f"veridian-supervisor@{task_id}.service")
     return {"started": started, "skipped_cap": skipped_cap}
+
+
+# ---------------------------------------------------------------------------
+# 1b. resume-after-interruption (added 2026-08-01, 24-unit OOM-kill RCA fix)
+# ---------------------------------------------------------------------------
+
+def _unit_active_state(unit):
+    """Real, current systemd --user ActiveState for `unit` ('active',
+    'inactive', 'failed', 'activating', ...), never a self-tracked guess.
+    Returns 'unknown' if systemctl itself can't answer (unit truly never
+    existed this boot) -- treated the same as 'inactive' by the caller."""
+    r = run(["systemctl", "--user", "show", unit, "-p", "ActiveState", "--value"])
+    state = r.stdout.strip()
+    return state or "unknown"
+
+
+def resume_interrupted_workers_tick(tasks):
+    """Finds every task.yaml left in a non-terminal status (RESUMABLE_STATUSES)
+    whose veridian-worker@ unit is NOT currently active -- the real signature
+    of "was mid-work when the box rebooted/crashed, and nothing auto-started
+    it" now that these units are never boot-enabled (see module docstring).
+    Re-submits each one through resource_governor.submit() -- the queue, not
+    a direct systemctl call -- so resource_governor's own dispatch_one()
+    (dispatch_core-gated, plus the 4-metric resource gate) is what actually
+    restarts it, at the existing cap, whenever it next runs a tick.
+
+    task_identity=task_id gives resource_governor.submit() its existing
+    de-dup for free: a task already queued/dispatched/running in umr_tasks
+    (e.g. a previous tick already resubmitted it, or it's mid-run right now)
+    is rejected as a duplicate rather than double-queued -- this function is
+    safe to call every tick, not just once after a reboot.
+    """
+    resumed, skipped_running, skipped_duplicate = [], [], []
+    for task_id, doc in tasks.items():
+        service = doc.get("service")
+        if not service or not service.startswith("veridian-worker@"):
+            continue
+        if doc.get("status") not in RESUMABLE_STATUSES:
+            continue
+
+        state = _unit_active_state(service)
+        if state in ("active", "activating", "reloading"):
+            skipped_running.append(task_id)
+            continue
+
+        action = "reset_failed_and_start" if state == "failed" else "start"
+        result = resource_governor.submit(
+            task_spec={
+                "task_identity": task_id,
+                "task_kind": "systemctl_action",
+                "unit_name": service,
+                "inputs": {"action": action, "resumed_after_state": state},
+            },
+            tier=1,  # already-started work outranks brand-new dispatch in priority
+            source_trigger="dispatch-tick:resume_interrupted_workers",
+        )
+        if result["accepted"]:
+            resumed.append(task_id)
+            print(f"RESUME QUEUED: {task_id} (unit was {state!r}, action={action}, umr_id={result['umr_id']})")
+        else:
+            skipped_duplicate.append(task_id)
+            print(f"SKIP resume (already in queue): {task_id} -- {result['reason']}")
+
+    return {"resumed": resumed, "skipped_running": skipped_running, "skipped_duplicate": skipped_duplicate}
 
 
 # ---------------------------------------------------------------------------
@@ -420,11 +511,13 @@ def main():
     tasks = dispatch_core.task_status_sync()
 
     sweep_result = supervisor_sweep_tick(tasks)
+    resume_result = resume_interrupted_workers_tick(tasks)
     gap_result = gap_queue_tick(tasks)
     module_result = module_queue_tick(tasks)
 
     dispatched_this_tick = (
         len(sweep_result.get("started", []))
+        + len(resume_result.get("resumed", []))
         + len(gap_result.get("dispatched", []))
         + len(module_result.get("dispatched", []))
     )
@@ -432,6 +525,7 @@ def main():
         "dispatch-tick", status="ok", dispatched_this_tick=dispatched_this_tick,
         extra={
             "supervisor_sweep_started": sweep_result.get("started", []),
+            "resumed_interrupted_workers": resume_result.get("resumed", []),
             "gap_queue_dispatched": gap_result.get("dispatched", []),
             "module_queue_dispatched": module_result.get("dispatched", []),
         },
@@ -439,6 +533,7 @@ def main():
 
     print(json.dumps({
         "supervisor_sweep": sweep_result,
+        "resume_interrupted_workers": resume_result,
         "gap_queue": gap_result,
         "module_queue": module_result,
     }, indent=2, default=str))

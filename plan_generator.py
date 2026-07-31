@@ -111,15 +111,229 @@ def split_objective_into_steps(objective):
     return parts if parts else [objective.strip()]
 
 
-def _lookup_capability(intent_text):
+def _lookup_capability(intent_text, domain=None):
+    cmd = ["python3", SUPERBOSS, "lookup-capability", "--intent-text", intent_text]
+    if domain:
+        cmd += ["--domain", domain]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return {"found": False, "matches": []}
+
+
+def _lookup_entity(query_text):
     proc = subprocess.run(
-        ["python3", SUPERBOSS, "lookup-capability", "--intent-text", intent_text],
+        ["python3", SUPERBOSS, "lookup-entity", "--query", query_text],
         capture_output=True, text=True,
     )
     try:
         return json.loads(proc.stdout)
     except json.JSONDecodeError:
         return {"found": False, "matches": []}
+
+
+def _query_knowledge(query_text):
+    proc = subprocess.run(
+        ["python3", SUPERBOSS, "query-knowledge", query_text],
+        capture_output=True, text=True,
+    )
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return {"found": 0, "matches": []}
+
+
+def _search_system_index(query_text):
+    proc = subprocess.run(
+        ["python3", SUPERBOSS, "search", query_text, "--limit", "5"],
+        capture_output=True, text=True,
+    )
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return {"system_index": []}
+
+
+# Phase 7 (reuse-check-enforcement-gate-phase7-2026-07-30): a capability
+# match at or above this confidence is treated as "this already exists,
+# reuse it" rather than merely "worth a human glance" -- same threshold
+# convention lookup_capability()'s own resolution_order comment (in
+# superboss-register.py) treats exact-name/domain-scoped matches as
+# high-confidence signal for. Advisory only; see
+# check_reuse_before_dispatch()'s own docstring.
+REUSE_CONFIDENCE_THRESHOLD = 0.7
+
+# Small, local stopword set for _name_overlaps_intent() below -- deliberately
+# NOT importing superboss-register.py's own STOPWORDS in-process (this
+# module only ever talks to that script via subprocess, same convention as
+# _lookup_capability() etc.); this list only needs to filter common English
+# function words out of a registry NAME (e.g. "of"/"and"/"the" inside a
+# capability_name), a much narrower job than _fts_query()'s own stopword use.
+STOPWORDS = {"the", "and", "for", "of", "with", "from", "into", "onto", "this", "that"}
+
+_NAME_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _name_overlaps_intent(name, intent_text):
+    """Mechanical (no LLM call) relevance check: does a registry name (e.g.
+    capability_name 'commission_calculator', or a wiring entity_id) actually
+    describe what intent_text is about, rather than merely sharing an
+    incidental FTS term with it? True if every significant (len > 2,
+    de-stopworded) word of `name` -- split on '_'/'-'/camelCase boundaries --
+    appears as a whole word somewhere in intent_text. Used by
+    check_reuse_before_dispatch() instead of capability_registry's own
+    per-row 'confidence' field (a static data-quality rating, not a
+    query-relevance score -- see that function's own comment for the real
+    false-positive this caught live in Phase 7 testing)."""
+    if not name or not intent_text:
+        return False
+    words = [w for w in _NAME_WORD_RE.findall(name.lower()) if len(w) > 2 and w not in STOPWORDS]
+    if not words:
+        return False
+    intent_words = set(_NAME_WORD_RE.findall(intent_text.lower()))
+    return all(w in intent_words for w in words)
+
+
+def check_reuse_before_dispatch(intent_text, task_identity=None, domain=None):
+    """Phase 7 (reuse-check-enforcement-gate-phase7-2026-07-30): the single,
+    shared, real "check existing before building new" enforcement function.
+    Until this, that check existed only as prompt instructions given by hand
+    to each dispatched agent (worked today for the SAP-equivalent-reports
+    work only because the prompts happened to say so every time) -- nothing
+    in software stopped a future dispatch from skipping it. Separately,
+    task-gateway.py's cmd_submit and directive_engine.py's process_one
+    (via run_check_duplicate_battery) already run their own real
+    check-duplicate/search/query-knowledge/lookup-capability battery before
+    ever constructing a task_spec -- but resource_governor.py's submit(),
+    the real low-level task-creation entrypoint everything else funnels
+    into, had no equivalent of its own and could be reached directly,
+    bypassing both.
+
+    This function is that missing, shared piece: it does not reimplement
+    any registry lookup -- it composes the same already-built
+    superboss-register.py subcommands this module's own _lookup_capability()
+    already used (lookup-capability), plus lookup-entity (wiring_registry),
+    query-knowledge (knowledge_engine), and search (system_index, among
+    other FTS trees), all via subprocess exactly as this module and
+    task-gateway.py's cmd_submit already call them.
+
+    Returns a real, structured result:
+      {
+        "checked_at": iso8601 str or None,
+        "intent_text": str, "task_identity": str or None,
+        "capability": <lookup-capability's own full JSON response>,
+        "wiring": <lookup-entity's own full JSON response>,
+        "knowledge": <query-knowledge's own full JSON response>,
+        "system_index_search": <search's own full JSON response>,
+        "reuse_candidates": [str, ...],   # names/ids pulled from whichever
+                                          # of the above found something
+        "confidence": float,             # capability's best_match_confidence
+        "recommendation": "proceed" | "needs_review" | "reuse_instead",
+        "error": str or None,            # set (non-fatal) if a lookup failed
+      }
+
+    Never raises and never blocks -- a broken or inconclusive check always
+    still returns recommendation="proceed" (or "needs_review"), the same
+    fail-open philosophy as directive_engine.py's
+    find_in_flight_duplicate()/run_check_duplicate_battery(): this is
+    advisory, recorded for accountability (e.g. callers writing it to
+    umr_tasks.metadata_json.reuse_check_result), never a hard gate that
+    could block genuinely new, legitimate work.
+    """
+    intent_text = (intent_text or "").strip()
+    result = {
+        "checked_at": None,
+        "intent_text": intent_text,
+        "task_identity": task_identity,
+        "capability": {"found": False, "matches": [], "best_match_confidence": 0.0},
+        "wiring": {"found": False, "matches": []},
+        "knowledge": {"found": 0, "matches": []},
+        "system_index_search": {"system_index": []},
+        "reuse_candidates": [],
+        "confidence": 0.0,
+        "recommendation": "proceed",
+        "error": None,
+    }
+    try:
+        result["checked_at"] = _now_iso()
+    except Exception:
+        pass
+
+    if not intent_text:
+        return result
+
+    errors = []
+    try:
+        result["capability"] = _lookup_capability(intent_text, domain)
+    except Exception as e:
+        errors.append(f"capability lookup failed: {e}")
+    try:
+        result["wiring"] = _lookup_entity(intent_text)
+    except Exception as e:
+        errors.append(f"wiring lookup failed: {e}")
+    try:
+        result["knowledge"] = _query_knowledge(intent_text)
+    except Exception as e:
+        errors.append(f"knowledge lookup failed: {e}")
+    try:
+        result["system_index_search"] = _search_system_index(intent_text)
+    except Exception as e:
+        errors.append(f"search failed: {e}")
+    if errors:
+        result["error"] = "; ".join(errors)
+
+    cap = result["capability"] or {}
+    cap_found = bool(cap.get("found"))
+    # capability_registry's own "confidence" field (surfaced here as
+    # best_match_confidence) is a static per-ROW data-quality rating set at
+    # register-capability time (e.g. "how sure are we this record is
+    # accurate") -- NOT a query-relevance score. Any FTS hit at all, however
+    # generic the shared term, carries that same ~1.0 row confidence, so
+    # thresholding on it directly (an earlier version of this function did)
+    # falsely recommended reuse_instead for text that only coincidentally
+    # shared a common word with an unrelated row (caught live during Phase 7
+    # end-to-end testing: a "quasar-flux telemetry ingestion" test task
+    # matched on generic terms and got reuse_instead). Real relevance is
+    # instead computed mechanically here -- same "no LLM call, deterministic
+    # only" discipline this module's own split_objective_into_steps() already
+    # follows -- by checking whether the matched capability_name's own
+    # significant words actually appear in the submitted intent_text.
+    cap_matches = cap.get("matches", []) or []
+    strong_cap_matches = [m for m in cap_matches
+                           if m.get("capability_name") and _name_overlaps_intent(m["capability_name"], intent_text)]
+    cap_confidence = max((float(m.get("confidence") or 0.0) for m in strong_cap_matches), default=0.0)
+
+    wiring_matches = (result["wiring"] or {}).get("matches") or []
+    wiring_found = bool((result["wiring"] or {}).get("found")) and bool(wiring_matches)
+    strong_wiring_matches = [m for m in wiring_matches
+                              if m.get("entity_id") and _name_overlaps_intent(m["entity_id"], intent_text)]
+
+    knowledge_matches = (result["knowledge"] or {}).get("matches") or []
+    knowledge_found = len(knowledge_matches) > 0
+    sys_idx_matches = ((result["system_index_search"] or {}).get("system_index")) or []
+    search_found = isinstance(sys_idx_matches, list) and len(sys_idx_matches) > 0
+
+    candidates = []
+    if cap_found:
+        candidates += [m.get("capability_name") for m in cap_matches if m.get("capability_name")]
+    if wiring_found:
+        candidates += [m.get("entity_id") for m in wiring_matches if m.get("entity_id")]
+    if knowledge_found:
+        candidates += [m.get("purpose") or m.get("id") for m in knowledge_matches[:5]]
+    result["reuse_candidates"] = [c for c in candidates if c]
+
+    strong_match = bool(strong_cap_matches) or bool(strong_wiring_matches)
+    result["confidence"] = cap_confidence if strong_match else 0.0
+
+    if strong_match and cap_confidence >= REUSE_CONFIDENCE_THRESHOLD:
+        result["recommendation"] = "reuse_instead"
+    elif strong_match or cap_found or wiring_found or knowledge_found or search_found:
+        result["recommendation"] = "needs_review"
+    else:
+        result["recommendation"] = "proceed"
+
+    return result
 
 
 def cmd_generate_plan(args):

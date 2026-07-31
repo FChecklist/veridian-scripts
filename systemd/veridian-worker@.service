@@ -1,0 +1,56 @@
+[Unit]
+Description=VERIDIAN AI worker for task %i
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=1800
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/veridian/ai-os/tasks/%i
+EnvironmentFile=/opt/veridian/shared/.env
+ExecStart=/opt/veridian/scripts/worker-entrypoint.sh %i
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/opt/veridian/ai-os/tasks/%i/systemd.log
+StandardError=append:/opt/veridian/ai-os/tasks/%i/systemd.log
+
+# 2026-07-26 RCA fix (task-20260726-175957, watchdog signature "periodic
+# checkpoint"): this template had no memory limit (MemoryMax=infinity), so on
+# a 15GB host running 15-30 of these units concurrently, a memory-heavy
+# invocation (tsc/bun test/node under `claude -p`) was contained by nothing
+# -- confirmed live via `journalctl --user -u "veridian-worker@*"`: the
+# kernel's SYSTEM-WIDE OOM killer struck a rotating, unrelated set of worker
+# units every 5-15 minutes (171129, 171954, 171957, 171946 -- the task this
+# RCA covers, 171926, 172016, 171954 again), each logged as "Failed with
+# result 'oom-kill'". A unit killed mid-work between its 5-minute periodic
+# checkpoints (worker-entrypoint.sh's background loop) simply goes quiet
+# until the watchdog's 20-minute stall threshold fires, with whatever the
+# last periodic-checkpoint note happened to be as its only "signature" --
+# non-diagnostic by construction, and reproducible against any task the
+# kernel happens to pick next. MemoryHigh/MemoryMax below scope this to a
+# per-unit cgroup limit: a runaway invocation now gets throttled (MemoryHigh)
+# or, in the worst case, killed within its OWN cgroup (MemoryMax) --
+# contained and immediately recovered by the existing Restart=on-failure +
+# resume-context path -- instead of the kernel choosing an arbitrary victim
+# unit system-wide.
+MemoryHigh=2G
+MemoryMax=3G
+MemorySwapMax=1G
+
+# 2026-08-01 RCA fix (24-unit OOM-kill incident): deliberately NO [Install]
+# section. This template used to end with `[Install]\nWantedBy=default.target`,
+# which is what let `systemctl --user enable` wire a unit into
+# default.target.wants/ -- and every unit in default.target.wants/ is started
+# by systemd itself, in parallel, unconditionally, the instant the user
+# session/box boots. That is real boot activation with zero awareness of
+# dispatch_core.py's shared lock/CONCURRENCY_CAP (default 5): on 2026-08-01,
+# 24 accumulated enabled worker units all launched at once at boot against an
+# 11GB memory cap and OOM-killed the box. Removing [Install] here means
+# `systemctl --user enable veridian-worker@<id>.service` now fails outright
+# ("Unit has no installation config") instead of silently doing this again --
+# a real unit is only ever meant to be started explicitly, by name, via
+# `systemctl --user start` from a caller that already holds
+# dispatch_core.acquire_dispatch_lock() (veridian-task.py's cmd_create, or
+# dispatch-tick.py's resume_interrupted_workers_tick() after a reboot). See
+# veridian-task.py's cmd_create for the matching change on the caller side.

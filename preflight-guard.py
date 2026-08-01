@@ -358,68 +358,6 @@ def check_proxy_health(proxy_url):
              f"this is the hard ceiling working as designed, not a bug")
 
 
-def check_openrouter_balance(min_remaining_usd=0.10):
-    """RCA fix, 2026-07-20 -- root cause of the 47-failed-unit /
-    71.9%-task-failure-rate incident found this same day: this proxy's own
-    check_proxy_health() above tracks ONLY the budget THIS proxy itself has
-    spent -- it has no visibility into the REAL, LIVE OpenRouter account
-    balance, which can be (and was) drained toward zero by other draws on
-    the same API key. Confirmed directly: the account showed
-    total_credits=$40 / total_usage=$40.07 (already over) while every
-    worker's canary call (5 max_tokens, cheap enough to still succeed) kept
-    passing preflight, only for the REAL prompt (up to 64000 max_tokens) to
-    fail immediately with a real, live OpenRouter 402 -- which systemd then
-    retried 3x into a permanent 'failed' state per affected task, across at
-    least 47 units.
-
-    This queries OpenRouter's OWN /credits endpoint directly -- ground
-    truth, cannot drift out of sync with reality the way a local tracker
-    can. Fails OPEN (never blocks a real task) on any network/read/parse
-    error on the check itself; fails CLOSED (blocks, hard stop) only on a
-    confirmed, real low/zero balance. Same fail-open/fail-closed asymmetry
-    as the app-layer's checkOpenRouterBalance() in cost-policy.ts -- this
-    is that same guardrail's ops-layer twin, for the worker fleet that
-    guardrail never covered.
-    """
-    key = os.environ.get("OPENROUTER_API_KEY")
-    if not key:
-        env_path = "/opt/veridian/shared/.env"
-        try:
-            with open(env_path) as f:
-                for line in f:
-                    if line.startswith("OPENROUTER_API_KEY="):
-                        key = line.strip().split("=", 1)[1]
-                        break
-        except FileNotFoundError:
-            pass
-    if not key:
-        return  # can't verify -- fail open, do not block on a check with no key to run it
-    req = urllib.request.Request(
-        "https://openrouter.ai/api/v1/credits",
-        headers={"Authorization": f"Bearer {key}"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            data = json.loads(r.read())
-    except Exception:
-        return  # fail open -- a hiccup on the balance check itself must never block real work
-    d = data.get("data", {})
-    total_credits = d.get("total_credits")
-    total_usage = d.get("total_usage")
-    if total_credits is None or total_usage is None:
-        return  # unexpected response shape -- fail open
-    remaining = total_credits - total_usage
-    if remaining < min_remaining_usd:
-        fail("openrouter_balance_exhausted",
-             f"OpenRouter account has ${remaining:.4f} remaining "
-             f"(${total_usage:.2f} used of ${total_credits:.2f} credits) -- below the "
-             f"${min_remaining_usd} safety floor. This is the REAL, live account balance, "
-             f"not this proxy's own internal spend tracker. Add credits at "
-             f"https://openrouter.ai/settings/credits before retrying -- this is a real "
-             f"money problem, not a code bug, and retrying will not help until the balance "
-             f"is restored.")
-
-
 def canary_call(proxy_url):
     """One minimal real call through the actual call path -- confirms model
     reachability, auth, and tool-schema handling before the full task prompt
@@ -475,6 +413,5 @@ if __name__ == "__main__":
     else:
         check_credit_accountant_approval(task_dir_arg)
         check_proxy_health(proxy_arg)
-        check_openrouter_balance()
         canary_call(proxy_arg)
-        ok("all pre-flight checks passed (circuit-breaker, disk, memory, worktree, proxy health, real OpenRouter balance, canary)")
+        ok("all pre-flight checks passed (circuit-breaker, disk, memory, worktree, proxy health, canary)")

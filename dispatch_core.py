@@ -45,15 +45,113 @@ TASKS_DIR = os.environ.get("VERIDIAN_TASKS_DIR", f"{AI_OS}/tasks")
 LOCK_DIR = os.environ.get("VERIDIAN_DISPATCH_LOCK_DIR", f"{AI_OS}/locks")
 LOCK_PATH = os.environ.get("VERIDIAN_DISPATCH_LOCK_PATH", f"{LOCK_DIR}/worker-spawn.lock")
 
-# The ONE shared concurrency cap for every real spawn path server-wide. Was 3
-# independent numbers before this consolidation: queue-dispatcher.py's 5 (Owner-set
-# 2026-07-20, "~80% capacity on this 8-core box"), module-queue-dispatcher.py's 3
-# (its own docstring already said this was meant to share queue-dispatcher.py's pool,
-# not add to it), and auto_phase_continuation.py's *none at all*. 5 is the Owner's
-# already-vetted ceiling for this box; module-queue-dispatcher.py's 3 was never a
-# second real limit, just a smaller number that happened to also be under 5.
-# Overridable for tests only -- production always uses the default.
-CONCURRENCY_CAP = int(os.environ.get("VERIDIAN_DISPATCH_CONCURRENCY_CAP", "5"))
+# DYNAMIC CONCURRENCY CAP (2026-08-01, Owner directive UMR-20260801-172407-ae58).
+# Was a single fixed number before this (5, Owner-set 2026-07-20 as "~80%
+# capacity on this 8-core box" -- itself replacing 3 independent numbers: see
+# git history on this constant for that consolidation). A fixed number can't
+# account for what's actually free on the box right now -- this session
+# directly observed real headroom swing from load 3.18/1.6G swap free to load
+# 15.84/283M swap free within the same hour, entirely independent of how many
+# workers were dispatched. compute_dynamic_concurrency_cap() below replaces
+# the constant with a live computation from real CPU/memory/swap/load,
+# re-evaluated fresh on every has_free_slot() call (every real spawn site
+# calls this immediately before spawning -- see this module's own docstring
+# -- so this is continuous relative to the dispatch flow, not a one-time
+# check, without needing a new standing daemon; a separate always-running
+# monitor process would itself be exactly the kind of always-on 6th-role
+# process this framework's own architecture deliberately avoids, see
+# master-decompose.py's docstring for that precedent).
+#
+# Two thresholds, per the Owner's own explicit numbers:
+#   HARD_CEILING_UTILIZATION_PCT (0.99) -- never cross, this is the point the
+#     Owner says the server stops/freezes. At or above this on ANY tracked
+#     resource, the cap is 0 -- no new dispatch at all, regardless of what
+#     the rest of the math says.
+#   TARGET_WORKING_UTILIZATION_PCT (0.80) -- meaningfully below the hard
+#     ceiling. All headroom/cap math below aims to keep steady-state usage
+#     under THIS number, not 0.99, because a single worker's own memory use
+#     has been directly observed to ramp from near-zero to a 2GB peak +
+#     1GB swap peak DURING its own run (2026-07-26 OOM RCA) -- a cap that
+#     only left room down to 0.99 would have zero margin left to absorb that
+#     kind of build/compile spike happening after a worker already started.
+#
+# PER_WORKER_MEMORY_BUDGET_BYTES (2GB) is not a new number invented for this --
+# it's the exact same MemoryHigh=2G already enforced per-unit in the
+# veridian-worker@.service template (2026-07-26 RCA fix, preserved unchanged
+# by this change, see that file). Using the same figure here means the
+# memory-based slot count and the per-unit cgroup ceiling agree with each
+# other by construction, instead of this module guessing a different number.
+#
+# Explicit env override is still honored (VERIDIAN_DISPATCH_CONCURRENCY_CAP) --
+# unchanged behavior for tests/manual overrides; when unset, production now
+# always uses the live dynamic computation instead of a fixed default.
+HARD_CEILING_UTILIZATION_PCT = 0.99
+TARGET_WORKING_UTILIZATION_PCT = 0.80
+PER_WORKER_MEMORY_BUDGET_BYTES = 2 * 1024 ** 3  # matches MemoryHigh=2G per-unit
+
+
+def _read_meminfo_bytes():
+    """Real /proc/meminfo values in bytes. MemAvailable (not MemFree) is the
+    kernel's own estimate of memory available for new allocations without
+    swapping -- already accounts for reclaimable cache/buffers, same figure
+    `free -h`'s "available" column shows."""
+    info = {}
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if ":" not in line:
+                    continue
+                key, rest = line.split(":", 1)
+                parts = rest.split()
+                if not parts:
+                    continue
+                info[key.strip()] = int(parts[0]) * 1024
+    except (OSError, ValueError):
+        pass
+    return info
+
+
+def compute_dynamic_concurrency_cap():
+    """Live, real-host-capacity-based concurrency cap -- replaces the old
+    fixed CONCURRENCY_CAP constant. Returns an int >= 0. Called fresh on
+    every has_free_slot() invocation (never cached), so every real dispatch
+    decision reflects current reality, not a snapshot from whenever the
+    process started."""
+    override = os.environ.get("VERIDIAN_DISPATCH_CONCURRENCY_CAP")
+    if override is not None:
+        return int(override)
+
+    meminfo = _read_meminfo_bytes()
+    mem_total = meminfo.get("MemTotal", 0)
+    mem_available = meminfo.get("MemAvailable", 0)
+    swap_total = meminfo.get("SwapTotal", 0)
+    swap_free = meminfo.get("SwapFree", 0)
+
+    mem_used_pct = (1 - (mem_available / mem_total)) if mem_total else 1.0
+    swap_used_pct = (1 - (swap_free / swap_total)) if swap_total else 0.0
+
+    # HARD CEILING -- Owner's own number, never cross. At/above 99% used on
+    # either real resource, refuse every new dispatch outright.
+    if mem_used_pct >= HARD_CEILING_UTILIZATION_PCT or swap_used_pct >= HARD_CEILING_UTILIZATION_PCT:
+        return 0
+
+    cpu_count = os.cpu_count() or 1
+    try:
+        load1, _, _ = os.getloadavg()
+    except OSError:
+        load1 = float(cpu_count)  # fail safe: assume fully loaded if unreadable
+
+    # Real headroom to the TARGET working threshold (not the hard ceiling) --
+    # this is the safety margin a build/compile spike needs room to be
+    # absorbed in without ever touching the 99% hard ceiling.
+    mem_used_bytes = mem_total - mem_available
+    mem_headroom_bytes = max(0, (mem_total * TARGET_WORKING_UTILIZATION_PCT) - mem_used_bytes)
+    memory_based_cap = int(mem_headroom_bytes // PER_WORKER_MEMORY_BUDGET_BYTES)
+
+    cpu_headroom = max(0.0, (cpu_count * TARGET_WORKING_UTILIZATION_PCT) - load1)
+    cpu_based_cap = int(cpu_headroom)
+
+    return max(0, min(memory_based_cap, cpu_based_cap))
 
 # Both unit templates this box actually spawns from a dispatch path (see KNOWN_CONTEXT
 # item 2 in this task's spec): veridian-worker@ (queue-dispatcher.py/module-queue-
@@ -91,7 +189,8 @@ def running_worker_count():
     """Real, current count of BOTH veridian-worker@* and veridian-supervisor@*
     systemd --user units in state=running, counted together -- the single
     number every spawn call site in every consolidated script checks against
-    CONCURRENCY_CAP before spawning anything else."""
+    the live dynamic cap (see compute_dynamic_concurrency_cap()) before
+    spawning anything else."""
     total = 0
     for unit_glob in _UNIT_GLOBS:
         r = _run(["systemctl", "--user", "list-units", unit_glob, "--state=running", "--no-legend"])
@@ -103,8 +202,10 @@ def has_free_slot(cap=None):
     """True if a real spawn is currently allowed under the shared cap. Callers
     must check this WHILE holding acquire_dispatch_lock(), never before/after --
     checking outside the lock reintroduces the exact TOCTOU race this module
-    exists to close."""
-    cap = CONCURRENCY_CAP if cap is None else cap
+    exists to close. cap defaults to the live compute_dynamic_concurrency_cap()
+    result (real host CPU/memory/swap/load, re-read fresh on every call) --
+    pass an explicit cap only to override for tests."""
+    cap = compute_dynamic_concurrency_cap() if cap is None else cap
     return running_worker_count() < cap
 
 

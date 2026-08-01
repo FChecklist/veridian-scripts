@@ -146,7 +146,21 @@ if [ -f package.json ]; then
     # `-w` bounds the wait so a genuinely deep backlog still fails honestly (a
     # real capacity limit) instead of hanging forever, and the existing outer
     # `timeout` in run_gate remains the hard backstop on total wall-clock time.
-    run_gate build "flock -w 700 /tmp/veridian-quality-gate-build.lock -c '$PKG_MGR run build'"
+    # Configurable (2026-08-01, same precedent as GATE_STEP_TIMEOUT_SECONDS/
+    # BUILD_MAX_OLD_SPACE_MB above): default unchanged at 700s for every
+    # existing caller. Root-caused during the 800-task ai-os/tasks audit --
+    # confirmed LIVE that a merge-only task (no code changes, nothing that
+    # should ever touch `build` at all) failed with exit_code=1 and a
+    # completely EMPTY output_tail, which is flock's own documented behavior
+    # on a wait-timeout (the wrapped command never runs at all, so there is
+    # no build output to capture) -- not a real build failure. With several
+    # tasks dispatched inside the same short window all queuing for this one
+    # host-wide build slot, 700s was not enough for every queued task to get
+    # its turn. An explicit BUILD_LOCK_WAIT_SECONDS override is opt-in only,
+    # for a specific dispatch batch known to need more queueing headroom, not
+    # a change to the default this incident's original fix established.
+    BUILD_LOCK_WAIT_SECONDS="${BUILD_LOCK_WAIT_SECONDS:-700}"
+    run_gate build "flock -w $BUILD_LOCK_WAIT_SECONDS /tmp/veridian-quality-gate-build.lock -c '$PKG_MGR run build'"
   fi
   if grep -q '"test"' package.json; then
     run_gate test "$PKG_MGR test -- --run 2>/dev/null || $PKG_MGR test"

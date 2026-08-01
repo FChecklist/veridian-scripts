@@ -3,22 +3,39 @@
 # work to the server, whether relayed by a Claude Code CLI laptop session or run
 # directly by the Owner via SSH/PowerShell. Chains the existing instruction /
 # work-item / UMR registration pipeline (superboss-register.py +
-# resource_governor.py) instead of bypassing it with a raw tmux send-keys nudge
-# or an ad-hoc SSH command. Every call either returns a real umr_id, or refuses
-# with a clear reason (duplicate content, or resource_governor.py rejection) --
-# it never silently does nothing.
+# resource_governor.py), then relays the same UMR-tagged message directly into
+# the live interactive tmux session in the SAME call -- there is no separate
+# "raw tmux send-keys" step left to accidentally use instead of this script.
+# Every call either returns a real umr_id (and relays it), or refuses with a
+# clear reason (duplicate content, or resource_governor.py rejection) -- it
+# never silently does nothing.
 #
-# Usage: dispatch-owner-task.sh "<short title>" "<full prompt text>" [tier] [medium] [repo]
-#   tier   - resource_governor.py tier, 0 (highest) .. 4 (lowest); default 2
-#   medium - "claude_code_cli" (default, laptop-relayed) or "ssh_session"
-#            (Owner running this directly by hand)
-#   repo   - target repo for veridian-task.py create; default compliance-tracker
+# Usage: dispatch-owner-task.sh "<short title>" "<full prompt text>" [tier] [medium] [repo] [--no-relay]
+#   tier       - resource_governor.py tier, 0 (highest) .. 4 (lowest); default 2
+#   medium     - "claude_code_cli" (default, laptop-relayed) or "ssh_session"
+#                (Owner running this directly by hand)
+#   repo       - target repo for veridian-task.py create; default compliance-tracker
+#   --no-relay - register only, do not deliver into the tmux session (e.g. for
+#                pure background-worker dispatch with no interactive session
+#                involvement). Omit this and relay happens by default.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TITLE="${1:?Usage: dispatch-owner-task.sh \"<title>\" \"<prompt>\" [tier] [medium] [repo]}"
-PROMPT="${2:?Usage: dispatch-owner-task.sh \"<title>\" \"<prompt>\" [tier] [medium] [repo]}"
+
+RELAY=1
+ARGS=()
+for a in "$@"; do
+  if [ "$a" = "--no-relay" ]; then
+    RELAY=0
+  else
+    ARGS+=("$a")
+  fi
+done
+set -- "${ARGS[@]}"
+
+TITLE="${1:?Usage: dispatch-owner-task.sh \"<title>\" \"<prompt>\" [tier] [medium] [repo] [--no-relay]}"
+PROMPT="${2:?Usage: dispatch-owner-task.sh \"<title>\" \"<prompt>\" [tier] [medium] [repo] [--no-relay]}"
 TIER="${3:-2}"
 MEDIUM="${4:-claude_code_cli}"
 REPO="${5:-compliance-tracker}"
@@ -67,3 +84,16 @@ WORK_JSON=$(python3 superboss-register.py log-work --instruction-id "$INSTRUCTIO
 WORK_ITEM_ID=$(echo "$WORK_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['work_item_id'])")
 
 echo "DISPATCHED: umr_id=$UMR_ID instruction_id=$INSTRUCTION_ID work_item_id=$WORK_ITEM_ID task_identity=$TASK_IDENTITY"
+
+# 5. Relay into the live interactive tmux session -- same call, no separate
+#    raw tmux send-keys step for anyone (or anything) to skip past.
+if [ "$RELAY" -eq 1 ]; then
+  if tmux has-session -t claude 2>/dev/null; then
+    tmux send-keys -t claude -l "[${UMR_ID}] ${PROMPT}"
+    sleep 1
+    tmux send-keys -t claude Enter
+    echo "RELAYED into tmux session 'claude'"
+  else
+    echo "WARNING: tmux session 'claude' not found -- task is registered (umr_id=$UMR_ID) but NOT yet delivered. Recreate the session and relay manually, or re-run once it exists." >&2
+  fi
+fi

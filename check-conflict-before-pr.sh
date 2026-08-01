@@ -13,6 +13,12 @@
 # CAN choose to treat it as a gate, but nothing forces that; same
 # warning-only posture as dispatch-owner-task.sh's own Step 0.
 #
+# IMPORTANT: once your PR merges/closes, run:
+#   python3 superboss-register.py log-entity --type pr --key "<owner>/<repo>#<number>" --metadata '{"status":"merged"}'
+# (or "closed") -- log-entity upserts metadata on an existing entity, and
+# this is the only thing that keeps future callers of this script from
+# seeing your already-resolved claim forever.
+#
 # Usage: check-conflict-before-pr.sh "<file_area>" ["<issue-or-task-key>"]
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

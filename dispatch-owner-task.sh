@@ -108,9 +108,21 @@ WORK_ITEM_ID=$(echo "$WORK_JSON" | python3 -c "import json,sys; print(json.load(
 # 4.5. Register this task's own claim in the coordination graph, so the NEXT
 #      dispatch's Step 0 check-conflict can actually find it -- this is what
 #      keeps the graph live/current going forward instead of only reflecting
-#      the one-time ACTIVE-CLAIMS.yaml backfill.
+#      the one-time ACTIVE-CLAIMS.yaml backfill. Explicit status=open (not
+#      just relying on log-relation's own bare-metadata entity creation) so
+#      there's always a real status field to flip later -- see the note
+#      below on WHY that flip matters.
+python3 superboss-register.py log-entity --type task --key "$TASK_IDENTITY" \
+  --metadata '{"status":"open"}' >/dev/null 2>&1 || true
 python3 superboss-register.py log-relation --src-type task --src-key "$TASK_IDENTITY" \
   --dst-type file_area --dst-key "$TITLE" --type claims --created-by owner >/dev/null 2>&1 || true
+# IMPORTANT for whoever closes this task out: once it's genuinely done
+# (merged/closed/abandoned), run:
+#   python3 superboss-register.py log-entity --type task --key "$TASK_IDENTITY" --metadata '{"status":"merged"}'
+# (or "closed"/"abandoned") -- log-entity upserts metadata on an existing
+# entity (unlike log-relation, which never touches it), and this is the ONLY
+# thing that makes check-conflict's open/closed exclusion mean anything
+# instead of every claim staying "open" forever.
 
 echo "DISPATCHED: umr_id=$UMR_ID instruction_id=$INSTRUCTION_ID work_item_id=$WORK_ITEM_ID task_identity=$TASK_IDENTITY"
 

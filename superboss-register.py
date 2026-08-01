@@ -920,11 +920,33 @@ def _get_or_create_entity(conn, entity_type, key, metadata=None):
 
 
 def log_entity(args):
+    """Unlike _get_or_create_entity (a pure create-if-missing primitive used
+    by log_relation, which must never silently overwrite metadata just
+    because a relation happened to touch that entity), this is the explicit,
+    deliberate entry point for SETTING metadata -- e.g. flipping a task/PR's
+    status to 'merged'/'closed'/'abandoned' once real work concludes, which
+    is what lets check-conflict's status exclusion actually do anything
+    (found by this PR's own independent audit: without this update path, a
+    task/PR could never leave 'open', permanently). Re-calling with
+    --metadata on an EXISTING entity shallow-merges the new keys into the
+    existing metadata_json (new keys win, untouched keys survive) rather
+    than replacing it wholesale or being a no-op. Calling with no --metadata
+    on an existing entity remains a harmless read (returns the same
+    entity_id, changes nothing) -- exactly the idempotent behavior
+    _get_or_create_entity alone provided before this fix."""
     init_db_silent()
     conn = _connect()
     _ensure_coordination_graph_tables(conn)
     metadata = json.loads(args.metadata) if args.metadata else {}
-    eid = _get_or_create_entity(conn, args.type, args.key, metadata)
+    row = conn.execute("SELECT id, metadata_json FROM entity WHERE type=? AND key=?", (args.type, args.key)).fetchone()
+    if row is not None:
+        eid = row["id"]
+        if metadata:
+            merged = json.loads(row["metadata_json"] or "{}")
+            merged.update(metadata)
+            conn.execute("UPDATE entity SET metadata_json=? WHERE id=?", (json.dumps(merged), eid))
+    else:
+        eid = _get_or_create_entity(conn, args.type, args.key, metadata)
     conn.commit()
     conn.close()
     print(json.dumps({"entity_id": eid}))

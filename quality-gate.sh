@@ -87,7 +87,15 @@ if [ -f package.json ]; then
   # build's own contribution to system-wide memory pressure, same mitigation
   # Next.js's own docs recommend for constrained-memory build environments.
   # Preserves any NODE_OPTIONS already set rather than clobbering it.
-  export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=2048"
+  # Heap ceiling configurable (2026-08-01, same precedent as
+  # GATE_STEP_TIMEOUT_SECONDS above): default unchanged at 2048MB for every
+  # existing caller -- an explicit BUILD_MAX_OLD_SPACE_MB override is opt-in
+  # only, for a specific dispatch known to need more headroom (confirmed via
+  # a real manual build outside this pipeline needing ~8GB to complete in a
+  # reasonable time on a large route-count repo), not a change to the
+  # default safety ceiling this incident fix established.
+  BUILD_MAX_OLD_SPACE_MB="${BUILD_MAX_OLD_SPACE_MB:-2048}"
+  export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=${BUILD_MAX_OLD_SPACE_MB}"
   PKG_MGR="npm"
   [ -f pnpm-lock.yaml ] && PKG_MGR="pnpm"
   # Bun-managed repo (bun.lock / bun.lockb): prefer Bun. npm/pnpm cannot

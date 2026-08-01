@@ -14,15 +14,27 @@ for repo in compliance-tracker claude-control projexa veda-advisors global-reven
   git fetch --quiet origin
   git pull --ff-only --quiet && echo "OK: $(git rev-parse --short HEAD)" || echo "FAILED (non-fast-forward or network issue)"
 done
+
+# 2026-08-01: retired the claude-control/scripts -> live-scripts copy mechanism
+# (deploy-live-scripts.sh). Root cause this closes: /opt/veridian/scripts is
+# itself a real git working copy of FChecklist/veridian-scripts, but every
+# cycle deploy-live-scripts.sh unconditionally overwrote same-named tracked
+# files here with claude-control's older scripts/ subdirectory content --
+# silently discarding real fixes merged into veridian-scripts (confirmed:
+# the 2026-07-27 worker-boot-activation OOM fix and dispatch-tick.py's
+# resume_interrupted_workers_tick never actually reached production because
+# of this, despite being merged hours/days earlier). Pulling /opt/veridian/scripts
+# directly here, the same fast-forward-only + dirty-skip pattern as every repo
+# above, removes the two-repo drift entirely. claude-control's own scripts/
+# subdirectory is retired -- see its README-RETIRED.md.
+echo "--- veridian-scripts (live, /opt/veridian/scripts) ---"
+cd /opt/veridian/scripts
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  echo "SKIPPED: uncommitted local changes present"
+else
+  git fetch --quiet origin
+  git pull --ff-only --quiet && echo "OK: $(git rev-parse --short HEAD)" || echo "FAILED (non-fast-forward or network issue)"
+fi
+
 echo "=== done $(date -u) ==="
 find /opt/veridian/logs -name 'sync-repos-*.log' -mtime +14 -delete
-
-# ai-os/SCRIPTS_LIVE_VS_REPO_DRIFT_AUDIT_2026-07-25.yaml: pulling claude-control
-# above only updates the /opt/veridian/repos/claude-control checkout -- it never
-# touched /opt/veridian/scripts/, the path every cron job and every direct
-# `python3 /opt/veridian/scripts/X.py` invocation actually runs. Without this
-# call, merged PRs had zero real effect on production behavior. See
-# deploy-live-scripts.sh for exactly what it does and does not touch.
-echo "--- deploy claude-control/scripts -> live scripts (git-tracked files only) ---"
-/opt/veridian/scripts/deploy-live-scripts.sh
-echo "deploy-live-scripts.sh exit code: $?"

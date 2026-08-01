@@ -478,6 +478,15 @@ def _perform_spawn(row):
 
     if task_kind == "systemctl_action":
         unit = row["unit_name"]
+        if not unit:
+            # ADVTEST6-CONTROL-OK (UMR-20260728-224529-df61): a systemctl_action
+            # row with no unit_name reached subprocess.run(["systemctl", ...,
+            # None]), which raises TypeError (expected str, bytes or
+            # os.PathLike object, not NoneType) instead of a clean validation
+            # failure -- a malformed/malformed-by-a-bug row could crash the
+            # whole dispatch tick rather than just failing its own task.
+            return {"status": "failed", "unit_name": unit,
+                    "outputs": {"error": "systemctl_action row has no unit_name -- cannot spawn"}}
         action = inputs.get("action", "start")
         if action == "reset_failed_and_start":
             _run(["systemctl", "--user", "reset-failed", unit])

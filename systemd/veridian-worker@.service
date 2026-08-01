@@ -44,11 +44,14 @@ MemorySwapMax=1G
 # default.target.wants/ -- and every unit in default.target.wants/ is started
 # by systemd itself, in parallel, unconditionally, the instant the user
 # session/box boots. That is real boot activation with zero awareness of
-# dispatch_core.py's shared lock/concurrency cap (a live, resource-computed
-# value as of 2026-08-01 -- see compute_dynamic_concurrency_cap(), no longer
-# a fixed default): on 2026-08-01, 24 accumulated enabled worker units all
-# launched at once at boot against an 11GB memory cap and OOM-killed the
-# box. Removing [Install] here means
+# dispatch_core.py's shared lock/CONCURRENCY_CAP (fixed at 5, plus a
+# real-time resource-headroom veto below that -- see has_resource_headroom(),
+# added/reverted-to-fixed same day per UMR-20260801-190119-ff34 after this
+# same incident's own evidence that the slot count alone, fixed or
+# dynamically computed, doesn't track real memory/swap pressure): on
+# 2026-08-01, 24 accumulated enabled worker units all launched at once at
+# boot against an 11GB memory cap and OOM-killed the box. Removing
+# [Install] here means
 # `systemctl --user enable veridian-worker@<id>.service` now fails outright
 # ("Unit has no installation config") instead of silently doing this again --
 # a real unit is only ever meant to be started explicitly, by name, via

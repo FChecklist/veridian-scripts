@@ -60,6 +60,7 @@ the others.
 """
 import argparse
 import contextlib
+import datetime
 import fcntl
 import glob as globmod
 import json
@@ -100,6 +101,21 @@ TERMINAL_GOOD = {"completed"}
 TERMINAL_BAD = {"blocked", "failed"}
 TERMINAL_HOLD = {"awaiting_human_approval"}
 
+# Stuck-task / heartbeat surface (added 2026-08-02, PM directive: this tick is
+# the one mechanism on the box that is genuinely laptop-independent -- the
+# interactive tmux session and any PM laptop session both depend on either
+# being alive to catch stuck work, this tick does not). Read-only w.r.t. task
+# state: this only ever reports, it never flips a status or dispatches
+# anything -- a blocked task needs a real PM decision, not an auto-resolve.
+# Checked MASTER_INDEX.yaml's registries/quick_reference first: no existing
+# stuck-task or heartbeat file convention to extend, so this is a new single
+# canonical file, same non-git ai-os/ live-runtime-state directory as
+# CONTROLLER.yaml/ATTENTION.md.
+STUCK_TASK_THRESHOLD_MINUTES = float(
+    os.environ.get("VERIDIAN_STUCK_TASK_THRESHOLD_MINUTES", "30"))
+STUCK_TASKS_HEARTBEAT_PATH = os.environ.get(
+    "VERIDIAN_STUCK_TASKS_HEARTBEAT_PATH", f"{AI_OS}/STUCK_TASKS_HEARTBEAT.json")
+
 
 def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
@@ -122,6 +138,14 @@ def _atomic_save_yaml(path, doc):
     tmp = f"{path}.tmp"
     with open(tmp, "w") as f:
         yaml.safe_dump(doc, f, sort_keys=False, default_flow_style=False, allow_unicode=True)
+    os.replace(tmp, path)
+
+
+def _atomic_save_json(path, doc):
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(doc, f, indent=2, default=str)
+        f.write("\n")
     os.replace(tmp, path)
 
 
@@ -212,6 +236,99 @@ def resume_interrupted_workers_tick(tasks):
             print(f"SKIP resume (already in queue): {task_id} -- {result['reason']}")
 
     return {"resumed": resumed, "skipped_running": skipped_running, "skipped_duplicate": skipped_duplicate}
+
+
+# ---------------------------------------------------------------------------
+# 1c. stuck-task detection + real heartbeat (added 2026-08-02, PM directive)
+# ---------------------------------------------------------------------------
+
+def _parse_iso_ts(value):
+    """Best-effort ISO-8601 -> aware datetime. Returns None on anything
+    missing/unparseable rather than raising -- a task.yaml with a malformed
+    or absent timestamp must never crash the tick, just be skipped from
+    stuck-task detection (it'll show up again next tick with better data,
+    or not at all)."""
+    if not value:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
+def _last_checkpoint_note(doc):
+    """The note on the most recent checkpoints[] entry, if any -- the real
+    last thing the worker (or supervisor) said before the task went quiet.
+    Falls back to None, never a fabricated string, so a genuinely-missing
+    note is visibly absent in the heartbeat file rather than papered over."""
+    checkpoints = doc.get("checkpoints") or []
+    if not checkpoints:
+        return None
+    return checkpoints[-1].get("note")
+
+
+def find_stuck_tasks(tasks, now, threshold_minutes=None):
+    """Any task.yaml with status=='blocked' whose last_checkpoint_at is older
+    than threshold_minutes (default STUCK_TASK_THRESHOLD_MINUTES). Blocked is
+    a terminal-for-automation status (worker-entrypoint.sh already disables
+    the unit on it, see RESUMABLE_STATUSES' own comment above) -- nothing
+    else on the box will touch it again without a real PM decision, so
+    last_checkpoint_at not advancing IS "no new checkpoint note in that
+    window" by construction; there is no separate note-freshness check to
+    make. Purely a read: never mutates a task.yaml or dispatches anything."""
+    threshold_minutes = STUCK_TASK_THRESHOLD_MINUTES if threshold_minutes is None else threshold_minutes
+    stuck = []
+    for task_id, doc in tasks.items():
+        if doc.get("status") != "blocked":
+            continue
+        last_at = _parse_iso_ts(doc.get("last_checkpoint_at"))
+        if last_at is None:
+            continue
+        blocked_minutes = (now - last_at).total_seconds() / 60.0
+        if blocked_minutes < threshold_minutes:
+            continue
+        stuck.append({
+            "task_id": task_id,
+            "blocked_since": doc.get("last_checkpoint_at"),
+            "blocked_minutes": round(blocked_minutes, 1),
+            "last_note": _last_checkpoint_note(doc),
+        })
+    stuck.sort(key=lambda item: -item["blocked_minutes"])
+    return stuck
+
+
+def _real_load_average():
+    try:
+        load1, load5, load15 = os.getloadavg()
+    except OSError:
+        return None
+    return {"1m": load1, "5m": load5, "15m": load15}
+
+
+def write_stuck_tasks_heartbeat(tasks, stuck_tasks, now):
+    """Writes ONE canonical, real-state file every tick: current timestamp,
+    real load average, whether resource_governor's EMERGENCY_STOP sentinel is
+    set, current blocked/in_progress task counts, and the stuck-task list
+    computed above. Lets any future check (this laptop, Cowork, anywhere
+    else) read one file for real current state instead of running several
+    separate SSH commands by hand. Read-only w.r.t. task state -- this
+    function never mutates a task.yaml or triggers dispatch; it only reports.
+    Atomic write (tmp + os.replace), same pattern as _atomic_save_yaml, so a
+    concurrent reader never sees a half-written file."""
+    doc = {
+        "generated_at": now.isoformat(),
+        "load_average": _real_load_average(),
+        "emergency_stop": os.path.exists(resource_governor.EMERGENCY_STOP_PATH),
+        "blocked_task_count": sum(1 for d in tasks.values() if d.get("status") == "blocked"),
+        "running_task_count": sum(1 for d in tasks.values() if d.get("status") == "in_progress"),
+        "stuck_task_threshold_minutes": STUCK_TASK_THRESHOLD_MINUTES,
+        "stuck_tasks": stuck_tasks,
+    }
+    _atomic_save_json(STUCK_TASKS_HEARTBEAT_PATH, doc)
+    return doc
 
 
 # ---------------------------------------------------------------------------
@@ -509,11 +626,21 @@ def main():
     parser.parse_args()
 
     tasks = dispatch_core.task_status_sync()
+    now = datetime.datetime.now(datetime.timezone.utc)
 
     sweep_result = supervisor_sweep_tick(tasks)
     resume_result = resume_interrupted_workers_tick(tasks)
     gap_result = gap_queue_tick(tasks)
     module_result = module_queue_tick(tasks)
+
+    stuck_tasks = find_stuck_tasks(tasks, now)
+    heartbeat = write_stuck_tasks_heartbeat(tasks, stuck_tasks, now)
+    if stuck_tasks:
+        print(f"STUCK TASKS ({len(stuck_tasks)}, threshold={STUCK_TASK_THRESHOLD_MINUTES}min): "
+              f"see {STUCK_TASKS_HEARTBEAT_PATH}")
+        for item in stuck_tasks:
+            print(f"  - {item['task_id']}: blocked {item['blocked_minutes']}min "
+                  f"(last note: {item['last_note']!r})")
 
     dispatched_this_tick = (
         len(sweep_result.get("started", []))
@@ -528,6 +655,7 @@ def main():
             "resumed_interrupted_workers": resume_result.get("resumed", []),
             "gap_queue_dispatched": gap_result.get("dispatched", []),
             "module_queue_dispatched": module_result.get("dispatched", []),
+            "stuck_tasks_found": len(stuck_tasks),
         },
     )
 
@@ -536,6 +664,7 @@ def main():
         "resume_interrupted_workers": resume_result,
         "gap_queue": gap_result,
         "module_queue": module_result,
+        "stuck_tasks_heartbeat": heartbeat,
     }, indent=2, default=str))
 
 

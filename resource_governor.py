@@ -27,7 +27,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 VERIDIAN_ROOT = os.environ.get("VERIDIAN_ROOT", "/opt/veridian")
 AI_OS = os.environ.get("VERIDIAN_AI_OS_DIR", f"{VERIDIAN_ROOT}/ai-os")
@@ -72,6 +72,10 @@ AGING_PROMOTION_INTERVAL_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_AGING_I
 # Stuck-task protocol: timeout -> SIGTERM -> grace period -> SIGKILL.
 STUCK_TASK_TIMEOUT_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_STUCK_TIMEOUT_S", str(60 * 60)))
 SIGTERM_TO_SIGKILL_GRACE_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_SIGKILL_GRACE_S", "60"))
+
+# Stage 3 (2026-07-29): how stale a running/dispatched row's last_heartbeat
+# must be before reconcile_stale_heartbeats() will treat it as a candidate.
+HEARTBEAT_STALE_TTL_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_HEARTBEAT_TTL_S", str(15 * 60)))
 
 # Emergency fail-safe cascade (design doc Section 7).
 EMERGENCY_CONSECUTIVE_TICKS_SHED = int(os.environ.get("VERIDIAN_GOVERNOR_EMERGENCY_SHED_TICKS", "3"))
@@ -648,6 +652,123 @@ def scan_stuck_tasks(now=None):
 
 
 # ---------------------------------------------------------------------------
+# Stale-heartbeat reconciliation (Stage 3, 2026-07-29)
+# ---------------------------------------------------------------------------
+
+def _unit_exit_terminal_status(unit):
+    """Real systemd Result for `unit` -- used only to decide completed vs
+    failed when reconciling a stale-heartbeat row whose unit is no longer
+    active. 'completed' requires Result=success; anything else (crashed,
+    signalled, non-zero exit, timeout, oom-kill, or an unreadable/unexpected
+    read) fails CLOSED to 'failed' -- an ambiguous read must never be
+    miscounted as a success.
+
+    FIX (2026-07-29 stress-test round 1, 2 confirmed bugs in the original
+    implementation, both reproduced live):
+    (1) `systemctl show unit -p SubState -p ExecMainStatus --value` does NOT
+        return lines in the order the -p flags were given -- systemd emits
+        properties in its own fixed internal schema order regardless of
+        request order. Live-verified: for a real completed unit this
+        actually printed ExecMainStatus ("15") on line 0 and SubState
+        ("dead") on line 1, i.e. exactly swapped from what the old code
+        assumed (`lines[0]`=substate, `lines[1]`=exec_status) -- so
+        `substate == "exited"` was really comparing an ExecMainStatus number
+        to the string "exited", which can never match. Fixed by parsing
+        `KEY=VALUE` output (order-independent) instead of relying on line
+        position.
+    (2) Even with correct parsing, SubState never becomes "exited" for this
+        unit template -- veridian-worker@.service/veridian-docworker@.service
+        are both Type=simple, and Type=simple units transition to
+        SubState=dead (not exited) on any exit, clean or not (SubState=exited
+        is a Type=oneshot/RemainAfterExit concept). Live-verified against all
+        5 real historical completed units on this box: every one shows
+        SubState=dead, Result=success. Fixed by keying off Result (systemd's
+        own designed-for-this aggregate success/failure verdict, "success"
+        iff the service's main process exited 0 and no other failure --
+        timeout/signal/core-dump/oom-kill/etc -- occurred) instead of
+        SubState/ExecMainStatus, which is also Type-independent.
+    Net effect of both bugs together: this function could never return
+    "completed" under any real circumstance -- every reconciled row was
+    unconditionally marked "failed" regardless of real outcome."""
+    r = _run(["systemctl", "--user", "show", unit, "-p", "Result", "-p", "ExecMainStatus", "-p", "SubState"])
+    props = {}
+    for line in r.stdout.strip().splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            props[key.strip()] = value.strip()
+    if props.get("Result") == "success":
+        return "completed"
+    return "failed"
+
+
+def reconcile_stale_heartbeats(now=None, ttl_seconds=None):
+    """Fix for 'task exits cleanly but umr_tasks status never reconciles' (5
+    real historical instances found 2026-07-29): worker-entrypoint.sh /
+    doc-worker-entrypoint.sh checkpoint task.yaml via veridian-task.py on
+    every exit path, but nothing ever wrote the matching terminal status back
+    onto the umr_tasks row that dispatched it -- a row could sit at
+    status='running' indefinitely after its unit had already exited cleanly.
+    This is a periodic sweep, run from resource_governor_tick_loop.sh right
+    after --tick, same 30s cadence as the dispatcher itself -- it does not
+    trust any process to call back in on exit.
+
+    CRITICAL (2026-07-29 adversarial review, verify before relying on this):
+    last_heartbeat is a brand-new column (see superboss-register.py's
+    _migrate_umr_last_heartbeat) -- every umr_tasks row written before this
+    deploy, which includes ALL 5 real in-flight tasks at the moment this
+    ships (PR617-REVIEW, PR618-REVIEW, PR58-CONFLICT, PR610-CONFLICT,
+    PHASE-2-CROSSREF), has last_heartbeat NULL, not old-and-expired. The SQL
+    WHERE clause below excludes NULL by construction -- a row only becomes
+    eligible for this sweep once it HAS a real last_heartbeat that has since
+    gone stale, so there is no code path here that can flag a row on its
+    first tick post-deploy, and systemctl is never even invoked for a
+    healthy or not-yet-instrumented row.
+
+    Returns the list of rows actually reconciled this call (empty if none
+    were stale, which is the expected/normal steady-state result)."""
+    now = now or _utcnow()
+    ttl = ttl_seconds if ttl_seconds is not None else HEARTBEAT_STALE_TTL_SECONDS
+    cutoff = (now - timedelta(seconds=ttl)).isoformat()
+    sbr = _superboss_register()
+    conn = sbr._connect()
+    sbr._ensure_umr_table(conn)
+    stale = conn.execute(
+        "SELECT * FROM umr_tasks WHERE status IN ('running','dispatched') "
+        "AND last_heartbeat IS NOT NULL AND last_heartbeat < ?",
+        (cutoff,),
+    ).fetchall()
+    actions = []
+    for row in stale:
+        row = dict(row)
+        unit = row.get("unit_name")
+        if not unit:
+            continue  # nothing to check liveness against -- leave for human/other path
+        is_active = _run(["systemctl", "--user", "is-active", "--quiet", unit]).returncode == 0
+        if is_active:
+            continue  # genuinely still running, just a slow/missed heartbeat -- not stale
+        # Real fix, 2026-07-29 (zombie-worker incident): a unit's real process
+        # exiting does NOT remove its default.target.wants/ enable-symlink --
+        # only `disable` does. Without this, a systemd --user manager restart
+        # (confirmed live, 05:53:27 UTC) resurrects every unit ever enabled,
+        # regardless of its real umr_tasks status, silently burning real CPU
+        # re-running already-finished/killed work. Safe here specifically
+        # because is_active is already confirmed False above -- disable never
+        # touches a running unit's live state, only its boot-time wiring.
+        _run(["systemctl", "--user", "disable", unit])
+        terminal = _unit_exit_terminal_status(unit)
+        with sbr._write_lock():
+            sbr.update_umr_task(
+                conn, row["umr_id"], status=terminal, ts_completed=_now_iso(),
+                reason=(f"reconciled by heartbeat sweep: unit {unit} inactive, last_heartbeat "
+                        f"stale (>{ttl}s), real exit status={terminal}"),
+            )
+            conn.commit()
+        actions.append({"umr_id": row["umr_id"], "unit_name": unit, "reconciled_to": terminal})
+    conn.close()
+    return actions
+
+
+# ---------------------------------------------------------------------------
 # Emergency fail-safe cascade (design doc Section 7)
 # ---------------------------------------------------------------------------
 
@@ -739,6 +860,10 @@ def main():
     ap.add_argument("--tier", type=int, default=DEFAULT_TIER, help="0 (highest) .. 4 (lowest)")
     ap.add_argument("--source-trigger", default="manual")
     ap.add_argument("--scan-stuck", action="store_true", help="run only the stuck-task SIGTERM/SIGKILL scan")
+    ap.add_argument("--reconcile-stale", action="store_true",
+                     help="Stage 3: sweep umr_tasks rows in running/dispatched with a stale "
+                          "last_heartbeat (NULL heartbeats are always skipped) and write back real "
+                          "terminal status via systemctl --user is-active, scoped only to the stale subset")
     ap.add_argument("--query-umr", action="store_true", help="search/list umr_tasks rows")
     ap.add_argument("--limit", type=int, default=20)
     ap.add_argument("--status", default=None)
@@ -774,6 +899,10 @@ def main():
 
     if args.scan_stuck:
         print(json.dumps({"actions": scan_stuck_tasks()}, default=str))
+        return
+
+    if args.reconcile_stale:
+        print(json.dumps({"actions": reconcile_stale_heartbeats()}, default=str))
         return
 
     if args.tick:

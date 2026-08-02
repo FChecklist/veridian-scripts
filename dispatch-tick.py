@@ -60,6 +60,7 @@ the others.
 """
 import argparse
 import contextlib
+import datetime
 import fcntl
 import glob as globmod
 import json
@@ -100,6 +101,15 @@ TERMINAL_GOOD = {"completed"}
 TERMINAL_BAD = {"blocked", "failed"}
 TERMINAL_HOLD = {"awaiting_human_approval"}
 
+# 2026-08-02 (PM decision, real infra work -- extends this existing tick
+# rather than a new cron/systemd timer: this is the one mechanism on this box
+# that is genuinely laptop-independent, already EMERGENCY_STOP-gated, already
+# has its own supervisor_sweep_tick). See stuck_task_and_heartbeat_tick()
+# below.
+STUCK_TASK_THRESHOLD_SECONDS = int(os.environ.get("VERIDIAN_DISPATCH_TICK_STUCK_THRESHOLD_S", str(30 * 60)))
+DISPATCH_TICK_HEARTBEAT_PATH = os.environ.get(
+    "VERIDIAN_DISPATCH_TICK_HEARTBEAT_PATH", f"{AI_OS}/DISPATCH_TICK_HEARTBEAT.json")
+
 
 def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
@@ -122,6 +132,13 @@ def _atomic_save_yaml(path, doc):
     tmp = f"{path}.tmp"
     with open(tmp, "w") as f:
         yaml.safe_dump(doc, f, sort_keys=False, default_flow_style=False, allow_unicode=True)
+    os.replace(tmp, path)
+
+
+def _atomic_save_json(path, doc):
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(doc, f, indent=2, default=str)
     os.replace(tmp, path)
 
 
@@ -501,6 +518,107 @@ def module_queue_tick(tasks):
 
 
 # ---------------------------------------------------------------------------
+# 5. Stuck-task detection + real heartbeat (added 2026-08-02, PM decision)
+# ---------------------------------------------------------------------------
+# Extends this existing tick rather than adding a new cron/systemd timer --
+# this is the one mechanism on this box that is genuinely laptop-independent
+# (the interactive tmux session and the PM laptop session both depend on
+# either being alive to catch stuck work; this tick does not), already
+# EMERGENCY_STOP-gated (see veridian-cron-dispatch-tick.service's
+# ConditionPathExists, and resource_governor.EMERGENCY_STOP_PATH read below),
+# and already has its own supervisor_sweep_tick doing the analogous job for
+# pending_review.
+#
+# READ-ONLY with respect to task state: this function never writes a
+# task.yaml, never dispatches anything, never resolves a stuck task -- it
+# only surfaces real, current findings to one file so a PM/human check does
+# not have to manually grep every task.yaml by hand (the real, repeated,
+# manual pattern from tonight's session this closes).
+
+def stuck_task_and_heartbeat_tick(tasks, now=None):
+    """Real, read-only sweep: (a) any task.yaml with status='blocked' whose
+    last_checkpoint_at is older than STUCK_TASK_THRESHOLD_SECONDS (default
+    30min, VERIDIAN_DISPATCH_TICK_STUCK_THRESHOLD_S override) is logged --
+    task id, how long blocked, and the last real checkpoint note, never
+    auto-resolved (a blocked task often needs a real PM decision); (b) a real
+    heartbeat -- current timestamp, real load average, whether
+    EMERGENCY_STOP is set, and current blocked/running counts -- so any
+    future check (this laptop, a different tool, anywhere else) can read one
+    file instead of running several separate SSH commands, the real, manual
+    pattern this closes.
+
+    Both written atomically to the SAME file (DISPATCH_TICK_HEARTBEAT_PATH)
+    -- one canonical file, not two, per MASTER_INDEX.yaml's own
+    UPPERCASE_WITH_UNDERSCORES.json convention for ai-os/-root state files
+    (see e.g. PHASE_READY_CACHE.json, an existing undated/continuously-
+    overwritten live-state file of the same shape).
+
+    Returns the written doc (for tests / callers that want the in-memory
+    result without re-reading the file)."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+
+    blocked_count = 0
+    running_count = 0
+    stuck = []
+    for task_id, doc in tasks.items():
+        status = doc.get("status")
+        if status in ("running", "in_progress"):
+            running_count += 1
+        if status != "blocked":
+            continue
+        blocked_count += 1
+
+        last_checkpoint_at = doc.get("last_checkpoint_at")
+        if not last_checkpoint_at:
+            continue  # no real checkpoint timestamp to age -- nothing honest to report
+        try:
+            checkpoint_ts = datetime.datetime.fromisoformat(last_checkpoint_at)
+        except (TypeError, ValueError):
+            continue  # malformed timestamp -- skip rather than guess
+        if checkpoint_ts.tzinfo is None:
+            checkpoint_ts = checkpoint_ts.replace(tzinfo=datetime.timezone.utc)
+
+        blocked_seconds = (now - checkpoint_ts).total_seconds()
+        if blocked_seconds < STUCK_TASK_THRESHOLD_SECONDS:
+            continue
+
+        checkpoints = doc.get("checkpoints") or []
+        last_note = checkpoints[-1].get("note") if checkpoints else None
+
+        stuck.append({
+            "task_id": task_id,
+            "blocked_since": last_checkpoint_at,
+            "blocked_seconds": blocked_seconds,
+            "last_note": last_note,
+        })
+
+    try:
+        load_average = list(os.getloadavg())
+    except OSError:
+        load_average = None  # platform without getloadavg -- honest null, not a fabricated 0
+
+    doc = {
+        "heartbeat": {
+            "ts": now.isoformat(),
+            "load_average": load_average,
+            "emergency_stop": os.path.exists(resource_governor.EMERGENCY_STOP_PATH),
+            "counts": {
+                "blocked": blocked_count,
+                "running_or_in_progress": running_count,
+                "total_tasks": len(tasks),
+            },
+        },
+        "stuck_tasks": {
+            "threshold_seconds": STUCK_TASK_THRESHOLD_SECONDS,
+            "count": len(stuck),
+            "tasks": stuck,
+        },
+    }
+    _atomic_save_json(DISPATCH_TICK_HEARTBEAT_PATH, doc)
+    return doc
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -531,9 +649,16 @@ def main():
         },
     )
 
+    # Re-read task state fresh (cheap -- one directory walk) rather than reuse
+    # the snapshot from the top of this tick: the 4 dispatch passes above may
+    # have just changed several tasks' real status, and the heartbeat/stuck
+    # report should reflect current state, not pre-dispatch state.
+    heartbeat_result = stuck_task_and_heartbeat_tick(dispatch_core.task_status_sync())
+
     print(json.dumps({
         "supervisor_sweep": sweep_result,
         "resume_interrupted_workers": resume_result,
+        "heartbeat": heartbeat_result,
         "gap_queue": gap_result,
         "module_queue": module_result,
     }, indent=2, default=str))

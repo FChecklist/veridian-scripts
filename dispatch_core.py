@@ -45,15 +45,128 @@ TASKS_DIR = os.environ.get("VERIDIAN_TASKS_DIR", f"{AI_OS}/tasks")
 LOCK_DIR = os.environ.get("VERIDIAN_DISPATCH_LOCK_DIR", f"{AI_OS}/locks")
 LOCK_PATH = os.environ.get("VERIDIAN_DISPATCH_LOCK_PATH", f"{LOCK_DIR}/worker-spawn.lock")
 
-# The ONE shared concurrency cap for every real spawn path server-wide. Was 3
-# independent numbers before this consolidation: queue-dispatcher.py's 5 (Owner-set
-# 2026-07-20, "~80% capacity on this 8-core box"), module-queue-dispatcher.py's 3
-# (its own docstring already said this was meant to share queue-dispatcher.py's pool,
-# not add to it), and auto_phase_continuation.py's *none at all*. 5 is the Owner's
-# already-vetted ceiling for this box; module-queue-dispatcher.py's 3 was never a
-# second real limit, just a smaller number that happened to also be under 5.
-# Overridable for tests only -- production always uses the default.
+# FIXED CONCURRENCY CAP + RESOURCE-AWARE BACKOFF.
+#
+# History, kept honest rather than rewritten: UMR-20260801-172407-ae58
+# (2026-08-01) replaced this fixed constant with a dynamically COMPUTED
+# ceiling that could rise above 5 when the box looked idle. UMR-20260801-
+# 190119-ff34 (same day, later) reverted that after real evidence: swap hit
+# 100% exhaustion with only 3 of the then-current 5-slot cap actually
+# running. That is the key finding -- the box can run out of real headroom
+# WITHOUT the slot count ever reaching whatever the ceiling is, fixed or
+# dynamic, because per-worker memory/swap use ramps up DURING a worker's own
+# run (a build/compile spike), not just at spawn time (see the 2026-07-26
+# OOM RCA already documented on MemoryHigh/MemoryMax below). A smarter
+# ceiling number does not fix that -- it can only ever gate what a NEW
+# dispatch does, and a dynamic ceiling that computes higher than 5 on a
+# seemingly-idle box makes the failure mode WORSE, not better, since it
+# would permit even more concurrent build-shaped processes than the
+# already-proven-risky fixed 5 does today.
+#
+# Final design: CONCURRENCY_CAP goes back to being a genuinely fixed
+# constant (5, the Owner's own already-vetted number, never computed
+# upward). has_resource_headroom() is a SEPARATE, independent veto check --
+# real /proc/meminfo + load average, re-read fresh on every has_free_slot()
+# call -- that can refuse a new dispatch even when the slot count is still
+# under 5, if real headroom is already tight. Both must pass. This keeps the
+# ceiling itself simple and proven while still directly addressing "even
+# below the cap, don't dispatch into tight real headroom" -- the thing a
+# fixed-only cap cannot do and a dynamic-ceiling-only design does not
+# reliably do either (a dynamic ceiling only refuses new slots once it
+# recomputes lower, which still lags a spike already in progress on already-
+# running workers; an explicit veto with a real, conservative margin below
+# the hard ceiling is the more legible, more conservative version of the
+# same idea).
+#
+# Two thresholds:
+#   HARD_CEILING_UTILIZATION_PCT (0.99) -- the Owner's own number, never
+#     cross. At/above this on memory OR swap, refuse the dispatch outright.
+#   BACKOFF_UTILIZATION_PCT (0.80) -- meaningfully below the hard ceiling.
+#     The veto trips at/above THIS, not 0.99, because a single worker's own
+#     memory has been directly observed to ramp from near-zero to a 2GB peak
+#     + 1GB swap peak DURING its own run (2026-07-26 OOM RCA) -- refusing
+#     only at 0.99 would leave zero margin for that kind of spike to be
+#     absorbed once a new worker is already running.
+#
+# PER_WORKER_MEMORY_BUDGET_BYTES (2GB) is not a new number invented for
+# this -- it's the exact same MemoryHigh=2G already enforced per-unit in the
+# veridian-worker@.service template (2026-07-26 RCA fix, preserved
+# unchanged by this change, see that file): the veto also refuses a new
+# dispatch if less than one more worker's own budget of real headroom is
+# left below the backoff threshold, not just a raw percentage check.
+#
+# Explicit env override (VERIDIAN_DISPATCH_CONCURRENCY_CAP) still works
+# identically for tests/manual overrides -- unaffected by any of this.
 CONCURRENCY_CAP = int(os.environ.get("VERIDIAN_DISPATCH_CONCURRENCY_CAP", "5"))
+
+HARD_CEILING_UTILIZATION_PCT = 0.99
+BACKOFF_UTILIZATION_PCT = 0.80
+PER_WORKER_MEMORY_BUDGET_BYTES = 2 * 1024 ** 3  # matches MemoryHigh=2G per-unit
+
+
+def _read_meminfo_bytes():
+    """Real /proc/meminfo values in bytes. MemAvailable (not MemFree) is the
+    kernel's own estimate of memory available for new allocations without
+    swapping -- already accounts for reclaimable cache/buffers, same figure
+    `free -h`'s "available" column shows."""
+    info = {}
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if ":" not in line:
+                    continue
+                key, rest = line.split(":", 1)
+                parts = rest.split()
+                if not parts:
+                    continue
+                info[key.strip()] = int(parts[0]) * 1024
+    except (OSError, ValueError):
+        pass
+    return info
+
+
+def has_resource_headroom():
+    """Real-time veto, independent of CONCURRENCY_CAP/running_worker_count():
+    True only if current real memory/swap/load headroom is enough to safely
+    absorb one more worker-class (~2-3GB) task, checked fresh on every call.
+    This is what lets has_free_slot() refuse a new dispatch even when the
+    slot count is still under the fixed cap -- see the module-level comment
+    above for why the cap alone (fixed or dynamic) doesn't catch this."""
+    meminfo = _read_meminfo_bytes()
+    mem_total = meminfo.get("MemTotal", 0)
+    mem_available = meminfo.get("MemAvailable", 0)
+    swap_total = meminfo.get("SwapTotal", 0)
+    swap_free = meminfo.get("SwapFree", 0)
+
+    mem_used_pct = (1 - (mem_available / mem_total)) if mem_total else 1.0
+    swap_used_pct = (1 - (swap_free / swap_total)) if swap_total else 0.0
+
+    # HARD CEILING -- Owner's own number, never cross.
+    if mem_used_pct >= HARD_CEILING_UTILIZATION_PCT or swap_used_pct >= HARD_CEILING_UTILIZATION_PCT:
+        return False
+
+    # BACKOFF threshold -- meaningfully below the hard ceiling, tripped
+    # first so a build/compile spike on an already-running worker still has
+    # real room before 0.99.
+    if mem_used_pct >= BACKOFF_UTILIZATION_PCT or swap_used_pct >= BACKOFF_UTILIZATION_PCT:
+        return False
+
+    # Real headroom to the backoff threshold must fit at least one more
+    # worker's own memory budget, not just be nonzero.
+    mem_used_bytes = mem_total - mem_available
+    mem_headroom_bytes = (mem_total * BACKOFF_UTILIZATION_PCT) - mem_used_bytes
+    if mem_headroom_bytes < PER_WORKER_MEMORY_BUDGET_BYTES:
+        return False
+
+    cpu_count = os.cpu_count() or 1
+    try:
+        load1, _, _ = os.getloadavg()
+    except OSError:
+        return False  # fail safe: refuse rather than assume idle if unreadable
+    if load1 >= cpu_count * BACKOFF_UTILIZATION_PCT:
+        return False
+
+    return True
 
 # Both unit templates this box actually spawns from a dispatch path (see KNOWN_CONTEXT
 # item 2 in this task's spec): veridian-worker@ (queue-dispatcher.py/module-queue-
@@ -100,12 +213,19 @@ def running_worker_count():
 
 
 def has_free_slot(cap=None):
-    """True if a real spawn is currently allowed under the shared cap. Callers
-    must check this WHILE holding acquire_dispatch_lock(), never before/after --
-    checking outside the lock reintroduces the exact TOCTOU race this module
-    exists to close."""
+    """True if a real spawn is currently allowed. Two independent conditions
+    must BOTH pass: the fixed CONCURRENCY_CAP slot count, and
+    has_resource_headroom()'s real-time memory/swap/load veto -- the fixed
+    cap alone does not catch a build/compile spike ramping on an already-
+    running worker well before the slot count reaches its ceiling (see the
+    module-level comment above CONCURRENCY_CAP for the real incident this
+    caught). Callers must check this WHILE holding acquire_dispatch_lock(),
+    never before/after -- checking outside the lock reintroduces the exact
+    TOCTOU race this module exists to close. Pass an explicit cap only to
+    override CONCURRENCY_CAP for tests -- has_resource_headroom() is not
+    overridable, it always reads real host state."""
     cap = CONCURRENCY_CAP if cap is None else cap
-    return running_worker_count() < cap
+    return running_worker_count() < cap and has_resource_headroom()
 
 
 def task_status_sync():

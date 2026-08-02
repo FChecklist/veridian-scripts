@@ -452,6 +452,30 @@ def should_triage_pm(tasks, stuck_tasks, now):
     return (bool(reasons), reasons, evidence)
 
 
+PM_TRIAGE_EVIDENCE_MAX_ITEMS = 10
+
+
+def _summarize_evidence(evidence, max_items=PM_TRIAGE_EVIDENCE_MAX_ITEMS):
+    """Bounds any list-valued evidence entry to the first max_items real
+    records plus an honest '_omitted_count' of how many more real records
+    exist -- never a fabricated smaller number. Exists because real
+    production ticks have shown 400+ stuck tasks / dozens of audit-fail
+    tasks at once: passing every one of them as a subprocess argv element
+    hits the OS ARG_MAX ('Argument list too long') and the raw dump also
+    makes the durable alert-file log unreadably huge. Full, untruncated
+    evidence stays available for a human via each finding's own task.yaml
+    (task_id is always included) -- this is a summary for the triage
+    judgment/alert entry, not the sole record."""
+    summarized = {}
+    for key, value in evidence.items():
+        if isinstance(value, list) and len(value) > max_items:
+            summarized[key] = value[:max_items]
+            summarized[f"{key}_omitted_count"] = len(value) - max_items
+        else:
+            summarized[key] = value
+    return summarized
+
+
 def _invoke_triage_claude(reasons, evidence, run_fn=None):
     """The one real Claude invocation this feature makes. Strictly scoped:
     no tool access at all (--allowedTools "" -- the model can only return
@@ -476,14 +500,16 @@ def _invoke_triage_claude(reasons, evidence, run_fn=None):
     "INVOCATION_ERROR:" on any failure -- never silently swallowed, never a
     fabricated judgment."""
     run_fn = run_fn or subprocess.run
+    bounded_evidence = _summarize_evidence(evidence)
     prompt = (
         "You are a narrow triage/escalation check, NOT a decision-maker. You have "
         "no tool access and cannot take any action beyond this one text answer.\n\n"
         "Real evidence gathered by a deterministic pre-filter (not your own judgment "
         "of what's notable -- these specific findings already crossed a real "
-        "threshold):\n"
+        "threshold; any *_omitted_count field means the real full list was "
+        "longer than shown here, never a smaller fabricated count):\n"
         f"Reasons: {json.dumps(reasons)}\n"
-        f"Evidence: {json.dumps(evidence, indent=2, default=str)}\n\n"
+        f"Evidence: {json.dumps(bounded_evidence, indent=2, default=str)}\n\n"
         "Answer ONLY: does this genuinely need Owner or PM attention right now -- "
         "YES or NO -- with a one or two sentence reason citing the evidence above. "
         "Do NOT decide what to do about it, do NOT propose a fix, do NOT pick "
@@ -521,11 +547,14 @@ def append_pm_triage_alert(path, now, reasons, evidence, judgment):
     "PM triage" file to extend, so this is the one new canonical file, same
     non-git ai-os/ live-runtime-state location as ATTENTION.md/CONTROLLER.yaml."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    bounded_evidence = _summarize_evidence(evidence)
     entry = (
         f"\n## {now.isoformat()}\n"
         f"**Reasons:** {'; '.join(reasons)}\n\n"
         f"**Judgment:** {judgment}\n\n"
-        f"**Evidence:**\n```json\n{json.dumps(evidence, indent=2, default=str)}\n```\n"
+        f"**Evidence** (any `*_omitted_count` means the real full list was "
+        f"longer than shown -- see each finding's own task_id/task.yaml for "
+        f"the complete record):\n```json\n{json.dumps(bounded_evidence, indent=2, default=str)}\n```\n"
     )
     with open(path, "a") as f:
         f.write(entry)

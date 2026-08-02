@@ -250,6 +250,97 @@ def test_should_triage_pm_multiple_reasons_all_included():
 
 
 # ---------------------------------------------------------------------------
+# _summarize_evidence() / large-scale regression for the real ARG_MAX bug
+# found running this against the live box's real 846 tasks (425 stuck, 56
+# fresh audit-fails): passing every full record as a subprocess argv element
+# raised OSError "Argument list too long". Reproduced here at the same real
+# scale rather than trusting the fix without exercising it.
+# ---------------------------------------------------------------------------
+
+def test_summarize_evidence_bounds_large_lists_honestly():
+    dt = load_dispatch_tick()
+    big_list = [{"task_id": f"t{i}", "last_note": "n" * 200} for i in range(425)]
+    evidence = {"stuck_tasks": big_list, "small_key": "unaffected"}
+    summarized = dt._summarize_evidence(evidence, max_items=10)
+
+    check("large list is truncated to the configured max_items",
+          len(summarized["stuck_tasks"]) == 10)
+    check("the truncated entries are real, unmodified records (first 10, not fabricated)",
+          summarized["stuck_tasks"] == big_list[:10])
+    check("an honest _omitted_count reflects the real remaining count (425-10=415)",
+          summarized.get("stuck_tasks_omitted_count") == 415)
+    check("a small, unaffected key passes through untouched",
+          summarized["small_key"] == "unaffected")
+    check("a list at or under max_items is never given a fabricated omitted_count",
+          "small_key_omitted_count" not in summarized)
+
+
+def test_invoke_triage_claude_survives_real_production_scale_evidence():
+    dt = load_dispatch_tick()
+    # Reproduces the exact real-world shape that broke argv: 425 stuck tasks
+    # + 56 fresh audit-fail tasks, each carrying a real-length note.
+    stuck_tasks = [
+        {"task_id": f"task-{i:04d}", "blocked_seconds": 3600.0 + i,
+         "last_note": "credit accountant rejected auto-fix attempt " * 5}
+        for i in range(425)
+    ]
+    fresh_audit_fails = [
+        {"task_id": f"audit-fail-{i:04d}", "note": "Superboss rejected: real findings " * 5}
+        for i in range(56)
+    ]
+    evidence = {"stuck_tasks": stuck_tasks, "fresh_audit_fail_tasks": fresh_audit_fails}
+    reasons = ["425 task(s) stuck past 30.0min", "56 task(s) with a fresh real audit-reject/fail verdict"]
+
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        # The real bug: subprocess.run/os.execve raises OSError before this
+        # callable would even be reached if argv were still oversized -- but
+        # here we're testing the PRODUCER (the prompt string itself), so
+        # assert its real size stays sane regardless of run_fn.
+        captured["prompt_len"] = len(cmd[2])
+        captured["argv_total_len"] = sum(len(str(x)) for x in cmd)
+
+        class R:
+            returncode = 0
+            stdout = json.dumps({"result": "NO -- routine tick, nothing new."})
+            stderr = ""
+        return R()
+
+    judgment = dt._invoke_triage_claude(reasons=reasons, evidence=evidence, run_fn=fake_run)
+
+    check("invocation with real production-scale evidence (425+56 records) does not crash",
+          judgment == "NO -- routine tick, nothing new.")
+    # Linux ARG_MAX is typically ~2MB; this asserts a real, comfortable
+    # safety margin, not just "under the exact OS limit."
+    check("the real built prompt stays well under a safe argv size limit (<100KB) "
+          "even with 425+56 full-scale records in the evidence",
+          captured["argv_total_len"] < 100_000)
+
+
+def test_invoke_triage_claude_prompt_discloses_real_omitted_counts():
+    dt = load_dispatch_tick()
+    stuck_tasks = [{"task_id": f"task-{i}", "blocked_seconds": 1000.0} for i in range(425)]
+    evidence = {"stuck_tasks": stuck_tasks}
+    captured_cmd = {}
+
+    def fake_run(cmd, **kw):
+        captured_cmd["cmd"] = cmd
+
+        class R:
+            returncode = 0
+            stdout = json.dumps({"result": "NO."})
+            stderr = ""
+        return R()
+
+    dt._invoke_triage_claude(reasons=["425 stuck"], evidence=evidence, run_fn=fake_run)
+    prompt = captured_cmd["cmd"][2]
+    check("the real prompt honestly discloses the true omitted count (425-10=415), "
+          "never silently dropping records without saying so",
+          "stuck_tasks_omitted_count" in prompt and "415" in prompt)
+
+
+# ---------------------------------------------------------------------------
 # _invoke_triage_claude() -- real invocation shape, stubbed subprocess
 # ---------------------------------------------------------------------------
 
@@ -329,6 +420,21 @@ def test_append_pm_triage_alert_is_real_append_not_overwrite():
               NOW.isoformat() in content and later.isoformat() in content)
         check("entries appear in real chronological append order",
               content.index("reason one") < content.index("reason two"))
+
+
+def test_append_pm_triage_alert_stays_readable_at_production_scale():
+    dt = load_dispatch_tick()
+    stuck_tasks = [{"task_id": f"task-{i}", "blocked_seconds": 1000.0} for i in range(425)]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "PM_TRIAGE_ALERTS.md")
+        dt.append_pm_triage_alert(path, NOW, ["425 stuck"], {"stuck_tasks": stuck_tasks}, "YES.")
+        with open(path) as f:
+            content = f.read()
+        check("a single real entry at production scale (425 records) stays under a "
+              "sane, human-readable size (<50KB), not a multi-hundred-KB dump",
+              len(content) < 50_000)
+        check("the real, honest omitted count is still visible in the durable alert log",
+              "stuck_tasks_omitted_count" in content and "415" in content)
 
 
 # ---------------------------------------------------------------------------
@@ -411,9 +517,13 @@ if __name__ == "__main__":
     test_should_triage_pm_triggers_on_fresh_audit_fail_even_without_stuck_tasks()
     test_should_triage_pm_triggers_on_real_tmux_pending_input()
     test_should_triage_pm_multiple_reasons_all_included()
+    test_summarize_evidence_bounds_large_lists_honestly()
+    test_invoke_triage_claude_survives_real_production_scale_evidence()
+    test_invoke_triage_claude_prompt_discloses_real_omitted_counts()
     test_invoke_triage_claude_builds_correctly_scoped_command()
     test_invoke_triage_claude_reports_real_errors_not_silently()
     test_append_pm_triage_alert_is_real_append_not_overwrite()
+    test_append_pm_triage_alert_stays_readable_at_production_scale()
     test_pm_triage_tick_skips_invocation_when_nothing_notable()
     test_pm_triage_tick_invokes_and_writes_real_alert_when_triggered()
 

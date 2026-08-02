@@ -332,6 +332,222 @@ def write_stuck_tasks_heartbeat(tasks, stuck_tasks, now):
 
 
 # ---------------------------------------------------------------------------
+# 1d. PM triage escalation (added 2026-08-02, PM decision UMR-20260802-090702-c813)
+# ---------------------------------------------------------------------------
+# Extends the stuck-task/heartbeat surface above with a real, but strictly
+# scoped, headless-Claude triage step -- same file, same tick, same 10-minute
+# cadence, no new script/cron/timer. STRICT SCOPE (the whole point of this
+# feature): the invocation below may ONLY answer "does this look like it
+# needs Owner/PM attention right now, yes or no, with a one/two sentence
+# evidence-cited reason" and write that answer to one append-only alert file.
+# It must NEVER make a product-level decision, dispatch new work, edit any
+# other file, or resolve a KERNEL_CONFLICT-style stop itself -- those stay PM
+# (Claude Desktop) scope per the role split established earlier tonight. This
+# is a pure triage/escalation role, closer to a Cowork backstop than a second
+# PM or an Executor.
+#
+# Cheap deterministic pre-filter runs FIRST and gates the real Claude
+# invocation entirely -- most ticks find nothing notable and must skip the
+# invocation outright (real cost, not spent for nothing). Three real trigger
+# conditions, each independently evidence-based, never a guess:
+#   (a) any task already in stuck_tasks (computed above) -- something has been
+#       blocked past STUCK_TASK_THRESHOLD_MINUTES with no PM action yet.
+#   (b) a real, current AUDIT:FAIL/Superboss-rejected verdict on a blocked
+#       task's OWN latest checkpoint note -- triggers immediately, does not
+#       wait for the stuck-minutes threshold, since a fresh audit rejection is
+#       inherently notable the moment it lands.
+#   (c) real, non-empty unsubmitted text sitting in the interactive session's
+#       own tmux prompt line (session "claude", the same one
+#       dispatch-owner-task.sh relays into) -- checked via a real
+#       `tmux capture-pane`, never assumed/fabricated. This exists because a
+#       prior real incident tonight involved a claimed-but-unverifiable
+#       "pending input line" -- this makes that claim mechanically checkable
+#       going forward instead of taken on faith either way.
+
+PM_TRIAGE_ALERTS_PATH = os.environ.get(
+    "VERIDIAN_PM_TRIAGE_ALERTS_PATH", f"{AI_OS}/PM_TRIAGE_ALERTS.md")
+PM_TRIAGE_TMUX_SESSION = os.environ.get("VERIDIAN_PM_TRIAGE_TMUX_SESSION", "claude")
+PM_TRIAGE_CLAUDE_MODEL = os.environ.get("VERIDIAN_PM_TRIAGE_CLAUDE_MODEL", "sonnet")
+PM_TRIAGE_CLAUDE_BUDGET_USD = os.environ.get("VERIDIAN_PM_TRIAGE_CLAUDE_BUDGET_USD", "0.50")
+# Real, confirmed note signature supervisor-entrypoint.sh writes on a genuine
+# Superboss/audit rejection (see e.g. task-20260802-055214's own real
+# checkpoint history, 2026-08-02: "Superboss rejected: <PR url> -- see
+# review.json for issues") -- matching this exact prefix is a real evidence
+# check, not a guess at wording.
+AUDIT_FAIL_NOTE_PATTERN = re.compile(r"Superboss rejected|AUDIT:\s*FAIL", re.IGNORECASE)
+
+
+def _find_fresh_audit_fail_tasks(tasks):
+    """Any status=='blocked' task whose OWN LATEST checkpoint note matches a
+    real audit-rejection signature -- independent of stuck_tasks/the minutes
+    threshold above, since a fresh AUDIT:FAIL is notable the moment it lands,
+    not just once it has also sat for 30+ minutes. Read-only, never mutates
+    a task.yaml."""
+    found = []
+    for task_id, doc in tasks.items():
+        if doc.get("status") != "blocked":
+            continue
+        note = _last_checkpoint_note(doc)
+        if note and AUDIT_FAIL_NOTE_PATTERN.search(note):
+            found.append({"task_id": task_id, "last_note": note})
+    return found
+
+
+def _capture_tmux_pending_input(session=None):
+    """Real, honest check of whether the interactive session's own tmux pane
+    (session "claude" by default -- the same one dispatch-owner-task.sh's own
+    relay targets via `tmux send-keys -t claude`) currently shows non-empty,
+    unsubmitted text sitting at its prompt line. Looks for the real prompt
+    marker this CLI renders ("<U+276F> " i.e. the '>' glyph) and returns the
+    trailing text on that line, or None.
+
+    Fails closed to None (never a fabricated finding) on ANY of: tmux not
+    installed, no session by that name, capture-pane erroring, or no
+    recognizable prompt line in the captured output -- this check existing to
+    make a claim mechanically verifiable is worthless if it can itself
+    fabricate a finding when it can't actually tell."""
+    session = session or PM_TRIAGE_TMUX_SESSION
+    try:
+        has = subprocess.run(["tmux", "has-session", "-t", session],
+                              capture_output=True, text=True, timeout=5)
+        if has.returncode != 0:
+            return None
+        cap = subprocess.run(["tmux", "capture-pane", "-t", session, "-p"],
+                              capture_output=True, text=True, timeout=5)
+        if cap.returncode != 0:
+            return None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in reversed(cap.stdout.splitlines()):
+        if "❯" in line:  # the real prompt glyph this CLI renders
+            after = line.split("❯", 1)[1].strip()
+            return after if after else None
+    return None
+
+
+def should_triage_pm(tasks, stuck_tasks, now):
+    """The real, deterministic pre-filter -- zero AI cost. Returns
+    (should_invoke: bool, reasons: list[str], evidence: dict). Only when this
+    returns True does main() spend anything invoking Claude at all; most real
+    ticks find nothing notable across all 3 conditions and return
+    (False, [], {}), which is the expected, common steady state, not an
+    error."""
+    reasons = []
+    evidence = {}
+
+    if stuck_tasks:
+        reasons.append(f"{len(stuck_tasks)} task(s) stuck past {STUCK_TASK_THRESHOLD_MINUTES}min")
+        evidence["stuck_tasks"] = stuck_tasks
+
+    fresh_audit_fails = _find_fresh_audit_fail_tasks(tasks)
+    if fresh_audit_fails:
+        reasons.append(f"{len(fresh_audit_fails)} task(s) with a fresh real audit-reject/fail verdict")
+        evidence["fresh_audit_fail_tasks"] = fresh_audit_fails
+
+    pending_input = _capture_tmux_pending_input()
+    if pending_input:
+        reasons.append("real, non-empty unsubmitted text found in the interactive session's own prompt line")
+        evidence["tmux_pending_input"] = pending_input
+
+    return (bool(reasons), reasons, evidence)
+
+
+def _invoke_triage_claude(reasons, evidence, run_fn=None):
+    """The one real Claude invocation this feature makes. Strictly scoped:
+    no tool access at all (--allowedTools "" -- the model can only return
+    text, it can never itself write a file or take any other action; THIS
+    SCRIPT is what writes the alert file below, never the model), no
+    --dangerously-skip-permissions, no --continue (fresh/stateless every
+    call, no session state persisted between ticks), a small real
+    --max-budget-usd cap (PM_TRIAGE_CLAUDE_BUDGET_USD, default $0.50) since
+    this can run up to every 10 minutes. The prompt contains ONLY the
+    specific, already-gathered pre-filter evidence -- never broader repo/task
+    access -- and asks for exactly one judgment: does this need Owner/PM
+    attention now, yes or no, with a one/two sentence evidence-cited reason.
+    It may not decide product questions, dispatch anything, or resolve a
+    KERNEL_CONFLICT itself -- the prompt says so explicitly, and it has no
+    tool access to do so even if it tried.
+
+    run_fn is injectable (defaults to subprocess.run) so tests can stub the
+    real subprocess call without spending real API budget or requiring a
+    real `claude` binary/auth in the test environment.
+
+    Returns the real judgment text (str), or a clear error string prefixed
+    "INVOCATION_ERROR:" on any failure -- never silently swallowed, never a
+    fabricated judgment."""
+    run_fn = run_fn or subprocess.run
+    prompt = (
+        "You are a narrow triage/escalation check, NOT a decision-maker. You have "
+        "no tool access and cannot take any action beyond this one text answer.\n\n"
+        "Real evidence gathered by a deterministic pre-filter (not your own judgment "
+        "of what's notable -- these specific findings already crossed a real "
+        "threshold):\n"
+        f"Reasons: {json.dumps(reasons)}\n"
+        f"Evidence: {json.dumps(evidence, indent=2, default=str)}\n\n"
+        "Answer ONLY: does this genuinely need Owner or PM attention right now -- "
+        "YES or NO -- with a one or two sentence reason citing the evidence above. "
+        "Do NOT decide what to do about it, do NOT propose a fix, do NOT pick "
+        "between options, do NOT say what the right next step is beyond flagging "
+        "it. That is all out of scope for you -- your only job is the yes/no plus "
+        "reason."
+    )
+    try:
+        r = run_fn(
+            ["claude", "-p", prompt,
+             "--model", PM_TRIAGE_CLAUDE_MODEL,
+             "--allowedTools", "",
+             "--max-budget-usd", PM_TRIAGE_CLAUDE_BUDGET_USD,
+             "--output-format", "json"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"INVOCATION_ERROR: {type(e).__name__}: {e}"
+    if r.returncode != 0:
+        return f"INVOCATION_ERROR: claude -p exited {r.returncode}: {r.stderr[-500:]}"
+    try:
+        parsed = json.loads(r.stdout)
+        return parsed.get("result") or parsed.get("response") or r.stdout.strip()
+    except (json.JSONDecodeError, ValueError):
+        return r.stdout.strip() or "INVOCATION_ERROR: empty response"
+
+
+def append_pm_triage_alert(path, now, reasons, evidence, judgment):
+    """Real, append-only write -- each tick's real finding becomes one new
+    timestamped entry, never overwriting a prior one (unlike
+    STUCK_TASKS_HEARTBEAT.json, which is a point-in-time snapshot by design;
+    this file is a durable log a PM/Owner can scroll through). Markdown, same
+    real convention as the existing ai-os/logs/ATTENTION.md append-only alert
+    log -- checked MASTER_INDEX.yaml first, no existing single-purpose
+    "PM triage" file to extend, so this is the one new canonical file, same
+    non-git ai-os/ live-runtime-state location as ATTENTION.md/CONTROLLER.yaml."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    entry = (
+        f"\n## {now.isoformat()}\n"
+        f"**Reasons:** {'; '.join(reasons)}\n\n"
+        f"**Judgment:** {judgment}\n\n"
+        f"**Evidence:**\n```json\n{json.dumps(evidence, indent=2, default=str)}\n```\n"
+    )
+    with open(path, "a") as f:
+        f.write(entry)
+
+
+def pm_triage_tick(tasks, stuck_tasks, now, invoke_fn=None):
+    """Orchestrates the pre-filter -> (maybe) invoke -> (maybe) alert
+    sequence for one tick. invoke_fn defaults to _invoke_triage_claude, and
+    is only ever called when should_triage_pm() already returned True --
+    every real tick where nothing crossed a real threshold skips the
+    invocation (and therefore its real cost) entirely. Returns a summary
+    dict always safe to json.dumps into main()'s own tick summary."""
+    invoke_fn = invoke_fn or _invoke_triage_claude
+    should_invoke, reasons, evidence = should_triage_pm(tasks, stuck_tasks, now)
+    if not should_invoke:
+        return {"invoked": False, "reasons": []}
+    judgment = invoke_fn(reasons, evidence)
+    append_pm_triage_alert(PM_TRIAGE_ALERTS_PATH, now, reasons, evidence, judgment)
+    return {"invoked": True, "reasons": reasons, "judgment": judgment, "alert_path": PM_TRIAGE_ALERTS_PATH}
+
+
+# ---------------------------------------------------------------------------
 # 2. gap_queue.yaml dispatch (was queue-dispatcher.py)
 # ---------------------------------------------------------------------------
 
@@ -642,6 +858,11 @@ def main():
             print(f"  - {item['task_id']}: blocked {item['blocked_minutes']}min "
                   f"(last note: {item['last_note']!r})")
 
+    pm_triage_result = pm_triage_tick(tasks, stuck_tasks, now)
+    if pm_triage_result["invoked"]:
+        print(f"PM TRIAGE ALERT ({'; '.join(pm_triage_result['reasons'])}): "
+              f"see {pm_triage_result['alert_path']}")
+
     dispatched_this_tick = (
         len(sweep_result.get("started", []))
         + len(resume_result.get("resumed", []))
@@ -656,6 +877,7 @@ def main():
             "gap_queue_dispatched": gap_result.get("dispatched", []),
             "module_queue_dispatched": module_result.get("dispatched", []),
             "stuck_tasks_found": len(stuck_tasks),
+            "pm_triage_invoked": pm_triage_result["invoked"],
         },
     )
 
@@ -665,6 +887,7 @@ def main():
         "gap_queue": gap_result,
         "module_queue": module_result,
         "stuck_tasks_heartbeat": heartbeat,
+        "pm_triage": pm_triage_result,
     }, indent=2, default=str))
 
 

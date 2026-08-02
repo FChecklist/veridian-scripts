@@ -507,6 +507,72 @@ def test_pm_triage_tick_invokes_and_writes_real_alert_when_triggered():
         dt._capture_tmux_pending_input = orig
 
 
+# ---------------------------------------------------------------------------
+# pm_triage_tick() cooldown -- fixes a real bug an independent supervisor
+# review found (task-20260802-074612's review.json, verdict=reject): with no
+# cooldown, a box with hundreds of already-stuck tasks (424 in this
+# session's own real dry run) would re-invoke the budgeted claude -p call
+# roughly every tick (~10min) indefinitely -- an unbounded recurring-cost
+# bug, not a hypothetical. Reproduces that exact scenario.
+# ---------------------------------------------------------------------------
+
+def test_pm_triage_tick_cooldown_blocks_repeat_invocation_within_window():
+    dt = load_dispatch_tick()
+    invoke_calls = []
+
+    def stub_invoke(reasons, evidence, run_fn=None):
+        invoke_calls.append(1)
+        return "YES -- real finding."
+
+    stuck = [{"task_id": f"task-{i}", "blocked_minutes": 90.0, "last_note": "n"} for i in range(424)]
+    orig = dt._capture_tmux_pending_input
+    dt._capture_tmux_pending_input = lambda *a, **kw: None
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            alert_path = os.path.join(tmp, "PM_TRIAGE_ALERTS.md")
+            real_path = dt.PM_TRIAGE_ALERTS_PATH
+            dt.PM_TRIAGE_ALERTS_PATH = alert_path
+            try:
+                # First tick: real invocation happens (nothing to cool down from yet).
+                r1 = dt.pm_triage_tick({}, stuck, NOW, invoke_fn=stub_invoke)
+                check("first tick with 424 real stuck tasks invokes for real",
+                      r1["invoked"] is True and len(invoke_calls) == 1)
+
+                # Second tick, 5 real minutes later, same 424 stuck tasks still present
+                # (exactly the reviewer's scenario) -- must NOT invoke again.
+                later = NOW + datetime.timedelta(minutes=5)
+                r2 = dt.pm_triage_tick({}, stuck, later, invoke_fn=stub_invoke)
+                check("second tick 5min later, same stuck tasks, does NOT re-invoke "
+                      "(the real bug this fixes)",
+                      r2["invoked"] is False and len(invoke_calls) == 1)
+                check("cooldown-skip result explains why, not a silent no-op",
+                      "cooldown" in (r2.get("skipped_reason") or "").lower())
+
+                # Third tick, well past the real cooldown window -- must invoke again.
+                much_later = NOW + datetime.timedelta(minutes=dt.PM_TRIAGE_COOLDOWN_MINUTES + 1)
+                r3 = dt.pm_triage_tick({}, stuck, much_later, invoke_fn=stub_invoke)
+                check("tick past the real cooldown window invokes again",
+                      r3["invoked"] is True and len(invoke_calls) == 2)
+            finally:
+                dt.PM_TRIAGE_ALERTS_PATH = real_path
+    finally:
+        dt._capture_tmux_pending_input = orig
+
+
+def test_last_pm_triage_alert_ts_reads_real_last_entry_not_first():
+    dt = load_dispatch_tick()
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "PM_TRIAGE_ALERTS.md")
+        check("no file yet -> None, not a fabricated timestamp",
+              dt._last_pm_triage_alert_ts(path) is None)
+        dt.append_pm_triage_alert(path, NOW, ["r1"], {}, "j1")
+        later = NOW + datetime.timedelta(hours=3)
+        dt.append_pm_triage_alert(path, later, ["r2"], {}, "j2")
+        result = dt._last_pm_triage_alert_ts(path)
+        check("reads the real LAST entry's timestamp, not the first",
+              result == later)
+
+
 if __name__ == "__main__":
     test_find_fresh_audit_fail_tasks()
     test_capture_tmux_pending_input_fails_closed_on_missing_session()
@@ -526,6 +592,8 @@ if __name__ == "__main__":
     test_append_pm_triage_alert_stays_readable_at_production_scale()
     test_pm_triage_tick_skips_invocation_when_nothing_notable()
     test_pm_triage_tick_invokes_and_writes_real_alert_when_triggered()
+    test_pm_triage_tick_cooldown_blocks_repeat_invocation_within_window()
+    test_last_pm_triage_alert_ts_reads_real_last_entry_not_first()
 
     print()
     if failures:

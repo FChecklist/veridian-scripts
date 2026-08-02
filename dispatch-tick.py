@@ -369,6 +369,16 @@ PM_TRIAGE_ALERTS_PATH = os.environ.get(
 PM_TRIAGE_TMUX_SESSION = os.environ.get("VERIDIAN_PM_TRIAGE_TMUX_SESSION", "claude")
 PM_TRIAGE_CLAUDE_MODEL = os.environ.get("VERIDIAN_PM_TRIAGE_CLAUDE_MODEL", "sonnet")
 PM_TRIAGE_CLAUDE_BUDGET_USD = os.environ.get("VERIDIAN_PM_TRIAGE_CLAUDE_BUDGET_USD", "0.50")
+# Real bug found by an independent supervisor review (2026-08-02, task-20260802-074612's
+# own review.json, verdict=reject): should_triage_pm() fired on ANY non-empty stuck_tasks
+# list every single tick with no cooldown -- on a box with hundreds of already-stuck tasks
+# (424 in this session's own real dry run), this would re-invoke the real, budgeted
+# claude -p call roughly every 10 minutes indefinitely, an unbounded recurring-cost bug,
+# not a hypothetical. Fixed here: a real cooldown gate, read from the alert file's own
+# last real timestamp (no new state file needed) -- skip a new invocation, even if
+# should_triage_pm() would otherwise trigger, until this many minutes have passed since
+# the last real alert entry.
+PM_TRIAGE_COOLDOWN_MINUTES = float(os.environ.get("VERIDIAN_PM_TRIAGE_COOLDOWN_MINUTES", "60"))
 # Real, confirmed note signature supervisor-entrypoint.sh writes on a genuine
 # Superboss/audit rejection (see e.g. task-20260802-055214's own real
 # checkpoint history, 2026-08-02: "Superboss rejected: <PR url> -- see
@@ -560,17 +570,54 @@ def append_pm_triage_alert(path, now, reasons, evidence, judgment):
         f.write(entry)
 
 
+_PM_TRIAGE_ALERT_HEADER_RE = re.compile(r"^## (\S+)\s*$", re.MULTILINE)
+
+
+def _last_pm_triage_alert_ts(path):
+    """Real cooldown signal: the ISO timestamp of the most recent '## <ts>'
+    entry header already written by append_pm_triage_alert(), read directly
+    from the durable alert file itself -- no separate state file to keep in
+    sync or lose. Returns None if the file doesn't exist yet or has no real
+    entries (never fabricates a timestamp)."""
+    if not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        content = f.read()
+    matches = _PM_TRIAGE_ALERT_HEADER_RE.findall(content)
+    if not matches:
+        return None
+    try:
+        return _parse_iso_ts(matches[-1])
+    except (TypeError, ValueError):
+        return None
+
+
 def pm_triage_tick(tasks, stuck_tasks, now, invoke_fn=None):
     """Orchestrates the pre-filter -> (maybe) invoke -> (maybe) alert
     sequence for one tick. invoke_fn defaults to _invoke_triage_claude, and
-    is only ever called when should_triage_pm() already returned True --
-    every real tick where nothing crossed a real threshold skips the
-    invocation (and therefore its real cost) entirely. Returns a summary
-    dict always safe to json.dumps into main()'s own tick summary."""
+    is only ever called when should_triage_pm() already returned True AND
+    the real cooldown (PM_TRIAGE_COOLDOWN_MINUTES, default 60) has elapsed
+    since the last real alert entry -- every real tick where nothing crossed
+    a real threshold, or where a real invocation already happened recently,
+    skips the invocation (and therefore its real cost) entirely. Fixes a
+    real bug an independent supervisor review found (2026-08-02,
+    task-20260802-074612's review.json): with no cooldown, a box with
+    hundreds of already-stuck tasks would re-invoke the budgeted claude -p
+    call roughly every tick indefinitely. Returns a summary dict always safe
+    to json.dumps into main()'s own tick summary."""
     invoke_fn = invoke_fn or _invoke_triage_claude
     should_invoke, reasons, evidence = should_triage_pm(tasks, stuck_tasks, now)
     if not should_invoke:
         return {"invoked": False, "reasons": []}
+    last_ts = _last_pm_triage_alert_ts(PM_TRIAGE_ALERTS_PATH)
+    if last_ts is not None:
+        elapsed_minutes = (now - last_ts).total_seconds() / 60.0
+        if elapsed_minutes < PM_TRIAGE_COOLDOWN_MINUTES:
+            return {
+                "invoked": False, "reasons": reasons,
+                "skipped_reason": f"cooldown active ({elapsed_minutes:.1f}min of "
+                                   f"{PM_TRIAGE_COOLDOWN_MINUTES}min since last real alert)",
+            }
     judgment = invoke_fn(reasons, evidence)
     append_pm_triage_alert(PM_TRIAGE_ALERTS_PATH, now, reasons, evidence, judgment)
     return {"invoked": True, "reasons": reasons, "judgment": judgment, "alert_path": PM_TRIAGE_ALERTS_PATH}

@@ -22,12 +22,13 @@ allowed to reach it.
 """
 import argparse
 import contextlib
+import fcntl
 import json
 import os
 import re
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 VERIDIAN_ROOT = os.environ.get("VERIDIAN_ROOT", "/opt/veridian")
 AI_OS = os.environ.get("VERIDIAN_AI_OS_DIR", f"{VERIDIAN_ROOT}/ai-os")
@@ -64,6 +65,11 @@ NETWORK_CAPACITY_BYTES_PER_SEC = float(os.environ.get("VERIDIAN_GOVERNOR_NET_CAP
 
 TIER_MIN, TIER_MAX = 0, 4
 DEFAULT_TIER = 2
+# 2026-07-29 adversarial-test fix: unbounded task_identity length was a real
+# storage/FTS5-index-bloat vector (500KB string accepted with no cap, live-
+# confirmed). branch names, filenames, and DB rows all use this value, so a
+# generous but real cap.
+MAX_TASK_IDENTITY_LEN = 500
 
 # Anti-starvation aging (design doc "Dynamic realignment"): a queued item's
 # effective priority is max(0, tier - age_seconds // this interval).
@@ -73,11 +79,33 @@ AGING_PROMOTION_INTERVAL_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_AGING_I
 STUCK_TASK_TIMEOUT_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_STUCK_TIMEOUT_S", str(60 * 60)))
 SIGTERM_TO_SIGKILL_GRACE_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_SIGKILL_GRACE_S", "60"))
 
+# Stage 3 reconciliation sweep (2026-07-29, "task exits cleanly but umr_tasks
+# status never reconciles" fix): worker-entrypoint.sh/doc-worker-entrypoint.sh
+# touch last_heartbeat every 300s (their periodic checkpoint loop) plus at
+# each credit-accountant.py report call site -- 900s (3x the 300s interval)
+# gives real headroom for a slow tick/lock contention before a live task is
+# ever considered stale. Overridable for tests only.
+HEARTBEAT_STALE_TTL_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_HEARTBEAT_TTL_S", str(15 * 60)))
+
 # Emergency fail-safe cascade (design doc Section 7).
 EMERGENCY_CONSECUTIVE_TICKS_SHED = int(os.environ.get("VERIDIAN_GOVERNOR_EMERGENCY_SHED_TICKS", "3"))
 EMERGENCY_CONSECUTIVE_TICKS_HARDSTOP = int(os.environ.get("VERIDIAN_GOVERNOR_EMERGENCY_HARDSTOP_TICKS", "6"))
 
 METRIC_NAMES = ("cpu", "ram", "disk_io", "network")
+
+# Stage 4 (2026-07-29): duplicate-PR guard. Real incidents this closes: PR
+# #617 redispatched 6x, PR #58 redispatched into two separate PRs (#64, #65)
+# -- same task_identity submitted again after its prior UMR row already went
+# terminal (killed/failed/completed), with a PR from the earlier run still
+# open. find_active_umr_by_identity() in submit() only rejects a SECOND
+# submission while the FIRST is still active (queued/dispatched/running); it
+# cannot see a prior run that already finished and already has a PR.
+GH_ORG = os.environ.get("VERIDIAN_GH_ORG", "FChecklist")
+GH_PR_CHECK_REPOS = tuple(
+    r.strip() for r in os.environ.get("VERIDIAN_GOVERNOR_GH_PR_CHECK_REPOS",
+                                       "compliance-tracker,projexa").split(",") if r.strip()
+)
+GH_PR_CHECK_TIMEOUT_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_GH_PR_CHECK_TIMEOUT_S", "8"))
 
 
 def _run(cmd, **kw):
@@ -284,6 +312,36 @@ def _save_json(path, data):
     os.replace(tmp, path)
 
 
+@contextlib.contextmanager
+def _state_file_lock(path):
+    """Serializes the read-modify-write cycle of a governor state JSON file
+    (resource-governor-metric-state.json / resource-governor-emergency-state.json)
+    across processes -- same proven pattern as superboss-register.py's own
+    _write_lock() (built for the 2026-07-18 CONTROLLER.yaml corruption; see
+    that function's docstring for the full incident history). Stage 0a
+    (2026-07-29): neither state file had any locking at all -- two concurrent
+    callers (e.g. a manual --tick plus the live veridian-governor-tick.service
+    loop, or two overlapping loop iterations) could each read the same prior
+    state, then both write back, silently dropping whichever write lost the
+    race. For the emergency-state file specifically, a dropped increment (or a
+    dropped reset back to 0) can desync the real consecutive-over-threshold
+    count from what actually happened metric-by-metric -- a plausible
+    contributor to the repeated-EMERGENCY_STOP-trip symptom this fix targets.
+    Acquiring this OS file lock around the whole load-then-save cycle (not
+    just the save) closes that race. flock is only held for the duration of
+    the `with` block and is auto-released if the holder is killed, so this
+    cannot deadlock the tick loop; it also does not change any behavior when
+    there is no contention."""
+    lock_path = path + ".lock"
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    with open(lock_path, "w") as lockfile:
+        fcntl.flock(lockfile, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lockfile, fcntl.LOCK_UN)
+
+
 def sample_metrics(now=None):
     """Real, delta-based sample of all 4 metrics against the PREVIOUSLY
     persisted raw sample (resource-governor-metric-state.json) -- delta-based
@@ -291,31 +349,69 @@ def sample_metrics(now=None):
     computes a real rate, not just an instantaneous (and for disk/net,
     meaningless) counter value. First-ever call (no prior state) seeds state
     and reports 0% for the three delta-based metrics -- never freezes the
-    queue on cold-start noise."""
+    queue on cold-start noise.
+
+    Stage 0a (2026-07-29): also returns a "raw" sub-dict alongside the
+    existing derived percentages -- the real io-ticks delta and the real
+    elapsed dt_seconds between samples that disk_io_percent() computes its
+    percentage from. Added for forensic diagnosis of EMERGENCY_STOP trips
+    after the fact (the derived percentage alone doesn't tell an operator
+    whether a trip was a real sustained I/O spike or a dt/counter artifact).
+    Purely additive -- does not change any existing key's value.
+
+    2026-07-30 real fix: disk I/O now uses read_disk_io_ticks() (real
+    iostat-style %util, see that function's docstring) instead of raw sector
+    throughput, which was the root cause of 3 false EMERGENCY_STOP trips.
+    The "raw" sub-dict below reports the io-ticks-based values accordingly.
+    Older state files (pre-fix) used "disk_sectors" -- if we see that key,
+    this is a cold-start-equivalent for disk_io specifically (0%), not a
+    crash, since the two metrics aren't comparable."""
     now = now or _utcnow()
     curr_cpu = read_cpu_times()
     curr_disk = read_disk_io_ticks()
     curr_net = read_net_bytes()
     ram = read_mem_percent()
 
-    prev = _load_json(METRIC_STATE_PATH)
-    state = {"ts": now.isoformat(), "cpu": curr_cpu, "disk_io_ticks_ms": curr_disk, "net_bytes": curr_net}
-    _save_json(METRIC_STATE_PATH, state)
+    with _state_file_lock(METRIC_STATE_PATH):
+        prev = _load_json(METRIC_STATE_PATH)
+        state = {"ts": now.isoformat(), "cpu": curr_cpu, "disk_io_ticks_ms": curr_disk, "net_bytes": curr_net}
+        _save_json(METRIC_STATE_PATH, state)
 
     if prev is None:
-        return {"cpu": 0.0, "ram": ram, "disk_io": 0.0, "network": 0.0}
+        return {
+            "cpu": 0.0, "ram": ram, "disk_io": 0.0, "network": 0.0,
+            "raw": {
+                "disk_io_prev_ticks_ms": None,
+                "disk_io_curr_ticks_ms": curr_disk,
+                "disk_io_ticks_delta_ms": None,
+                "disk_io_dt_seconds": None,
+            },
+        }
 
     dt = (now - datetime.fromisoformat(prev["ts"])).total_seconds()
-    # Older state files (pre-fix) used "disk_sectors" -- if we see that key,
-    # this is a cold-start-equivalent for disk_io specifically (0%), not a
-    # crash, since the two metrics aren't comparable.
     prev_disk_ticks = prev.get("disk_io_ticks_ms")
-    disk_io_value = 0.0 if prev_disk_ticks is None else disk_io_percent(prev_disk_ticks, curr_disk, dt)
+    if prev_disk_ticks is None:
+        disk_io_value = 0.0
+        raw_disk = {
+            "disk_io_prev_ticks_ms": None,
+            "disk_io_curr_ticks_ms": curr_disk,
+            "disk_io_ticks_delta_ms": None,
+            "disk_io_dt_seconds": dt,
+        }
+    else:
+        disk_io_value = disk_io_percent(prev_disk_ticks, curr_disk, dt)
+        raw_disk = {
+            "disk_io_prev_ticks_ms": prev_disk_ticks,
+            "disk_io_curr_ticks_ms": curr_disk,
+            "disk_io_ticks_delta_ms": curr_disk - prev_disk_ticks,
+            "disk_io_dt_seconds": dt,
+        }
     return {
         "cpu": cpu_percent(prev["cpu"], curr_cpu),
         "ram": ram,
         "disk_io": disk_io_value,
         "network": network_percent(prev["net_bytes"], curr_net, dt),
+        "raw": raw_disk,
     }
 
 
@@ -348,40 +444,105 @@ def submit(task_spec, tier, source_trigger):
         "repo": str, "title": str, "prompt": str,                (veridian_task_create)
         ...arbitrary extra input fields recorded verbatim on the UMR row...
       },
+      "tenant_id": str,        OPTIONAL (Stage 10 END_USER_ENGINE foundation,
+                               2026-07-29) -- the real tenant/customer this
+                               task is scoped to, once a future end-user-
+                               facing caller exists. Omit entirely (or pass
+                               None) for Owner-side work, which is every real
+                               caller today -- defaults to None, persisted
+                               verbatim as umr_tasks.tenant_id (nullable), so
+                               no existing caller needs to change anything.
+      "correlation_id": str,   OPTIONAL (Phase 6, task-umr-tasks-utm-
+                               correlation-phase6-2026-07-29, 3-monitoring-
+                               stream correlation goal) -- when this task
+                               originates from or relates to a real end-
+                               user-facing action, the SAME identifier that
+                               appears in compliance-tracker's own
+                               orchestraExecutions.taskId / activityLog rows
+                               (a completely separate Postgres stack -- see
+                               this field's own note in metadata_json below
+                               for what is and is not actually wired
+                               end-to-end today). Omit entirely (or pass
+                               None) for every real caller today -- persisted
+                               as umr_tasks.metadata_json.correlation_id
+                               (never a placeholder value; a genuinely absent
+                               correlation stays absent, not "none"/"n/a").
     }
     Returns {"accepted": bool, "umr_id": str, "reason": str}. Never raises for
     a normal duplicate rejection -- that is a real, logged outcome, not an
     error.
-
-    Phase 7 (reuse-check-enforcement-gate, 2026-07-30): also runs
-    plan_generator.check_reuse_before_dispatch() against
-    capability_registry/wiring_registry/knowledge_engine/system_index
-    BEFORE the task row is written, and records the full structured result
-    on the row itself (metadata_json.reuse_check_result), for both the
-    accepted and rejected_duplicate outcomes. This is the one, real,
-    software-enforced reuse check for this entrypoint specifically because
-    it is the lowest-level real task-creation path everything else
-    (task-gateway.py cmd_submit, directive_engine.py submit_task) funnels
-    into -- unlike those two callers, which already run their own
-    check-duplicate/search/query-knowledge/lookup-capability battery before
-    ever reaching here, a caller that constructs a task_spec and calls this
-    function directly (or via `resource_governor.py --submit`) previously
-    had no such check unless its own prompt/author happened to remember to
-    run one by hand. Advisory only, same fail-open philosophy as
-    directive_engine.py's find_in_flight_duplicate()/
-    run_check_duplicate_battery(): a low-confidence or no-match result (or
-    a broken check) never blocks the submission, it is only recorded for
-    accountability.
     """
     if not (TIER_MIN <= tier <= TIER_MAX):
         raise ValueError(f"tier must be an int {TIER_MIN}..{TIER_MAX}, got {tier!r}")
-    task_identity = task_spec["task_identity"]
 
-    inputs_for_reuse_check = task_spec.get("inputs", {}) or {}
+    # 2026-07-29 adversarial-test fix (real, live-reproduced crash-loop bug):
+    # this used to do zero shape/type validation on task_spec, so a malformed
+    # spec (non-dict inputs, missing/non-string/empty task_identity, unknown
+    # task_kind) would be accepted and written straight to umr_tasks as
+    # status=queued -- then crash _perform_spawn() on the NEXT tick with an
+    # uncaught exception BEFORE the row's status was ever updated away from
+    # "queued", so next_queued_task() would re-select and re-crash on the
+    # same row forever (a permanent poison-pill blocking that priority slot,
+    # confirmed live via UMR-20260728-224429-01b0). Reject clearly here
+    # instead, at the one place that can give the caller an actionable error;
+    # _perform_spawn() below is ALSO hardened as defense-in-depth for rows
+    # that predate this fix or reach the queue by any other path.
+    task_identity = task_spec.get("task_identity")
+    if not isinstance(task_identity, str) or not task_identity.strip():
+        raise ValueError(f"task_identity must be a non-empty string, got {task_identity!r}")
+    if len(task_identity) > MAX_TASK_IDENTITY_LEN:
+        raise ValueError(
+            f"task_identity too long ({len(task_identity)} chars, max {MAX_TASK_IDENTITY_LEN}) -- "
+            f"refusing to avoid unbounded umr_tasks/FTS5 index bloat"
+        )
+    inputs = task_spec.get("inputs", {})
+    if not isinstance(inputs, dict):
+        raise ValueError(f"inputs must be a JSON object, got {type(inputs).__name__}")
+    task_kind = task_spec.get("task_kind", "systemctl_action")
+    if task_kind not in ("systemctl_action", "veridian_task_create"):
+        raise ValueError(
+            f"task_kind must be 'systemctl_action' or 'veridian_task_create', got {task_kind!r}"
+        )
+    # Stage 10 (END_USER_ENGINE foundation, 2026-07-29): optional, additive --
+    # every real caller today omits this key, so .get() returns None here and
+    # behavior is unchanged from before this field existed.
+    tenant_id = task_spec.get("tenant_id")
+    if tenant_id is not None and not isinstance(tenant_id, str):
+        raise ValueError(f"tenant_id must be a string or None, got {type(tenant_id).__name__}")
+
+    # Phase 6 (task-umr-tasks-utm-correlation-phase6-2026-07-29, 3-monitoring-
+    # stream correlation goal): optional, additive, same shape as tenant_id
+    # above -- every real caller today omits this key too, so behavior is
+    # unchanged. NOT currently populated by any real end-to-end code path --
+    # see this function's docstring and metadata_json.correlation_id's own
+    # note for the honest wiring status (structurally ready, not connected).
+    correlation_id = task_spec.get("correlation_id")
+    if correlation_id is not None and not isinstance(correlation_id, str):
+        raise ValueError(f"correlation_id must be a string or None, got {type(correlation_id).__name__}")
+
+    # Phase 7 (reuse-check-enforcement-gate, 2026-07-30): runs
+    # plan_generator.check_reuse_before_dispatch() against
+    # capability_registry/wiring_registry/knowledge_engine/system_index
+    # BEFORE the task row is written, and records the full structured result
+    # on the row itself (metadata_json.reuse_check_result), for both the
+    # accepted and rejected_duplicate outcomes. This is the one, real,
+    # software-enforced reuse check for this entrypoint specifically because
+    # it is the lowest-level real task-creation path everything else
+    # (task-gateway.py cmd_submit, directive_engine.py submit_task) funnels
+    # into -- unlike those two callers, which already run their own
+    # check-duplicate/search/query-knowledge/lookup-capability battery before
+    # ever reaching here, a caller that constructs a task_spec and calls this
+    # function directly (or via `resource_governor.py --submit`) previously
+    # had no such check unless its own prompt/author happened to remember to
+    # run one by hand. Advisory only, same fail-open philosophy as
+    # directive_engine.py's find_in_flight_duplicate()/
+    # run_check_duplicate_battery(): a low-confidence or no-match result (or
+    # a broken check) never blocks the submission, it is only recorded for
+    # accountability.
     intent_text = (
-        inputs_for_reuse_check.get("prompt")
-        or inputs_for_reuse_check.get("title")
-        or inputs_for_reuse_check.get("action")
+        inputs.get("prompt")
+        or inputs.get("title")
+        or inputs.get("action")
         or task_spec.get("unit_name")
         or task_identity
     )
@@ -400,6 +561,9 @@ def submit(task_spec, tier, source_trigger):
             "confidence": 0.0,
             "reuse_candidates": [],
         }
+    metadata = {"reuse_check_result": reuse_check_result}
+    if correlation_id:
+        metadata["correlation_id"] = correlation_id
 
     sbr = _superboss_register()
     with sbr._write_lock():
@@ -419,9 +583,10 @@ def submit(task_spec, tier, source_trigger):
                 "source_trigger": source_trigger,
                 "task_kind": task_spec.get("task_kind", "systemctl_action"),
                 "unit_name": task_spec.get("unit_name"),
+                "tenant_id": tenant_id,
                 "inputs": task_spec.get("inputs", {}),
                 "reason": reason,
-                "metadata": {"reuse_check_result": reuse_check_result},
+                "metadata": metadata,
             })
             conn.commit()
             conn.close()
@@ -435,9 +600,10 @@ def submit(task_spec, tier, source_trigger):
             "source_trigger": source_trigger,
             "task_kind": task_spec.get("task_kind", "systemctl_action"),
             "unit_name": task_spec.get("unit_name"),
+            "tenant_id": tenant_id,
             "inputs": task_spec.get("inputs", {}),
             "reason": "queued",
-            "metadata": {"reuse_check_result": reuse_check_result},
+            "metadata": metadata,
         })
         conn.commit()
         conn.close()
@@ -471,39 +637,286 @@ def next_queued_task(conn, now=None):
 def _perform_spawn(row):
     """The real spawn -- systemctl/veridian-task.py, unchanged calls, gated
     by dispatch_core.py exactly as every other consolidated tick script
-    already does. Returns {"status", "unit_name", "outputs"}."""
-    task_kind = row["task_kind"]
-    inputs = row.get("inputs_json")
-    inputs = json.loads(inputs) if isinstance(inputs, str) else (inputs or {})
+    already does. Returns {"status", "unit_name", "outputs"}.
 
-    if task_kind == "systemctl_action":
-        unit = row["unit_name"]
-        action = inputs.get("action", "start")
-        if action == "reset_failed_and_start":
-            _run(["systemctl", "--user", "reset-failed", unit])
-            r = _run(["systemctl", "--user", "start", unit])
-        elif action == "restart":
-            r = _run(["systemctl", "--user", "restart", unit])
-        else:
-            r = _run(["systemctl", "--user", "start", unit])
-        status = "running" if r.returncode == 0 else "failed"
-        return {"status": status, "unit_name": unit, "outputs": {"returncode": r.returncode, "stderr": r.stderr[:500]}}
+    2026-07-29 adversarial-test fix (real, live-reproduced crash-loop bug):
+    the whole body used to run with no exception handling. dispatch_one()
+    calls this and only writes the row's terminal status AFTER it returns --
+    so an uncaught exception here (e.g. AttributeError from inputs.get() on
+    a non-dict `inputs`, confirmed live via a submitted spec with
+    inputs="not-a-dict") left the row's status stuck at "queued" forever,
+    and next_queued_task() would re-select and re-crash the identical row on
+    every subsequent tick (every 30s, permanently, once it became the
+    highest-priority queued item) -- a real poison-pill. submit() now
+    validates shape at the door, but this function must ALSO never let an
+    exception escape, as defense-in-depth for any row that predates that
+    fix or reaches the queue by another path: any failure here must resolve
+    to a clean status="failed" row, never a crash that leaves "queued"
+    unwritten."""
+    try:
+        task_kind = row["task_kind"]
+        inputs = row.get("inputs_json")
+        inputs = json.loads(inputs) if isinstance(inputs, str) else (inputs or {})
+        if not isinstance(inputs, dict):
+            return {"status": "failed", "unit_name": row.get("unit_name"),
+                    "outputs": {"error": f"malformed inputs: expected object, got {type(inputs).__name__}"}}
 
-    if task_kind == "veridian_task_create":
-        cmd = ["python3", os.path.join(SCRIPTS, "veridian-task.py"), "create",
-               "--title", inputs["title"], "--repo", inputs.get("repo", "claude-control"),
-               "--prompt", inputs["prompt"]]
-        r = _run(cmd)
-        m = re.search(r"^CREATED: (\S+)", r.stdout, re.MULTILINE)
-        new_task_id = m.group(1) if m else None
-        unit_name = f"veridian-worker@{new_task_id}.service" if new_task_id else None
-        if unit_name:
-            _run(["systemctl", "--user", "start", unit_name])
-        status = "running" if new_task_id else "failed"
-        return {"status": status, "unit_name": unit_name,
-                "outputs": {"new_task_id": new_task_id, "returncode": r.returncode, "stderr": r.stderr[:500]}}
+        if task_kind == "systemctl_action":
+            unit = row["unit_name"]
+            action = inputs.get("action", "start")
+            if action == "reset_failed_and_start":
+                _run(["systemctl", "--user", "reset-failed", unit])
+                r = _run(["systemctl", "--user", "start", unit])
+            elif action == "restart":
+                r = _run(["systemctl", "--user", "restart", unit])
+            else:
+                r = _run(["systemctl", "--user", "start", unit])
+            status = "running" if r.returncode == 0 else "failed"
+            return {"status": status, "unit_name": unit, "outputs": {"returncode": r.returncode, "stderr": r.stderr[:500]}}
 
-    return {"status": "failed", "unit_name": row.get("unit_name"), "outputs": {"error": f"unknown task_kind {task_kind!r}"}}
+        if task_kind == "veridian_task_create":
+            if "title" not in inputs or "prompt" not in inputs:
+                return {"status": "failed", "unit_name": row.get("unit_name"),
+                        "outputs": {"error": "veridian_task_create requires inputs.title and inputs.prompt"}}
+            cmd = ["python3", os.path.join(SCRIPTS, "veridian-task.py"), "create",
+                   "--title", inputs["title"], "--repo", inputs.get("repo", "claude-control"),
+                   "--prompt", inputs["prompt"]]
+            r = _run(cmd)
+            m = re.search(r"^CREATED: (\S+)", r.stdout, re.MULTILINE)
+            new_task_id = m.group(1) if m else None
+            unit_name = f"veridian-worker@{new_task_id}.service" if new_task_id else None
+            if unit_name:
+                _run(["systemctl", "--user", "start", unit_name])
+            status = "running" if new_task_id else "failed"
+            return {"status": status, "unit_name": unit_name,
+                    "outputs": {"new_task_id": new_task_id, "returncode": r.returncode, "stderr": r.stderr[:500]}}
+
+        return {"status": "failed", "unit_name": row.get("unit_name"), "outputs": {"error": f"unknown task_kind {task_kind!r}"}}
+    except Exception as e:
+        return {"status": "failed", "unit_name": row.get("unit_name"),
+                "outputs": {"error": f"_perform_spawn crashed: {type(e).__name__}: {e}"}}
+
+
+def _recorded_new_task_ids_for_identity(task_identity, exclude_umr_id=None, limit=2):
+    """Stage 5 (2026-07-29) real fix: veridian-task.py create mints a FRESH
+    task_id (and therefore a fresh worker/<task_id> git branch) on every
+    dispatch -- that id is generated at spawn time and is NOT derived from
+    task_spec['task_identity'], so it can never be reconstructed from
+    task_identity alone. Confirmed live via the real PR #58/#64/#65 incident
+    (task_identity "PR58-CONFLICT" / "DIRECTIVE-002-PR58-CONFLICT", both
+    UMR-20260728-123527-1d4d and UMR-20260728-175827-a017 in umr_tasks):
+    the real worker branches were worker/task-20260728-160929-resolve-
+    fresh-conflict-on-pr--58 (-> PR #65, still OPEN) and worker/task-
+    20260729-001520-resolve-fresh-conflict-on-pr--58 -- neither is
+    "worker/PR58-CONFLICT", so a guard that only ever checks
+    worker/<task_identity> (the shape find_pr_for_task_identity() had before
+    this fix) can never match a real branch for this task_kind, and would
+    have silently let PR #65 be opened redundant to PR #64.
+
+    The real, recoverable link is each PRIOR row's own outputs_json.
+    new_task_id, written by _perform_spawn() at the moment that dispatch's
+    veridian-task.py create call returned. Returns those historical task_id
+    values (most recent first) for every OTHER row -- any status, this is a
+    historical lookup, not a live-state one -- sharing this exact
+    task_identity, so find_pr_for_task_identity() can check the REAL branch
+    names a prior attempt actually created, not a name that was never real.
+    Never raises -- a failed lookup here returns [] (fail open, same
+    philosophy as find_pr_for_task_identity() itself: a broken check must
+    never block a real, legitimate dispatch)."""
+    if not task_identity:
+        return []
+    try:
+        sbr = _superboss_register()
+        conn = sbr._connect()
+        rows = conn.execute(
+            "SELECT umr_id, outputs_json FROM umr_tasks WHERE task_identity=? "
+            "ORDER BY ts_submitted DESC LIMIT ?",
+            (task_identity, limit + 1),
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return []
+    task_ids = []
+    for row in rows:
+        if exclude_umr_id and row["umr_id"] == exclude_umr_id:
+            continue
+        try:
+            outputs = json.loads(row["outputs_json"]) if row["outputs_json"] else {}
+        except (TypeError, ValueError):
+            continue
+        new_task_id = outputs.get("new_task_id") if isinstance(outputs, dict) else None
+        if new_task_id and new_task_id not in task_ids:
+            task_ids.append(new_task_id)
+        if len(task_ids) >= limit:
+            break
+    return task_ids
+
+
+def _referenced_pr_number(text):
+    """Stage 6 (2026-07-29) helper: extract the FIRST 'PR #NNN' / 'PR NNN'
+    reference from a task's own title (or prompt) text -- e.g. 'Resolve
+    fresh conflict on PR #58' -> '58'. Returns None if no such reference is
+    present or text is falsy. Never raises (a bad/odd string just yields no
+    match, same fail-open philosophy as the rest of this guard)."""
+    if not text:
+        return None
+    m = re.search(r"\bPR\s*#?\s*(\d+)\b", text, re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None, title=None):
+    """Stage 4 (2026-07-29) duplicate-PR guard -- real, exact --head branch
+    match against GitHub, ported from owner_backlog_orchestrator.py's
+    find_pr_for_task() (2026-07-27/28 bug-fix history preserved verbatim:
+    GitHub's --search is fuzzy/lagged and misses real existing PRs; a worker
+    can also legitimately open its PR in the OTHER repo than its nominal
+    dispatch repo -- check both, hinted repo first).
+
+    Stage 5 (2026-07-29) real fix: this used to check ONLY worker/<task_identity>,
+    which is never the real branch name veridian_task_create rows actually
+    produce (see _recorded_new_task_ids_for_identity()'s docstring for the
+    live-confirmed PR #58/#64/#65 evidence -- this exact guard, as originally
+    written, could not have caught that real incident). extra_task_ids (from
+    _recorded_new_task_ids_for_identity(), called by dispatch_one() below)
+    lets the caller also check the REAL prior branch(es) this task_identity
+    already produced, in addition to the original worker/<task_identity>
+    check (kept for back-compat / any caller whose branch naming really does
+    match task_identity directly).
+
+    LOCK-SCOPE DECISION (documented per this stage's own spec, not left
+    implicit): dispatch_one() below calls this WHILE still holding
+    dispatch_core.acquire_dispatch_lock() -- i.e. inside the same critical
+    section that already atomically selects the queued row and checks
+    has_free_slot(). This is deliberate:
+
+      - Releasing the lock before this network call (to let `gh` run
+        unlocked) and re-acquiring it afterward to spawn would reopen the
+        exact TOCTOU race dispatch_one()'s own docstring already closed once
+        (two concurrent callers picking the SAME queued row before either
+        claims it) -- between release and re-acquire, a second caller could
+        pick up and dispatch the very same row this call is still deciding
+        on. A guard against duplicate PRs must not itself reintroduce a
+        duplicate-dispatch race to do its job.
+      - The blast radius of holding the lock across a network call is bounded
+        three separate ways so this does not become a new stall for the 5
+        real in-flight tasks (PR617-REVIEW, PR618-REVIEW, PR58-CONFLICT,
+        PR610-CONFLICT, PHASE-2-CROSSREF) or anything else sharing this
+        server-wide lock via the other consolidated tick scripts:
+          1. Callers only invoke this for task_kind=='veridian_task_create'
+             rows -- systemctl_action rows (restarts, watchdog recoveries --
+             the majority of real governor dispatches per this module's own
+             design doc) never open PRs and skip the check entirely.
+          2. Each `gh pr list` call carries a hard subprocess timeout
+             (GH_PR_CHECK_TIMEOUT_SECONDS, default 8s) instead of an
+             unbounded one. Stage 5 (2026-07-29) added up to
+             _recorded_new_task_ids_for_identity()'s `limit` (default 2)
+             extra real prior-branch candidates per task_identity, checked
+             alongside the original worker/<task_identity> guess -- worst
+             case is now (1 + limit) candidate branches x 2 repos x
+             GH_PR_CHECK_TIMEOUT_SECONDS, i.e. ~48s at defaults, not the
+             original ~16s. Deliberately kept small (limit=2, not the whole
+             history) precisely to keep this bounded: the real PR #58/#64/#65
+             incident only ever needed the single most recent prior branch to
+             catch it, and each check still returns immediately on the first
+             match/success in the common case -- this is a worst-case ceiling
+             on repeated gh timeouts, not the normal-path cost.
+          3. On timeout or any gh/network error this fails OPEN -- returns
+             "no duplicate found" and logs to ATTENTION.md -- rather than
+             fail-closed. A GitHub outage or rate-limit must degrade to
+             "old behavior, no guard, dispatch proceeds" for a few
+             dispatches; it must never degrade to "queue permanently
+             wedged", since correctness here (closing the duplicate-PR
+             redispatch bug) is not worth trading for a new, different
+             class of stall.
+
+    Stage 6 (2026-07-29) real fix: closes a SECOND, separate real gap the same
+    PR #58/#64/#65/#66 incident exposed -- the same underlying PR-58
+    conflict-resolution work was submitted under two DIFFERENT task_identity
+    strings entirely ("DIRECTIVE-002-PR58-CONFLICT" for PR #64's row, plain
+    "PR58-CONFLICT" for PR #65/#66's rows -- confirmed live in umr_tasks:
+    UMR-20260728-122213-ff96 vs UMR-20260728-123527-1d4d /
+    UMR-20260728-175827-a017). Stage 5's extra_task_ids only ever correlates
+    rows sharing the EXACT SAME task_identity, so it could never have caught
+    PR #64 as a duplicate of #65/#66 -- a Stage 4/5-only guard still misses
+    this half of the real incident. The one thing both rows' dispatch inputs
+    DID share is plain title text naming the same real PR being fixed
+    ("...PR #58..."). If a PR number can be extracted from this task's own
+    title (see _referenced_pr_number()), do one further bounded gh call per
+    repo (same GH_PR_CHECK_TIMEOUT_SECONDS, same fail-open-on-error/timeout
+    semantics as the branch-based checks above) and check whether any
+    existing OPEN/MERGED PR's title already references that same PR number --
+    a low-false-positive signal in practice: unrelated PRs essentially never
+    reference the exact same "PR #NNN" substring by coincidence.
+
+    Returns (pr_number, repo) if an OPEN or MERGED PR already exists for
+    worker/<task_identity>, worker/<any of extra_task_ids>, OR (when `title`
+    is given) any existing PR whose own title references the same PR number
+    as this task's title; (None, None) if none found (including on any
+    failure -- fail open, see above)."""
+    if not task_identity:
+        return None, None
+    candidate_idents = [task_identity] + [t for t in (extra_task_ids or []) if t and t != task_identity]
+    if hint_repo and hint_repo in GH_PR_CHECK_REPOS:
+        repos = [hint_repo] + [r for r in GH_PR_CHECK_REPOS if r != hint_repo]
+    elif hint_repo:
+        repos = [hint_repo] + list(GH_PR_CHECK_REPOS)
+    else:
+        repos = list(GH_PR_CHECK_REPOS)
+    for repo in repos:
+        for ident in candidate_idents:
+            branch = f"worker/{ident}"
+            try:
+                r = _run(
+                    ["gh", "pr", "list", "--repo", f"{GH_ORG}/{repo}", "--state", "all",
+                     "--head", branch, "--json", "number,state", "--limit", "3"],
+                    timeout=GH_PR_CHECK_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
+                _append_attention(
+                    f"WARNING: Stage 4/5 duplicate-PR guard timed out checking {GH_ORG}/{repo} for branch "
+                    f"{branch} (>{GH_PR_CHECK_TIMEOUT_SECONDS}s) -- failing open, dispatch proceeding "
+                    f"WITHOUT the duplicate-PR check against this repo/branch for this row."
+                )
+                continue
+            if r.returncode != 0:
+                continue  # fail open on any gh error (auth hiccup, rate limit, transient API failure, ...)
+            try:
+                prs = json.loads(r.stdout)
+            except (json.JSONDecodeError, ValueError):
+                prs = []
+            if prs:
+                return prs[0]["number"], repo
+
+    # Stage 6 (2026-07-29): see this function's docstring for the real
+    # PR #64/#65/#66 evidence this closes -- a task_identity-fragmented
+    # duplicate (different task_identity string, same real PR referenced in
+    # the title) that no branch-name-based check above can ever catch.
+    pr_num = _referenced_pr_number(title)
+    if pr_num:
+        for repo in repos:
+            try:
+                r = _run(
+                    ["gh", "pr", "list", "--repo", f"{GH_ORG}/{repo}", "--state", "all",
+                     "--json", "number,title", "--limit", "50"],
+                    timeout=GH_PR_CHECK_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired:
+                _append_attention(
+                    f"WARNING: Stage 6 title-reference duplicate-PR guard timed out checking "
+                    f"{GH_ORG}/{repo} (>{GH_PR_CHECK_TIMEOUT_SECONDS}s) -- failing open, dispatch "
+                    f"proceeding WITHOUT this extra check against this repo for this row."
+                )
+                continue
+            if r.returncode != 0:
+                continue  # fail open on any gh error, same as the branch-based checks above
+            try:
+                prs = json.loads(r.stdout)
+            except (json.JSONDecodeError, ValueError):
+                prs = []
+            for pr in prs:
+                if _referenced_pr_number(pr.get("title") or "") == pr_num:
+                    return pr["number"], repo
+    return None, None
 
 
 def dispatch_one(dry_run=False, now=None):
@@ -524,7 +937,7 @@ def dispatch_one(dry_run=False, now=None):
 
     metrics = sample_metrics(now=now)
     over = over_threshold_metrics(metrics)
-    _record_emergency_tick(over)
+    _record_emergency_tick(over, metrics=metrics)
     if over:
         return {"action": "frozen", "detail": f"metric(s) at/over {METRIC_THRESHOLD_PERCENT}%: {over}",
                 "metrics": metrics}
@@ -548,6 +961,42 @@ def dispatch_one(dry_run=False, now=None):
         if dry_run:
             conn.close()
             return {"action": "would_dispatch", "umr_id": row["umr_id"], "metrics": metrics}
+
+        # Stage 4 (2026-07-29): duplicate-PR guard. See find_pr_for_task_identity()'s
+        # docstring for the lock-scope reasoning. Only veridian_task_create rows can
+        # ever have an associated PR -- systemctl_action rows skip this entirely.
+        # Stage 5 (2026-07-29) real fix: the original Stage 4 call below only ever
+        # checked worker/<task_identity>, which is NEVER the real branch name
+        # veridian-task.py actually creates (it mints a fresh task_id per dispatch --
+        # see _recorded_new_task_ids_for_identity()'s docstring). Confirmed live: this
+        # exact gap is why the real PR #58/#64/#65 incident happened even though this
+        # guard already existed -- worker/PR58-CONFLICT was never a real branch, so the
+        # check always found nothing and let the redundant dispatch through. Passing
+        # the real prior branch(es) recorded on this task_identity's own past rows
+        # closes that gap without touching the check's fail-open semantics.
+        if row["task_kind"] == "veridian_task_create":
+            raw_inputs = row.get("inputs_json")
+            row_inputs = json.loads(raw_inputs) if isinstance(raw_inputs, str) else (raw_inputs or {})
+            prior_task_ids = _recorded_new_task_ids_for_identity(
+                row["task_identity"], exclude_umr_id=row["umr_id"])
+            dup_pr, dup_repo = find_pr_for_task_identity(
+                row["task_identity"], row_inputs.get("repo"), extra_task_ids=prior_task_ids,
+                title=row_inputs.get("title"))
+            if dup_pr is not None:
+                reason = (
+                    f"duplicate-PR guard (Stage 4/5/6): existing PR {GH_ORG}/{dup_repo}#{dup_pr} already "
+                    f"open/merged for task_identity={row['task_identity']!r} "
+                    f"(checked worker/{row['task_identity']}, prior real branch(es) "
+                    f"{[f'worker/{t}' for t in prior_task_ids]}, and any existing PR title referencing "
+                    f"the same PR number as this task's own title) -- redispatch skipped, not spawned"
+                )
+                with sbr._write_lock():
+                    sbr.update_umr_task(conn, row["umr_id"], status="rejected_duplicate",
+                                         ts_completed=_now_iso(), reason=reason)
+                    conn.commit()
+                conn.close()
+                return {"action": "rejected_duplicate_pr", "umr_id": row["umr_id"], "detail": reason,
+                         "pr": {"repo": dup_repo, "number": dup_pr}, "metrics": metrics}
 
         result = _perform_spawn(row)
         with sbr._write_lock():
@@ -637,6 +1086,12 @@ def scan_stuck_tasks(now=None):
         since_sigterm = (now - datetime.fromisoformat(row["ts_sigterm"])).total_seconds()
         if since_sigterm >= SIGTERM_TO_SIGKILL_GRACE_SECONDS:
             _run(["systemctl", "--user", "kill", "-s", "SIGKILL", row["unit_name"]])
+            # Real fix, 2026-07-29 (zombie-worker incident, same root cause as
+            # reconcile_stale_heartbeats' equivalent fix above): kill alone
+            # leaves the enable-symlink behind, letting a systemd --user
+            # manager restart resurrect this exact unit later regardless of
+            # its now-terminal umr_tasks status.
+            _run(["systemctl", "--user", "disable", row["unit_name"]])
             with sbr._write_lock():
                 sbr.update_umr_task(conn, row["umr_id"], status="killed", ts_completed=_now_iso())
                 conn.commit()
@@ -645,6 +1100,355 @@ def scan_stuck_tasks(now=None):
 
     conn.close()
     return actions
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat reconciliation sweep (Stage 3, 2026-07-29)
+# ---------------------------------------------------------------------------
+
+def _unit_exit_terminal_status(unit):
+    """Real systemd Result for `unit` -- used only to decide completed vs
+    failed when reconciling a stale-heartbeat row whose unit is no longer
+    active. 'completed' requires Result=success; anything else (crashed,
+    signalled, non-zero exit, timeout, oom-kill, or an unreadable/unexpected
+    read) fails CLOSED to 'failed' -- an ambiguous read must never be
+    miscounted as a success.
+
+    FIX (2026-07-29 stress-test round 1, 2 confirmed bugs in the original
+    implementation, both reproduced live):
+    (1) `systemctl show unit -p SubState -p ExecMainStatus --value` does NOT
+        return lines in the order the -p flags were given -- systemd emits
+        properties in its own fixed internal schema order regardless of
+        request order. Live-verified: for a real completed unit this
+        actually printed ExecMainStatus ("15") on line 0 and SubState
+        ("dead") on line 1, i.e. exactly swapped from what the old code
+        assumed (`lines[0]`=substate, `lines[1]`=exec_status) -- so
+        `substate == "exited"` was really comparing an ExecMainStatus number
+        to the string "exited", which can never match. Fixed by parsing
+        `KEY=VALUE` output (order-independent) instead of relying on line
+        position.
+    (2) Even with correct parsing, SubState never becomes "exited" for this
+        unit template -- veridian-worker@.service/veridian-docworker@.service
+        are both Type=simple, and Type=simple units transition to
+        SubState=dead (not exited) on any exit, clean or not (SubState=exited
+        is a Type=oneshot/RemainAfterExit concept). Live-verified against all
+        5 real historical completed units on this box: every one shows
+        SubState=dead, Result=success. Fixed by keying off Result (systemd's
+        own designed-for-this aggregate success/failure verdict, "success"
+        iff the service's main process exited 0 and no other failure --
+        timeout/signal/core-dump/oom-kill/etc -- occurred) instead of
+        SubState/ExecMainStatus, which is also Type-independent.
+    Net effect of both bugs together: this function could never return
+    "completed" under any real circumstance -- every reconciled row was
+    unconditionally marked "failed" regardless of real outcome."""
+    r = _run(["systemctl", "--user", "show", unit, "-p", "Result", "-p", "ExecMainStatus", "-p", "SubState"])
+    props = {}
+    for line in r.stdout.strip().splitlines():
+        if "=" in line:
+            key, _, value = line.partition("=")
+            props[key.strip()] = value.strip()
+    if props.get("Result") == "success":
+        return "completed"
+    return "failed"
+
+
+def reconcile_stale_heartbeats(now=None, ttl_seconds=None):
+    """Fix for 'task exits cleanly but umr_tasks status never reconciles' (5
+    real historical instances found 2026-07-29): worker-entrypoint.sh /
+    doc-worker-entrypoint.sh checkpoint task.yaml via veridian-task.py on
+    every exit path, but nothing ever wrote the matching terminal status back
+    onto the umr_tasks row that dispatched it -- a row could sit at
+    status='running' indefinitely after its unit had already exited cleanly.
+    This is a periodic sweep, run from resource_governor_tick_loop.sh right
+    after --tick, same 30s cadence as the dispatcher itself -- it does not
+    trust any process to call back in on exit.
+
+    CRITICAL (2026-07-29 adversarial review, verify before relying on this):
+    last_heartbeat is a brand-new column (see superboss-register.py's
+    _migrate_umr_last_heartbeat) -- every umr_tasks row written before this
+    deploy, which includes ALL 5 real in-flight tasks at the moment this
+    ships (PR617-REVIEW, PR618-REVIEW, PR58-CONFLICT, PR610-CONFLICT,
+    PHASE-2-CROSSREF), has last_heartbeat NULL, not old-and-expired. The SQL
+    WHERE clause below excludes NULL by construction -- a row only becomes
+    eligible for this sweep once it HAS a real last_heartbeat that has since
+    gone stale, so there is no code path here that can flag a row on its
+    first tick post-deploy, and systemctl is never even invoked for a
+    healthy or not-yet-instrumented row.
+
+    Returns the list of rows actually reconciled this call (empty if none
+    were stale, which is the expected/normal steady-state result)."""
+    now = now or _utcnow()
+    ttl = ttl_seconds if ttl_seconds is not None else HEARTBEAT_STALE_TTL_SECONDS
+    cutoff = (now - timedelta(seconds=ttl)).isoformat()
+    sbr = _superboss_register()
+    conn = sbr._connect()
+    sbr._ensure_umr_table(conn)
+    stale = conn.execute(
+        "SELECT * FROM umr_tasks WHERE status IN ('running','dispatched') "
+        "AND last_heartbeat IS NOT NULL AND last_heartbeat < ?",
+        (cutoff,),
+    ).fetchall()
+    actions = []
+    for row in stale:
+        row = dict(row)
+        unit = row.get("unit_name")
+        if not unit:
+            continue  # nothing to check liveness against -- leave for human/other path
+        is_active = _run(["systemctl", "--user", "is-active", "--quiet", unit]).returncode == 0
+        if is_active:
+            continue  # genuinely still running, just a slow/missed heartbeat -- not stale
+        # Real fix, 2026-07-29 (zombie-worker incident): a unit's real process
+        # exiting does NOT remove its default.target.wants/ enable-symlink --
+        # only `disable` does. Without this, a systemd --user manager restart
+        # (confirmed live, 05:53:27 UTC) resurrects every unit ever enabled,
+        # regardless of its real umr_tasks status, silently burning real CPU
+        # re-running already-finished/killed work. Safe here specifically
+        # because is_active is already confirmed False above -- disable never
+        # touches a running unit's live state, only its boot-time wiring.
+        _run(["systemctl", "--user", "disable", unit])
+        terminal = _unit_exit_terminal_status(unit)
+        with sbr._write_lock():
+            sbr.update_umr_task(
+                conn, row["umr_id"], status=terminal, ts_completed=_now_iso(),
+                reason=(f"reconciled by heartbeat sweep: unit {unit} inactive, last_heartbeat "
+                        f"stale (>{ttl}s), real exit status={terminal}"),
+            )
+            conn.commit()
+        actions.append({"umr_id": row["umr_id"], "unit_name": unit, "reconciled_to": terminal})
+    conn.close()
+    return actions
+
+
+# ---------------------------------------------------------------------------
+# One-time NULL-heartbeat backfill (Stage 1, 2026-07-29)
+# ---------------------------------------------------------------------------
+# reconcile_stale_heartbeats() above is structurally blind to any row whose
+# last_heartbeat has ALWAYS been NULL -- its own WHERE clause requires
+# last_heartbeat < cutoff, which by construction excludes NULL. Two real
+# classes of row can never age out of NULL on their own: rows written before
+# the last_heartbeat column/instrumentation existed, and rows for task types
+# that never heartbeat at all (external_ai_state_machine.py-backed sessions,
+# which checkpoint via their own SQLite table, not umr_tasks.last_heartbeat).
+# This is a separate, one-time, explicitly-invoked backfill -- NOT wired into
+# run_tick() or the periodic tick loop, and it does not alter
+# reconcile_stale_heartbeats() itself in any way.
+
+EXTERNAL_AI_STATE_MACHINE_SCRIPT = os.path.join(SCRIPTS, "external_ai_state_machine.py")
+# Real Owner email this one-time backfill's external-session ground-truth
+# lookup is scoped to (external_ai_state_machine.py sessions are stored
+# per-user by email hash) -- overridable for tests only.
+BACKFILL_OWNER_EMAIL = os.environ.get("VERIDIAN_GOVERNOR_BACKFILL_EMAIL", "raajat.agarwal@gmail.com")
+
+
+def _external_ai_list_sessions(email):
+    """Real, read-only call into external_ai_state_machine.py's own
+    `list-sessions` command -- the ground truth for external_ai_state_machine.py
+    -backed rows (unit_name IS NULL, so systemctl has nothing to check against).
+    Returns the parsed `sessions` list on success, or None on any failure (a
+    missing/non-zero-exit call, or unparseable output) -- callers must treat
+    None as 'cannot verify, leave every unmatched row alone', never as 'zero
+    sessions exist'."""
+    r = _run(["python3", EXTERNAL_AI_STATE_MACHINE_SCRIPT, "list-sessions", "--email", email])
+    if r.returncode != 0:
+        return None
+    try:
+        sessions = json.loads(r.stdout).get("sessions")
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return sessions if isinstance(sessions, list) else None
+
+
+def _external_ai_mark_complete(session_id):
+    """Real call into external_ai_state_machine.py's own `mark-complete`
+    command -- reconciliation of an external-engine-owned row always goes
+    through that engine's own write path, never a raw UPDATE against its
+    external_ai_sessions table from this script. Returns True iff the engine
+    itself reports marked_complete=True."""
+    r = _run(["python3", EXTERNAL_AI_STATE_MACHINE_SCRIPT, "mark-complete", "--session-id", session_id])
+    if r.returncode != 0:
+        return False
+    try:
+        return bool(json.loads(r.stdout).get("marked_complete"))
+    except (json.JSONDecodeError, ValueError):
+        return False
+
+
+def backfill_null_heartbeats(now=None, execute=False, email=None):
+    """ONE-TIME operational backfill for the real gap reconcile_stale_heartbeats()
+    cannot structurally close (see module docstring above it). Dry-run
+    (read-only, execute=False) by default -- computes and reports every
+    decision without writing anything; execute=True applies the identical
+    decisions for real. A dry run's report is therefore always a true preview
+    of what --execute would do, never a different code path.
+
+    NARROW FILTER, DELIBERATE (real incident on this exact server earlier
+    today, 2026-07-29): both queries below are scoped to status IN
+    ('running','dispatched') ONLY -- 'queued' is deliberately excluded even
+    though a queued row can also have last_heartbeat NULL. A queued row has no
+    unit_name yet (never dispatched) and may legitimately succeed on its very
+    next tick; a broader filter that folded 'queued' in here nearly
+    misclassified exactly such a row as dead earlier today. This function must
+    never repeat that mistake.
+
+    Two independent ground-truth paths, never a guess, never a raw DB write
+    without one:
+
+      (a) unit_name IS NOT NULL (systemd-dispatched): `systemctl --user
+          is-active <unit_name>` is ground truth. Active -> genuine live work,
+          left alone untouched. Not active -> confirmed dead: marked 'failed'
+          (never 'completed' -- the real outcome of a row with no heartbeat
+          history at all is unknown, so the only honest terminal status is
+          failed), with ts_completed=now and a `reason` recording the real
+          evidence (unit_name checked, found inactive).
+
+      (b) unit_name IS NULL (external_ai_state_machine.py-backed, e.g.
+          sessions from that state machine which never write to
+          umr_tasks.last_heartbeat at all): that engine's own real
+          `list-sessions --email <email>` output is ground truth. A row is
+          only reconciled if list-sessions returns a session whose own
+          task_id exactly matches this row's task_identity AND that session's
+          own status is already 'COMPLETE' -- reconciled via that engine's own
+          `mark-complete` (never a raw DB edit), then this umr_tasks row is
+          synced to status='completed' to match. No matching session, a
+          session still 'ACTIVE', the ambiguous 'ABANDONED' state, or a failed/
+          unparseable list-sessions call are all left completely untouched --
+          this function never guesses at another engine's own session state.
+
+    Returns a report dict: every row examined (with its category, real
+    evidence, and decision -- 'left_alone' / 'marked_failed' /
+    'reconciled_completed', or the 'would_*' dry-run equivalents), plus
+    aggregate counts.
+    """
+    now = now or _utcnow()
+    email = email or BACKFILL_OWNER_EMAIL
+    sbr = _superboss_register()
+    conn = sbr._connect()
+    sbr._ensure_umr_table(conn)
+
+    systemd_rows = conn.execute(
+        "SELECT * FROM umr_tasks WHERE status IN ('running','dispatched') "
+        "AND last_heartbeat IS NULL AND unit_name IS NOT NULL"
+    ).fetchall()
+    external_rows = conn.execute(
+        "SELECT * FROM umr_tasks WHERE status IN ('running','dispatched') "
+        "AND last_heartbeat IS NULL AND unit_name IS NULL"
+    ).fetchall()
+
+    report = {
+        "execute": execute,
+        "ts": now.isoformat(),
+        "examined": [],
+        "counts": {
+            "systemd_examined": len(systemd_rows),
+            "systemd_marked_failed": 0,
+            "systemd_left_active": 0,
+            "external_examined": len(external_rows),
+            "external_reconciled_completed": 0,
+            "external_left_untouched": 0,
+        },
+    }
+
+    # --- (a) systemd-dispatched rows: ground-truth via systemctl -----------
+    for row in systemd_rows:
+        row = dict(row)
+        unit = row["unit_name"]
+        is_active = _run(["systemctl", "--user", "is-active", "--quiet", unit]).returncode == 0
+
+        if is_active:
+            report["counts"]["systemd_left_active"] += 1
+            report["examined"].append({
+                "umr_id": row["umr_id"], "task_identity": row["task_identity"], "category": "systemd",
+                "unit_name": unit, "status_before": row["status"], "decision": "left_alone",
+                "detail": f"systemctl --user is-active {unit} -> active; real live work, not touched",
+            })
+            continue
+
+        reason = (
+            f"one-time backfill reconciliation (Stage 1, {now.isoformat()}): unit_name={unit!r} "
+            f"checked via `systemctl --user is-active`, found inactive -- row had last_heartbeat=NULL "
+            f"and could never be reached by reconcile_stale_heartbeats()'s stale-heartbeat sweep. "
+            f"Marked 'failed' (not 'completed') because the real outcome of a row with no heartbeat "
+            f"history is unknown."
+        )
+        entry = {
+            "umr_id": row["umr_id"], "task_identity": row["task_identity"], "category": "systemd",
+            "unit_name": unit, "status_before": row["status"],
+            "decision": "marked_failed" if execute else "would_mark_failed",
+            "detail": f"systemctl --user is-active {unit} -> inactive; confirmed dead",
+            "reason": reason,
+        }
+        if execute:
+            with sbr._write_lock():
+                sbr.update_umr_task(conn, row["umr_id"], status="failed", ts_completed=_now_iso(), reason=reason)
+                conn.commit()
+            report["counts"]["systemd_marked_failed"] += 1
+        report["examined"].append(entry)
+
+    # --- (b) external_ai_state_machine.py-backed rows: ground-truth via ----
+    #         that engine's own list-sessions, never a raw DB read/write.
+    sessions = _external_ai_list_sessions(email)
+    for row in external_rows:
+        row = dict(row)
+        match = None
+        if sessions:
+            for s in sessions:
+                if s.get("task_id") == row["task_identity"]:
+                    match = s
+                    break
+
+        if match is None:
+            report["counts"]["external_left_untouched"] += 1
+            report["examined"].append({
+                "umr_id": row["umr_id"], "task_identity": row["task_identity"], "category": "external",
+                "unit_name": None, "status_before": row["status"], "decision": "left_alone",
+                "detail": (
+                    f"no external_ai_state_machine.py session with task_id== "
+                    f"{row['task_identity']!r} found via `list-sessions --email {email}`"
+                    if sessions is not None else
+                    "list-sessions call failed or returned unparseable output -- cannot verify, "
+                    "leaving row untouched"
+                ),
+            })
+            continue
+
+        if match.get("status") != "COMPLETE":
+            report["counts"]["external_left_untouched"] += 1
+            report["examined"].append({
+                "umr_id": row["umr_id"], "task_identity": row["task_identity"], "category": "external",
+                "unit_name": None, "status_before": row["status"],
+                "session_id": match.get("id"), "session_status": match.get("status"),
+                "decision": "left_alone",
+                "detail": (
+                    f"matching external session {match.get('id')} is real and still "
+                    f"{match.get('status')!r} -- genuinely active/incomplete or ambiguous, not touched"
+                ),
+            })
+            continue
+
+        reason = (
+            f"one-time backfill reconciliation (Stage 1, {now.isoformat()}): matching "
+            f"external_ai_state_machine.py session {match.get('id')!r} for task_identity="
+            f"{row['task_identity']!r} is real and already status='COMPLETE' per `list-sessions`; "
+            f"reconciled via that engine's own `mark-complete` (not a raw DB edit), then this "
+            f"umr_tasks row synced to 'completed' to match."
+        )
+        entry = {
+            "umr_id": row["umr_id"], "task_identity": row["task_identity"], "category": "external",
+            "unit_name": None, "status_before": row["status"],
+            "session_id": match.get("id"), "session_status": match.get("status"),
+            "decision": "reconciled_completed" if execute else "would_reconcile_completed",
+            "reason": reason,
+        }
+        if execute:
+            entry["mark_complete_call_result"] = _external_ai_mark_complete(match["id"])
+            with sbr._write_lock():
+                sbr.update_umr_task(conn, row["umr_id"], status="completed", ts_completed=_now_iso(), reason=reason)
+                conn.commit()
+            report["counts"]["external_reconciled_completed"] += 1
+        report["examined"].append(entry)
+
+    conn.close()
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -657,10 +1461,23 @@ def _append_attention(message):
         f.write(f"\n## {_now_iso()} -- SERVER RESOURCE GOVERNOR\n{message}\n")
 
 
-def _shed_load(state):
+def _shed_load(state, metrics=None):
     """Stage 2: SIGTERM the governor's own lowest-tier-priority currently
     running tracked unit, freeing real resources instead of just refusing new
     work. Returns the unit_name shed, or None if there was nothing to shed."""
+    # FIX (2026-07-29 gap-fix pass, real bug, live-reproduced): every message
+    # below used to interpolate `state` directly and call it "metric
+    # overload" -- but `state` is _record_emergency_tick's per-metric
+    # CONSECUTIVE-TICK COUNTER (0..EMERGENCY_CONSECUTIVE_TICKS_HARDSTOP), not
+    # the actual metric percentages. ATTENTION.md has been logging entries
+    # like "sustained metric overload {'disk_io': 6, ...}" that look like
+    # "disk_io is at 6%" but actually mean "disk_io has been over-threshold
+    # for 6 consecutive ticks" -- this real ambiguity caused multiple
+    # independent review passes this session to (reasonably) suspect a false
+    # trip. `metrics` (the real sample_metrics() percentages, when the caller
+    # has them) is now logged alongside `state` so operators can see the
+    # actual numbers, not just the counter.
+    metrics_note = f", real metrics at trip time: {metrics}" if metrics is not None else ""
     sbr = _superboss_register()
     conn = sbr._connect()
     sbr._ensure_umr_table(conn)
@@ -670,8 +1487,8 @@ def _shed_load(state):
     ).fetchall()
     if not running:
         conn.close()
-        _append_attention(f"CRITICAL: sustained metric overload {state}, but no governor-tracked "
-                           f"running unit available to shed load from.")
+        _append_attention(f"CRITICAL: sustained over-threshold ticks {state}{metrics_note}, but no "
+                           f"governor-tracked running unit available to shed load from.")
         return None
 
     victim = dict(running[0])
@@ -681,40 +1498,47 @@ def _shed_load(state):
         conn.commit()
     conn.close()
     _append_attention(
-        f"CRITICAL: sustained metric overload {state} -- shed load by SIGTERM to lowest-tier "
-        f"running unit {victim['unit_name']} (umr_id={victim['umr_id']}, tier={victim['tier']})."
+        f"CRITICAL: sustained over-threshold ticks {state}{metrics_note} -- shed load by SIGTERM to "
+        f"lowest-tier running unit {victim['unit_name']} (umr_id={victim['umr_id']}, tier={victim['tier']})."
     )
     return victim["unit_name"]
 
 
-def _write_emergency_stop(state):
-    _save_json(EMERGENCY_STOP_PATH, {"ts": _now_iso(), "state": state})
+def _write_emergency_stop(state, metrics=None):
+    metrics_note = f", real metrics at trip time: {metrics}" if metrics is not None else ""
+    _save_json(EMERGENCY_STOP_PATH, {"ts": _now_iso(), "state": state, "metrics": metrics})
     _append_attention(
-        f"EMERGENCY STOP: metrics stayed at/over {METRIC_THRESHOLD_PERCENT}% for "
-        f"{EMERGENCY_CONSECUTIVE_TICKS_HARDSTOP} consecutive governor ticks ({state}). All new "
-        f"dispatch is halted until an operator runs "
+        f"EMERGENCY STOP: at least one metric stayed at/over {METRIC_THRESHOLD_PERCENT}% for "
+        f"{EMERGENCY_CONSECUTIVE_TICKS_HARDSTOP} consecutive governor ticks (consecutive-tick "
+        f"counts: {state}{metrics_note}). All new dispatch is halted until an operator runs "
         f"`python3 scripts/resource_governor.py --clear-emergency-stop`."
     )
 
 
-def _record_emergency_tick(over_metrics):
+def _record_emergency_tick(over_metrics, metrics=None):
     """Per-metric consecutive-over-threshold counter, reset to 0 the instant a
     metric drops back under threshold. Escalates through shed-load (Stage 2)
     then hard-stop (Stage 3) as the max consecutive count crosses each
-    threshold. Returns the updated state dict."""
-    state = _load_json(EMERGENCY_STATE_PATH) or {}
-    max_consecutive = 0
-    for metric in METRIC_NAMES:
-        count = state.get(metric, 0)
-        count = count + 1 if metric in over_metrics else 0
-        state[metric] = count
-        max_consecutive = max(max_consecutive, count)
-    _save_json(EMERGENCY_STATE_PATH, state)
+    threshold. Returns the updated state dict.
+
+    Stage 0a (2026-07-29): the whole load-modify-save cycle below is now
+    inside _state_file_lock(EMERGENCY_STATE_PATH) -- see that function's
+    docstring for why (this was previously a plain unlocked read-modify-write,
+    same real gap as sample_metrics()'s metric-state file)."""
+    with _state_file_lock(EMERGENCY_STATE_PATH):
+        state = _load_json(EMERGENCY_STATE_PATH) or {}
+        max_consecutive = 0
+        for metric in METRIC_NAMES:
+            count = state.get(metric, 0)
+            count = count + 1 if metric in over_metrics else 0
+            state[metric] = count
+            max_consecutive = max(max_consecutive, count)
+        _save_json(EMERGENCY_STATE_PATH, state)
 
     if max_consecutive >= EMERGENCY_CONSECUTIVE_TICKS_HARDSTOP:
-        _write_emergency_stop(state)
+        _write_emergency_stop(state, metrics=metrics)
     elif max_consecutive >= EMERGENCY_CONSECUTIVE_TICKS_SHED:
-        _shed_load(state)
+        _shed_load(state, metrics=metrics)
     return state
 
 
@@ -739,6 +1563,24 @@ def main():
     ap.add_argument("--tier", type=int, default=DEFAULT_TIER, help="0 (highest) .. 4 (lowest)")
     ap.add_argument("--source-trigger", default="manual")
     ap.add_argument("--scan-stuck", action="store_true", help="run only the stuck-task SIGTERM/SIGKILL scan")
+    ap.add_argument("--reconcile-stale", action="store_true",
+                     help="Stage 3: sweep umr_tasks rows in running/dispatched with a stale "
+                          "last_heartbeat (NULL heartbeats are always skipped) and write back real "
+                          "terminal status via systemctl --user is-active, scoped only to the stale subset")
+    ap.add_argument("--backfill-null-heartbeats", action="store_true",
+                     help="ONE-TIME backfill (Stage 1, 2026-07-29): reconcile running/dispatched "
+                          "umr_tasks rows with last_heartbeat IS NULL that reconcile_stale_heartbeats() "
+                          "can never reach -- ground-truths unit_name rows via `systemctl is-active` "
+                          "and unit_name-IS-NULL rows via external_ai_state_machine.py's own "
+                          "list-sessions. Deliberately excludes 'queued' rows. Read-only dry run by "
+                          "default; pass --execute to apply the real writes it reports.")
+    ap.add_argument("--execute", action="store_true",
+                     help="apply real writes for --backfill-null-heartbeats (default: read-only dry "
+                          "run that only reports what it WOULD do)")
+    ap.add_argument("--backfill-email", dest="backfill_email", default=None,
+                     help="override the Owner email used for --backfill-null-heartbeats' "
+                          "external_ai_state_machine.py list-sessions lookup "
+                          f"(default: {BACKFILL_OWNER_EMAIL!r})")
     ap.add_argument("--query-umr", action="store_true", help="search/list umr_tasks rows")
     ap.add_argument("--limit", type=int, default=20)
     ap.add_argument("--status", default=None)
@@ -766,14 +1608,42 @@ def main():
         if not args.spec_file:
             print(json.dumps({"error": "--submit requires --spec-file"}))
             sys.exit(1)
-        with open(args.spec_file) as f:
-            task_spec = json.load(f)
-        result = submit(task_spec, args.tier, args.source_trigger)
+        # 2026-07-29 adversarial-test fix: this used to have no exception
+        # handling at all, so any malformed --spec-file (missing file,
+        # invalid JSON, JSON that isn't an object, a valid object missing
+        # task_identity, an out-of-range --tier, ...) produced a raw Python
+        # traceback on stderr instead of the JSON this CLI's every other
+        # branch returns -- inconsistent with this file's own
+        # json.dumps({...})-everywhere convention, and unsafe for any caller
+        # (e.g. gateway.py) that expects to json.loads() the output. Still
+        # exits non-zero on failure (unchanged real behavior), just with a
+        # clean, parseable error body now.
+        try:
+            with open(args.spec_file) as f:
+                task_spec = json.load(f)
+            if not isinstance(task_spec, dict):
+                raise ValueError(f"--spec-file must contain a JSON object, got {type(task_spec).__name__}")
+            result = submit(task_spec, args.tier, args.source_trigger)
+        except Exception as e:
+            print(json.dumps({"accepted": False, "umr_id": None,
+                               "error": f"{type(e).__name__}: {e}"}))
+            sys.exit(1)
         print(json.dumps(result))
         return
 
     if args.scan_stuck:
         print(json.dumps({"actions": scan_stuck_tasks()}, default=str))
+        return
+
+    if args.reconcile_stale:
+        print(json.dumps({"actions": reconcile_stale_heartbeats()}, default=str))
+        return
+
+    if args.backfill_null_heartbeats:
+        print(json.dumps(
+            backfill_null_heartbeats(execute=args.execute, email=args.backfill_email),
+            indent=2, default=str,
+        ))
         return
 
     if args.tick:

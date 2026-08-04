@@ -1112,6 +1112,10 @@ RULE2_OUTCOME_MAP = {
     "superboss_unavailable": "blocked",
     "deferred": "blocked",
     "rejected_duplicate_pr": "rejected",
+    # UMR-20260804-213847-4b56: the real OCID-evidence supersession check,
+    # same real "rejected" outcome as rejected_duplicate_pr above -- a
+    # deliberate, evidence-based skip, not a failure.
+    "superseded_by_ocid_evidence": "rejected",
 }
 
 
@@ -1160,7 +1164,7 @@ def classify_dispatch_outcome(dispatch_result):
         detail = dispatch_result.get("detail") or "no detail captured"
         next_actions = {
             "blocked": "re-run dispatch_one() on the next tick; this is a real, expected transient block (metric threshold, concurrency cap, EMERGENCY_STOP, or Superboss Register unavailability), not a task-specific failure",
-            "rejected": "no action -- a duplicate PR already exists for this task_identity; this row is intentionally terminal",
+            "rejected": "no action -- real evidence (an existing PR for this task_identity, or newer ocid_artifact_links evidence for this task's own OCID) shows this row's work is already done; intentionally terminal",
         }
         return {
             "outcome": outcome,
@@ -1237,6 +1241,7 @@ def _dispatch_one_inner(dry_run=False, now=None):
     with dc.acquire_dispatch_lock():
         conn = sbr._connect()
         sbr._ensure_umr_table(conn)
+        sbr._ensure_ocid_artifact_links_table(conn)
         row = next_queued_task(conn, now=now)
         if row is None:
             conn.close()
@@ -1250,6 +1255,71 @@ def _dispatch_one_inner(dry_run=False, now=None):
         if dry_run:
             conn.close()
             return {"action": "would_dispatch", "umr_id": row["umr_id"], "metrics": metrics}
+
+        # Real root-cause fix (UMR-20260804-213847-4b56, citing
+        # UMR-20260804-180711-7f96): dispatch-owner-task.sh's own real,
+        # by-design dual dispatch (relay the same instruction into the live
+        # interactive tmux session AND submit a real veridian_task_create
+        # task into this same governed queue, in the SAME call -- see that
+        # script's own header comment) means every real Owner/PM
+        # instruction ends up on two real, independent channels at once.
+        # This is deliberate (laptop-independence: the queued twin still
+        # runs even if the interactive session goes away) -- the real,
+        # previously-missing piece is a way for THIS channel to notice the
+        # OTHER channel already finished the same real work while this
+        # task sat queued (confirmed live, 2026-08-04: real
+        # anti-starvation aging plus real concurrency backpressure from
+        # this session's own heavy interactive slot usage left several
+        # owner-dispatch tasks queued 27-74 real minutes before reaching
+        # this point, by which time the same UMR's work had already been
+        # completed and merged via the interactive channel -- not a retry
+        # loop, not a duplicate cron/notification, the same original
+        # queued row simply reaching the front of a real, working-as-
+        # designed priority queue late). Deterministic, evidence-based,
+        # never heuristic/semantic: if this task's own title names a real
+        # OCID, and ocid_artifact_links (the real OCID<->UMR<->PR/commit
+        # registry OCID-068 itself built) already has a real link for that
+        # OCID created AFTER this row's own ts_submitted, that is real,
+        # direct evidence the same OCID's work was independently completed
+        # while this task waited -- skip the redundant spawn rather than
+        # duplicate real, already-finished work.
+        if row["task_kind"] == "veridian_task_create":
+            raw_inputs_for_ocid = row.get("inputs_json")
+            row_inputs_for_ocid = (
+                json.loads(raw_inputs_for_ocid) if isinstance(raw_inputs_for_ocid, str)
+                else (raw_inputs_for_ocid or {})
+            )
+            title = row_inputs_for_ocid.get("title") or ""
+            ocid_match = re.search(r"OCID-0*(\d+)", title, re.IGNORECASE)
+            if ocid_match:
+                ocid_number = f"OCID-{int(ocid_match.group(1)):03d}"
+                newer_links = [
+                    link for link in sbr.query_ocid_artifact_links(conn, ocid_number=ocid_number)
+                    if (link.get("created_at") or "") > (row["ts_submitted"] or "")
+                ]
+                if newer_links:
+                    newest = newer_links[0]
+                    reason = (
+                        f"superseded: {ocid_number} (extracted from this task's own title {title!r}) "
+                        f"already has real, newer evidence in ocid_artifact_links -- umr_id="
+                        f"{newest['umr_id']!r}, repo={newest['repo']!r}, pr_number={newest.get('pr_number')!r}, "
+                        f"commit_sha={newest.get('commit_sha')!r}, link_kind={newest['link_kind']!r}, "
+                        f"created_at={newest['created_at']!r} (after this task's own ts_submitted="
+                        f"{row['ts_submitted']!r}) -- the same OCID's real work was independently "
+                        f"completed while this task sat queued; redispatch skipped, not spawned"
+                    )
+                    with sbr._write_lock():
+                        sbr.update_umr_task(conn, row["umr_id"], status="rejected_duplicate",
+                                             ts_completed=_now_iso(), reason=reason)
+                        conn.commit()
+                    conn.close()
+                    _append_attention(
+                        f"INFO: dispatch_one() skipped a real, redundant veridian_task_create "
+                        f"spawn for umr_id={row['umr_id']!r} (task_identity={row['task_identity']!r}): "
+                        f"{reason}"
+                    )
+                    return {"action": "superseded_by_ocid_evidence", "umr_id": row["umr_id"],
+                             "detail": reason, "ocid_number": ocid_number, "metrics": metrics}
 
         # Stage 4 (2026-07-29): duplicate-PR guard. See find_pr_for_task_identity()'s
         # docstring for the lock-scope reasoning. Only veridian_task_create rows can

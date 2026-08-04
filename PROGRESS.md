@@ -1,52 +1,37 @@
-# PROGRESS -- task-20260804-201653-resolve-real-merge-conflicts-on-pr-21--o
+# PROGRESS -- task-20260804-214705-ocid-999-a-genuinely-new--never-worked-i
 
 ## Completed
-- [x] Checked real PR #21 state via `gh pr view`/`gh api` before acting: it was
-      already **MERGED** at `2026-08-04T19:29:07Z` (merge commit `199e73c7`),
-      **~47 minutes before this task was created** (`20260804-201653`). The
-      spec's premise ("genuinely OPEN with a real DIRTY merge state, two real
-      conflicts") was stale by the time this task ran -- a prior session
-      (self-citing `UMR-20260804-185749-c565`) had already done the conflict
-      resolution, updated the PR description with a detailed per-file
-      resolution writeup citing all three UMRs from this task's spec, and the
-      Owner account (`FChecklist`) had already posted a detailed AUDIT: PASS
-      review and merged it (`merged_by: FChecklist`).
-- [x] Did NOT attempt to redo/undo/re-merge anything -- there was no open PR
-      with conflict markers left to resolve, and re-litigating an
-      already-reviewed-and-merged Owner decision is out of scope.
-- [x] Independently verified (did not just trust the PR's self-report) by
-      cloning the repo fresh and inspecting `main` at its current tip
-      (post PR #26, which includes the PR #21 merge):
-      - `resource_governor.py`'s `_shed_load()` contains **both** real fixes
-        together: the `metrics=None`/`metrics_note` tick-counter-labeling fix
-        AND the `_safe_superboss_register("_shed_load")` fail-open wrapper.
-      - `supervisor-entrypoint.sh` contains **both**: the OCID-linkage wiring
-        block AND the more detailed checkpoint note text citing the Owner's
-        2026-07-31 full-approval-autonomy directive.
-      - Zero leftover `<<<<<<<`/`=======`/`>>>>>>>` conflict markers in either
-        file.
-      - `python3 -m py_compile resource_governor.py` -- clean.
-      - `bash -n supervisor-entrypoint.sh` -- clean.
-- [x] Independently re-ran the real existing test suite (not the PR's
-      self-reported numbers) against current `main`:
-      `pytest tests/test_resolve_superboss_db_path.py tests/test_ocid_artifact_links.py
-      test_worker_boot_activation_and_resume.py test_stuck_task_heartbeat.py -v`
-      -> **19/19 tests passed, 0 failures** (real output, not mocked; see PR
-      comment below for full breakdown).
-- [x] Posted a comment on PR #21 documenting this session's independent
-      post-merge re-verification (the PR was closed/merged, so no code or
-      description changes were made -- only a factual comment), citing
-      `UMR-20260804-184906-a6dc`, `UMR-20260804-184014-9a18`,
-      `UMR-20260804-170055-a069`, and the prior `UMR-20260804-185749-c565`.
-- [x] Did not merge anything (nothing to merge -- already merged by Owner).
+- [x] Investigated the task input before writing any code. The only spec
+      text actually delivered to this task is the literal string `x`
+      (`prompt.txt` is 1 byte, content `x`). `task.yaml` supplies no
+      requirements beyond the title itself: "OCID-999 a genuinely new,
+      never-worked item".
+- [x] Searched the repo for any source of truth that could resolve what
+      OCID-999 is actually supposed to do:
+      - No registry/database of OCID checklist items exists in the
+        workspace. The only sqlite artifact present is
+        `superboss-register.sqlite.empty-stub-superseded-2026-07-29`, an
+        explicitly-superseded empty stub -- not usable.
+      - `OCID-999` only appears in the codebase as a test fixture value
+        (`tests/test_ocid_artifact_links.py`,
+        `tests/test_rule3_no_premature_umr_minting.py`,
+        `tests/test_rule6_zero_duplication_by_ocid.py`), used the same way
+        `OCID-042` is used elsewhere in those tests -- i.e. as an example
+        ID in test data, not as a real, numbered checklist item with its
+        own requirements.
+      - No open GitHub issue/PR, commit, or file anywhere references a real
+        "OCID-999" feature spec. Recent merged work in this repo (PRs
+        #26-#35) is all OCID-068 (rules 1-7 of a stall/duplication/evidence
+        engine) -- unrelated to item 999.
+- [x] Conclusion: this task was dispatched with an empty/degenerate spec.
+      There is nothing here to implement, fix, or verify -- inventing
+      requirements from the title alone ("a genuinely new, never-worked
+      item") would mean guessing at unstated behavior and shipping
+      speculative code against a spec that doesn't exist. Per protocol,
+      not doing that is the correct call, not a stall.
 
 ## Remaining
-- [ ] None. This task's real work (resolving PR #21's conflicts) was already
-      completed and merged by a prior session/Owner before this task began.
-      This session's contribution is the independent re-verification above.
-      Flagging for whoever reviews this task: the task's stale premise
-      (claiming an open PR with a dirty merge state that had, in fact, closed
-      47 minutes earlier) is worth checking upstream -- future task dispatch
-      should re-check `mergeStateStatus`/PR `state` immediately before
-      generating a resolve-conflicts task, not rely on state captured at
-      task-authoring time.
+- [ ] Blocked on input: needs a real spec (or a pointer to wherever
+      OCID-999's actual requirements live) before any implementation work
+      can start. Recommend the dispatcher re-issue this task with the full
+      spec body once available.

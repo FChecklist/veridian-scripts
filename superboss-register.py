@@ -210,6 +210,7 @@ def _new_id(prefix):
 def _connect():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
     return conn
@@ -2748,7 +2749,25 @@ def _ensure_umr_table(conn):
     CREATE TABLE IF NOT EXISTS is genuinely sufficient. Tested against a
     fixture DB seeded with the real pre-existing (non-UMR) schema in
     tests/test_resource_governor.py, not a fresh DB, per PR #101's own
-    postmortem on trusting CREATE TABLE IF NOT EXISTS alone."""
+    postmortem on trusting CREATE TABLE IF NOT EXISTS alone.
+
+    2026-08-02 fast path (fixes recurring 'database is locked' crashes,
+    see /var/crash/..superboss-register.py.1000.crash 2026-08-01 21:52):
+    resource_governor.py calls this before every umr_tasks read/write, and
+    touch_umr_heartbeat() (CLI `heartbeat`) is fired every 5 minutes by every
+    active worker's checkpoint loop -- so under real concurrency this ran the
+    full CREATE TABLE/TRIGGER/INDEX sequence plus 3 migration functions (each
+    with its own commit()) on nearly every call, almost always as a pure
+    no-op, contending for SQLite's single writer lock. Once the schema is
+    fully migrated (checked here via a plain read, no transaction), every
+    subsequent call returns immediately with zero writes."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='umr_tasks'"
+    ).fetchone()
+    if row is not None:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(umr_tasks)").fetchall()}
+        if {"last_heartbeat", "tenant_id", "utm_source"} <= cols:
+            return
     status_sql = ",".join("'" + s + "'" for s in UMR_STATUSES)
     conn.execute(f"""CREATE TABLE IF NOT EXISTS umr_tasks (
         umr_id TEXT PRIMARY KEY,

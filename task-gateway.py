@@ -390,13 +390,29 @@ def cmd_start(args):
         fail("ddl_authorization_check.py did not return parseable JSON",
              stdout=ddl_proc.stdout, stderr=ddl_proc.stderr)
     if not ddl_result.get("valid", False):
+        # Category B (UMR-20260803-025317-0c64): if a CATEGORY-B-DETERMINISTIC-RECOVERY
+        # block was present but didn't satisfy all 10 conditions, surface the real
+        # per-condition breakdown here too -- so a rejection reported to the dispatcher
+        # says plainly which specific condition failed, not just that DDL was found.
         fail(
             "ddl_authorization_check.py rejected this prompt-file -- dispatch blocked "
-            "until an explicit, citable Owner approval is added",
+            "until an explicit, citable Owner approval (Category A) or a fully-satisfied "
+            "deterministic recovery evidence block (Category B) is added",
             reason=ddl_result.get("reason"),
             guidance=ddl_result.get("guidance"),
+            category_b_conditions=ddl_result.get("category_b_conditions"),
             prompt_file=args.prompt_file,
         )
+    elif ddl_result.get("category") == "B":
+        # Real, deterministic Category B authorization -- not narrated, not a
+        # human/PM/AI judgment call. Logged here (not just inside
+        # ddl_authorization_check.py's own return value) so task-gateway.py's own
+        # stdout/dispatch log carries which conditions were verified and how, for
+        # whoever reviews this task's real dispatch record later.
+        print(json.dumps({
+            "category_b_authorized": True,
+            "conditions": ddl_result.get("category_b_conditions"),
+        }, default=str), file=sys.stderr)
 
     # Structural duplicate-task constraint (task-20260731-074406, real
     # #634-vs-#639 / #641-vs-#629 duplicate-dispatch incidents this session):

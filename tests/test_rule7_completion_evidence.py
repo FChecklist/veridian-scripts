@@ -215,6 +215,84 @@ def test_cmd_checkpoint_ignores_evidence_json_for_non_completed_status():
         vt.AI_OS = real_ai_os
 
 
+def test_cmd_checkpoint_never_persists_evidence_for_non_completed_status_real_task():
+    """Round-1 review finding (PR #35): completion_evidence used to persist
+    unconditionally whenever --evidence-json was supplied, regardless of
+    --status -- bypassing validate_completion_evidence() (which only runs
+    for --status completed) and allowing a later non-completed checkpoint
+    to silently overwrite a previously-validated completed evidence record
+    with unvalidated data. This is the real end-to-end regression test the
+    round-1 review named as missing: a genuinely-invalid --evidence-json,
+    against a REAL task.yaml (not a missing one that short-circuits via
+    FileNotFoundError before the persistence line is ever reached), at a
+    non-'completed' status, must reach save_task() successfully and must
+    NOT have written completion_evidence onto the task."""
+    vt = _load_veridian_task()
+    real_ai_os = vt.AI_OS
+    scratch_dir = tempfile.mkdtemp(prefix="rule7-real-persist-test-")
+    task_id = "rule7-real-task-with-yaml"
+    task_dir = os.path.join(scratch_dir, "tasks", task_id)
+    os.makedirs(task_dir)
+    real_task_doc = {
+        "id": task_id, "title": "test", "status": "in_progress",
+        "repo": "veridian-scripts", "branch": f"worker/{task_id}",
+        "created_at": "2026-08-04T00:00:00+00:00",
+        "service": f"veridian-worker@{task_id}.service", "task_dir": task_dir,
+        "workspace": os.path.join(task_dir, "workspace"),  # deliberately absent -- os.path.isdir() guard skips git status
+        "checkpoints": [], "files_modified": [],
+    }
+    with open(os.path.join(task_dir, "task.yaml"), "w") as f:
+        vt.yaml.safe_dump(real_task_doc, f)
+
+    bad_evidence_path = os.path.join(scratch_dir, "bad_evidence.json")
+    with open(bad_evidence_path, "w") as f:
+        json_module.dump({"pr_url": "not-a-real-url"}, f)  # genuinely invalid: missing required fields
+
+    # sync_controller_entry()'s own CONTROLLER path is a module-level
+    # constant fixed at import time from the REAL AI_OS -- reassigning
+    # vt.AI_OS (as done below, which correctly redirects load_task/
+    # save_task, both of which build their path from the global AI_OS at
+    # CALL time) does not redirect it, so calling the real function here
+    # would write a fake entry into the real, live production
+    # CONTROLLER.yaml. Neutralized for this test only, restored after --
+    # same real risk test_ocid063_handoff_envelope.py's own comment already
+    # documents and deliberately avoids a different way (stopping short of
+    # this call entirely via a real FileNotFoundError).
+    real_sync_controller_entry = vt.sync_controller_entry
+    vt.sync_controller_entry = lambda task: None
+    try:
+        vt.AI_OS = scratch_dir
+        args = argparse.Namespace(
+            task_id=task_id, status="in_progress", note=None, auto=False,
+            handoff_envelope=None, evidence_json=bad_evidence_path,
+        )
+        vt.cmd_checkpoint(args)  # must NOT raise/exit -- invalid evidence is irrelevant at this status
+
+        with open(os.path.join(task_dir, "task.yaml")) as f:
+            saved = vt.yaml.safe_load(f)
+        assert "completion_evidence" not in saved, (
+            f"Rule 7 regression: invalid, unvalidated evidence was persisted onto a "
+            f"non-completed checkpoint: {saved.get('completion_evidence')!r}"
+        )
+        assert saved["status"] == "in_progress", saved
+    finally:
+        vt.AI_OS = real_ai_os
+        vt.sync_controller_entry = real_sync_controller_entry
+    print("PASS: test_cmd_checkpoint_never_persists_evidence_for_non_completed_status_real_task")
+
+
+def test_db_changes_none_case_insensitive():
+    """Round-1 review finding (PR #35, minor): 'None' (capitalized) must be
+    accepted the same as 'none' (lowercase) as an honest claim of absence."""
+    vt = _load_veridian_task()
+    for honest_none in ("none", "None", "NONE", "  none  ", "No schema or data changes", "NO SCHEMA OR DATA CHANGES"):
+        evidence = dict(_REAL_EVIDENCE)
+        evidence["db_changes"] = honest_none
+        valid, errors = vt.validate_completion_evidence(evidence)
+        assert valid is True, (honest_none, errors)
+    print("PASS: test_db_changes_none_case_insensitive")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

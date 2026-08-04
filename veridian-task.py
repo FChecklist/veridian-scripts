@@ -439,8 +439,11 @@ def validate_completion_evidence(evidence):
         value = evidence.get(field)
         if _is_narration_placeholder(value):
             errors.append(f"{field!r} is missing or a narration placeholder ({value!r}), real evidence required")
-    if "db_changes" in evidence and _is_narration_placeholder(evidence["db_changes"]) and evidence["db_changes"] not in ("none", "no schema or data changes"):
-        # "none"/"no schema or data changes" are real, explicit, honest
+    db_changes = evidence.get("db_changes")
+    db_changes_normalized = db_changes.strip().lower() if isinstance(db_changes, str) else None
+    if "db_changes" in evidence and _is_narration_placeholder(db_changes) and db_changes_normalized not in ("none", "no schema or data changes"):
+        # "none"/"no schema or data changes" (case-insensitive) are real,
+        # explicit, honest
         # claims of absence, not narration placeholders -- deliberately
         # exempted from the generic placeholder list above (which exists
         # to catch vague non-answers, not honest "nothing to report").
@@ -770,13 +773,21 @@ def cmd_checkpoint(args):
             if args.status == "in_progress" and task["status"] != "pending":
                 task["restart_count"] = task.get("restart_count", 0) + 1
             task["status"] = args.status
-        if completion_evidence is not None:
+        # Real fix (independent review, PR #35 round 1): this used to fire
+        # whenever completion_evidence was not None, regardless of
+        # args.status -- so a non-'completed' checkpoint with
+        # --evidence-json bypassed validate_completion_evidence() entirely
+        # (it only runs above when args.status == "completed") yet still
+        # got persisted, meaning a LATER non-completed checkpoint could
+        # silently overwrite a previously-validated completed evidence
+        # record with unvalidated data. Gated on the same condition
+        # validation itself uses, so persistence and validation can never
+        # drift apart again.
+        if completion_evidence is not None and args.status == "completed":
             # Real, structured Rule 7 record -- persisted verbatim on the
             # task itself so it survives alongside the rest of this task's
             # own real history, same convention checkpoints[]/
-            # files_modified already use. Not overwritten by a later
-            # non-completion checkpoint (only ever set here, when the
-            # caller actually supplies --evidence-json).
+            # files_modified already use.
             task["completion_evidence"] = completion_evidence
 
         workspace = task["workspace"]

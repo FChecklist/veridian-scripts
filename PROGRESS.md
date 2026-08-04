@@ -1,15 +1,60 @@
-# PROGRESS -- task-20260802-142001-checkpoint-refresh--item-c--pr-14--needs
+# PROGRESS -- task-20260804-193850-deterministic-canonical-database-path-re
 
 ## Completed
-- [x] Confirmed real diagnosis: veridian-scripts has no `.github/workflows/`; `audit-check` is a manually-posted commit status from the supervisor/audit process, not GitHub Actions (`gh api .../commits/<sha>/check-runs` → 0 runs)
-- [x] Confirmed real current head of PR #14: `dc3521a2b33f04e1bfb1d9b6a7229c8a68321e28`, MERGEABLE, and that it had **no** posted status or PR comment yet (`gh api .../commits/dc3521a2.../status` → 0 statuses; `issues/14/comments` → 0 comments) -- no supervisor pass had evaluated this exact head before this task
-- [x] Confirmed no supervisor/sweep process already running against PR #14 (`systemctl --user list-units veridian-supervisor@*` -- not present)
-- [x] Read `SUPERBOSS_DISPATCH_PROMPT.md` (authoritative standing instructions) before reviewing, per its own required protocol
-- [x] Fetched PR #14's real head into an isolated git worktree (`/tmp/pr14-audit-wt`, not the task's own branch) and ran `risk-tier.py` against it directly: **tier1** (additive-only diff, no deletions, no migrations/auth/security-sensitive paths)
-- [x] Performed a real, independent diff review (not trusting the PR's self-reported test plan): read the full diff (`dispatch-tick.py` +428, `test_pm_triage.py` new +603, `test_stuck_task_heartbeat.py` new +246), verified referenced imports (`re`, `resource_governor`, `AI_OS`) pre-exist in the base file
-- [x] Actually executed the claimed tests against the fetched head (not self-certified): `py_compile` OK; `test_stuck_task_heartbeat.py` 18/18 pass; `test_pm_triage.py` 37/37 pass; pre-existing `test_worker_boot_activation_and_resume.py` 16/16 pass (no regression)
-- [x] Posted a real, structured `AUDIT: PASS` PR comment (8-field format, referencing exact SHA `dc3521a2b33f04e1bfb1d9b6a7229c8a68321e28`, citing UMR-20260802-074346-a9b9 / UMR-20260802-090702-c813): https://github.com/FChecklist/veridian-scripts/pull/14#issuecomment-5158508667
-- [x] Cleaned up audit worktree/branch (`git worktree remove`, `git branch -D pr-14-audit`)
+- [x] Read UMR-20260804-180142-676d (this task's own dispatch record) directly from the
+      live `/opt/veridian/ai-os/memory/superboss-register.sqlite` `umr_tasks` table, plus
+      the full linked instruction chain (`INS-20260804-172009-0002` through
+      `INS-20260804-191835-bd64`) rather than relying on the shortened SPEC summary, per
+      SPEC's own instruction.
+- [x] Read `superboss-register.py` line 63 onward (the exact code named in SPEC) and
+      confirmed `resolve_superboss_db_path()` -- the deterministic, 5-step,
+      verification-gated function specified verbatim in `INS-20260804-180208-0d2b`
+      (env override -> fixed default -> exists -> non-zero size -> real SQLite header
+      magic bytes -> real `umr_tasks` table via `sqlite_master`, raising a named
+      `SuperbossDbPathError` naming the exact failed check/path/size on any failure,
+      never a silent fallback) -- is **already present and wired as `DB_PATH =
+      resolve_superboss_db_path()`**, replacing the prior plain `DB_PATH` default this
+      task was dispatched to fix.
+- [x] Traced the real history: this exact UMR chain (`UMR-20260804-170055-a069` and its
+      addenda `UMR-20260804-180142-676d` / `UMR-20260804-180210-9e2c`) was already
+      implemented by a parallel/earlier dispatch of the same requirement
+      (`task-20260804-175936-ocid-068-requirement-addition-structured`), shipped as
+      commit `5130153` ("feat(OCID-068): structured OCID/UMR/PR/commit traceability +
+      verified DB path resolution"), merged via PR #20 (`0637e5b`), then carried through
+      a live-deploy-gap fix and an orphaned-hotfix-recovery merge (PR #21, `199e73c`) --
+      all independently confirmed via `INS-20260804-184013-b8ba` through
+      `INS-20260804-191835-bd64`. This worker branch was created from `main` **after**
+      all of that had already landed.
+- [x] Confirmed with fresh, real evidence (not narration) that this task's own branch
+      already matches the fully-implemented target state:
+      - `git diff origin/main HEAD -- superboss-register.py` → 0 files changed (byte-identical).
+      - `python3 -m pytest tests/test_resolve_superboss_db_path.py
+        tests/test_ocid_artifact_links.py -v` → **14/14 passed** (8 DB-path-resolution
+        tests covering all 3 required failure paths -- missing file, zero-byte file,
+        missing `umr_tasks` table -- plus the env-override and real-live-database
+        success paths; 6 `ocid_artifact_links` wiring tests).
+      - `py_compile` of `superboss-register.py` → clean.
+      - Live import of the module resolves `DB_PATH` to the real production path
+        `/opt/veridian/ai-os/memory/superboss-register.sqlite`.
+      - Direct `sqlite_master` query against that live database confirms both
+        `umr_tasks` and `ocid_artifact_links` tables exist.
+      - Live-deployed copy at `/opt/veridian/scripts/superboss-register.py` (separate
+        git clone) is at the same commit (`199e73c`) and contains
+        `resolve_superboss_db_path` / `ocid_artifact_links`, closing the deploy-sync gap
+        flagged in `INS-20260804-184013-b8ba`.
+- [x] Per Rule 1/Rule 6 of `INS-20260804-180709-ef57` (one OCID/UMR/task identity per
+      logical unit of work; zero duplication; reuse the existing UMR, never mint a
+      second implementation) and the explicit instruction in
+      `INS-20260804-180027-9314` ("if this is a duplicate of an already queued
+      submission ... report that instead of resubmitting"): **no new PR was opened**,
+      since there is no code delta to submit -- opening one would duplicate PR #20/#21's
+      already-merged, already-tested, already-deployed implementation of the identical
+      change against the identical file.
 
 ## Remaining
-- [ ] tier1 + approve makes PR #14 eligible for autonomous merge per the standing trust model -- actual merge is out of this task's stated scope (SPEC asked only to trigger the audit sweep and post the verdict, not to merge)
+- [ ] None. This task's SPEC requirement (deterministic, verification-gated
+      `resolve_superboss_db_path()` replacing the plain `DB_PATH` default) is already
+      fully implemented, tested, merged (PR #20 + PR #21), and live-deployed --
+      confirmed above with fresh evidence rather than assumed from history. Reporting
+      this task complete as a verified duplicate of already-shipped work, per the
+      Owner's own zero-duplication rule.

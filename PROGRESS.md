@@ -20,6 +20,10 @@
       follow-on to UMR-20260804-180142-676d) alongside the existing OCID-068 /
       UMR-20260804-170055-a069 citation, so the audit trail names this specific re-verification
       pass without changing any real behavior.
+- [x] Opened and merged real PR #23
+      (https://github.com/FChecklist/veridian-scripts/pull/23, merged 2026-08-04T19:45:54Z)
+      showing this fresh test output (14/14 passing), citing UMR-20260804-194230,
+      UMR-20260804-180142-676d, and OCID-068 UMR-20260804-170055-a069.
+
 ## Remaining
-- [ ] Open and merge a real PR showing this fresh test output, citing this UMR and
-      OCID-068 UMR-20260804-170055-a069.
+(none)

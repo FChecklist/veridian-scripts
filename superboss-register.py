@@ -74,7 +74,12 @@ def resolve_superboss_db_path(default_path="/opt/veridian/ai-os/memory/superboss
     addendum UMR-20260804-170055-a069, itself under OCID-068's own real UMR
     UMR-20260804-164106-3fb8 -- the standing hard-rule-7 implementation lock
     was given a fresh, explicit, real-time Owner override scoped narrowly to
-    this one change). This is the single canonical chokepoint: the one real
+    this one change; independently re-confirmed by the "full spec" follow-up
+    directive UMR-20260804-194230, itself a follow-on to
+    UMR-20260804-180142-676d, which had carried only a short summary of this
+    same real 5-step algorithm -- both re-verify, neither changes, the real
+    behavior already implemented and merged below). This is the single
+    canonical chokepoint: the one real
     place DB_PATH is computed anywhere in this codebase. resource_governor.py
     (via its own _superboss_register() importlib loader) and every other
     real caller of this module reads the module-level DB_PATH this function

@@ -651,7 +651,44 @@ def submit(task_spec, tier, source_trigger):
             return {"accepted": False, "umr_id": umr_id, "reason": reason,
                      "reuse_check_result": reuse_check_result}
 
+        # OCID-068 seven-rule guardrails addendum, Rule 1 (real, previously
+        # documented gap -- see the module comment above
+        # find_active_umr_by_identity()'s own definition, and
+        # UMR-20260804-180711-7f96 / UMR-20260804-194355-be9c): a retry/
+        # resume/redispatch of the SAME task_identity, after its prior
+        # umr_tasks row already went terminal (completed/failed/killed/
+        # rejected_duplicate), used to always mint a brand-new umr_id here --
+        # the real caller this fixes is dispatch-tick.py's
+        # resume_interrupted_workers_tick(), which reuses task_identity=task_id
+        # stably across every resume attempt for a given worker task. Reusing
+        # the prior row's own umr_id (via upsert_umr_task's existing
+        # ON CONFLICT(umr_id) DO UPDATE path) means a retried task keeps one
+        # real, continuous UMR history rather than a fresh, disconnected one
+        # per resume. Owner-dispatch callers (dispatch-owner-task.sh) mint a
+        # fresh timestamp+pid task_identity per call, so this never fires for
+        # them -- only a genuine identity collision (by construction, a
+        # retry/resume of the same real task) reuses a umr_id.
+        prior = sbr.find_most_recent_umr_by_identity(conn, task_identity)
+        reused_umr_id = prior["umr_id"] if prior else None
+
+        # Real fix (independent review, PR #26 round 1): upsert_umr_task()'s
+        # existing ON CONFLICT(umr_id) DO UPDATE path unconditionally
+        # overwrites outputs_json/logs_ref/metric_snapshot_json/
+        # ts_dispatched/ts_sigterm/ts_completed with whatever this record
+        # supplies -- a fresh submit() record supplies none of them, which
+        # would silently wipe the prior terminal run's real execution
+        # evidence the moment its umr_id is reused, defeating the whole
+        # point of "one real, continuous UMR history." Carry the prior row's
+        # own values forward here so a reuse preserves them; the resumed
+        # run's own worker/supervisor overwrites them for real via its own
+        # later update_umr_task() checkpoint calls as it actually progresses
+        # -- this only prevents the reuse INSERT itself from clobbering them
+        # with nulls before that real progress happens.
+        prior_outputs = json.loads(prior["outputs_json"]) if prior and prior.get("outputs_json") else {}
+        prior_metric_snapshot = json.loads(prior["metric_snapshot_json"]) if prior and prior.get("metric_snapshot_json") else None
+
         umr_id = sbr.upsert_umr_task(conn, {
+            "umr_id": reused_umr_id,
             "task_identity": task_identity,
             "tier": tier,
             "status": "queued",
@@ -660,8 +697,14 @@ def submit(task_spec, tier, source_trigger):
             "unit_name": task_spec.get("unit_name"),
             "tenant_id": tenant_id,
             "inputs": task_spec.get("inputs", {}),
-            "reason": "queued",
+            "reason": "queued" if not reused_umr_id else f"resubmitted (reused umr_id, prior status was {prior['status']!r})",
             "metadata": metadata,
+            "outputs": prior_outputs if reused_umr_id else {},
+            "logs_ref": prior["logs_ref"] if reused_umr_id else None,
+            "metric_snapshot": prior_metric_snapshot if reused_umr_id else None,
+            "ts_dispatched": prior["ts_dispatched"] if reused_umr_id else None,
+            "ts_sigterm": prior["ts_sigterm"] if reused_umr_id else None,
+            "ts_completed": prior["ts_completed"] if reused_umr_id else None,
         })
         # OCID-068 real requirement addendum (UMR-20260804-170055-a069, Owner
         # real-time implementation override on the standing hard-rule-7 lock):

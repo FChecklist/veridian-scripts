@@ -3130,6 +3130,41 @@ def find_active_umr_by_identity(conn, task_identity):
     return dict(row) if row else None
 
 
+def find_most_recent_umr_by_identity(conn, task_identity):
+    """OCID-068 seven-rule guardrails addendum, Rule 1 (UMR-20260804-180711-7f96,
+    UMR-20260804-194355-be9c): "one logical task shall have exactly one OCID,
+    exactly one UMR... and any retry, resume, redispatch, supervisor, worker,
+    executor, or restart shall reuse the existing UMR rather than minting a
+    new one." find_active_umr_by_identity() above only sees ACTIVE
+    (queued/dispatched/running) rows -- by design, since it exists to reject a
+    racing SECOND live submission, not to find history. This function is the
+    complement: any row at all for task_identity, active or terminal, most
+    recent first. Used by submit() to decide whether a resume/retry should
+    reuse a prior (now-terminal) UMR id instead of minting a fresh one -- the
+    real, previously-documented gap this closes (see this file's own
+    resource_governor.py callers and the module comment above
+    find_active_umr_by_identity() describing exactly this limitation).
+
+    Real fix (independent review, PR #26 round 1): excludes
+    status='rejected_duplicate' rows. The primary real caller,
+    resource_governor.py's resume_interrupted_workers_tick() path, calls
+    submit() every tick for a task that is still active -- each of those
+    calls, while the real row is queued/dispatched/running, inserts a
+    rejected_duplicate STUB row (via find_active_umr_by_identity()'s own
+    rejection path) with a LATER ts_submitted than the real row it rejected.
+    Without this exclusion, a genuine later resume (after the real row
+    finally goes terminal) would pick the newest rejected_duplicate stub
+    instead of the real historical row -- grafting the resume onto a
+    spurious placeholder rather than continuing the real UMR's own history,
+    the opposite of this function's purpose."""
+    row = conn.execute(
+        "SELECT * FROM umr_tasks WHERE task_identity=? AND status != 'rejected_duplicate' "
+        "ORDER BY ts_submitted DESC LIMIT 1",
+        (task_identity,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def upsert_umr_task(conn, record):
     """Insert-or-replace ONE umr_tasks row keyed on umr_id (generated here if
     not supplied). Does NOT commit -- caller (resource_governor.py) owns the
@@ -3140,12 +3175,35 @@ def upsert_umr_task(conn, record):
     optional, defaults to None via record.get() below -- every existing real
     caller omits this key entirely and gets NULL, same as before this field
     existed (100% backward compatible). Treated as an immutable
-    submission-time classification field, same as tier/task_kind/
-    source_trigger: it is written once on INSERT and deliberately NOT part of
-    the ON CONFLICT DO UPDATE SET list, so a later re-upsert of the same
-    umr_id (e.g. the running->completed status transitions this function is
-    also used for) can never silently overwrite/clear the tenant a task was
-    originally submitted under.
+    submission-time classification field: written once on INSERT and
+    deliberately NOT part of the ON CONFLICT DO UPDATE SET list, so a later
+    re-upsert of the same umr_id can never silently overwrite/clear the
+    tenant a task was originally submitted under.
+
+    Real fix (independent review, PR #26 round 2): tier/source_trigger/
+    task_kind/inputs_json ARE now part of the ON CONFLICT DO UPDATE SET list
+    (they previously were not, on the same "immutable submission-time field"
+    reasoning as tenant_id above -- that reasoning was wrong for these four
+    specifically, since before OCID-068 Rule 1's UMR-reuse-on-resume feature
+    this function's ON CONFLICT branch was never actually exercised by any
+    real caller with a genuinely different new inputs/tier/source_trigger for
+    an existing umr_id; the branch was dead code in practice). The real,
+    confirmed bug this closes: dispatch-tick.py's
+    resume_interrupted_workers_tick() resubmits a stuck task with a corrected
+    inputs.action ('reset_failed_and_start' vs 'start', based on the unit's
+    live ActiveState) and tier=1 (to intentionally outrank brand-new
+    dispatch) on every resume -- resource_governor.py's _perform_spawn()
+    reads inputs.action straight off the DB row at dispatch time, not from
+    any in-memory task_spec. Before this fix, reusing a terminal row's umr_id
+    silently discarded that corrected action/tier and kept the FIRST-EVER
+    submission's stale values forever, meaning a resume after a real systemd
+    start-limit trip (ActiveState=failed) would keep issuing a plain
+    'systemctl start' instead of the required 'reset-failed' first -- making
+    stuck-worker auto-resume worse, not better, exactly the scenario Rule 1
+    exists to fix. tenant_id and the five UTM fields remain deliberately
+    excluded (unaffected by this fix): they are genuinely immutable
+    submission-time facts about WHO/WHERE a task originated, not per-attempt
+    dispatch parameters like inputs/tier/source_trigger.
 
     Phase 6 (task-umr-tasks-utm-correlation-phase6-2026-07-29): every INSERT
     also populates the five UTM fields via _derive_umr_utm_fields(record) --
@@ -3154,11 +3212,11 @@ def upsert_umr_task(conn, record):
     call site" pattern register_capability() uses for capability_registry.
     Deliberately NOT part of the ON CONFLICT DO UPDATE SET list, same reason
     tenant_id is excluded above: fixed at INSERT time, never silently
-    overwritten by a later re-upsert (in practice every real status
-    transition goes through update_umr_task()'s partial UPDATE instead, which
-    never touches these columns either -- this exclusion is defense-in-depth
-    for this function's own generic re-upsert path, not something that fires
-    today)."""
+    overwritten by a later re-upsert -- every real status transition goes
+    through update_umr_task()'s partial UPDATE instead, which never touches
+    these columns either, and (as of Rule 1's UMR-reuse-on-resume feature,
+    PR #26) this function's ON CONFLICT branch genuinely does fire in real
+    production use, not just in theory."""
     umr_id = record.get("umr_id") or _new_id("UMR")
     now = _now_iso()
     utm = _derive_umr_utm_fields(record)
@@ -3172,7 +3230,9 @@ def upsert_umr_task(conn, record):
         "outputs_json=excluded.outputs_json, logs_ref=excluded.logs_ref, "
         "metric_snapshot_json=excluded.metric_snapshot_json, ts_dispatched=excluded.ts_dispatched, "
         "ts_sigterm=excluded.ts_sigterm, ts_completed=excluded.ts_completed, reason=excluded.reason, "
-        "metadata_json=excluded.metadata_json",
+        "metadata_json=excluded.metadata_json, "
+        "tier=excluded.tier, source_trigger=excluded.source_trigger, task_kind=excluded.task_kind, "
+        "inputs_json=excluded.inputs_json",
         (
             umr_id, record["task_identity"], record.get("ts_submitted") or now,
             record["tier"], record.get("status", "queued"), record["source_trigger"],

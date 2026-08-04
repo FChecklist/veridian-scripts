@@ -1039,7 +1039,112 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
     return None, None
 
 
+# OCID-068 seven-rule guardrails addendum, Rule 2 (UMR-20260804-180711-7f96,
+# UMR-20260804-203846-e722, UMR-20260804-170055-a069): "every dispatch shall
+# return exactly one of five allowed results, success, failed, blocked,
+# rejected, or cancelled... on failure the dispatch must return a real error
+# id, a real root cause, real evidence, and a real next action." dispatch_one()
+# already has a real, richer internal "action" vocabulary (idle, deferred,
+# frozen, dispatched, rejected_duplicate_pr, ...) that other real code
+# (dispatch-tick.py, run_tick()'s own loop-stop condition, existing tests)
+# depends on -- this constant maps that existing vocabulary onto Rule 2's
+# canonical 5-value outcome, additively, without changing dispatch_one()'s
+# existing "action"/"result" shape for any current caller.
+RULE2_OUTCOME_MAP = {
+    "emergency_stopped": "blocked",
+    "frozen": "blocked",
+    "superboss_unavailable": "blocked",
+    "deferred": "blocked",
+    "rejected_duplicate_pr": "rejected",
+}
+
+
+def classify_dispatch_outcome(dispatch_result):
+    """Rule 2's real classification, applied to dispatch_one()'s own return
+    dict. Two of dispatch_one()'s real actions -- "idle" (queue empty, no
+    task was ever selected) and "would_dispatch" (an explicit --dry-run
+    preview) -- are not a real dispatch ATTEMPT at all, so Rule 2's "every
+    dispatch shall return..." does not apply to them by construction; this
+    function returns outcome=None for both rather than forcing a fabricated
+    value into the 5-enum. Every other action maps to exactly one of
+    success/failed/blocked/rejected. "cancelled" is real, but is emitted by
+    scan_stuck_tasks()'s own real SIGKILL path (status="killed"), a distinct
+    real lifecycle event from dispatch_one()'s own dispatch attempts -- out
+    of this function's scope, not fabricated here.
+
+    Returns {"outcome": str|None, "error_id": str|None, "root_cause": str|None,
+    "evidence": str|None, "next_action": str|None} -- the four extra fields
+    are populated (never left silently empty) whenever outcome is anything
+    other than "success"/None, per Rule 2's own explicit requirement."""
+    action = dispatch_result.get("action")
+    umr_id = dispatch_result.get("umr_id")
+
+    if action in ("idle", "would_dispatch"):
+        return {"outcome": None, "error_id": None, "root_cause": None, "evidence": None, "next_action": None}
+
+    if action == "dispatched":
+        spawn_result = dispatch_result.get("result") or {}
+        if spawn_result.get("status") == "running":
+            return {"outcome": "success", "error_id": None, "root_cause": None, "evidence": None, "next_action": None}
+        # _perform_spawn() always resolves failures to status="failed" with a
+        # real outputs.error/outputs.stderr -- never an empty/silent failure
+        # (see its own docstring's "no exception ever escapes" contract).
+        outputs = spawn_result.get("outputs") or {}
+        root_cause = outputs.get("error") or outputs.get("stderr") or "unknown spawn failure (no error detail captured)"
+        return {
+            "outcome": "failed",
+            "error_id": f"DISPATCH-FAILED-{umr_id}" if umr_id else "DISPATCH-FAILED-UNKNOWN-UMR",
+            "root_cause": root_cause,
+            "evidence": json.dumps(outputs),
+            "next_action": "inspect outputs_json on this umr_id's umr_tasks row; retry via resume_interrupted_workers_tick() once the underlying cause is fixed",
+        }
+
+    if action in RULE2_OUTCOME_MAP:
+        outcome = RULE2_OUTCOME_MAP[action]
+        detail = dispatch_result.get("detail") or "no detail captured"
+        next_actions = {
+            "blocked": "re-run dispatch_one() on the next tick; this is a real, expected transient block (metric threshold, concurrency cap, EMERGENCY_STOP, or Superboss Register unavailability), not a task-specific failure",
+            "rejected": "no action -- a duplicate PR already exists for this task_identity; this row is intentionally terminal",
+        }
+        return {
+            "outcome": outcome,
+            "error_id": f"DISPATCH-{outcome.upper()}-{action.upper()}",
+            "root_cause": detail,
+            "evidence": json.dumps({k: v for k, v in dispatch_result.items() if k != "metrics"}),
+            "next_action": next_actions.get(outcome, "no defined next action for this outcome"),
+        }
+
+    # Defensive: an action this function doesn't recognize (e.g. a future
+    # addition) must never silently produce an empty/missing classification --
+    # Rule 2 explicitly forbids that. Surfaced as "failed" with a real,
+    # honest root_cause naming the gap, rather than guessed at.
+    return {
+        "outcome": "failed",
+        "error_id": f"DISPATCH-UNCLASSIFIED-ACTION-{action}",
+        "root_cause": f"classify_dispatch_outcome() has no mapping for dispatch_one() action={action!r} -- "
+                       f"this is a real gap in this function's own coverage, not a task failure",
+        "evidence": json.dumps({k: v for k, v in dispatch_result.items() if k != "metrics"}),
+        "next_action": "add this action to RULE2_OUTCOME_MAP (or the idle/would_dispatch exclusion) in resource_governor.py",
+    }
+
+
 def dispatch_one(dry_run=False, now=None):
+    """Real, thin Rule 2 wrapper (OCID-068 seven-rule guardrails addendum,
+    UMR-20260804-180711-7f96, UMR-20260804-203846-e722): calls
+    _dispatch_one_inner() (the actual, unchanged dispatch logic -- see its
+    own docstring) and merges classify_dispatch_outcome()'s real
+    outcome/error_id/root_cause/evidence/next_action fields into the
+    returned dict before returning, so every real dispatch_one() call now
+    genuinely carries Rule 2's required classification alongside the
+    existing "action"/"result" shape every current caller (dispatch-tick.py,
+    run_tick(), existing tests) already depends on -- purely additive, no
+    existing key removed or renamed."""
+    result = _dispatch_one_inner(dry_run=dry_run, now=now)
+    result.update(classify_dispatch_outcome(result))
+    return result
+
+
+def _dispatch_one_inner(dry_run=False, now=None):
     """Checks all 4 real metrics, and only if NONE are at/over threshold,
     acquires dispatch_core's shared lock and does EVERYTHING else --
     selecting the next queued row, the free-slot check, and the real spawn

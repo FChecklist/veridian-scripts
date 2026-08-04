@@ -308,14 +308,106 @@ def _real_load_average():
     return {"1m": load1, "5m": load5, "15m": load15}
 
 
+# OCID-068 seven-rule guardrails addendum, Rule 4 (UMR-20260804-180711-7f96,
+# UMR-20260804-205741-cf3f, citing UMR-20260804-170055-a069): "the project
+# manager shall always see real counts for running, queued, blocked, failed,
+# rejected, retrying, stale, and completed tasks, and any alert cooldown may
+# suppress notifications only, it must never suppress the underlying real
+# data or real counts themselves."
+#
+# Real discovery: task.yaml's own status field (blocked/in_progress/
+# completed/...) and umr_tasks' own status column (queued/running/completed/
+# failed/killed/rejected_duplicate) are two distinct, real vocabularies for
+# two distinct real concepts -- per-worker-task lifecycle vs. per-dispatch-
+# attempt governance state. Rule 4's own 8-word list spans both: "blocked"
+# and "stale" are real task.yaml-level/heartbeat-level concepts (this
+# module's own existing blocked_task_count / stuck_tasks already compute
+# them); "running/queued/failed/rejected/completed" map directly onto real
+# umr_tasks.status values; "retrying" has no dedicated status column, so it
+# is derived from Rule 1's own real, already-live evidence trail (PR #26):
+# a row whose `reason` matches "resubmitted (reused umr_id" is, by
+# construction, a real resume/retry. One real umr_tasks status,
+# "killed" (the real SIGKILL-stuck-task terminal state,
+# scan_stuck_tasks()'s own), has no explicit bucket in Rule 4's literal
+# 8-word list -- rather than silently drop it or force-fit it into a wrong
+# bucket, it is surfaced as its own honestly-labeled 9th field, consistent
+# with Rule 4's own stated goal (real counts always visible, nothing
+# suppressed).
+RULE4_RETRY_REASON_PATTERN = re.compile(r"^resubmitted \(reused umr_id")
+
+
+def compute_real_task_counts(tasks, stuck_tasks, now):
+    """Rule 4's real counts, gathered fresh every call -- never cached,
+    never suppressed by any cooldown (this function has no cooldown logic
+    of its own, and is called unconditionally by
+    write_stuck_tasks_heartbeat(), itself called unconditionally every real
+    tick). Queries the real live umr_tasks table directly via
+    resource_governor's own _safe_superboss_register() helper (same
+    fail-open philosophy as every other real caller of that helper: a
+    genuinely unavailable Superboss Register must never crash this tick's
+    own heartbeat write, it surfaces as a real, honest
+    'umr_counts_error' field instead of a fabricated zero).
+
+    Returns a dict with real integer counts for: running, queued, blocked,
+    failed, rejected, retrying, stale, completed, killed. 'blocked' and
+    'stale' come from `tasks`/`stuck_tasks` (task.yaml-level); every other
+    key comes from a real, fresh umr_tasks GROUP BY status query
+    (dispatch-level)."""
+    counts = {
+        "blocked": sum(1 for d in tasks.values() if d.get("status") == "blocked"),
+        "stale": len(stuck_tasks),
+        "running": 0, "queued": 0, "failed": 0, "rejected": 0,
+        "retrying": 0, "completed": 0, "killed": 0,
+    }
+    sbr, error = resource_governor._safe_superboss_register("compute_real_task_counts")
+    if error:
+        counts["umr_counts_error"] = error
+        return counts
+
+    conn = sbr._connect()
+    try:
+        rows = conn.execute("SELECT status, COUNT(*) AS n FROM umr_tasks GROUP BY status").fetchall()
+        for row in rows:
+            status, n = row["status"], row["n"]
+            if status == "running":
+                counts["running"] += n
+            elif status == "queued":
+                counts["queued"] += n
+            elif status == "failed":
+                counts["failed"] += n
+            elif status == "rejected_duplicate":
+                counts["rejected"] += n
+            elif status == "completed":
+                counts["completed"] += n
+            elif status == "killed":
+                counts["killed"] += n
+            # Any future/unrecognized status value is intentionally NOT
+            # silently dropped from the real total below -- see
+            # "umr_tasks_total" cross-check.
+        counts["umr_tasks_total"] = sum(r["n"] for r in rows)
+
+        retrying_row = conn.execute(
+            "SELECT COUNT(*) AS n FROM umr_tasks WHERE reason LIKE 'resubmitted (reused umr_id%'"
+        ).fetchone()
+        counts["retrying"] = retrying_row["n"]
+    finally:
+        conn.close()
+    return counts
+
+
 def write_stuck_tasks_heartbeat(tasks, stuck_tasks, now):
     """Writes ONE canonical, real-state file every tick: current timestamp,
     real load average, whether resource_governor's EMERGENCY_STOP sentinel is
-    set, current blocked/in_progress task counts, and the stuck-task list
-    computed above. Lets any future check (this laptop, Cowork, anywhere
-    else) read one file for real current state instead of running several
-    separate SSH commands by hand. Read-only w.r.t. task state -- this
-    function never mutates a task.yaml or triggers dispatch; it only reports.
+    set, current blocked/in_progress task counts, the stuck-task list
+    computed above, and (Rule 4, OCID-068 seven-rule guardrails addendum)
+    the full real task-count breakdown from compute_real_task_counts().
+    Lets any future check (this laptop, Cowork, anywhere else) read one file
+    for real current state instead of running several separate SSH commands
+    by hand. Read-only w.r.t. task state -- this function never mutates a
+    task.yaml or triggers dispatch; it only reports. Called unconditionally
+    every real tick, with no cooldown of its own -- Rule 4's "never suppress
+    the underlying real data" requirement holds by construction: nothing in
+    this function's own call path can skip a write once main() reaches it.
     Atomic write (tmp + os.replace), same pattern as _atomic_save_yaml, so a
     concurrent reader never sees a half-written file."""
     doc = {
@@ -326,6 +418,7 @@ def write_stuck_tasks_heartbeat(tasks, stuck_tasks, now):
         "running_task_count": sum(1 for d in tasks.values() if d.get("status") == "in_progress"),
         "stuck_task_threshold_minutes": STUCK_TASK_THRESHOLD_MINUTES,
         "stuck_tasks": stuck_tasks,
+        "real_task_counts": compute_real_task_counts(tasks, stuck_tasks, now),
     }
     _atomic_save_json(STUCK_TASKS_HEARTBEAT_PATH, doc)
     return doc

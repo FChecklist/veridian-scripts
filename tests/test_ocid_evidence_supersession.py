@@ -64,6 +64,26 @@ class _FakeDispatchCoreAlwaysFreeSlot:
         pass
 
 
+# Real, disclosed incident (found and fully cleaned up before this PR was
+# finalized): an earlier version of this test file monkey-patched
+# _dispatch_core but NOT _perform_spawn. For task_kind=='veridian_task_create'
+# rows that were NOT superseded (the "control" cases below, by design), that
+# meant dispatch_one() reached the real _perform_spawn(), whose
+# veridian_task_create branch runs `python3 veridian-task.py create` as a
+# REAL subprocess against real, hardcoded /opt/veridian paths -- completely
+# independent of this test's own SUPERBOSS_REGISTER_DB isolation, which only
+# covers resource_governor.py's/superboss-register.py's own DB access, not a
+# separate script invoked via subprocess. Real consequence: repeated test
+# runs during development created 18 real local task directories, 12 real
+# pushed branches, and 12 real open GitHub PRs on the live veridian-scripts
+# repo, all using this file's own fake test title strings -- all found and
+# cleaned up (units stopped, PRs closed, branches deleted, worktrees pruned,
+# task directories removed) before this PR was finalized. Every test below
+# now ALSO monkey-patches _perform_spawn itself, so no test in this file can
+# ever reach a real subprocess/git/systemd call again, regardless of which
+# code path it takes.
+
+
 def _seed_scratch_db(path):
     spec = importlib.util.spec_from_file_location("sbr_seed_rc", os.path.join(SCRIPTS_DIR, "superboss-register.py"))
     sbr = importlib.util.module_from_spec(spec)
@@ -131,6 +151,7 @@ def test_reproduces_the_real_incident_queued_task_superseded_by_newer_evidence()
         env = {"SUPERBOSS_REGISTER_DB": scratch_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
         rg = _load("rg_ocid_supersede_repro", "resource_governor.py", env=env)
         rg._dispatch_core = lambda: _FakeDispatchCoreAlwaysFreeSlot()
+        rg._perform_spawn = lambda row: {"status": "running", "unit_name": "fake-test-unit-never-real.service", "outputs": {}}
 
         os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
         try:
@@ -166,6 +187,7 @@ def test_queued_task_with_ocid_but_no_newer_evidence_still_spawns_normally():
         env = {"SUPERBOSS_REGISTER_DB": scratch_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
         rg = _load("rg_ocid_supersede_control", "resource_governor.py", env=env)
         rg._dispatch_core = lambda: _FakeDispatchCoreAlwaysFreeSlot()
+        rg._perform_spawn = lambda row: {"status": "running", "unit_name": "fake-test-unit-never-real.service", "outputs": {}}
 
         os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
         try:
@@ -208,6 +230,7 @@ def test_older_evidence_before_submission_does_not_supersede():
         env = {"SUPERBOSS_REGISTER_DB": scratch_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
         rg = _load("rg_ocid_supersede_old_evidence", "resource_governor.py", env=env)
         rg._dispatch_core = lambda: _FakeDispatchCoreAlwaysFreeSlot()
+        rg._perform_spawn = lambda row: {"status": "running", "unit_name": "fake-test-unit-never-real.service", "outputs": {}}
 
         os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
         try:
@@ -239,6 +262,7 @@ def test_no_ocid_in_title_never_matches():
         env = {"SUPERBOSS_REGISTER_DB": scratch_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
         rg = _load("rg_ocid_supersede_no_ocid", "resource_governor.py", env=env)
         rg._dispatch_core = lambda: _FakeDispatchCoreAlwaysFreeSlot()
+        rg._perform_spawn = lambda row: {"status": "running", "unit_name": "fake-test-unit-never-real.service", "outputs": {}}
 
         os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
         try:
@@ -278,6 +302,7 @@ def test_systemctl_action_rows_never_checked():
         env = {"SUPERBOSS_REGISTER_DB": scratch_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
         rg = _load("rg_ocid_supersede_systemctl", "resource_governor.py", env=env)
         rg._dispatch_core = lambda: _FakeDispatchCoreAlwaysFreeSlot()
+        rg._perform_spawn = lambda row: {"status": "running", "unit_name": "fake-test-unit-never-real.service", "outputs": {}}
 
         os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
         try:

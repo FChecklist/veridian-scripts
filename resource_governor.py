@@ -669,6 +669,44 @@ def submit(task_spec, tier, source_trigger):
             return {"accepted": False, "umr_id": umr_id, "reason": reason,
                      "reuse_check_result": reuse_check_result}
 
+        # OCID-068 seven-rule guardrails addendum, Rule 6 (UMR-20260804-180711-7f96,
+        # UMR-20260804-205741-cf3f): "zero duplication, before creating any
+        # new UMR verify the OCID... and if a match is found return the
+        # existing UMR instead of creating a duplicate." The complement of
+        # the task_identity check just above: same real ACTIVE-status-only
+        # scope (a genuinely CONCURRENT second UMR for an OCID that already
+        # has one in flight -- see find_active_umr_by_ocid()'s own docstring
+        # for why "one OCID = one UMR forever" would be a real, wrong
+        # over-application, given this session's own history of many
+        # legitimate sequential UMRs per OCID). Runs inside the same
+        # write-lock as the task_identity check, closing the same TOCTOU
+        # window. Only fires when the caller's task_spec carries an
+        # ocid_number (opt-in, same as the OCID-linkage wiring below) --
+        # every caller that omits it is unaffected.
+        ocid_active = sbr.find_active_umr_by_ocid(conn, ocid_number) if ocid_number else None
+        if ocid_active:
+            reason = (
+                f"duplicate submission rejected: ocid_number={ocid_number!r} already has an "
+                f"active umr_id={ocid_active['umr_id']} ({ocid_active['status']}, "
+                f"source_trigger={ocid_active['source_trigger']!r}, tier={ocid_active['tier']})"
+            )
+            umr_id = sbr.upsert_umr_task(conn, {
+                "task_identity": task_identity,
+                "tier": tier,
+                "status": "rejected_duplicate",
+                "source_trigger": source_trigger,
+                "task_kind": task_spec.get("task_kind", "systemctl_action"),
+                "unit_name": task_spec.get("unit_name"),
+                "tenant_id": tenant_id,
+                "inputs": task_spec.get("inputs", {}),
+                "reason": reason,
+                "metadata": metadata,
+            })
+            conn.commit()
+            conn.close()
+            return {"accepted": False, "umr_id": umr_id, "reason": reason,
+                     "reuse_check_result": reuse_check_result}
+
         # OCID-068 seven-rule guardrails addendum, Rule 1 (real, previously
         # documented gap -- see the module comment above
         # find_active_umr_by_identity()'s own definition, and

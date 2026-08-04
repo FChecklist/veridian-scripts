@@ -3130,6 +3130,47 @@ def find_active_umr_by_identity(conn, task_identity):
     return dict(row) if row else None
 
 
+def find_active_umr_by_ocid(conn, ocid_number):
+    """OCID-068 seven-rule guardrails addendum, Rule 6 (UMR-20260804-180711-7f96,
+    UMR-20260804-205741-cf3f, citing UMR-20260804-170055-a069): "zero
+    duplication, before creating any new UMR verify the OCID... and if a
+    match is found return the existing UMR instead of creating a duplicate."
+
+    find_active_umr_by_identity() above already provides real, deterministic
+    dedup on task_identity (a caller-provided string) -- this is the OCID-
+    dimension complement, using ocid_artifact_links (the real, canonical
+    OCID<->UMR registry this same addendum built for exactly this purpose,
+    per UMR-20260804-170055-a069) as the join: any UMR already linked to
+    ocid_number, currently in an ACTIVE status (queued/dispatched/running).
+
+    Deliberately narrower than "one OCID = one UMR forever" -- this session's
+    own real history has many legitimate, sequential, non-overlapping UMRs
+    for the same OCID (e.g. OCID-068 itself has ~15 real UMRs across
+    distinct PM directives). Blocking that pattern would be a real, wrong
+    over-application of this rule. This function only catches a genuinely
+    CONCURRENT second UMR for an OCID that already has one actively in
+    flight -- the real, narrow case Rule 6 exists to prevent (an OCID being
+    worked twice at once, not an OCID being worked more than once, ever).
+
+    Returns the existing active UMR's own real row (dict) if found, else
+    None -- never fabricates a match."""
+    ocid_rows = conn.execute(
+        "SELECT DISTINCT umr_id FROM ocid_artifact_links WHERE ocid_number=?",
+        (ocid_number,),
+    ).fetchall()
+    if not ocid_rows:
+        return None
+    umr_ids = [r["umr_id"] for r in ocid_rows]
+    umr_placeholders = ",".join("?" * len(umr_ids))
+    status_placeholders = ",".join("?" * len(UMR_ACTIVE_STATUSES))
+    row = conn.execute(
+        f"SELECT * FROM umr_tasks WHERE umr_id IN ({umr_placeholders}) "
+        f"AND status IN ({status_placeholders}) ORDER BY ts_submitted DESC LIMIT 1",
+        (*umr_ids, *UMR_ACTIVE_STATUSES),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def find_most_recent_umr_by_identity(conn, task_identity):
     """OCID-068 seven-rule guardrails addendum, Rule 1 (UMR-20260804-180711-7f96,
     UMR-20260804-194355-be9c): "one logical task shall have exactly one OCID,

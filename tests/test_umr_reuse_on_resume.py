@@ -374,6 +374,73 @@ def test_reuse_preserves_prior_outputs_logs_metrics_completion():
         print(f"PASS: test_reuse_preserves_prior_outputs_logs_metrics_completion -> outputs/logs/metrics/ts_completed all survived reuse")
 
 
+def test_reuse_applies_new_inputs_and_tier_not_stale_first_submission():
+    """Round-2 review finding (PR #26): reusing a terminal row's umr_id must
+    apply the NEW submission's inputs_json/tier/source_trigger/task_kind, not
+    silently keep the very first submission's stale values. This is the real
+    bug that would have made dispatch-tick.py's
+    resume_interrupted_workers_tick() actively worse: it resubmits with a
+    corrected inputs.action ('reset_failed_and_start' for a unit in
+    ActiveState=failed) and tier=1 on every resume; resource_governor.py's
+    _perform_spawn() reads inputs.action straight off the DB row at dispatch
+    time, so a reuse that dropped the new action would keep issuing a plain
+    'start' instead of 'reset-failed'+'start', which keeps failing once a
+    real systemd start-limit burst has tripped."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        env = {"SUPERBOSS_REGISTER_DB": scratch_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
+        rg = _load("rg_reuse_new_inputs", "resource_governor.py", env=env)
+        sbr = _load("sbr_reuse_new_inputs", "superboss-register.py", env=env)
+
+        os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
+        try:
+            first = rg.submit(
+                task_spec={"task_identity": "test-resume-reuse-task-7", "task_kind": "systemctl_action",
+                           "unit_name": "veridian-worker@test-resume-reuse-task-7.service",
+                           "inputs": {"action": "start"}},
+                tier=2, source_trigger="unit_test",
+            )
+            umr_id = first["umr_id"]
+
+            conn = sbr._connect()
+            try:
+                sbr.update_umr_task(conn, umr_id, status="failed", reason="test: simulated real systemd failure")
+                conn.commit()
+            finally:
+                conn.close()
+
+            # Real resume_interrupted_workers_tick()-shaped resubmission:
+            # corrected action for a unit whose start-limit has tripped, at
+            # the real tier=1 priority bump.
+            second = rg.submit(
+                task_spec={"task_identity": "test-resume-reuse-task-7", "task_kind": "systemctl_action",
+                           "unit_name": "veridian-worker@test-resume-reuse-task-7.service",
+                           "inputs": {"action": "reset_failed_and_start", "resumed_after_state": "failed"}},
+                tier=1, source_trigger="dispatch-tick:resume_interrupted_workers",
+            )
+            assert second["umr_id"] == umr_id, second
+
+            conn = sbr._connect()
+            try:
+                row = conn.execute(
+                    "SELECT inputs_json, tier, source_trigger, task_kind FROM umr_tasks WHERE umr_id=?",
+                    (umr_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+        finally:
+            del os.environ["SUPERBOSS_REGISTER_DB"]
+
+        inputs = json.loads(row["inputs_json"])
+        assert inputs.get("action") == "reset_failed_and_start", (
+            f"Rule 1 regression: reuse kept the stale first-submission action, got {inputs!r}"
+        )
+        assert row["tier"] == 1, f"Rule 1 regression: reuse kept the stale first-submission tier, got {row['tier']!r}"
+        assert row["source_trigger"] == "dispatch-tick:resume_interrupted_workers", row["source_trigger"]
+        print(f"PASS: test_reuse_applies_new_inputs_and_tier_not_stale_first_submission -> inputs={inputs}, tier={row['tier']}")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

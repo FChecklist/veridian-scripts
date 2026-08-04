@@ -3130,6 +3130,27 @@ def find_active_umr_by_identity(conn, task_identity):
     return dict(row) if row else None
 
 
+def find_most_recent_umr_by_identity(conn, task_identity):
+    """OCID-068 seven-rule guardrails addendum, Rule 1 (UMR-20260804-180711-7f96,
+    UMR-20260804-194355-be9c): "one logical task shall have exactly one OCID,
+    exactly one UMR... and any retry, resume, redispatch, supervisor, worker,
+    executor, or restart shall reuse the existing UMR rather than minting a
+    new one." find_active_umr_by_identity() above only sees ACTIVE
+    (queued/dispatched/running) rows -- by design, since it exists to reject a
+    racing SECOND live submission, not to find history. This function is the
+    complement: any row at all for task_identity, active or terminal, most
+    recent first. Used by submit() to decide whether a resume/retry should
+    reuse a prior (now-terminal) UMR id instead of minting a fresh one -- the
+    real, previously-documented gap this closes (see this file's own
+    resource_governor.py callers and the module comment above
+    find_active_umr_by_identity() describing exactly this limitation)."""
+    row = conn.execute(
+        "SELECT * FROM umr_tasks WHERE task_identity=? ORDER BY ts_submitted DESC LIMIT 1",
+        (task_identity,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def upsert_umr_task(conn, record):
     """Insert-or-replace ONE umr_tasks row keyed on umr_id (generated here if
     not supplied). Does NOT commit -- caller (resource_governor.py) owns the

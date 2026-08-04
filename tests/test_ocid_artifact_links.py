@@ -213,13 +213,7 @@ def test_submit_gracefully_handles_broken_db_path():
     genuinely fails) -- not a synthetic mock, the real function's real
     failure path."""
     with tempfile.TemporaryDirectory() as d:
-        wrong_schema_db = os.path.join(d, "wrong-schema.sqlite")
-        conn = sqlite3.connect(wrong_schema_db)
-        conn.execute("CREATE TABLE unrelated_table (id INTEGER PRIMARY KEY)")
-        conn.commit()
-        conn.close()
-        assert os.path.getsize(wrong_schema_db) > 0
-
+        wrong_schema_db = _make_wrong_schema_db(d)
         env = {"SUPERBOSS_REGISTER_DB": wrong_schema_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
         rg = _load("rg_test_broken_db", "resource_governor.py", env=env)
 
@@ -239,12 +233,67 @@ def test_submit_gracefully_handles_broken_db_path():
         print(f"PASS: test_submit_gracefully_handles_broken_db_path -> {result['reason']}")
 
 
+def _make_wrong_schema_db(d):
+    """Real fixture, shared by every broken-DB regression test below: a
+    real, existing, non-zero-size SQLite file lacking the umr_tasks table,
+    so resolve_superboss_db_path()'s step 2 exists+non-zero pre-check
+    accepts it as the real candidate and step 4's schema check then
+    genuinely, really fails -- not a synthetic mock of the failure."""
+    path = os.path.join(d, "wrong-schema.sqlite")
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE unrelated_table (id INTEGER PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+    assert os.path.getsize(path) > 0
+    return path
+
+
+def test_dispatch_one_gracefully_handles_broken_db_path():
+    """Real regression test for the independent review round 2's finding:
+    dispatch_one()'s own docstring promises 'Never raises for a normal
+    nothing-to-do/frozen outcome' -- a broken Superboss Register must be the
+    same kind of real, non-raising outcome, not an uncaught crash of the
+    real dispatch loop."""
+    with tempfile.TemporaryDirectory() as d:
+        wrong_schema_db = _make_wrong_schema_db(d)
+        env = {"SUPERBOSS_REGISTER_DB": wrong_schema_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
+        rg = _load("rg_test_dispatch_one_broken", "resource_governor.py", env=env)
+        os.environ["SUPERBOSS_REGISTER_DB"] = wrong_schema_db
+        try:
+            result = rg.dispatch_one()
+        finally:
+            del os.environ["SUPERBOSS_REGISTER_DB"]
+        assert result["action"] == "superboss_unavailable", result
+        assert "umr_tasks table" in result["detail"], result
+        print(f"PASS: test_dispatch_one_gracefully_handles_broken_db_path -> {result['action']}")
+
+
+def test_scan_stuck_tasks_gracefully_handles_broken_db_path():
+    """Real regression test: scan_stuck_tasks() (the real SIGTERM/SIGKILL
+    stuck-task safety net) must never crash on a broken Superboss Register
+    -- it returns the same real, empty shape as the ordinary
+    nothing-stuck case, real failure still surfaced via ATTENTION.md."""
+    with tempfile.TemporaryDirectory() as d:
+        wrong_schema_db = _make_wrong_schema_db(d)
+        env = {"SUPERBOSS_REGISTER_DB": wrong_schema_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
+        rg = _load("rg_test_scan_stuck_broken", "resource_governor.py", env=env)
+        os.environ["SUPERBOSS_REGISTER_DB"] = wrong_schema_db
+        try:
+            result = rg.scan_stuck_tasks()
+        finally:
+            del os.environ["SUPERBOSS_REGISTER_DB"]
+        assert result == [], result
+        print(f"PASS: test_scan_stuck_tasks_gracefully_handles_broken_db_path -> {result}")
+
+
 if __name__ == "__main__":
     tests = [
         test_call_site_1_resource_governor_submit,
         test_call_site_2_supervisor_merge_wiring,
         test_insert_is_idempotent_on_repeat_call,
         test_submit_gracefully_handles_broken_db_path,
+        test_dispatch_one_gracefully_handles_broken_db_path,
+        test_scan_stuck_tasks_gracefully_handles_broken_db_path,
     ]
     failed = 0
     for t in tests:

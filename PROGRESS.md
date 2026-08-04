@@ -1,52 +1,36 @@
-# PROGRESS -- task-20260804-201653-resolve-real-merge-conflicts-on-pr-21--o
+# PROGRESS -- task-20260804-214508-ocid-068-a-real--distinct--later-directi
 
 ## Completed
-- [x] Checked real PR #21 state via `gh pr view`/`gh api` before acting: it was
-      already **MERGED** at `2026-08-04T19:29:07Z` (merge commit `199e73c7`),
-      **~47 minutes before this task was created** (`20260804-201653`). The
-      spec's premise ("genuinely OPEN with a real DIRTY merge state, two real
-      conflicts") was stale by the time this task ran -- a prior session
-      (self-citing `UMR-20260804-185749-c565`) had already done the conflict
-      resolution, updated the PR description with a detailed per-file
-      resolution writeup citing all three UMRs from this task's spec, and the
-      Owner account (`FChecklist`) had already posted a detailed AUDIT: PASS
-      review and merged it (`merged_by: FChecklist`).
-- [x] Did NOT attempt to redo/undo/re-merge anything -- there was no open PR
-      with conflict markers left to resolve, and re-litigating an
-      already-reviewed-and-merged Owner decision is out of scope.
-- [x] Independently verified (did not just trust the PR's self-report) by
-      cloning the repo fresh and inspecting `main` at its current tip
-      (post PR #26, which includes the PR #21 merge):
-      - `resource_governor.py`'s `_shed_load()` contains **both** real fixes
-        together: the `metrics=None`/`metrics_note` tick-counter-labeling fix
-        AND the `_safe_superboss_register("_shed_load")` fail-open wrapper.
-      - `supervisor-entrypoint.sh` contains **both**: the OCID-linkage wiring
-        block AND the more detailed checkpoint note text citing the Owner's
-        2026-07-31 full-approval-autonomy directive.
-      - Zero leftover `<<<<<<<`/`=======`/`>>>>>>>` conflict markers in either
-        file.
-      - `python3 -m py_compile resource_governor.py` -- clean.
-      - `bash -n supervisor-entrypoint.sh` -- clean.
-- [x] Independently re-ran the real existing test suite (not the PR's
-      self-reported numbers) against current `main`:
-      `pytest tests/test_resolve_superboss_db_path.py tests/test_ocid_artifact_links.py
-      test_worker_boot_activation_and_resume.py test_stuck_task_heartbeat.py -v`
-      -> **19/19 tests passed, 0 failures** (real output, not mocked; see PR
-      comment below for full breakdown).
-- [x] Posted a comment on PR #21 documenting this session's independent
-      post-merge re-verification (the PR was closed/merged, so no code or
-      description changes were made -- only a factual comment), citing
-      `UMR-20260804-184906-a6dc`, `UMR-20260804-184014-9a18`,
-      `UMR-20260804-170055-a069`, and the prior `UMR-20260804-185749-c565`.
-- [x] Did not merge anything (nothing to merge -- already merged by Owner).
+- [x] Checked the real task spec before doing anything: `prompt.txt` for this
+      task (`/opt/veridian/ai-os/tasks/task-20260804-214508-ocid-068-a-real--distinct--later-directi/prompt.txt`)
+      contains a single byte, `x` -- no directive text of any kind. The task
+      title ("OCID-068 a real, distinct, later directive") implies there is
+      a specific new directive to act on, but none was actually attached.
+- [x] Searched for that directive elsewhere before concluding it's missing,
+      rather than assuming and fabricating scope:
+      - `grep -rn "OCID-068"` across all `.py`/`.md` in the repo.
+      - Read the last two real merged commits on `main`
+        (`82d107f` Rule 7, `a5e7853` Rule 7 review-fix) in full.
+      - Searched the filesystem for the Owner review package these commits
+        reference by name (`VERIDIAN_OCID_068_..._OWNER_REVIEW_PACKAGE_2026-08-04.md`)
+        -- not present anywhere on disk.
+      - Searched for the newest cited UMR, `UMR-20260804-205741-cf3f` -- every
+        hit is an existing citation *inside* the already-merged Rule 1-7 code/
+        tests, not a new/separate directive.
+  - **Finding:** OCID-068's known, real scope is the "seven-rule guardrails
+    addendum," and all seven rules are already implemented and merged to
+    `main`: Rule 1 (PR #26), Rule 2 (#29), Rule 3 (#30), Rule 4 (#31),
+    Rule 5 (#33), Rule 6 (#34), Rule 7 (#35, plus its own review-fix
+    `a5e7853`). Commit `82d107f` explicitly calls Rule 7 the "Seventh and
+    final real installment" of that addendum. Nothing in the repo, git
+    history, or filesystem points to an eighth rule or any other pending
+    OCID-068 directive.
 
 ## Remaining
-- [ ] None. This task's real work (resolving PR #21's conflicts) was already
-      completed and merged by a prior session/Owner before this task began.
-      This session's contribution is the independent re-verification above.
-      Flagging for whoever reviews this task: the task's stale premise
-      (claiming an open PR with a dirty merge state that had, in fact, closed
-      47 minutes earlier) is worth checking upstream -- future task dispatch
-      should re-check `mergeStateStatus`/PR `state` immediately before
-      generating a resolve-conflicts task, not rely on state captured at
-      task-authoring time.
+- [ ] **Blocked on missing spec.** This task cannot be worked because its
+      prompt has no real content (`x`) and no other source names what the
+      "real, distinct, later directive" actually is. Per protocol, not
+      inventing new scope (e.g. an unrequested "Rule 8") to fill the gap --
+      that would be exactly the kind of narrated-not-real work OCID-068's own
+      rules exist to catch. Needs the actual directive text supplied before
+      any implementation work can start.

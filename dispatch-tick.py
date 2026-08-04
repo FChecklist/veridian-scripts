@@ -270,6 +270,226 @@ def _last_checkpoint_note(doc):
     return checkpoints[-1].get("note")
 
 
+# OCID-068 seven-rule guardrails addendum, Rule 5 (UMR-20260804-180711-7f96,
+# UMR-20260804-205741-cf3f, citing UMR-20260804-170055-a069): "real stall
+# detection, a task is stale only if it has no heartbeat, no checkpoint, no
+# log entry, no CPU activity, and no file change for the configured
+# threshold, visual tmux pane text alone shall never be used by itself to
+# declare a stall, stall detection requires this real combined evidence."
+#
+# Real discovery: find_stuck_tasks() above already exists but covers only
+# status=='blocked' tasks (RESUMABLE_STATUSES' own comment: a blocked task
+# has no running unit at all, by construction -- worker-entrypoint.sh
+# disables it before writing the blocked status), using ONE signal
+# (last_checkpoint_at). That single-signal design is real, correct, and
+# unmodified here for that specific case (a genuinely dead process has no
+# CPU/log/file activity to check anyway). Rule 5's combined-evidence design
+# targets a DIFFERENT, previously uncovered real gap: a status=='in_progress'
+# task whose systemd unit still reports ActiveState=active (so it is NOT
+# blocked, and find_stuck_tasks() never looks at it) but is silently hung --
+# no real forward progress despite looking "alive." This is the "real false
+# stall concern" the rule's own text references: naive tmux-pane-text-only
+# detection could wrongly call a legitimately-still-computing task stalled;
+# combining 5 independent real signals avoids that false positive.
+TASK_CPU_STATE_PATH = os.environ.get("VERIDIAN_TASK_CPU_STATE_PATH", f"{AI_OS}/TASK_CPU_STATE.json")
+
+
+def _load_json_or_none(path):
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _unit_main_pid(unit):
+    """Real, current systemd --user MainPID for `unit`, or None if the unit
+    has no real running main process (never a fabricated PID)."""
+    r = run(["systemctl", "--user", "show", unit, "-p", "MainPID", "--value"])
+    try:
+        pid = int(r.stdout.strip())
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _read_proc_cpu_ticks(pid, proc_stat_path=None):
+    """Real /proc/<pid>/stat utime+stime (fields 14/15, 1-indexed) -- the
+    same real, kernel-reported cumulative CPU-tick counter
+    resource_governor.read_cpu_times() uses for host-wide CPU%, applied here
+    per-process. The comm field (field 2) is parenthesized and may itself
+    contain spaces/parens, so parsing anchors on the LAST ')' in the line
+    (the kernel guarantees comm's own parens are always the innermost --
+    anything after the final ')' is always the remaining numeric fields),
+    same technique the Linux proc(5) man page itself recommends. Returns
+    None if the process doesn't exist or the line can't be parsed -- never
+    fabricates a ticks value for a process that isn't real."""
+    proc_stat_path = proc_stat_path or f"/proc/{pid}/stat"
+    try:
+        with open(proc_stat_path) as f:
+            content = f.read()
+    except OSError:
+        return None
+    try:
+        rparen = content.rindex(")")
+    except ValueError:
+        return None
+    fields = content[rparen + 2:].split()
+    try:
+        return int(fields[11]) + int(fields[12])  # utime + stime
+    except (IndexError, ValueError):
+        return None
+
+
+def _cpu_activity_since_last_tick(task_id, unit, now, state_path=None):
+    """Real, cross-tick CPU-activity check (a single dispatch-tick.py
+    invocation only ever has one instantaneous /proc/<pid>/stat sample --
+    detecting a real DELTA needs the prior tick's own sample, persisted to
+    state_path, same cross-invocation-delta pattern
+    resource_governor.sample_metrics() already establishes for host-wide
+    metrics via METRIC_STATE_PATH).
+
+    Returns True (real activity, or cannot rule it out) when: no real
+    MainPID exists to check (fails safe toward NOT flagging a stall on an
+    inconclusive check), this is the first-ever observation for this
+    task_id (cold start -- never fabricates staleness from having nothing
+    to compare against, same philosophy as sample_metrics()'s own
+    cold-start handling), the unit's PID changed since the last sample (a
+    restart is itself real evidence something happened), or the real
+    CPU-tick counter moved. Returns False only when a real prior sample
+    exists, the same PID is still running, and its CPU ticks are
+    genuinely unchanged."""
+    state_path = state_path or TASK_CPU_STATE_PATH
+    pid = _unit_main_pid(unit)
+    if pid is None:
+        return True
+    curr_ticks = _read_proc_cpu_ticks(pid)
+    if curr_ticks is None:
+        return True
+
+    state = _load_json_or_none(state_path) or {}
+    prev = state.get(task_id)
+    state[task_id] = {"pid": pid, "ticks": curr_ticks, "ts": now.isoformat()}
+    _atomic_save_json(state_path, state)
+
+    if prev is None or prev.get("pid") != pid:
+        return True
+    return curr_ticks != prev.get("ticks")
+
+
+def _real_umr_heartbeat_age_minutes(task_id, now, sbr_module=None):
+    """Real umr_tasks.last_heartbeat age (minutes) for the most recent row
+    whose task_identity == task_id, via resource_governor's own
+    _safe_superboss_register() -- same fail-open philosophy as every other
+    real caller: an unavailable Superboss Register returns None (treated as
+    'cannot confirm heartbeat activity', not 'definitely stale' -- see
+    find_stalled_running_tasks()'s own fail-safe-toward-not-flagging
+    default), never a fabricated age."""
+    sbr_module = sbr_module or resource_governor
+    sbr, error = sbr_module._safe_superboss_register("find_stalled_running_tasks")
+    if error:
+        return None
+    conn = sbr._connect()
+    try:
+        row = conn.execute(
+            "SELECT last_heartbeat FROM umr_tasks WHERE task_identity=? ORDER BY ts_submitted DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None or not row["last_heartbeat"]:
+        return None
+    hb_ts = _parse_iso_ts(row["last_heartbeat"])
+    if hb_ts is None:
+        return None
+    return (now - hb_ts).total_seconds() / 60.0
+
+
+def _real_log_and_file_activity_minutes(task_dir, now):
+    """Real, most-recent mtime (minutes-ago) across every file under
+    task_dir/workspace -- covers both 'log entry' (worker.log's own mtime,
+    a file inside this same tree) and 'file change' as ONE real filesystem
+    walk, since both signals are answered by the same real question ('has
+    anything under this task's real workspace changed recently'). Returns
+    None if the workspace doesn't exist or contains no files (never a
+    fabricated 0)."""
+    workspace = os.path.join(task_dir, "workspace")
+    newest = None
+    if not os.path.isdir(workspace):
+        return None
+    for root, _dirs, files in os.walk(workspace):
+        if "/.git" in root or root.endswith("/.git"):
+            continue
+        for fname in files:
+            try:
+                mtime = os.path.getmtime(os.path.join(root, fname))
+            except OSError:
+                continue
+            if newest is None or mtime > newest:
+                newest = mtime
+    if newest is None:
+        return None
+    return (now - datetime.datetime.fromtimestamp(newest, tz=datetime.timezone.utc)).total_seconds() / 60.0
+
+
+def find_stalled_running_tasks(tasks, now, threshold_minutes=None, sbr_module=None):
+    """Rule 5's real, combined-evidence stall detector for status==
+    'in_progress' tasks (find_stuck_tasks() above already covers 'blocked').
+    A task is flagged ONLY when ALL FIVE real signals independently confirm
+    no activity within threshold_minutes: no heartbeat update, no new
+    checkpoint, no fresh log/file activity, and no real CPU-tick movement.
+    Any signal that cannot be determined (DB unavailable, no MainPID, no
+    workspace) fails safe toward NOT flagging a stall -- an inconclusive
+    check must never manufacture a false positive. Purely a read: never
+    mutates a task.yaml or kills anything (that stays scan_stuck_tasks()'s
+    own, separate, already-real SIGTERM/SIGKILL responsibility)."""
+    threshold_minutes = STUCK_TASK_THRESHOLD_MINUTES if threshold_minutes is None else threshold_minutes
+    sbr_module = sbr_module or resource_governor
+    stalled = []
+    for task_id, doc in tasks.items():
+        if doc.get("status") != "in_progress":
+            continue
+        service = doc.get("service")
+        if not service:
+            continue
+
+        checkpoint_age = None
+        last_at = _parse_iso_ts(doc.get("last_checkpoint_at"))
+        if last_at is not None:
+            checkpoint_age = (now - last_at).total_seconds() / 60.0
+
+        heartbeat_age = _real_umr_heartbeat_age_minutes(task_id, now, sbr_module=sbr_module)
+        file_log_age = _real_log_and_file_activity_minutes(doc.get("_task_dir", ""), now)
+        cpu_active = _cpu_activity_since_last_tick(task_id, service, now)
+
+        evidence = {
+            "checkpoint_age_minutes": round(checkpoint_age, 1) if checkpoint_age is not None else None,
+            "heartbeat_age_minutes": round(heartbeat_age, 1) if heartbeat_age is not None else None,
+            "file_log_age_minutes": round(file_log_age, 1) if file_log_age is not None else None,
+            "cpu_active_since_last_tick": cpu_active,
+        }
+
+        # Fail-safe: any signal that could not be determined at all means
+        # this check is inconclusive for this task -- never flag a stall on
+        # incomplete evidence.
+        if checkpoint_age is None or heartbeat_age is None or file_log_age is None:
+            continue
+        if cpu_active:
+            continue
+        if checkpoint_age < threshold_minutes:
+            continue
+        if heartbeat_age < threshold_minutes:
+            continue
+        if file_log_age < threshold_minutes:
+            continue
+
+        stalled.append({"task_id": task_id, "threshold_minutes": threshold_minutes, "evidence": evidence})
+    stalled.sort(key=lambda item: -item["evidence"]["checkpoint_age_minutes"])
+    return stalled
+
+
 def find_stuck_tasks(tasks, now, threshold_minutes=None):
     """Any task.yaml with status=='blocked' whose last_checkpoint_at is older
     than threshold_minutes (default STUCK_TASK_THRESHOLD_MINUTES). Blocked is
@@ -395,21 +615,25 @@ def compute_real_task_counts(tasks, stuck_tasks, now):
     return counts
 
 
-def write_stuck_tasks_heartbeat(tasks, stuck_tasks, now):
+def write_stuck_tasks_heartbeat(tasks, stuck_tasks, now, stalled_running_tasks=None):
     """Writes ONE canonical, real-state file every tick: current timestamp,
     real load average, whether resource_governor's EMERGENCY_STOP sentinel is
     set, current blocked/in_progress task counts, the stuck-task list
-    computed above, and (Rule 4, OCID-068 seven-rule guardrails addendum)
-    the full real task-count breakdown from compute_real_task_counts().
-    Lets any future check (this laptop, Cowork, anywhere else) read one file
-    for real current state instead of running several separate SSH commands
-    by hand. Read-only w.r.t. task state -- this function never mutates a
-    task.yaml or triggers dispatch; it only reports. Called unconditionally
-    every real tick, with no cooldown of its own -- Rule 4's "never suppress
-    the underlying real data" requirement holds by construction: nothing in
-    this function's own call path can skip a write once main() reaches it.
-    Atomic write (tmp + os.replace), same pattern as _atomic_save_yaml, so a
-    concurrent reader never sees a half-written file."""
+    computed above, (Rule 4, OCID-068 seven-rule guardrails addendum) the
+    full real task-count breakdown from compute_real_task_counts(), and
+    (Rule 5, same addendum) the real, combined-evidence stalled-running-task
+    list from find_stalled_running_tasks(). Lets any future check (this
+    laptop, Cowork, anywhere else) read one file for real current state
+    instead of running several separate SSH commands by hand. Read-only
+    w.r.t. task state -- this function never mutates a task.yaml or triggers
+    dispatch; it only reports. Called unconditionally every real tick, with
+    no cooldown of its own -- Rule 4's "never suppress the underlying real
+    data" requirement holds by construction: nothing in this function's own
+    call path can skip a write once main() reaches it. stalled_running_tasks
+    defaults to an empty list (not None) when the caller omits it, so
+    existing callers/tests that predate Rule 5 are unaffected. Atomic write
+    (tmp + os.replace), same pattern as _atomic_save_yaml, so a concurrent
+    reader never sees a half-written file."""
     doc = {
         "generated_at": now.isoformat(),
         "load_average": _real_load_average(),
@@ -419,6 +643,7 @@ def write_stuck_tasks_heartbeat(tasks, stuck_tasks, now):
         "stuck_task_threshold_minutes": STUCK_TASK_THRESHOLD_MINUTES,
         "stuck_tasks": stuck_tasks,
         "real_task_counts": compute_real_task_counts(tasks, stuck_tasks, now),
+        "stalled_running_tasks": stalled_running_tasks if stalled_running_tasks is not None else [],
     }
     _atomic_save_json(STUCK_TASKS_HEARTBEAT_PATH, doc)
     return doc
@@ -1019,7 +1244,13 @@ def main():
     module_result = module_queue_tick(tasks)
 
     stuck_tasks = find_stuck_tasks(tasks, now)
-    heartbeat = write_stuck_tasks_heartbeat(tasks, stuck_tasks, now)
+    stalled_running_tasks = find_stalled_running_tasks(tasks, now)
+    heartbeat = write_stuck_tasks_heartbeat(tasks, stuck_tasks, now, stalled_running_tasks=stalled_running_tasks)
+    if stalled_running_tasks:
+        print(f"STALLED RUNNING TASKS ({len(stalled_running_tasks)}, real combined-evidence check, "
+              f"threshold={STUCK_TASK_THRESHOLD_MINUTES}min): see {STUCK_TASKS_HEARTBEAT_PATH}")
+        for item in stalled_running_tasks:
+            print(f"  - {item['task_id']}: {item['evidence']}")
     if stuck_tasks:
         print(f"STUCK TASKS ({len(stuck_tasks)}, threshold={STUCK_TASK_THRESHOLD_MINUTES}min): "
               f"see {STUCK_TASKS_HEARTBEAT_PATH}")

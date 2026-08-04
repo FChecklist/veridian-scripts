@@ -113,6 +113,42 @@ def _superboss_register():
     return _sbr
 
 
+def _safe_superboss_register(context):
+    """Real fix (independent review round 2, PR #20): centralizes the
+    fail-open wrapper around _superboss_register() in ONE place, so every
+    real call site gets the same protection automatically -- the first fix
+    round only wrapped submit()'s own call site individually and the
+    reviewer correctly found four more unguarded ones (dispatch_one() /
+    run_tick()'s core dispatch path, scan_stuck_tasks()'s SIGTERM/SIGKILL
+    safety net, _shed_load()'s emergency load-shedding cascade, and main()'s
+    --query-umr handler), each a real gap the same class of bug could
+    recur in if patched individually again. superboss-register.py's own
+    resolve_superboss_db_path() (OCID-068, UMR-20260804-180210-9e2c) raises
+    SuperbossDbPathError unconditionally at module-import time on any
+    verification failure -- by design, never a silent fallback -- and since
+    _superboss_register() is not cached across process runs (this whole
+    script runs as a brand-new process every real tick), a transient
+    verification hiccup must never crash the caller uncaught.
+
+    Returns (sbr_module_or_None, error_message_or_None). On failure, also
+    appends a real CRITICAL entry to ATTENTION.md via _append_attention()
+    (defined below) so a genuine infrastructure problem is never silently
+    swallowed -- every caller still gets real, honest visibility, just
+    without an uncaught crash. `context` is a short, real label (e.g.
+    "dispatch_one", "scan_stuck_tasks") identifying which real call site hit
+    the failure, since ATTENTION.md and any caller-logged reason should say
+    which real operation was blocked, not just that "something" failed."""
+    try:
+        return _superboss_register(), None
+    except Exception as e:
+        error = f"superboss_register_unavailable ({context}): {e}"
+        try:
+            _append_attention(f"CRITICAL: {error}")
+        except Exception:
+            pass  # _append_attention itself must never mask the real original error
+        return None, error
+
+
 _dc = None
 
 
@@ -401,10 +437,32 @@ def submit(task_spec, tier, source_trigger):
             "reuse_candidates": [],
         }
 
-    sbr = _superboss_register()
+    # Real fix (independent review, PR #20): uses the centralized
+    # _safe_superboss_register() helper (see its own docstring) rather than
+    # an inline try/except, so this call site can never silently drift out
+    # of sync with the other real callers again. Fail-open here, same
+    # philosophy the reuse-check three lines above already applies: a
+    # broken/unavailable Superboss Register must be a real, clearly-labeled
+    # rejection (never a crash), never silently treated as an accepted
+    # submission either.
+    sbr, error = _safe_superboss_register("submit")
+    if error:
+        return {"accepted": False, "umr_id": None, "reason": error,
+                "reuse_check_result": reuse_check_result}
+
     with sbr._write_lock():
         conn = sbr._connect()
         sbr._ensure_umr_table(conn)
+        # Real fix (independent review, PR #20): grouped with the
+        # _ensure_umr_table() call above, both at the very start of this
+        # transaction, rather than later inline (its old position). Both
+        # _ensure_*_table() functions call conn.commit() internally
+        # (matching their own pre-existing DDL convention) -- doing that
+        # once, up front, before any real row-level work in this
+        # transaction, avoids an extra mid-transaction commit point that
+        # the write-lock block's own single-commit-per-branch design
+        # otherwise implies.
+        sbr._ensure_ocid_artifact_links_table(conn)
         existing = sbr.find_active_umr_by_identity(conn, task_identity)
         if existing:
             reason = (
@@ -439,6 +497,25 @@ def submit(task_spec, tier, source_trigger):
             "reason": "queued",
             "metadata": {"reuse_check_result": reuse_check_result},
         })
+        # OCID-068 real requirement addendum (UMR-20260804-170055-a069, Owner
+        # real-time implementation override on the standing hard-rule-7 lock):
+        # structured OCID -> UMR linkage, recorded at this real, canonical
+        # UMR-creation chokepoint -- the one place submit() actually mints a
+        # genuinely new umr_id for an accepted submission. Opt-in only: fires
+        # only when the caller's task_spec carries an "ocid_number" input
+        # (a new, optional field -- no existing caller changes behavior by
+        # omitting it). Never lets a traceability-write failure break this
+        # function's own real, load-bearing UMR-creation return value --
+        # insert_ocid_artifact_link() itself never raises (see its own
+        # docstring), and this call site additionally never touches
+        # `accepted`/`umr_id` in the return value below.
+        inputs = task_spec.get("inputs", {}) or {}
+        ocid_number = inputs.get("ocid_number")
+        if ocid_number:
+            sbr.insert_ocid_artifact_link(
+                conn, ocid_number=ocid_number, umr_id=umr_id,
+                repo=inputs.get("repo") or "unknown", link_kind="registration",
+            )
         conn.commit()
         conn.close()
     return {"accepted": True, "umr_id": umr_id, "reason": "queued",
@@ -530,7 +607,15 @@ def dispatch_one(dry_run=False, now=None):
                 "metrics": metrics}
 
     dc = _dispatch_core()
-    sbr = _superboss_register()
+    # Real fix (independent review round 2, PR #20): see
+    # _safe_superboss_register()'s own docstring. Matches this function's
+    # own documented contract ("Never raises for a normal 'nothing to
+    # do'/'frozen' outcome") -- a broken/unavailable Superboss Register is
+    # now the same kind of real, non-raising outcome as "frozen"/"idle",
+    # not an uncaught crash of the whole dispatch loop.
+    sbr, error = _safe_superboss_register("dispatch_one")
+    if error:
+        return {"action": "superboss_unavailable", "detail": error, "metrics": metrics}
 
     with dc.acquire_dispatch_lock():
         conn = sbr._connect()
@@ -607,7 +692,17 @@ def scan_stuck_tasks(now=None):
     Returns the list of actions actually taken this call (empty if nothing
     was stuck)."""
     now = now or _utcnow()
-    sbr = _superboss_register()
+    # Real fix (independent review round 2, PR #20): see
+    # _safe_superboss_register()'s own docstring. A broken/unavailable
+    # Superboss Register must never crash this function's own real
+    # SIGTERM/SIGKILL stuck-task safety net -- it returns the same real,
+    # empty "nothing done this call" shape this function's own docstring
+    # already documents for the ordinary no-stuck-tasks case, while still
+    # surfacing the real failure via ATTENTION.md (never silently
+    # indistinguishable from "genuinely nothing was stuck").
+    sbr, error = _safe_superboss_register("scan_stuck_tasks")
+    if error:
+        return []
     conn = sbr._connect()
     sbr._ensure_umr_table(conn)
     actions = []
@@ -661,7 +756,20 @@ def _shed_load(state):
     """Stage 2: SIGTERM the governor's own lowest-tier-priority currently
     running tracked unit, freeing real resources instead of just refusing new
     work. Returns the unit_name shed, or None if there was nothing to shed."""
-    sbr = _superboss_register()
+    # Real fix (independent review round 2, PR #20): see
+    # _safe_superboss_register()'s own docstring. A broken/unavailable
+    # Superboss Register must never crash this function's own real
+    # emergency load-shedding cascade -- treated the same as "nothing to
+    # shed" for this function's own return contract, but still surfaced as
+    # its own real CRITICAL ATTENTION.md entry (in addition to the one
+    # _safe_superboss_register() itself already appends), since an
+    # inability to even shed load during a sustained metric overload is a
+    # more urgent real signal than the ordinary "no running unit" case.
+    sbr, error = _safe_superboss_register("_shed_load")
+    if error:
+        _append_attention(f"CRITICAL: sustained metric overload {state}, and Superboss Register "
+                           f"itself is unavailable -- cannot even shed load. {error}")
+        return None
     conn = sbr._connect()
     sbr._ensure_umr_table(conn)
     running = conn.execute(
@@ -753,7 +861,14 @@ def main():
         return
 
     if args.query_umr:
-        sbr = _superboss_register()
+        # Real fix (independent review round 2, PR #20): see
+        # _safe_superboss_register()'s own docstring. A broken/unavailable
+        # Superboss Register must produce a real, informative CLI error
+        # (and non-zero exit) here, never an uncaught Python traceback.
+        sbr, error = _safe_superboss_register("--query-umr")
+        if error:
+            print(json.dumps({"error": error}))
+            sys.exit(1)
         conn = sbr._connect()
         sbr._ensure_umr_table(conn)
         rows = sbr.query_umr_tasks(conn, limit=args.limit, status=args.status,

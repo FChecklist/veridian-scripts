@@ -1,52 +1,48 @@
-# PROGRESS -- task-20260804-201653-resolve-real-merge-conflicts-on-pr-21--o
+# PROGRESS -- task-20260804-214713-a-plain-title-with-no-ocid-reference-at
 
 ## Completed
-- [x] Checked real PR #21 state via `gh pr view`/`gh api` before acting: it was
-      already **MERGED** at `2026-08-04T19:29:07Z` (merge commit `199e73c7`),
-      **~47 minutes before this task was created** (`20260804-201653`). The
-      spec's premise ("genuinely OPEN with a real DIRTY merge state, two real
-      conflicts") was stale by the time this task ran -- a prior session
-      (self-citing `UMR-20260804-185749-c565`) had already done the conflict
-      resolution, updated the PR description with a detailed per-file
-      resolution writeup citing all three UMRs from this task's spec, and the
-      Owner account (`FChecklist`) had already posted a detailed AUDIT: PASS
-      review and merged it (`merged_by: FChecklist`).
-- [x] Did NOT attempt to redo/undo/re-merge anything -- there was no open PR
-      with conflict markers left to resolve, and re-litigating an
-      already-reviewed-and-merged Owner decision is out of scope.
-- [x] Independently verified (did not just trust the PR's self-report) by
-      cloning the repo fresh and inspecting `main` at its current tip
-      (post PR #26, which includes the PR #21 merge):
-      - `resource_governor.py`'s `_shed_load()` contains **both** real fixes
-        together: the `metrics=None`/`metrics_note` tick-counter-labeling fix
-        AND the `_safe_superboss_register("_shed_load")` fail-open wrapper.
-      - `supervisor-entrypoint.sh` contains **both**: the OCID-linkage wiring
-        block AND the more detailed checkpoint note text citing the Owner's
-        2026-07-31 full-approval-autonomy directive.
-      - Zero leftover `<<<<<<<`/`=======`/`>>>>>>>` conflict markers in either
-        file.
-      - `python3 -m py_compile resource_governor.py` -- clean.
-      - `bash -n supervisor-entrypoint.sh` -- clean.
-- [x] Independently re-ran the real existing test suite (not the PR's
-      self-reported numbers) against current `main`:
-      `pytest tests/test_resolve_superboss_db_path.py tests/test_ocid_artifact_links.py
-      test_worker_boot_activation_and_resume.py test_stuck_task_heartbeat.py -v`
-      -> **19/19 tests passed, 0 failures** (real output, not mocked; see PR
-      comment below for full breakdown).
-- [x] Posted a comment on PR #21 documenting this session's independent
-      post-merge re-verification (the PR was closed/merged, so no code or
-      description changes were made -- only a factual comment), citing
-      `UMR-20260804-184906-a6dc`, `UMR-20260804-184014-9a18`,
-      `UMR-20260804-170055-a069`, and the prior `UMR-20260804-185749-c565`.
-- [x] Did not merge anything (nothing to merge -- already merged by Owner).
+- [x] Read the task's actual SPEC as dispatched: the literal string `x` --
+      one character, no OCID/UMR reference, no PR/issue number, and no
+      description of desired behavior or acceptance criteria. The task
+      title ("a plain title with no OCID reference at all") is itself an
+      honest description of this: a spec-less dispatch.
+- [x] Checked for a hidden/implicit target before treating this as
+      un-actionable:
+      - `gh pr list --state open` -- 8 open PRs (#28, #24, #17, #13, #12,
+        #11, #8, #7, #2), none reference this task, an OCID, or `x`.
+      - `gh issue list --state open` -- none open.
+      - `grep -rn "no ocid reference\|plain title"` across the repo --
+        only a coincidental unrelated string in `resource_governor.py`
+        (log text about DID shares), no dispatch convention for this case.
+- [x] Found this is a **near-duplicate dispatch**, not a first occurrence:
+      `task-20260804-214514-a-plain-title-with-no-ocid-reference-at`
+      (created ~2 minutes before this task, `20260804-214713`) had the
+      *identical* title and *identical* `x` spec, reached the identical
+      conclusion (spec un-actionable), and was already merged as
+      **PR #36** (`6d0c25f`, commit `617964f`
+      "docs: flag SPEC=x as un-actionable, no OCID/work item to perform").
+      This session independently re-verified that finding rather than
+      just trusting it, then reached the same conclusion on this task's
+      own copy of the same spec.
+- [x] Did not fabricate unrelated work in this shared production
+      automation repo to manufacture a diff. Per this repo's own
+      established norm from prior sessions (verify real state, don't
+      redo already-done work, document and flag stale/bad premises
+      instead of inventing busywork -- see e.g. the PR #21
+      re-verification in this branch's history), the correct action for
+      a genuinely empty spec is to say so, not guess.
 
 ## Remaining
-- [ ] None. This task's real work (resolving PR #21's conflicts) was already
-      completed and merged by a prior session/Owner before this task began.
-      This session's contribution is the independent re-verification above.
-      Flagging for whoever reviews this task: the task's stale premise
-      (claiming an open PR with a dirty merge state that had, in fact, closed
-      47 minutes earlier) is worth checking upstream -- future task dispatch
-      should re-check `mergeStateStatus`/PR `state` immediately before
-      generating a resolve-conflicts task, not rely on state captured at
-      task-authoring time.
+- [ ] None -- there is no real work item, OCID, or spec to act on.
+- [ ] Flagging for whoever reviews this task / owns dispatch: this is the
+      **second** back-to-back task created with the exact same title and
+      the exact same one-character spec (`x`), two minutes apart
+      (`20260804-214514` and `20260804-214713`), each spinning up a full
+      worker/branch/PR cycle for zero real content. The in-flight
+      OCID-068 dedup work (Rule 6, "zero-duplication check on OCID") would
+      **not** catch this pattern because these tasks have no OCID to key
+      on at all -- the duplication here is on (title, spec) with no OCID
+      present, which is a distinct gap from what Rule 6 covers. Worth a
+      follow-up: either dispatch should refuse to mint a task when the
+      spec is empty/near-empty and carries no OCID/PR/issue reference, or
+      it should dedup on (title, spec) content when no OCID exists.

@@ -439,6 +439,26 @@ def submit(task_spec, tier, source_trigger):
             "reason": "queued",
             "metadata": {"reuse_check_result": reuse_check_result},
         })
+        # OCID-068 real requirement addendum (UMR-20260804-170055-a069, Owner
+        # real-time implementation override on the standing hard-rule-7 lock):
+        # structured OCID -> UMR linkage, recorded at this real, canonical
+        # UMR-creation chokepoint -- the one place submit() actually mints a
+        # genuinely new umr_id for an accepted submission. Opt-in only: fires
+        # only when the caller's task_spec carries an "ocid_number" input
+        # (a new, optional field -- no existing caller changes behavior by
+        # omitting it). Never lets a traceability-write failure break this
+        # function's own real, load-bearing UMR-creation return value --
+        # insert_ocid_artifact_link() itself never raises (see its own
+        # docstring), and this call site additionally never touches
+        # `accepted`/`umr_id` in the return value below.
+        inputs = task_spec.get("inputs", {}) or {}
+        ocid_number = inputs.get("ocid_number")
+        if ocid_number:
+            sbr._ensure_ocid_artifact_links_table(conn)
+            sbr.insert_ocid_artifact_link(
+                conn, ocid_number=ocid_number, umr_id=umr_id,
+                repo=inputs.get("repo") or "unknown", link_kind="registration",
+            )
         conn.commit()
         conn.close()
     return {"accepted": True, "umr_id": umr_id, "reason": "queued",

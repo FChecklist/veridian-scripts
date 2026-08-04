@@ -60,7 +60,110 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
-DB_PATH = os.environ.get("SUPERBOSS_REGISTER_DB", "/opt/veridian/ai-os/memory/superboss-register.sqlite")
+class SuperbossDbPathError(Exception):
+    """Raised by resolve_superboss_db_path() below when the real Superboss
+    Register database path fails a real, deterministic verification check.
+    Never a silent fallback -- a failed check stops execution rather than
+    letting any caller operate against an unverified database."""
+
+
+def resolve_superboss_db_path(default_path="/opt/veridian/ai-os/memory/superboss-register.sqlite"):
+    """Deterministic, close-ended, auditable resolution of the real
+    Superboss Register database path (OCID-068 real requirement, Owner
+    directive UMR-20260804-180210-9e2c, following the structured-traceability
+    addendum UMR-20260804-170055-a069, itself under OCID-068's own real UMR
+    UMR-20260804-164106-3fb8 -- the standing hard-rule-7 implementation lock
+    was given a fresh, explicit, real-time Owner override scoped narrowly to
+    this one change). This is the single canonical chokepoint: the one real
+    place DB_PATH is computed anywhere in this codebase. resource_governor.py
+    (via its own _superboss_register() importlib loader) and every other
+    real caller of this module reads the module-level DB_PATH this function
+    sets below, at import time -- none of them recompute their own path, so
+    this replaces the prior plain `os.environ.get(..., "<default>")`
+    assignment without creating a second, parallel implementation anywhere.
+
+    Real, strict order:
+      1. Read SUPERBOSS_REGISTER_DB from the environment.
+      2. If it is set AND the path it names exists on disk AND is non-zero
+         size, that path is the candidate.
+      3. Otherwise the fixed default,
+         /opt/veridian/ai-os/memory/superboss-register.sqlite, is the
+         candidate.
+      4. Before any read/write/register/update against the candidate,
+         verify in order: (a) the file exists; (b) it is non-zero size;
+         (c) it begins with the real SQLite file header magic bytes
+         (b"SQLite format 3\\x00", 16 bytes -- rejects a non-SQLite file);
+         (d) it contains a real umr_tasks table, checked via a direct
+         sqlite_master query, never assumed.
+      5. Only once every check in step 4 passes does this function return
+         the candidate as the real DB_PATH.
+
+    Any failure raises SuperbossDbPathError naming exactly which check
+    failed, the exact path checked, the exact file size found, and the
+    specific reason -- never a silent fallback to a different path. This
+    deliberately, permanently keeps failing against the real, confirmed
+    stale decoy file at /opt/veridian/ai-os/superboss-register.sqlite
+    (independently confirmed 0 bytes, dated 2026-07-31, a completely
+    different file one directory shallower than the real, live database --
+    the exact same class of confusable-decoy-artifact hazard as the
+    separately-found, separately-flagged ai-os/umr_tasks.db, see the OCID-068
+    owner review package's own §4d): that path fails check (b) unconditionally
+    by construction, and this function must never be changed to accept it.
+
+    default_path exists purely as a real testability seam (real tests, not
+    production callers, are the only real reason to ever pass it) -- its
+    default value IS the exact real fixed path named in step 3 above, so
+    every real caller (this module's own DB_PATH assignment below, and
+    everything that imports/execs this file) gets byte-identical behavior to
+    calling this with zero arguments. This exists specifically so real tests
+    can exercise steps 4/5's failure paths (missing file, zero-byte file,
+    wrong schema) without ever touching the real, live, production database
+    this whole platform's dispatch loop reads/writes every 30 seconds."""
+    env_path = os.environ.get("SUPERBOSS_REGISTER_DB")
+    if env_path and os.path.exists(env_path) and os.path.getsize(env_path) > 0:
+        candidate = env_path
+    else:
+        candidate = default_path
+
+    if not os.path.exists(candidate):
+        raise SuperbossDbPathError(
+            "Superboss Register DB path verification FAILED at check 'file exists': "
+            f"path_checked={candidate!r}"
+        )
+
+    size = os.path.getsize(candidate)
+    if size == 0:
+        raise SuperbossDbPathError(
+            "Superboss Register DB path verification FAILED at check 'non-zero size' "
+            f"(known stale-decoy signature): path_checked={candidate!r} size_found=0"
+        )
+
+    with open(candidate, "rb") as f:
+        header = f.read(16)
+    if header != b"SQLite format 3\x00":
+        raise SuperbossDbPathError(
+            "Superboss Register DB path verification FAILED at check 'SQLite file header magic bytes' "
+            f"(not a real SQLite database): path_checked={candidate!r} size_found={size} "
+            f"header_found={header!r}"
+        )
+
+    conn = sqlite3.connect(candidate)
+    try:
+        table_row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='umr_tasks'"
+        ).fetchone()
+    finally:
+        conn.close()
+    if table_row is None:
+        raise SuperbossDbPathError(
+            "Superboss Register DB path verification FAILED at check 'contains umr_tasks table' "
+            f"(real SQLite file, wrong/incomplete database): path_checked={candidate!r} size_found={size}"
+        )
+
+    return candidate
+
+
+DB_PATH = resolve_superboss_db_path()
 _WRITE_LOCK_PATH = DB_PATH + ".writelock"
 
 
@@ -562,6 +665,7 @@ def _migrate_schema(conn):
     _migrate_wiring_registry_content_hash(conn)
     _migrate_wiring_registry_entity_types(conn)
     _ensure_umr_table(conn)
+    _ensure_ocid_artifact_links_table(conn)
     _migrate_instructions_content_hash(conn)
     _migrate_capability_registry_utm(conn)
 
@@ -2692,6 +2796,44 @@ def _ensure_umr_table(conn):
     _migrate_umr_utm(conn)
 
 
+def _ensure_ocid_artifact_links_table(conn):
+    """OCID-068 real requirement addendum (UMR-20260804-170055-a069, Owner
+    real-time implementation override on the standing hard-rule-7 lock, cited
+    UMR-20260804-164106-3fb8/UMR-20260804-170055-a069): structured,
+    deterministic linkage between an OCID number, its real UMR, and the real
+    PR/commit/file path(s) that closed it -- Option A from the real owner
+    review package (ai-os/VERIDIAN_OCID_068_..._OWNER_REVIEW_PACKAGE_2026-08-04.md
+    §4e), a new additive table, not a change to umr_tasks itself. Same
+    idempotent CREATE TABLE IF NOT EXISTS + standalone-callable convention as
+    _ensure_umr_table/_ensure_wiring_registry_table above -- safe to call on
+    every write path, works even on a pre-existing DB that predates this
+    table. umr_id is a real FOREIGN KEY into umr_tasks (SQLite only enforces
+    this when the caller's connection has `PRAGMA foreign_keys = ON`, which
+    _connect() does not set today -- documented here rather than silently
+    assumed, since foreign_keys is a real, well-known SQLite opt-in). The
+    UNIQUE constraint intentionally does NOT enforce true idempotency for
+    NULL-valued pr_number/file_path (SQLite treats NULLs as distinct in a
+    UNIQUE index) -- insert_ocid_artifact_link() below does an explicit
+    pre-insert existence check instead, so idempotency is a real property of
+    the Python call, not assumed from the SQL constraint alone."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS ocid_artifact_links (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ocid_number TEXT NOT NULL,
+        umr_id TEXT NOT NULL REFERENCES umr_tasks(umr_id),
+        repo TEXT NOT NULL,
+        pr_number INTEGER,
+        commit_sha TEXT,
+        file_path TEXT,
+        link_kind TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(ocid_number, umr_id, repo, pr_number, file_path)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ocid_links_ocid ON ocid_artifact_links(ocid_number)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ocid_links_umr ON ocid_artifact_links(umr_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ocid_links_pr ON ocid_artifact_links(repo, pr_number)")
+    conn.commit()
+
+
 def _migrate_umr_last_heartbeat(conn):
     """2026-07-29 (Stage 3 reconciliation-sweep fix for 'task exits cleanly but
     umr_tasks status never reconciles', 5 real historical instances): additive
@@ -3037,6 +3179,77 @@ def update_umr_task(conn, umr_id, **fields):
         values.append(json.dumps(value) if key in json_fields else value)
     values.append(umr_id)
     conn.execute(f"UPDATE umr_tasks SET {', '.join(set_clauses)} WHERE umr_id=?", values)
+
+
+def insert_ocid_artifact_link(conn, ocid_number, umr_id, repo, link_kind,
+                               pr_number=None, commit_sha=None, file_path=None):
+    """OCID-068 real requirement addendum (UMR-20260804-170055-a069). Records
+    one real (OCID, UMR, PR/commit/file) linkage row. Caller owns
+    conn/transaction/commit, same convention as upsert_umr_task()/
+    update_umr_task() above -- this function itself never commits.
+
+    Idempotent by explicit pre-insert check (not by relying on the table's
+    UNIQUE constraint alone, since SQLite treats NULL pr_number/file_path as
+    always-distinct in a UNIQUE index -- see _ensure_ocid_artifact_links_table's
+    own docstring): a second call with identical
+    (ocid_number, umr_id, repo, pr_number, file_path) is a real no-op, returns
+    the existing row's id rather than inserting a duplicate. This matters
+    because both real call sites (resource_governor.py:submit(), a real
+    duplicate-rejected resubmission still mints a fresh umr_id so this is
+    naturally non-colliding there; supervisor-entrypoint.sh's merge retry
+    path, where the SAME PR can be merged-checked more than once) can be
+    called more than once for what is conceptually the same real link.
+
+    Deliberately does NOT raise on a schema/constraint error -- callers at
+    both real chokepoints (resource_governor.py's submit(), a function every
+    real UMR creation on this platform depends on; supervisor-entrypoint.sh's
+    PR create/merge steps, which every real autonomous merge depends on) must
+    never have their own real, load-bearing operation broken by a failure in
+    this purely additive traceability write. Returns None (not the row id) on
+    any internal failure, logging nothing itself -- the caller decides
+    whether/how to log, per its own existing best-effort-write conventions
+    (matches src/instrumentation.ts's onRequestError design in the product
+    codebase: "a failure writing the error record must never throw again")."""
+    try:
+        existing = conn.execute(
+            "SELECT id FROM ocid_artifact_links WHERE ocid_number=? AND umr_id=? AND repo=? "
+            "AND pr_number IS ? AND file_path IS ?",
+            (ocid_number, umr_id, repo, pr_number, file_path),
+        ).fetchone()
+        if existing:
+            return existing["id"]
+        cur = conn.execute(
+            "INSERT INTO ocid_artifact_links "
+            "(ocid_number, umr_id, repo, pr_number, commit_sha, file_path, link_kind, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (ocid_number, umr_id, repo, pr_number, commit_sha, file_path, link_kind, _now_iso()),
+        )
+        return cur.lastrowid
+    except Exception:
+        return None
+
+
+def query_ocid_artifact_links(conn, ocid_number=None, umr_id=None, repo=None, pr_number=None, limit=50):
+    """Real, read-only lookup -- deterministic linkage query, the whole point
+    of this table existing (per the real Owner requirement this addendum
+    implements): 'what closed OCID-X' or 'what OCID does PR/commit Y belong
+    to', without re-deriving it from governance-doc prose."""
+    clauses, params = [], []
+    if ocid_number:
+        clauses.append("ocid_number=?"); params.append(ocid_number)
+    if umr_id:
+        clauses.append("umr_id=?"); params.append(umr_id)
+    if repo:
+        clauses.append("repo=?"); params.append(repo)
+    if pr_number is not None:
+        clauses.append("pr_number=?"); params.append(pr_number)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    rows = conn.execute(
+        f"SELECT * FROM ocid_artifact_links {where} ORDER BY created_at DESC LIMIT ?",
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def _umr_row_to_dict(row):

@@ -350,6 +350,44 @@ elif [ "$VERDICT" = "approve" ] && [ "$TIER" = "tier1" ] && [ "$SCOPE_OK" = "1" 
       --work-item-id "$TASK_ID" --source deployment --medium github-merge \
       --content "$REPO" --term "${MERGE_COMMIT_SHA:-unknown}" --result merged \
       >> "$TASK_DIR/supervisor.log" 2>&1 || true
+    # OCID-068 real requirement addendum (UMR-20260804-170055-a069, Owner
+    # real-time implementation override on the standing hard-rule-7 lock):
+    # structured OCID -> UMR -> PR -> commit linkage, recorded at this real,
+    # canonical merge chokepoint -- only after the merge above is
+    # independently confirmed (never a self-report), same discipline the
+    # surrounding merge-detection block already established. Best-effort,
+    # `|| true`, same convention as log-action/backfill_phase_self_report.py
+    # immediately above/below -- must never affect the already-confirmed
+    # merge result. ocid_number is derived from the branch name via the same
+    # "ocid-NNN"/"ocidNNN" naming convention every real OCID branch this
+    # session used; umr_id is looked up by real task_identity match against
+    # umr_tasks -- many real tasks (adopted branches, direct veridian-task.py
+    # create calls) have no such row at all (a real, separately-documented
+    # gap, see ai-os/VERIDIAN_OCID_068_..._OWNER_REVIEW_PACKAGE_2026-08-04.md),
+    # so this silently records nothing rather than inventing a fake umr_id --
+    # ocid_artifact_links.umr_id is a real NOT NULL foreign key, never
+    # fabricated to satisfy it.
+    timeout 10 python3 -c "
+import re, importlib.util
+_spec = importlib.util.spec_from_file_location('superboss_register_supervisor', '/opt/veridian/scripts/superboss-register.py')
+sbr = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(sbr)
+m = re.search(r'ocid-?0*([0-9]+)', '''$BRANCH''', re.IGNORECASE)
+if m:
+    ocid_number = f'OCID-{int(m.group(1)):03d}'
+    conn = sbr._connect()
+    sbr._ensure_umr_table(conn)
+    sbr._ensure_ocid_artifact_links_table(conn)
+    rows = sbr.query_umr_tasks(conn, task_identity='$TASK_ID', limit=1)
+    if rows:
+        sbr.insert_ocid_artifact_link(
+            conn, ocid_number=ocid_number, umr_id=rows[0]['umr_id'], repo='$REPO',
+            pr_number=int('$PR_URL'.rstrip('/').rsplit('/', 1)[-1]),
+            commit_sha='$MERGE_COMMIT_SHA' or None, link_kind='merge',
+        )
+        conn.commit()
+    conn.close()
+" >> "$TASK_DIR/supervisor.log" 2>&1 || true
     python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status completed --note "tier1, Superboss-approved, merged autonomously: $PR_URL"
     # Root cause 1 (real incidents: VERIDIAN_ARCHITECTURE_V2 phase_1/PR #559,
     # phase_2/PR #560 -- both merged for real, neither worker updated its own

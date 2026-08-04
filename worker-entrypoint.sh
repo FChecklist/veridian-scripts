@@ -476,7 +476,19 @@ while [ "$GATE_ATTEMPT" -lt 3 ]; do
 $(cat "$TASK_DIR/quality-gate-$((GATE_ATTEMPT-1)).json" | python3 -c 'import json,sys; d=json.load(sys.stdin); [print(f"--{k}--\n{v.get(\"output_tail\",\"\")}") for k,v in d.items() if not v.get("passed", True)]' 2>/dev/null)
 
 $PROGRESS_INSTRUCTION"
-  FIX_PROPOSE_OUT=$(python3 /opt/veridian/scripts/credit-accountant.py propose --task-id "$TASK_ID" --plan "auto-fix attempt $GATE_ATTEMPT/2 for quality gate failure on task $TASK_ID, see quality-gate-$((GATE_ATTEMPT-1)).json for the failing checks" --search-terms "quality gate auto-fix retry")
+  # 2026-08-02: was a hardcoded literal ("quality gate auto-fix retry") identical
+  # for every task fleet-wide, so check_existing_capability()'s system_index
+  # lookup always matched ~60 unrelated generic entries (preflight-guard.py,
+  # quality-gate.sh, risk-tier.py, ...) regardless of what actually failed --
+  # false-positive-rejecting every single auto-fix attempt fleet-wide (root
+  # cause of the Phase 2 / 8-clean-PR-merge blocks; a real, plausible major
+  # contributor to the 484-blocked bucket under the 800-task audit,
+  # UMR-20260801-153900-9100). credit-accountant.py's own check_existing_capability()
+  # docstring requires curated, specific terms for exactly this reason. Surface
+  # the real failing gate name(s) instead.
+  FAILING_GATES=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); names=sorted(k for k,v in d.items() if not v.get("passed", True)); print(",".join(names) if names else "unknown")' "$TASK_DIR/quality-gate-$((GATE_ATTEMPT-1)).json" 2>/dev/null)
+  FAILING_GATES="${FAILING_GATES:-unknown}"
+  FIX_PROPOSE_OUT=$(python3 /opt/veridian/scripts/credit-accountant.py propose --task-id "$TASK_ID" --plan "auto-fix attempt $GATE_ATTEMPT/2 for quality gate failure on task $TASK_ID, see quality-gate-$((GATE_ATTEMPT-1)).json for the failing checks" --search-terms "quality gate auto-fix retry: $FAILING_GATES")
   FIX_PROPOSE_RC=$?
   echo "$FIX_PROPOSE_OUT" >> "$TASK_DIR/worker.log"
   if [ "$FIX_PROPOSE_RC" -ne 0 ]; then

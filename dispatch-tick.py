@@ -60,6 +60,7 @@ the others.
 """
 import argparse
 import contextlib
+import datetime
 import fcntl
 import glob as globmod
 import json
@@ -100,6 +101,21 @@ TERMINAL_GOOD = {"completed"}
 TERMINAL_BAD = {"blocked", "failed"}
 TERMINAL_HOLD = {"awaiting_human_approval"}
 
+# Stuck-task / heartbeat surface (added 2026-08-02, PM directive: this tick is
+# the one mechanism on the box that is genuinely laptop-independent -- the
+# interactive tmux session and any PM laptop session both depend on either
+# being alive to catch stuck work, this tick does not). Read-only w.r.t. task
+# state: this only ever reports, it never flips a status or dispatches
+# anything -- a blocked task needs a real PM decision, not an auto-resolve.
+# Checked MASTER_INDEX.yaml's registries/quick_reference first: no existing
+# stuck-task or heartbeat file convention to extend, so this is a new single
+# canonical file, same non-git ai-os/ live-runtime-state directory as
+# CONTROLLER.yaml/ATTENTION.md.
+STUCK_TASK_THRESHOLD_MINUTES = float(
+    os.environ.get("VERIDIAN_STUCK_TASK_THRESHOLD_MINUTES", "30"))
+STUCK_TASKS_HEARTBEAT_PATH = os.environ.get(
+    "VERIDIAN_STUCK_TASKS_HEARTBEAT_PATH", f"{AI_OS}/STUCK_TASKS_HEARTBEAT.json")
+
 
 def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
@@ -122,6 +138,14 @@ def _atomic_save_yaml(path, doc):
     tmp = f"{path}.tmp"
     with open(tmp, "w") as f:
         yaml.safe_dump(doc, f, sort_keys=False, default_flow_style=False, allow_unicode=True)
+    os.replace(tmp, path)
+
+
+def _atomic_save_json(path, doc):
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(doc, f, indent=2, default=str)
+        f.write("\n")
     os.replace(tmp, path)
 
 
@@ -212,6 +236,391 @@ def resume_interrupted_workers_tick(tasks):
             print(f"SKIP resume (already in queue): {task_id} -- {result['reason']}")
 
     return {"resumed": resumed, "skipped_running": skipped_running, "skipped_duplicate": skipped_duplicate}
+
+
+# ---------------------------------------------------------------------------
+# 1c. stuck-task detection + real heartbeat (added 2026-08-02, PM directive)
+# ---------------------------------------------------------------------------
+
+def _parse_iso_ts(value):
+    """Best-effort ISO-8601 -> aware datetime. Returns None on anything
+    missing/unparseable rather than raising -- a task.yaml with a malformed
+    or absent timestamp must never crash the tick, just be skipped from
+    stuck-task detection (it'll show up again next tick with better data,
+    or not at all)."""
+    if not value:
+        return None
+    try:
+        dt = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
+def _last_checkpoint_note(doc):
+    """The note on the most recent checkpoints[] entry, if any -- the real
+    last thing the worker (or supervisor) said before the task went quiet.
+    Falls back to None, never a fabricated string, so a genuinely-missing
+    note is visibly absent in the heartbeat file rather than papered over."""
+    checkpoints = doc.get("checkpoints") or []
+    if not checkpoints:
+        return None
+    return checkpoints[-1].get("note")
+
+
+def find_stuck_tasks(tasks, now, threshold_minutes=None):
+    """Any task.yaml with status=='blocked' whose last_checkpoint_at is older
+    than threshold_minutes (default STUCK_TASK_THRESHOLD_MINUTES). Blocked is
+    a terminal-for-automation status (worker-entrypoint.sh already disables
+    the unit on it, see RESUMABLE_STATUSES' own comment above) -- nothing
+    else on the box will touch it again without a real PM decision, so
+    last_checkpoint_at not advancing IS "no new checkpoint note in that
+    window" by construction; there is no separate note-freshness check to
+    make. Purely a read: never mutates a task.yaml or dispatches anything."""
+    threshold_minutes = STUCK_TASK_THRESHOLD_MINUTES if threshold_minutes is None else threshold_minutes
+    stuck = []
+    for task_id, doc in tasks.items():
+        if doc.get("status") != "blocked":
+            continue
+        last_at = _parse_iso_ts(doc.get("last_checkpoint_at"))
+        if last_at is None:
+            continue
+        blocked_minutes = (now - last_at).total_seconds() / 60.0
+        if blocked_minutes < threshold_minutes:
+            continue
+        stuck.append({
+            "task_id": task_id,
+            "blocked_since": doc.get("last_checkpoint_at"),
+            "blocked_minutes": round(blocked_minutes, 1),
+            "last_note": _last_checkpoint_note(doc),
+        })
+    stuck.sort(key=lambda item: -item["blocked_minutes"])
+    return stuck
+
+
+def _real_load_average():
+    try:
+        load1, load5, load15 = os.getloadavg()
+    except OSError:
+        return None
+    return {"1m": load1, "5m": load5, "15m": load15}
+
+
+def write_stuck_tasks_heartbeat(tasks, stuck_tasks, now):
+    """Writes ONE canonical, real-state file every tick: current timestamp,
+    real load average, whether resource_governor's EMERGENCY_STOP sentinel is
+    set, current blocked/in_progress task counts, and the stuck-task list
+    computed above. Lets any future check (this laptop, Cowork, anywhere
+    else) read one file for real current state instead of running several
+    separate SSH commands by hand. Read-only w.r.t. task state -- this
+    function never mutates a task.yaml or triggers dispatch; it only reports.
+    Atomic write (tmp + os.replace), same pattern as _atomic_save_yaml, so a
+    concurrent reader never sees a half-written file."""
+    doc = {
+        "generated_at": now.isoformat(),
+        "load_average": _real_load_average(),
+        "emergency_stop": os.path.exists(resource_governor.EMERGENCY_STOP_PATH),
+        "blocked_task_count": sum(1 for d in tasks.values() if d.get("status") == "blocked"),
+        "running_task_count": sum(1 for d in tasks.values() if d.get("status") == "in_progress"),
+        "stuck_task_threshold_minutes": STUCK_TASK_THRESHOLD_MINUTES,
+        "stuck_tasks": stuck_tasks,
+    }
+    _atomic_save_json(STUCK_TASKS_HEARTBEAT_PATH, doc)
+    return doc
+
+
+# ---------------------------------------------------------------------------
+# 1d. PM triage escalation (added 2026-08-02, PM decision UMR-20260802-090702-c813)
+# ---------------------------------------------------------------------------
+# Extends the stuck-task/heartbeat surface above with a real, but strictly
+# scoped, headless-Claude triage step -- same file, same tick, same 10-minute
+# cadence, no new script/cron/timer. STRICT SCOPE (the whole point of this
+# feature): the invocation below may ONLY answer "does this look like it
+# needs Owner/PM attention right now, yes or no, with a one/two sentence
+# evidence-cited reason" and write that answer to one append-only alert file.
+# It must NEVER make a product-level decision, dispatch new work, edit any
+# other file, or resolve a KERNEL_CONFLICT-style stop itself -- those stay PM
+# (Claude Desktop) scope per the role split established earlier tonight. This
+# is a pure triage/escalation role, closer to a Cowork backstop than a second
+# PM or an Executor.
+#
+# Cheap deterministic pre-filter runs FIRST and gates the real Claude
+# invocation entirely -- most ticks find nothing notable and must skip the
+# invocation outright (real cost, not spent for nothing). Three real trigger
+# conditions, each independently evidence-based, never a guess:
+#   (a) any task already in stuck_tasks (computed above) -- something has been
+#       blocked past STUCK_TASK_THRESHOLD_MINUTES with no PM action yet.
+#   (b) a real, current AUDIT:FAIL/Superboss-rejected verdict on a blocked
+#       task's OWN latest checkpoint note -- triggers immediately, does not
+#       wait for the stuck-minutes threshold, since a fresh audit rejection is
+#       inherently notable the moment it lands.
+#   (c) real, non-empty unsubmitted text sitting in the interactive session's
+#       own tmux prompt line (session "claude", the same one
+#       dispatch-owner-task.sh relays into) -- checked via a real
+#       `tmux capture-pane`, never assumed/fabricated. This exists because a
+#       prior real incident tonight involved a claimed-but-unverifiable
+#       "pending input line" -- this makes that claim mechanically checkable
+#       going forward instead of taken on faith either way.
+
+PM_TRIAGE_ALERTS_PATH = os.environ.get(
+    "VERIDIAN_PM_TRIAGE_ALERTS_PATH", f"{AI_OS}/PM_TRIAGE_ALERTS.md")
+PM_TRIAGE_TMUX_SESSION = os.environ.get("VERIDIAN_PM_TRIAGE_TMUX_SESSION", "claude")
+PM_TRIAGE_CLAUDE_MODEL = os.environ.get("VERIDIAN_PM_TRIAGE_CLAUDE_MODEL", "sonnet")
+PM_TRIAGE_CLAUDE_BUDGET_USD = os.environ.get("VERIDIAN_PM_TRIAGE_CLAUDE_BUDGET_USD", "0.50")
+# Real bug found by an independent supervisor review (2026-08-02, task-20260802-074612's
+# own review.json, verdict=reject): should_triage_pm() fired on ANY non-empty stuck_tasks
+# list every single tick with no cooldown -- on a box with hundreds of already-stuck tasks
+# (424 in this session's own real dry run), this would re-invoke the real, budgeted
+# claude -p call roughly every 10 minutes indefinitely, an unbounded recurring-cost bug,
+# not a hypothetical. Fixed here: a real cooldown gate, read from the alert file's own
+# last real timestamp (no new state file needed) -- skip a new invocation, even if
+# should_triage_pm() would otherwise trigger, until this many minutes have passed since
+# the last real alert entry.
+PM_TRIAGE_COOLDOWN_MINUTES = float(os.environ.get("VERIDIAN_PM_TRIAGE_COOLDOWN_MINUTES", "60"))
+# Real, confirmed note signature supervisor-entrypoint.sh writes on a genuine
+# Superboss/audit rejection (see e.g. task-20260802-055214's own real
+# checkpoint history, 2026-08-02: "Superboss rejected: <PR url> -- see
+# review.json for issues") -- matching this exact prefix is a real evidence
+# check, not a guess at wording.
+AUDIT_FAIL_NOTE_PATTERN = re.compile(r"Superboss rejected|AUDIT:\s*FAIL", re.IGNORECASE)
+
+
+def _find_fresh_audit_fail_tasks(tasks):
+    """Any status=='blocked' task whose OWN LATEST checkpoint note matches a
+    real audit-rejection signature -- independent of stuck_tasks/the minutes
+    threshold above, since a fresh AUDIT:FAIL is notable the moment it lands,
+    not just once it has also sat for 30+ minutes. Read-only, never mutates
+    a task.yaml."""
+    found = []
+    for task_id, doc in tasks.items():
+        if doc.get("status") != "blocked":
+            continue
+        note = _last_checkpoint_note(doc)
+        if note and AUDIT_FAIL_NOTE_PATTERN.search(note):
+            found.append({"task_id": task_id, "last_note": note})
+    return found
+
+
+def _capture_tmux_pending_input(session=None):
+    """Real, honest check of whether the interactive session's own tmux pane
+    (session "claude" by default -- the same one dispatch-owner-task.sh's own
+    relay targets via `tmux send-keys -t claude`) currently shows non-empty,
+    unsubmitted text sitting at its prompt line. Looks for the real prompt
+    marker this CLI renders ("<U+276F> " i.e. the '>' glyph) and returns the
+    trailing text on that line, or None.
+
+    Fails closed to None (never a fabricated finding) on ANY of: tmux not
+    installed, no session by that name, capture-pane erroring, or no
+    recognizable prompt line in the captured output -- this check existing to
+    make a claim mechanically verifiable is worthless if it can itself
+    fabricate a finding when it can't actually tell."""
+    session = session or PM_TRIAGE_TMUX_SESSION
+    try:
+        has = subprocess.run(["tmux", "has-session", "-t", session],
+                              capture_output=True, text=True, timeout=5)
+        if has.returncode != 0:
+            return None
+        cap = subprocess.run(["tmux", "capture-pane", "-t", session, "-p"],
+                              capture_output=True, text=True, timeout=5)
+        if cap.returncode != 0:
+            return None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in reversed(cap.stdout.splitlines()):
+        if "❯" in line:  # the real prompt glyph this CLI renders
+            after = line.split("❯", 1)[1].strip()
+            return after if after else None
+    return None
+
+
+def should_triage_pm(tasks, stuck_tasks, now):
+    """The real, deterministic pre-filter -- zero AI cost. Returns
+    (should_invoke: bool, reasons: list[str], evidence: dict). Only when this
+    returns True does main() spend anything invoking Claude at all; most real
+    ticks find nothing notable across all 3 conditions and return
+    (False, [], {}), which is the expected, common steady state, not an
+    error."""
+    reasons = []
+    evidence = {}
+
+    if stuck_tasks:
+        reasons.append(f"{len(stuck_tasks)} task(s) stuck past {STUCK_TASK_THRESHOLD_MINUTES}min")
+        evidence["stuck_tasks"] = stuck_tasks
+
+    fresh_audit_fails = _find_fresh_audit_fail_tasks(tasks)
+    if fresh_audit_fails:
+        reasons.append(f"{len(fresh_audit_fails)} task(s) with a fresh real audit-reject/fail verdict")
+        evidence["fresh_audit_fail_tasks"] = fresh_audit_fails
+
+    pending_input = _capture_tmux_pending_input()
+    if pending_input:
+        reasons.append("real, non-empty unsubmitted text found in the interactive session's own prompt line")
+        evidence["tmux_pending_input"] = pending_input
+
+    return (bool(reasons), reasons, evidence)
+
+
+PM_TRIAGE_EVIDENCE_MAX_ITEMS = 10
+
+
+def _summarize_evidence(evidence, max_items=PM_TRIAGE_EVIDENCE_MAX_ITEMS):
+    """Bounds any list-valued evidence entry to the first max_items real
+    records plus an honest '_omitted_count' of how many more real records
+    exist -- never a fabricated smaller number. Exists because real
+    production ticks have shown 400+ stuck tasks / dozens of audit-fail
+    tasks at once: passing every one of them as a subprocess argv element
+    hits the OS ARG_MAX ('Argument list too long') and the raw dump also
+    makes the durable alert-file log unreadably huge. Full, untruncated
+    evidence stays available for a human via each finding's own task.yaml
+    (task_id is always included) -- this is a summary for the triage
+    judgment/alert entry, not the sole record."""
+    summarized = {}
+    for key, value in evidence.items():
+        if isinstance(value, list) and len(value) > max_items:
+            summarized[key] = value[:max_items]
+            summarized[f"{key}_omitted_count"] = len(value) - max_items
+        else:
+            summarized[key] = value
+    return summarized
+
+
+def _invoke_triage_claude(reasons, evidence, run_fn=None):
+    """The one real Claude invocation this feature makes. Strictly scoped:
+    no tool access at all (--allowedTools "" -- the model can only return
+    text, it can never itself write a file or take any other action; THIS
+    SCRIPT is what writes the alert file below, never the model), no
+    --dangerously-skip-permissions, no --continue (fresh/stateless every
+    call, no session state persisted between ticks), a small real
+    --max-budget-usd cap (PM_TRIAGE_CLAUDE_BUDGET_USD, default $0.50) since
+    this can run up to every 10 minutes. The prompt contains ONLY the
+    specific, already-gathered pre-filter evidence -- never broader repo/task
+    access -- and asks for exactly one judgment: does this need Owner/PM
+    attention now, yes or no, with a one/two sentence evidence-cited reason.
+    It may not decide product questions, dispatch anything, or resolve a
+    KERNEL_CONFLICT itself -- the prompt says so explicitly, and it has no
+    tool access to do so even if it tried.
+
+    run_fn is injectable (defaults to subprocess.run) so tests can stub the
+    real subprocess call without spending real API budget or requiring a
+    real `claude` binary/auth in the test environment.
+
+    Returns the real judgment text (str), or a clear error string prefixed
+    "INVOCATION_ERROR:" on any failure -- never silently swallowed, never a
+    fabricated judgment."""
+    run_fn = run_fn or subprocess.run
+    bounded_evidence = _summarize_evidence(evidence)
+    prompt = (
+        "You are a narrow triage/escalation check, NOT a decision-maker. You have "
+        "no tool access and cannot take any action beyond this one text answer.\n\n"
+        "Real evidence gathered by a deterministic pre-filter (not your own judgment "
+        "of what's notable -- these specific findings already crossed a real "
+        "threshold; any *_omitted_count field means the real full list was "
+        "longer than shown here, never a smaller fabricated count):\n"
+        f"Reasons: {json.dumps(reasons)}\n"
+        f"Evidence: {json.dumps(bounded_evidence, indent=2, default=str)}\n\n"
+        "Answer ONLY: does this genuinely need Owner or PM attention right now -- "
+        "YES or NO -- with a one or two sentence reason citing the evidence above. "
+        "Do NOT decide what to do about it, do NOT propose a fix, do NOT pick "
+        "between options, do NOT say what the right next step is beyond flagging "
+        "it. That is all out of scope for you -- your only job is the yes/no plus "
+        "reason."
+    )
+    try:
+        r = run_fn(
+            ["claude", "-p", prompt,
+             "--model", PM_TRIAGE_CLAUDE_MODEL,
+             "--allowedTools", "",
+             "--max-budget-usd", PM_TRIAGE_CLAUDE_BUDGET_USD,
+             "--output-format", "json"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"INVOCATION_ERROR: {type(e).__name__}: {e}"
+    if r.returncode != 0:
+        return f"INVOCATION_ERROR: claude -p exited {r.returncode}: {r.stderr[-500:]}"
+    try:
+        parsed = json.loads(r.stdout)
+        return parsed.get("result") or parsed.get("response") or r.stdout.strip()
+    except (json.JSONDecodeError, ValueError):
+        return r.stdout.strip() or "INVOCATION_ERROR: empty response"
+
+
+def append_pm_triage_alert(path, now, reasons, evidence, judgment):
+    """Real, append-only write -- each tick's real finding becomes one new
+    timestamped entry, never overwriting a prior one (unlike
+    STUCK_TASKS_HEARTBEAT.json, which is a point-in-time snapshot by design;
+    this file is a durable log a PM/Owner can scroll through). Markdown, same
+    real convention as the existing ai-os/logs/ATTENTION.md append-only alert
+    log -- checked MASTER_INDEX.yaml first, no existing single-purpose
+    "PM triage" file to extend, so this is the one new canonical file, same
+    non-git ai-os/ live-runtime-state location as ATTENTION.md/CONTROLLER.yaml."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    bounded_evidence = _summarize_evidence(evidence)
+    entry = (
+        f"\n## {now.isoformat()}\n"
+        f"**Reasons:** {'; '.join(reasons)}\n\n"
+        f"**Judgment:** {judgment}\n\n"
+        f"**Evidence** (any `*_omitted_count` means the real full list was "
+        f"longer than shown -- see each finding's own task_id/task.yaml for "
+        f"the complete record):\n```json\n{json.dumps(bounded_evidence, indent=2, default=str)}\n```\n"
+    )
+    with open(path, "a") as f:
+        f.write(entry)
+
+
+_PM_TRIAGE_ALERT_HEADER_RE = re.compile(r"^## (\S+)\s*$", re.MULTILINE)
+
+
+def _last_pm_triage_alert_ts(path):
+    """Real cooldown signal: the ISO timestamp of the most recent '## <ts>'
+    entry header already written by append_pm_triage_alert(), read directly
+    from the durable alert file itself -- no separate state file to keep in
+    sync or lose. Returns None if the file doesn't exist yet or has no real
+    entries (never fabricates a timestamp)."""
+    if not os.path.isfile(path):
+        return None
+    with open(path) as f:
+        content = f.read()
+    matches = _PM_TRIAGE_ALERT_HEADER_RE.findall(content)
+    if not matches:
+        return None
+    try:
+        return _parse_iso_ts(matches[-1])
+    except (TypeError, ValueError):
+        return None
+
+
+def pm_triage_tick(tasks, stuck_tasks, now, invoke_fn=None):
+    """Orchestrates the pre-filter -> (maybe) invoke -> (maybe) alert
+    sequence for one tick. invoke_fn defaults to _invoke_triage_claude, and
+    is only ever called when should_triage_pm() already returned True AND
+    the real cooldown (PM_TRIAGE_COOLDOWN_MINUTES, default 60) has elapsed
+    since the last real alert entry -- every real tick where nothing crossed
+    a real threshold, or where a real invocation already happened recently,
+    skips the invocation (and therefore its real cost) entirely. Fixes a
+    real bug an independent supervisor review found (2026-08-02,
+    task-20260802-074612's review.json): with no cooldown, a box with
+    hundreds of already-stuck tasks would re-invoke the budgeted claude -p
+    call roughly every tick indefinitely. Returns a summary dict always safe
+    to json.dumps into main()'s own tick summary."""
+    invoke_fn = invoke_fn or _invoke_triage_claude
+    should_invoke, reasons, evidence = should_triage_pm(tasks, stuck_tasks, now)
+    if not should_invoke:
+        return {"invoked": False, "reasons": []}
+    last_ts = _last_pm_triage_alert_ts(PM_TRIAGE_ALERTS_PATH)
+    if last_ts is not None:
+        elapsed_minutes = (now - last_ts).total_seconds() / 60.0
+        if elapsed_minutes < PM_TRIAGE_COOLDOWN_MINUTES:
+            return {
+                "invoked": False, "reasons": reasons,
+                "skipped_reason": f"cooldown active ({elapsed_minutes:.1f}min of "
+                                   f"{PM_TRIAGE_COOLDOWN_MINUTES}min since last real alert)",
+            }
+    judgment = invoke_fn(reasons, evidence)
+    append_pm_triage_alert(PM_TRIAGE_ALERTS_PATH, now, reasons, evidence, judgment)
+    return {"invoked": True, "reasons": reasons, "judgment": judgment, "alert_path": PM_TRIAGE_ALERTS_PATH}
 
 
 # ---------------------------------------------------------------------------
@@ -509,11 +918,26 @@ def main():
     parser.parse_args()
 
     tasks = dispatch_core.task_status_sync()
+    now = datetime.datetime.now(datetime.timezone.utc)
 
     sweep_result = supervisor_sweep_tick(tasks)
     resume_result = resume_interrupted_workers_tick(tasks)
     gap_result = gap_queue_tick(tasks)
     module_result = module_queue_tick(tasks)
+
+    stuck_tasks = find_stuck_tasks(tasks, now)
+    heartbeat = write_stuck_tasks_heartbeat(tasks, stuck_tasks, now)
+    if stuck_tasks:
+        print(f"STUCK TASKS ({len(stuck_tasks)}, threshold={STUCK_TASK_THRESHOLD_MINUTES}min): "
+              f"see {STUCK_TASKS_HEARTBEAT_PATH}")
+        for item in stuck_tasks:
+            print(f"  - {item['task_id']}: blocked {item['blocked_minutes']}min "
+                  f"(last note: {item['last_note']!r})")
+
+    pm_triage_result = pm_triage_tick(tasks, stuck_tasks, now)
+    if pm_triage_result["invoked"]:
+        print(f"PM TRIAGE ALERT ({'; '.join(pm_triage_result['reasons'])}): "
+              f"see {pm_triage_result['alert_path']}")
 
     dispatched_this_tick = (
         len(sweep_result.get("started", []))
@@ -528,6 +952,8 @@ def main():
             "resumed_interrupted_workers": resume_result.get("resumed", []),
             "gap_queue_dispatched": gap_result.get("dispatched", []),
             "module_queue_dispatched": module_result.get("dispatched", []),
+            "stuck_tasks_found": len(stuck_tasks),
+            "pm_triage_invoked": pm_triage_result["invoked"],
         },
     )
 
@@ -536,6 +962,8 @@ def main():
         "resume_interrupted_workers": resume_result,
         "gap_queue": gap_result,
         "module_queue": module_result,
+        "stuck_tasks_heartbeat": heartbeat,
+        "pm_triage": pm_triage_result,
     }, indent=2, default=str))
 
 

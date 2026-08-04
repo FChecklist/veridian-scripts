@@ -1,35 +1,36 @@
-# PROGRESS -- task-20260804-214725-a-plain-title-with-no-ocid-reference-at
+# PROGRESS -- task-20260804-214915-ocid-999-a-genuinely-new--never-worked-i
 
 ## Completed
 - [x] Read the task's actual SPEC as dispatched: the literal string `x` --
       one character, no OCID/UMR reference, no PR/issue number, no
-      description of desired behavior or acceptance criteria. This matches
-      the task title itself ("a plain title with no ocid reference
-      attached"), i.e. the title is honestly describing a spec-less task.
+      description of desired behavior or acceptance criteria. The task
+      title ("OCID-999 a genuinely new, never-worked item") claims novelty,
+      but the SPEC itself carries none.
 - [x] Checked for any hidden/implicit target before treating this as
       un-actionable:
-      - Reviewed open PRs (`gh pr list`) -- #28, #24, #17, #13, #12, #11, #8,
-        #7, #2 -- none reference this task, an OCID, or a spec matching `x`.
-      - Reviewed open issues (`gh issue list`) -- none open.
-      - Searched the repo for any convention around "no ocid reference"
-        tasks (`grep -rn "no ocid reference\|plain title"`) -- no
-        established handling pattern found beyond the immediately prior
-        task of this same name (task-20260804-214514-...), which reached
-        the identical conclusion.
-      - Checked git log -- the immediately preceding task run
-        (`task-20260804-214514-a-plain-title-with-no-ocid-reference-at`,
-        merged as PR #36) hit the exact same dispatch (SPEC=x, no OCID) and
-        already concluded, after equivalent verification, that it is
-        un-actionable.
-- [x] Concluded the spec is genuinely empty/un-actionable as dispatched, not
-      just terse -- and that this is a repeat of the immediately prior task
-      dispatch, not a new one. Per this repo's established norm (verify
+      - `gh pr list` shows this exact task title/branch pattern
+        (`ocid-999-a-genuinely-new--never-worked-i`) has already been
+        dispatched and closed out at least three times before: PR #42, #40,
+        #39, and PR #45 ("SPEC=x un-actionable, no OCID-999/work item to
+        perform", branch `worker/task-20260804-214807-...`), which reached
+        this identical conclusion for this identical SPEC.
+      - `gh issue list` -- none open.
+      - Searched the repo for `OCID-999` / `ocid.999` -- only appears in
+        test fixtures (`tests/test_ocid_artifact_links.py`,
+        `tests/test_rule3_no_premature_umr_minting.py`,
+        `tests/test_rule6_zero_duplication_by_ocid.py`) as an example
+        placeholder value, not a real work item reference.
+      - No commit, PR, or file in this repo ties "OCID-999" to any actual
+        pending work.
+- [x] Concluded: this is a repeat dispatch of an already-resolved,
+      genuinely empty SPEC (`x`), not a new task despite the "genuinely
+      new, never-worked" title. Per this repo's established norm (verify
       real state, don't fabricate or redo work, document and flag
-      stale/bad premises rather than inventing busywork), the correct
-      action here is to not guess at arbitrary unrelated work in a shared
-      production automation repo, and instead flag this dispatch as
-      needing a real spec/OCID reference.
+      stale/duplicate premises rather than inventing busywork), the
+      correct action is to flag this dispatch as needing a real spec/OCID
+      reference and stop, matching the resolution already reached in PR
+      #45 and its predecessors.
 
 ## Remaining
-- [ ] Awaiting a real spec/OCID reference from the dispatcher before any
-      further action can be taken on this task.
+- [ ] None. Awaiting a real, non-duplicate SPEC/OCID reference from the
+      dispatcher before any further work can be performed on this task.

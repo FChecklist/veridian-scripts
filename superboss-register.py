@@ -349,6 +349,42 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_knowledge_engine_type ON knowledge_engine(artifact_type);
     CREATE INDEX IF NOT EXISTS idx_knowledge_engine_path ON knowledge_engine(artifact_path);
 
+    -- Coordination graph (2026-08-01, Owner directive UMR-20260801-142246-8d51,
+    -- closing the real duplicate-work-incident gap ACTIVE-CLAIMS.yaml only
+    -- partially closes today: nothing makes "what already exists / who's
+    -- touching what / what depends on what" queryable, only manually
+    -- readable). Deliberately distinct from knowledge_engine above (that
+    -- table tracks CODE/DOC ARTIFACTS -- artifact_path/content_hash -- with
+    -- relationships as a free-text JSON blob column, not a real relation
+    -- table) and from wiring_registry below (tracks CODE WIRING -- what
+    -- function/route/table calls what -- via its own entity_id/entity_type
+    -- concept, a different taxonomy entirely). This entity/relation pair is
+    -- the first real typed graph over COORDINATION state -- task/pr/issue/
+    -- file_area/agent/report/engine -- queryable via a real recursive CTE
+    -- (see cmd_check_conflict), not a JSON blob. UNIQUE(type, key) on entity
+    -- gives get-or-create idempotency (see _get_or_create_entity) so
+    -- re-logging the same real task/PR/file-area never duplicates a row.
+    CREATE TABLE IF NOT EXISTS entity (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL CHECK(type IN ('task','pr','issue','file_area','agent','report','engine')),
+        key TEXT NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_type_key ON entity(type, key);
+
+    CREATE TABLE IF NOT EXISTS relation (
+        id TEXT PRIMARY KEY,
+        src_id TEXT NOT NULL REFERENCES entity(id),
+        dst_id TEXT NOT NULL REFERENCES entity(id),
+        type TEXT NOT NULL CHECK(type IN ('claims','addresses','depends_on','implemented_by','conflicts_with')),
+        created_at TEXT NOT NULL,
+        created_by TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_relation_src ON relation(src_id);
+    CREATE INDEX IF NOT EXISTS idx_relation_dst ON relation(dst_id);
+    CREATE INDEX IF NOT EXISTS idx_relation_type ON relation(type);
+
     -- 8th tree (2026-07-24, VERIDIAN 20-ENGINE/10-GATEWAY architecture Phase 1,
     -- task-20260724-083420, closes_engines: [3]). Wires
     -- ai-os/CAPABILITY_REGISTRY_SCHEMA_2026-07-24.yaml's capability_record_schema
@@ -564,6 +600,7 @@ def _migrate_schema(conn):
     _ensure_umr_table(conn)
     _migrate_instructions_content_hash(conn)
     _migrate_capability_registry_utm(conn)
+    _ensure_coordination_graph_tables(conn)
 
 
 def _migrate_wiring_registry_content_hash(conn):
@@ -834,6 +871,176 @@ def _migrate_capability_registry_utm(conn):
         _ensure_capability_registry_table(conn)  # recreates the FTS5 table + its 3 triggers (IF NOT EXISTS, safe)
         conn.execute("INSERT INTO capability_registry_fts(capability_registry_fts) VALUES ('rebuild')")
         conn.commit()
+
+
+ENTITY_TYPES = ("task", "pr", "issue", "file_area", "agent", "report", "engine")
+RELATION_TYPES = ("claims", "addresses", "depends_on", "implemented_by", "conflicts_with")
+
+
+def _ensure_coordination_graph_tables(conn):
+    """Additive/idempotent -- see the executescript block in init_db() above for
+    the authoritative CREATE TABLE text (this is the same statements, run
+    against a pre-existing DB that predates this addition, same convention
+    as every other _ensure_*/_migrate_* helper in this file)."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS entity (
+        id TEXT PRIMARY KEY,
+        type TEXT NOT NULL CHECK(type IN ('task','pr','issue','file_area','agent','report','engine')),
+        key TEXT NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL
+    )""")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_type_key ON entity(type, key)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS relation (
+        id TEXT PRIMARY KEY,
+        src_id TEXT NOT NULL REFERENCES entity(id),
+        dst_id TEXT NOT NULL REFERENCES entity(id),
+        type TEXT NOT NULL CHECK(type IN ('claims','addresses','depends_on','implemented_by','conflicts_with')),
+        created_at TEXT NOT NULL,
+        created_by TEXT
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_relation_src ON relation(src_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_relation_dst ON relation(dst_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_relation_type ON relation(type)")
+    conn.commit()
+
+
+def _get_or_create_entity(conn, entity_type, key, metadata=None):
+    """Idempotent lookup-or-insert keyed on the real UNIQUE(type, key) index --
+    re-logging the same real task/PR/file-area/issue/agent/report/engine never
+    creates a duplicate row; callers get back the same entity_id every time."""
+    row = conn.execute("SELECT id FROM entity WHERE type=? AND key=?", (entity_type, key)).fetchone()
+    if row is not None:
+        return row["id"]
+    eid = _new_id("ENT")
+    conn.execute(
+        "INSERT INTO entity (id, type, key, metadata_json, created_at) VALUES (?,?,?,?,?)",
+        (eid, entity_type, key, json.dumps(metadata or {}), _now_iso()),
+    )
+    return eid
+
+
+def log_entity(args):
+    """Unlike _get_or_create_entity (a pure create-if-missing primitive used
+    by log_relation, which must never silently overwrite metadata just
+    because a relation happened to touch that entity), this is the explicit,
+    deliberate entry point for SETTING metadata -- e.g. flipping a task/PR's
+    status to 'merged'/'closed'/'abandoned' once real work concludes, which
+    is what lets check-conflict's status exclusion actually do anything
+    (found by this PR's own independent audit: without this update path, a
+    task/PR could never leave 'open', permanently). Re-calling with
+    --metadata on an EXISTING entity shallow-merges the new keys into the
+    existing metadata_json (new keys win, untouched keys survive) rather
+    than replacing it wholesale or being a no-op. Calling with no --metadata
+    on an existing entity remains a harmless read (returns the same
+    entity_id, changes nothing) -- exactly the idempotent behavior
+    _get_or_create_entity alone provided before this fix."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_coordination_graph_tables(conn)
+    metadata = json.loads(args.metadata) if args.metadata else {}
+    row = conn.execute("SELECT id, metadata_json FROM entity WHERE type=? AND key=?", (args.type, args.key)).fetchone()
+    if row is not None:
+        eid = row["id"]
+        if metadata:
+            merged = json.loads(row["metadata_json"] or "{}")
+            merged.update(metadata)
+            conn.execute("UPDATE entity SET metadata_json=? WHERE id=?", (json.dumps(merged), eid))
+    else:
+        eid = _get_or_create_entity(conn, args.type, args.key, metadata)
+    conn.commit()
+    conn.close()
+    print(json.dumps({"entity_id": eid}))
+
+
+def log_relation(args):
+    init_db_silent()
+    conn = _connect()
+    _ensure_coordination_graph_tables(conn)
+    src_id = _get_or_create_entity(conn, args.src_type, args.src_key)
+    dst_id = _get_or_create_entity(conn, args.dst_type, args.dst_key)
+    rid = _new_id("REL")
+    conn.execute(
+        "INSERT INTO relation (id, src_id, dst_id, type, created_at, created_by) VALUES (?,?,?,?,?,?)",
+        (rid, src_id, dst_id, args.type, _now_iso(), args.created_by),
+    )
+    conn.commit()
+    conn.close()
+    print(json.dumps({"relation_id": rid, "src_id": src_id, "dst_id": dst_id}))
+
+
+def cmd_check_conflict(args):
+    """Given a file_area key and (optionally) an issue key, find other OPEN
+    task/pr entities that already have a 'claims' relation into an
+    overlapping file_area. "Overlapping" is a path-prefix match in either
+    direction (e.g. a claim on 'src/lib/services/' overlaps a query for
+    'src/lib/services/crm-service.ts', and vice versa). When --issue is
+    given, results are further narrowed to claimers that also 'addresses'
+    the same issue OR an issue reachable from it via depends_on/
+    implemented_by edges (walked transitively, either direction, via the
+    WITH RECURSIVE clause below) -- this is the "or related issue" half of
+    the ask. "OPEN" is judged from each claimer's own metadata_json.status
+    (absent status = treated as open -- a false positive here just shows an
+    extra warning; a false negative would silently let a real duplicate
+    through, so this deliberately errs toward showing more, not less).
+    Read-only: never mutates the graph, never blocks a caller -- it prints a
+    structured conflict list and lets the caller (a human, or
+    dispatch-owner-task.sh) decide what to do with it."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_coordination_graph_tables(conn)
+
+    fa_key = args.file_area
+    issue_key = args.issue or ""
+
+    rows = conn.execute("""
+        WITH RECURSIVE related_issue(issue_id) AS (
+            SELECT id FROM entity WHERE type = 'issue' AND key = ?
+            UNION
+            SELECT CASE WHEN r.src_id = ri.issue_id THEN r.dst_id ELSE r.src_id END
+            FROM relation r
+            JOIN related_issue ri
+              ON (r.src_id = ri.issue_id OR r.dst_id = ri.issue_id)
+             AND r.type IN ('depends_on', 'implemented_by')
+            JOIN entity e
+              ON e.id = CASE WHEN r.src_id = ri.issue_id THEN r.dst_id ELSE r.src_id END
+             AND e.type = 'issue'
+        ),
+        overlapping_area(area_id) AS (
+            SELECT id FROM entity
+            WHERE type = 'file_area'
+              AND (key = ? OR key LIKE (? || '%') OR ? LIKE (key || '%'))
+        )
+        SELECT DISTINCT claimer.id AS entity_id, claimer.type AS entity_type,
+               claimer.key AS entity_key, claimer.metadata_json AS metadata_json
+        FROM relation claims_rel
+        JOIN overlapping_area oa ON oa.area_id = claims_rel.dst_id
+        JOIN entity claimer ON claimer.id = claims_rel.src_id
+        WHERE claims_rel.type = 'claims'
+          AND claimer.type IN ('task', 'pr')
+          AND (
+                ? = ''
+                OR EXISTS (
+                    SELECT 1 FROM relation addr_rel
+                    JOIN related_issue ri2 ON ri2.issue_id = addr_rel.dst_id
+                    WHERE addr_rel.src_id = claimer.id AND addr_rel.type = 'addresses'
+                )
+          )
+    """, (issue_key, fa_key, fa_key, fa_key, issue_key)).fetchall()
+
+    conflicts = []
+    for r in rows:
+        meta = json.loads(r["metadata_json"] or "{}")
+        if meta.get("status") in ("closed", "merged", "abandoned"):
+            continue
+        conflicts.append({
+            "entity_id": r["entity_id"], "entity_type": r["entity_type"],
+            "entity_key": r["entity_key"], "metadata": meta,
+        })
+    conn.close()
+    print(json.dumps({
+        "file_area": fa_key, "issue": issue_key or None,
+        "conflict_count": len(conflicts), "conflicts": conflicts,
+    }))
 
 
 def _migrate_instructions_content_hash(conn):
@@ -3343,6 +3550,30 @@ if __name__ == "__main__":
     p_checktk = sub.add_parser("check-task-key")
     p_checktk.add_argument("--task-key", dest="task_key", required=True)
 
+    # Coordination graph (2026-08-01, UMR-20260801-142246-8d51). Mirrors the
+    # log-instruction/log-work CLI convention above -- distinct from
+    # register-entity/lookup-entity/list-entities (those are wiring_registry's
+    # code-wiring entities, a different table and taxonomy entirely).
+    p_loge = sub.add_parser("log-entity")
+    p_loge.add_argument("--type", required=True, choices=ENTITY_TYPES)
+    p_loge.add_argument("--key", required=True, help="stable natural key, e.g. a repo-relative path, "
+                         "'FChecklist/compliance-tracker#666', or a task_id")
+    p_loge.add_argument("--metadata", default="", help="JSON object, e.g. '{\"status\":\"open\"}'")
+
+    p_logr = sub.add_parser("log-relation")
+    p_logr.add_argument("--src-type", dest="src_type", required=True, choices=ENTITY_TYPES)
+    p_logr.add_argument("--src-key", dest="src_key", required=True)
+    p_logr.add_argument("--dst-type", dest="dst_type", required=True, choices=ENTITY_TYPES)
+    p_logr.add_argument("--dst-key", dest="dst_key", required=True)
+    p_logr.add_argument("--type", required=True, choices=RELATION_TYPES)
+    p_logr.add_argument("--created-by", dest="created_by", default=None,
+                         help="who's asserting this relation: owner|ai_agent|software (optional)")
+
+    p_checkc = sub.add_parser("check-conflict")
+    p_checkc.add_argument("--file-area", dest="file_area", required=True)
+    p_checkc.add_argument("--issue", default=None,
+                           help="optional issue/task/PR key to narrow to the same-or-related issue")
+
     args = p.parse_args()
     if args.cmd == "init":
         with _write_lock():
@@ -3430,3 +3661,11 @@ if __name__ == "__main__":
             claim_task_key(args)
     elif args.cmd == "check-task-key":
         check_task_key(args)
+    elif args.cmd == "log-entity":
+        with _write_lock():
+            log_entity(args)
+    elif args.cmd == "log-relation":
+        with _write_lock():
+            log_relation(args)
+    elif args.cmd == "check-conflict":
+        cmd_check_conflict(args)

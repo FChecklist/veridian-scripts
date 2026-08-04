@@ -42,6 +42,28 @@ REPO="${5:-compliance-tracker}"
 
 cd "$SCRIPT_DIR"
 
+# 0. Coordination-graph conflict check (UMR-20260801-142246-8d51) -- surfaces,
+#    but never blocks, an existing 'claims' relation on an overlapping
+#    file_area/topic before this new task is even registered. TITLE is the
+#    best real scope signal available at this call site (these titles are
+#    already topic/file-scoped slugs, e.g. "crm--announcements",
+#    "rebase-pr-618" -- not a literal path, but the same kind of scope
+#    description ACTIVE-CLAIMS.yaml's own entries use). No --issue is passed
+#    here deliberately -- REPO is not a real issue key anything 'addresses',
+#    and check-conflict's issue filter is AND-only (would silently exclude
+#    every real match rather than fall back to file_area-only matching), so
+#    passing it here would make this check always report zero conflicts.
+#    Warning-only by design, same as this script's own existing duplicate-
+#    content check is a refusal but this is not -- a real conflict here is a
+#    judgment call (maybe genuinely intentional parallel work), not an
+#    automatic block.
+CONFLICT_JSON=$(python3 superboss-register.py check-conflict --file-area "$TITLE" 2>/dev/null || echo '{"conflict_count":0,"conflicts":[]}')
+CONFLICT_COUNT=$(echo "$CONFLICT_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('conflict_count', 0))" 2>/dev/null || echo 0)
+if [ "$CONFLICT_COUNT" != "0" ]; then
+  echo "WARNING: check-conflict found $CONFLICT_COUNT existing claim(s) overlapping '$TITLE' -- review before proceeding:" >&2
+  echo "$CONFLICT_JSON" >&2
+fi
+
 # 1. Duplicate check -- don't silently re-dispatch the same ask.
 DUP_JSON=$(python3 superboss-register.py check-content-duplicate --text "$PROMPT" --window-hours 6)
 DUP_FOUND=$(echo "$DUP_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['content_duplicate_found'])")
@@ -82,6 +104,25 @@ fi
 # 4. Link instruction -> work item -> the real UMR id (output side).
 WORK_JSON=$(python3 superboss-register.py log-work --instruction-id "$INSTRUCTION_ID" --ai-task-id "$UMR_ID" --source owner --medium "$MEDIUM" --status open)
 WORK_ITEM_ID=$(echo "$WORK_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['work_item_id'])")
+
+# 4.5. Register this task's own claim in the coordination graph, so the NEXT
+#      dispatch's Step 0 check-conflict can actually find it -- this is what
+#      keeps the graph live/current going forward instead of only reflecting
+#      the one-time ACTIVE-CLAIMS.yaml backfill. Explicit status=open (not
+#      just relying on log-relation's own bare-metadata entity creation) so
+#      there's always a real status field to flip later -- see the note
+#      below on WHY that flip matters.
+python3 superboss-register.py log-entity --type task --key "$TASK_IDENTITY" \
+  --metadata '{"status":"open"}' >/dev/null 2>&1 || true
+python3 superboss-register.py log-relation --src-type task --src-key "$TASK_IDENTITY" \
+  --dst-type file_area --dst-key "$TITLE" --type claims --created-by owner >/dev/null 2>&1 || true
+# IMPORTANT for whoever closes this task out: once it's genuinely done
+# (merged/closed/abandoned), run:
+#   python3 superboss-register.py log-entity --type task --key "$TASK_IDENTITY" --metadata '{"status":"merged"}'
+# (or "closed"/"abandoned") -- log-entity upserts metadata on an existing
+# entity (unlike log-relation, which never touches it), and this is the ONLY
+# thing that makes check-conflict's open/closed exclusion mean anything
+# instead of every claim staying "open" forever.
 
 echo "DISPATCHED: umr_id=$UMR_ID instruction_id=$INSTRUCTION_ID work_item_id=$WORK_ITEM_ID task_identity=$TASK_IDENTITY"
 

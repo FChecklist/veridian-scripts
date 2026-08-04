@@ -241,6 +241,129 @@ def parse_progress_md(workspace):
     return completed, remaining
 
 
+# ---------------------------------------------------------------------------
+# OCID-063 (PM directive UMR-20260804-060832-9fdf, real implementation
+# authorized by UMR-20260804-061827-e3c6, governed by the Mandatory
+# Governance Directive UMR-20260804-051521-7099): the mechanical handoff
+# envelope. Real gap this closes -- confirmed via OCID-063's own discovery
+# doc (ai-os/VERIDIAN_OCID_063_MECHANICAL_HANDOFF_ENVELOPE_DISCOVERY_2026-08-04.md
+# in the compliance-tracker repo) -- no existing mechanism on this platform
+# (task.yaml's narrated completed_steps/remaining_steps, ACTIVE-CLAIMS.yaml's
+# claim registration, resource_governor.py's reuse_check_result,
+# credit-accountant.py's deterministic verdict, or the AUDIT: PASS/FAIL
+# comment convention) is a mechanical, per-tool-invocation call log with
+# real status codes. Per that same discovery's own design proposal (and the
+# Mandatory Governance Directive's explicit "never build new when existing
+# can be enhanced" rule): this extends the EXISTING checkpoint write path
+# (cmd_checkpoint below) with one new optional field, rather than a new
+# schema/table/file. Entirely additive and optional -- a checkpoint that
+# never supplies a handoff envelope behaves exactly as before this change.
+#
+# Status-category taxonomy matches the proposal's own three named
+# categories (client error, server error, timeout) plus a real "success"
+# and "unknown" fallback for any status this taxonomy doesn't recognize --
+# never silently drops or misclassifies a real status value.
+STATUS_CATEGORY_TIMEOUT = "timeout"
+STATUS_CATEGORY_CLIENT_ERROR = "client_error"
+STATUS_CATEGORY_SERVER_ERROR = "server_error"
+STATUS_CATEGORY_SUCCESS = "success"
+STATUS_CATEGORY_UNKNOWN = "unknown"
+
+# "Capped" per the proposal's own framing ("a capped unknowns list"). No
+# existing precedent sets this number -- chosen to match
+# ai-os/CONSTITUTION.yaml's other small human-reviewable list caps (e.g.
+# a PR's own findings/issues lists in this session's real audit comments
+# rarely exceed single digits); revisit if real usage shows it's wrong.
+MAX_UNKNOWNS = 10
+
+
+def classify_call_status(status):
+    """Mechanically classifies one real tool-call status value into the
+    proposal's own three rejection categories, plus success/unknown.
+    Deterministic, no narration: an integer status is bucketed purely by
+    numeric range (matching real HTTP status-code semantics, the same
+    convention every real status code seen this session already uses --
+    e.g. credit-accountant.py's own subprocess exit-code handling and the
+    real 401/403/429/500 codes this session's own live E2E testing hit
+    against projexa-ai.com); the literal string "timeout" is its own
+    category since a timeout has no real numeric status to classify."""
+    if status == STATUS_CATEGORY_TIMEOUT:
+        return STATUS_CATEGORY_TIMEOUT
+    if isinstance(status, bool):
+        # bool is a subclass of int in Python -- exclude explicitly so a
+        # stray True/False status never silently classifies as a 2xx/4xx.
+        return STATUS_CATEGORY_UNKNOWN
+    if isinstance(status, int):
+        if 200 <= status < 400:
+            return STATUS_CATEGORY_SUCCESS
+        if 400 <= status < 500:
+            return STATUS_CATEGORY_CLIENT_ERROR
+        if 500 <= status < 600:
+            return STATUS_CATEGORY_SERVER_ERROR
+        return STATUS_CATEGORY_UNKNOWN
+    return STATUS_CATEGORY_UNKNOWN
+
+
+def compute_rejected_paths(call_log):
+    """The proposal's own "rejected paths list," derived MECHANICALLY (not
+    narrated) by filtering call_log for entries whose real status falls
+    into the client-error, server-error, or timeout category. call_log is
+    a list of dicts, each expected to carry a "status" key (int or the
+    literal string "timeout") -- entries missing "status" entirely are
+    treated as unknown, never silently rejected or silently accepted.
+    Pure function, no I/O, no mutation of call_log."""
+    return [
+        entry for entry in call_log
+        if classify_call_status(entry.get("status"))
+        in (STATUS_CATEGORY_CLIENT_ERROR, STATUS_CATEGORY_SERVER_ERROR, STATUS_CATEGORY_TIMEOUT)
+    ]
+
+
+def validate_handoff_envelope(call_log, conclusion, unknowns, max_unknowns=MAX_UNKNOWNS):
+    """The proposal's own three strict-validation rules, exactly as
+    specified (PM directive UMR-20260804-060832-9fdf): reject if the call
+    log is empty; reject if rejected paths exist but unknowns is empty;
+    reject if the conclusion is not exactly one sentence. Plus the
+    "capped" enforcement PM directive UMR-20260804-061827-e3c6 explicitly
+    named as its own real check: reject if unknowns exceeds max_unknowns.
+
+    Returns (valid: bool, errors: list[str], rejected_paths: list[dict]) --
+    rejected_paths is always returned (even when valid) since a caller
+    that stores the envelope wants the real, already-computed list, not a
+    second call to compute_rejected_paths.
+
+    Pure function: never raises on malformed-but-well-typed input (empty
+    list/string are valid inputs to check, not errors in the Python
+    sense) -- the same fail-closed-on-content, fail-open-on-plumbing
+    philosophy this platform's other deterministic checks already use
+    (e.g. plan_generator.py's check_reuse_before_dispatch never raises,
+    only returns a real recommendation)."""
+    errors = []
+    rejected_paths = compute_rejected_paths(call_log)
+
+    if not call_log:
+        errors.append("call_log must not be empty")
+
+    if rejected_paths and not unknowns:
+        errors.append(
+            f"rejected_paths is non-empty ({len(rejected_paths)} entr"
+            f"{'y' if len(rejected_paths) == 1 else 'ies'}) but unknowns is empty"
+        )
+
+    if len(unknowns) > max_unknowns:
+        errors.append(f"unknowns exceeds cap of {max_unknowns} (found {len(unknowns)})")
+
+    sentence_endings = re.findall(r"[.!?]+(?:\s|$)", (conclusion or "").strip())
+    sentence_count = len(sentence_endings)
+    if sentence_count != 1:
+        errors.append(
+            f"conclusion must be exactly one sentence (found {sentence_count} "
+            f"sentence-ending mark{'s' if sentence_count != 1 else ''})"
+        )
+
+    return (len(errors) == 0, errors, rejected_paths)
+
+
 def cmd_create(args):
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     slug = "".join(c if c.isalnum() else "-" for c in args.title.lower())[:40].strip("-")
@@ -454,6 +577,32 @@ def cmd_adopt(args):
 
 
 def cmd_checkpoint(args):
+    # OCID-063 (UMR-20260804-060832-9fdf / UMR-20260804-061827-e3c6): optional
+    # mechanical handoff envelope. Validated and rejected BEFORE the task
+    # lock is taken / anything is loaded or saved -- same "reject loudly,
+    # save nothing" posture the existing completed-status guard below
+    # already uses, so a malformed envelope never partially writes a
+    # checkpoint. A checkpoint that omits --handoff-envelope entirely
+    # behaves exactly as before this change.
+    envelope = None
+    rejected_paths = []
+    if args.handoff_envelope:
+        try:
+            with open(args.handoff_envelope) as f:
+                envelope = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"ERROR: could not read --handoff-envelope {args.handoff_envelope!r}: {e}")
+            sys.exit(1)
+        call_log = envelope.get("call_log", [])
+        conclusion = envelope.get("conclusion", "")
+        unknowns = envelope.get("unknowns", [])
+        valid, errors, rejected_paths = validate_handoff_envelope(call_log, conclusion, unknowns)
+        if not valid:
+            print(f"ERROR: --handoff-envelope failed strict validation for {args.task_id}:")
+            for e in errors:
+                print(f"  - {e}")
+            sys.exit(1)
+
     with task_lock(args.task_id):
         task = load_task(args.task_id)
         if args.status == "completed":
@@ -600,6 +749,16 @@ def cmd_checkpoint(args):
             "recent_commits": log_out.strip().splitlines(),
             "note": args.note or "",
         }
+        # OCID-063: optional, additive -- only present when a caller
+        # actually supplies --handoff-envelope (already validated above,
+        # before the task lock was even taken). rejected_paths is the
+        # real, mechanically-computed list, not re-derived from the
+        # stored call_log by a future reader.
+        if envelope is not None:
+            checkpoint["tool_call_log"] = envelope.get("call_log", [])
+            checkpoint["conclusion"] = envelope.get("conclusion", "")
+            checkpoint["unknowns"] = envelope.get("unknowns", [])
+            checkpoint["rejected_paths"] = rejected_paths
         task.setdefault("checkpoints", []).append(checkpoint)
         save_task(args.task_id, task)
     sync_controller_entry(task)
@@ -703,6 +862,14 @@ if __name__ == "__main__":
     ck.add_argument("--status", default=None)
     ck.add_argument("--note", default=None)
     ck.add_argument("--auto", action="store_true")
+    ck.add_argument(
+        "--handoff-envelope", default=None, dest="handoff_envelope",
+        help="OCID-063: path to a JSON file with {\"call_log\": [...], "
+             "\"conclusion\": \"...\", \"unknowns\": [...]}. Optional -- "
+             "omitting it behaves exactly as before this flag existed. "
+             "Strictly validated before the checkpoint is written; a "
+             "failing envelope rejects the whole checkpoint call.",
+    )
     ck.set_defaults(func=cmd_checkpoint)
 
     rc = sub.add_parser("resume-context")

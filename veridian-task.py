@@ -593,6 +593,19 @@ def cmd_checkpoint(args):
         except (OSError, json.JSONDecodeError) as e:
             print(f"ERROR: could not read --handoff-envelope {args.handoff_envelope!r}: {e}")
             sys.exit(1)
+        # Real defect found by independent review (PR #19, round 1): syntactically
+        # valid JSON whose top-level value isn't an object (null, a bare string,
+        # a number, a bool, or an array) parsed fine here and then crashed with an
+        # uncaught AttributeError on the very next line's .get() call -- json.load()
+        # only guarantees valid JSON, never that the result is a dict. Checked
+        # explicitly, same "reject loudly before anything is mutated" posture as
+        # the OSError/JSONDecodeError case immediately above.
+        if not isinstance(envelope, dict):
+            print(
+                f"ERROR: --handoff-envelope {args.handoff_envelope!r} must contain a "
+                f"JSON object at its top level, got {type(envelope).__name__}"
+            )
+            sys.exit(1)
         call_log = envelope.get("call_log", [])
         conclusion = envelope.get("conclusion", "")
         unknowns = envelope.get("unknowns", [])

@@ -14,10 +14,19 @@ Proves, against a real sample call log, that:
     must not be empty; rejected_paths non-empty implies unknowns
     non-empty; unknowns must not exceed the cap; conclusion must be
     exactly one sentence.
+  - cmd_checkpoint's --handoff-envelope wiring rejects a syntactically
+    valid but non-dict top-level JSON value (null/string/number/bool/
+    array) cleanly via sys.exit(1), never an uncaught AttributeError --
+    a real regression test for a real defect an independent review of
+    this exact PR found and posted an AUDIT: FAIL on.
 
 Everything here is in-process against the real functions in
 veridian-task.py directly -- no subprocess, no real task.yaml, no real
-checkpoint written.
+checkpoint written to the real production /opt/veridian/ai-os/tasks
+tree (the one test that needs a real task.yaml/CONTROLLER-adjacent code
+path monkey-patches AI_OS to an isolated scratch dir first, same
+isolation convention this repo's own test_stuck_task_heartbeat.py
+already uses).
 
 Usage: python3 test_ocid063_handoff_envelope.py
 Exit 0 = all assertions passed. Exit 1 = a test failed.
@@ -180,12 +189,115 @@ def test_validate_handoff_envelope(vt):
           not valid and len(errors) >= 2)
 
 
+def test_cmd_checkpoint_rejects_non_dict_envelope(vt):
+    """Regression test for a real defect an independent review of this exact
+    PR found and posted an AUDIT: FAIL on: syntactically valid JSON whose
+    top-level value isn't an object (null, a bare string, a number, a bool,
+    or an array) parsed fine via json.load() and then crashed with an
+    uncaught AttributeError on the immediately-following .get() call --
+    json.load() only guarantees valid JSON, never that the result is a
+    dict. Fixed with an explicit isinstance(envelope, dict) check that
+    rejects cleanly (sys.exit(1) with a real error message) instead of
+    crashing. Proves the crash is gone for every real non-dict JSON shape,
+    and that a genuinely malformed envelope never touches the task lock or
+    any task.yaml file -- confirmed by never reaching load_task/save_task
+    at all (this task_id is deliberately never created anywhere)."""
+    import argparse
+    import json as json_module
+    import tempfile
+
+    non_dict_json_shapes = [
+        ("null", "null"),
+        ("a bare string", '"just a string"'),
+        ("a number", "42"),
+        ("a bool", "true"),
+        ("an array", '["call_log", "conclusion", "unknowns"]'),
+    ]
+
+    for label, raw_json in non_dict_json_shapes:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            f.write(raw_json)
+            envelope_path = f.name
+
+        args = argparse.Namespace(
+            task_id="ocid063-regression-test-nonexistent-task",
+            status=None,
+            note=None,
+            auto=False,
+            handoff_envelope=envelope_path,
+        )
+        try:
+            vt.cmd_checkpoint(args)
+            check(f"non-dict envelope ({label}) is rejected, not silently accepted", False)
+        except SystemExit as e:
+            check(f"non-dict envelope ({label}) exits cleanly via sys.exit(1), not an AttributeError",
+                  e.code == 1)
+        except AttributeError as e:
+            check(f"non-dict envelope ({label}) must NOT raise an uncaught AttributeError "
+                  f"(this is the exact real defect independent review found: {e})", False)
+        finally:
+            os.unlink(envelope_path)
+
+    # -- a genuinely well-formed dict envelope must NOT be rejected by this
+    # fix's own isinstance(dict) check. Deliberately does NOT exercise
+    # cmd_checkpoint's full success path: sync_controller_entry() writes to
+    # a module-level CONTROLLER path (CONTROLLER = f"{AI_OS}/CONTROLLER.yaml")
+    # computed ONCE at import time from the module's own real AI_OS constant
+    # -- reassigning vt.AI_OS later does NOT redirect it, so letting
+    # cmd_checkpoint run all the way through would write a fake entry into
+    # the REAL, LIVE production /opt/veridian/ai-os/CONTROLLER.yaml. Instead:
+    # point AI_OS at an isolated scratch dir with a tasks/<id>/ directory
+    # that deliberately has NO task.yaml in it, so load_task() -- the very
+    # first line inside `with task_lock():`, still well before
+    # sync_controller_entry is ever reached -- raises a real, expected
+    # FileNotFoundError. Reaching that point (rather than an early sys.exit
+    # from the envelope check itself) is exactly the proof needed: this
+    # fix's isinstance(dict) check let a well-formed envelope through.
+    real_ai_os = vt.AI_OS
+    scratch_dir = tempfile.mkdtemp(prefix="ocid063-cmd-checkpoint-test-")
+    task_id = "ocid063-regression-scratch-task-no-yaml"
+    os.makedirs(os.path.join(scratch_dir, "tasks", task_id))
+    try:
+        vt.AI_OS = scratch_dir
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json_module.dump({
+                "call_log": [{"tool": "Read", "status": 200}],
+                "conclusion": "A real, well-formed one-sentence conclusion.",
+                "unknowns": [],
+            }, f)
+            good_envelope_path = f.name
+        try:
+            args = argparse.Namespace(
+                task_id=task_id, status=None, note=None, auto=False,
+                handoff_envelope=good_envelope_path,
+            )
+            vt.cmd_checkpoint(args)
+            check("a well-formed dict envelope must reach load_task() (FileNotFoundError "
+                  "expected here), not silently succeed against a task.yaml that doesn't exist",
+                  False)
+        except FileNotFoundError:
+            check("a well-formed dict envelope passes this fix's isinstance(dict) check and "
+                  "validate_handoff_envelope, reaching the real task lookup (proven by a real "
+                  "FileNotFoundError on the deliberately-absent task.yaml, never an early "
+                  "sys.exit from the envelope check itself)", True)
+        except SystemExit:
+            check("a well-formed dict envelope must NOT be rejected by this fix's own "
+                  "isinstance(dict)/validation check", False)
+        finally:
+            os.unlink(good_envelope_path)
+    finally:
+        vt.AI_OS = real_ai_os
+        import shutil
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
     veridian_task = load_veridian_task()
 
     test_classify_call_status(veridian_task)
     test_compute_rejected_paths(veridian_task)
     test_validate_handoff_envelope(veridian_task)
+    test_cmd_checkpoint_rejects_non_dict_envelope(veridian_task)
 
     print()
     if failures:

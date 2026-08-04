@@ -225,6 +225,7 @@ def test_cmd_checkpoint_rejects_non_dict_envelope(vt):
             note=None,
             auto=False,
             handoff_envelope=envelope_path,
+            evidence_json=None,
         )
         try:
             vt.cmd_checkpoint(args)
@@ -270,6 +271,7 @@ def test_cmd_checkpoint_rejects_non_dict_envelope(vt):
             args = argparse.Namespace(
                 task_id=task_id, status=None, note=None, auto=False,
                 handoff_envelope=good_envelope_path,
+                evidence_json=None,
             )
             vt.cmd_checkpoint(args)
             check("a well-formed dict envelope must reach load_task() (FileNotFoundError "

@@ -364,6 +364,107 @@ def validate_handoff_envelope(call_log, conclusion, unknowns, max_unknowns=MAX_U
     return (len(errors) == 0, errors, rejected_paths)
 
 
+# OCID-068 seven-rule guardrails addendum, Rule 7 (UMR-20260804-180711-7f96,
+# UMR-20260804-205741-cf3f, citing UMR-20260804-170055-a069): "implementation
+# completion, an implementation is not complete until real code, a real
+# database change, a real test, a real artifact, a real pull request, and
+# real evidence all match, never declare complete from narration alone. On
+# completion, return the real evidence, the real files modified, the real
+# database changes, the UMR, the OCID, the PR, the commit, the real test
+# results, any open items, any blockers, and the real next action, no
+# assumptions, no narration, no estimates."
+#
+# Real, existing partial enforcement this extends: cmd_checkpoint()'s own
+# state-machine guard (below) already refuses "completed" unless a real
+# "pending_review" checkpoint already exists in this task's own history --
+# so "completed" can never be self-reported directly, only reached via the
+# real pending_review -> supervisor-review path. That guard checks the
+# STATE SEQUENCE is real; it does not check that the specific fields Rule 7
+# names are genuinely present. This is the complement: an optional, strictly
+# validated --evidence-json (same real, already-reviewed pattern OCID-063's
+# --handoff-envelope established -- validated and rejected BEFORE the task
+# lock is taken/anything is loaded or saved, so a malformed evidence file
+# never partially writes a checkpoint; omitting it entirely behaves exactly
+# as before this change, same backward-compatibility contract
+# --handoff-envelope already set).
+COMPLETION_EVIDENCE_REQUIRED_STRING_FIELDS = ("pr_url", "commit_sha", "test_results", "umr_id", "next_action")
+COMPLETION_EVIDENCE_REQUIRED_LIST_FIELDS = ("open_items", "blockers")
+COMPLETION_EVIDENCE_NARRATION_PLACEHOLDERS = {
+    "n/a", "na", "none", "tbd", "todo", "unknown", "-", "pending", "later", "see above",
+}
+_COMPLETION_PR_URL_RE = re.compile(r"^https://github\.com/[\w.-]+/[\w.-]+/pull/\d+$")
+_COMPLETION_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+_COMPLETION_UMR_ID_RE = re.compile(r"^UMR-\d{8}-\d{6}-[0-9a-f]{4}$")
+
+
+def validate_completion_evidence(evidence):
+    """Rule 7's real, structural completion-evidence check. Pure function,
+    never raises: returns (valid: bool, errors: list[str]).
+
+    A "narration, not evidence" placeholder (empty string, or one of the
+    real generic strings in COMPLETION_EVIDENCE_NARRATION_PLACEHOLDERS,
+    case-insensitive) in any required string field is rejected -- the whole
+    point of this check is refusing exactly the kind of vague "done"/"N/A"
+    self-report Rule 7's own text names ("never declare complete from
+    narration alone"). pr_url/commit_sha/umr_id are further checked against
+    their real, known formats (a real GitHub PR URL, a real hex commit SHA,
+    a real UMR-<date>-<time>-<hex> id) -- not proof the PR is actually
+    merged or the commit actually exists (this function does no I/O, by
+    design, same as validate_handoff_envelope() above), but a real,
+    mechanical format check that catches an obviously-fabricated or
+    copy-pasted-wrong value, which a purely narrated "done" could never be
+    checked against at all.
+
+    open_items/blockers are real, required LIST fields -- an empty list is
+    a real, valid "genuinely nothing open" state (not itself an error), but
+    the key must be present and must actually be a list, never omitted or a
+    narrated string standing in for a list ("no blockers" as free text is
+    exactly the narration this check exists to refuse).
+
+    db_changes is intentionally NOT in the required-fields list: many real
+    completions genuinely touch no database at all (Rules 1-6's own PRs
+    included plenty of code-only changes) -- requiring a non-empty
+    db_changes value on every completion would itself be a fabrication
+    demand. If present, it is validated the same narration-placeholder way
+    as the required string fields; if absent, that is itself real, honest
+    information (no claim made either way), not an error."""
+    errors = []
+    if not isinstance(evidence, dict):
+        return False, [f"evidence must be a JSON object, got {type(evidence).__name__}"]
+
+    def _is_narration_placeholder(value):
+        return not isinstance(value, str) or not value.strip() or value.strip().lower() in COMPLETION_EVIDENCE_NARRATION_PLACEHOLDERS
+
+    for field in COMPLETION_EVIDENCE_REQUIRED_STRING_FIELDS:
+        value = evidence.get(field)
+        if _is_narration_placeholder(value):
+            errors.append(f"{field!r} is missing or a narration placeholder ({value!r}), real evidence required")
+    if "db_changes" in evidence and _is_narration_placeholder(evidence["db_changes"]) and evidence["db_changes"] not in ("none", "no schema or data changes"):
+        # "none"/"no schema or data changes" are real, explicit, honest
+        # claims of absence, not narration placeholders -- deliberately
+        # exempted from the generic placeholder list above (which exists
+        # to catch vague non-answers, not honest "nothing to report").
+        errors.append(f"'db_changes' is present but a narration placeholder ({evidence['db_changes']!r}) -- state 'none' explicitly if there truly were no database changes, or provide the real change")
+
+    for field in COMPLETION_EVIDENCE_REQUIRED_LIST_FIELDS:
+        if field not in evidence:
+            errors.append(f"{field!r} is required (an empty list is valid; the key must be present)")
+        elif not isinstance(evidence[field], list):
+            errors.append(f"{field!r} must be a real list, got {type(evidence[field]).__name__} ({evidence[field]!r})")
+
+    pr_url = evidence.get("pr_url")
+    if isinstance(pr_url, str) and pr_url.strip() and not _COMPLETION_PR_URL_RE.match(pr_url.strip()):
+        errors.append(f"'pr_url' does not match a real GitHub PR URL shape: {pr_url!r}")
+    commit_sha = evidence.get("commit_sha")
+    if isinstance(commit_sha, str) and commit_sha.strip() and not _COMPLETION_COMMIT_SHA_RE.match(commit_sha.strip()):
+        errors.append(f"'commit_sha' does not match a real hex commit SHA shape: {commit_sha!r}")
+    umr_id = evidence.get("umr_id")
+    if isinstance(umr_id, str) and umr_id.strip() and not _COMPLETION_UMR_ID_RE.match(umr_id.strip()):
+        errors.append(f"'umr_id' does not match the real UMR-<date>-<time>-<hex> shape: {umr_id!r}")
+
+    return (len(errors) == 0, errors)
+
+
 def cmd_create(args):
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     slug = "".join(c if c.isalnum() else "-" for c in args.title.lower())[:40].strip("-")
@@ -616,6 +717,29 @@ def cmd_checkpoint(args):
                 print(f"  - {e}")
             sys.exit(1)
 
+    # OCID-068 seven-rule guardrails addendum, Rule 7 (UMR-20260804-180711-7f96,
+    # UMR-20260804-205741-cf3f): optional --evidence-json, same real,
+    # already-reviewed pre-lock-validation pattern as --handoff-envelope
+    # above. Only enforced when --status completed is also used (Rule 7
+    # is specifically about the completion declaration); a checkpoint at any
+    # other status, or a completed checkpoint from a caller that predates
+    # this change and omits --evidence-json, behaves exactly as before.
+    completion_evidence = None
+    if args.evidence_json:
+        try:
+            with open(args.evidence_json) as f:
+                completion_evidence = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"ERROR: could not read --evidence-json {args.evidence_json!r}: {e}")
+            sys.exit(1)
+        if args.status == "completed":
+            valid, errors = validate_completion_evidence(completion_evidence)
+            if not valid:
+                print(f"ERROR: --evidence-json failed Rule 7 strict validation for {args.task_id}:")
+                for e in errors:
+                    print(f"  - {e}")
+                sys.exit(1)
+
     with task_lock(args.task_id):
         task = load_task(args.task_id)
         if args.status == "completed":
@@ -646,6 +770,14 @@ def cmd_checkpoint(args):
             if args.status == "in_progress" and task["status"] != "pending":
                 task["restart_count"] = task.get("restart_count", 0) + 1
             task["status"] = args.status
+        if completion_evidence is not None:
+            # Real, structured Rule 7 record -- persisted verbatim on the
+            # task itself so it survives alongside the rest of this task's
+            # own real history, same convention checkpoints[]/
+            # files_modified already use. Not overwritten by a later
+            # non-completion checkpoint (only ever set here, when the
+            # caller actually supplies --evidence-json).
+            task["completion_evidence"] = completion_evidence
 
         workspace = task["workspace"]
         log_out = ""
@@ -882,6 +1014,16 @@ if __name__ == "__main__":
              "omitting it behaves exactly as before this flag existed. "
              "Strictly validated before the checkpoint is written; a "
              "failing envelope rejects the whole checkpoint call.",
+    )
+    ck.add_argument(
+        "--evidence-json", default=None, dest="evidence_json",
+        help="OCID-068 Rule 7: path to a JSON file with real completion "
+             "evidence (pr_url, commit_sha, test_results, umr_id, "
+             "next_action, open_items, blockers, optionally db_changes). "
+             "Optional -- omitting it behaves exactly as before this flag "
+             "existed. Strictly validated before a --status completed "
+             "checkpoint is written; a failing evidence file rejects the "
+             "whole checkpoint call. Ignored for any other --status.",
     )
     ck.set_defaults(func=cmd_checkpoint)
 

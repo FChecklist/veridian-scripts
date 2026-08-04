@@ -1,52 +1,38 @@
-# PROGRESS -- task-20260804-201653-resolve-real-merge-conflicts-on-pr-21--o
+# PROGRESS -- task-20260804-214514-a-plain-title-with-no-ocid-reference-at
 
 ## Completed
-- [x] Checked real PR #21 state via `gh pr view`/`gh api` before acting: it was
-      already **MERGED** at `2026-08-04T19:29:07Z` (merge commit `199e73c7`),
-      **~47 minutes before this task was created** (`20260804-201653`). The
-      spec's premise ("genuinely OPEN with a real DIRTY merge state, two real
-      conflicts") was stale by the time this task ran -- a prior session
-      (self-citing `UMR-20260804-185749-c565`) had already done the conflict
-      resolution, updated the PR description with a detailed per-file
-      resolution writeup citing all three UMRs from this task's spec, and the
-      Owner account (`FChecklist`) had already posted a detailed AUDIT: PASS
-      review and merged it (`merged_by: FChecklist`).
-- [x] Did NOT attempt to redo/undo/re-merge anything -- there was no open PR
-      with conflict markers left to resolve, and re-litigating an
-      already-reviewed-and-merged Owner decision is out of scope.
-- [x] Independently verified (did not just trust the PR's self-report) by
-      cloning the repo fresh and inspecting `main` at its current tip
-      (post PR #26, which includes the PR #21 merge):
-      - `resource_governor.py`'s `_shed_load()` contains **both** real fixes
-        together: the `metrics=None`/`metrics_note` tick-counter-labeling fix
-        AND the `_safe_superboss_register("_shed_load")` fail-open wrapper.
-      - `supervisor-entrypoint.sh` contains **both**: the OCID-linkage wiring
-        block AND the more detailed checkpoint note text citing the Owner's
-        2026-07-31 full-approval-autonomy directive.
-      - Zero leftover `<<<<<<<`/`=======`/`>>>>>>>` conflict markers in either
-        file.
-      - `python3 -m py_compile resource_governor.py` -- clean.
-      - `bash -n supervisor-entrypoint.sh` -- clean.
-- [x] Independently re-ran the real existing test suite (not the PR's
-      self-reported numbers) against current `main`:
-      `pytest tests/test_resolve_superboss_db_path.py tests/test_ocid_artifact_links.py
-      test_worker_boot_activation_and_resume.py test_stuck_task_heartbeat.py -v`
-      -> **19/19 tests passed, 0 failures** (real output, not mocked; see PR
-      comment below for full breakdown).
-- [x] Posted a comment on PR #21 documenting this session's independent
-      post-merge re-verification (the PR was closed/merged, so no code or
-      description changes were made -- only a factual comment), citing
-      `UMR-20260804-184906-a6dc`, `UMR-20260804-184014-9a18`,
-      `UMR-20260804-170055-a069`, and the prior `UMR-20260804-185749-c565`.
-- [x] Did not merge anything (nothing to merge -- already merged by Owner).
+- [x] Read the task's actual SPEC as dispatched: the literal string `x` --
+      one character, no OCID/UMR reference, no PR/issue number, no
+      description of desired behavior or acceptance criteria. This matches
+      the task title itself ("a plain title with no ocid reference
+      attached"), i.e. the title is honestly describing a spec-less task.
+- [x] Checked for any hidden/implicit target before treating this as
+      un-actionable:
+      - Searched the repo for any convention around "no ocid reference"
+        tasks (`grep -rn "no ocid reference\|plain title"`) -- no
+        established handling pattern found other than this task's own name.
+      - Reviewed open PRs (`gh pr list`) for anything that might be the
+        real intended target (#28, #24, #17, #13, #12, #11, #8, #7, #2) --
+        none reference this task, an OCID, or a spec matching `x`.
+      - Reviewed open issues (`gh issue list`) -- none open.
+      - Checked git history/reflog for a fuller spec that may have been
+        overwritten -- the only prior content in this workspace's
+        `PROGRESS.md` belonged to a *different*, unrelated prior task
+        (`task-20260804-201653-resolve-real-merge-conflicts-on-pr-21`) and
+        was already correctly reset to a stub for this task before this
+        session started.
+- [x] Concluded the spec is genuinely empty/un-actionable as dispatched, not
+      just terse. Per this repo's own established norm (see prior task's
+      finding above: verify real state, don't fabricate or redo work,
+      document and flag stale/bad premises rather than inventing busywork),
+      the correct action here is to not guess at arbitrary unrelated work
+      in a shared production automation repo, and instead flag this
+      dispatch as needing a real spec/OCID reference.
 
 ## Remaining
-- [ ] None. This task's real work (resolving PR #21's conflicts) was already
-      completed and merged by a prior session/Owner before this task began.
-      This session's contribution is the independent re-verification above.
-      Flagging for whoever reviews this task: the task's stale premise
-      (claiming an open PR with a dirty merge state that had, in fact, closed
-      47 minutes earlier) is worth checking upstream -- future task dispatch
-      should re-check `mergeStateStatus`/PR `state` immediately before
-      generating a resolve-conflicts task, not rely on state captured at
-      task-authoring time.
+- [ ] None actionable from the dispatched spec. Flagging upstream: this
+      task was created with title "a plain title with no ocid reference
+      attached" and body `SPEC: x`, i.e. no real work item. Recommend the
+      task-dispatch pipeline require a non-trivial spec body (and ideally
+      an OCID/UMR/PR reference) before generating a worker task, rather
+      than dispatching on empty content.

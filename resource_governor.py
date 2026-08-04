@@ -401,10 +401,42 @@ def submit(task_spec, tier, source_trigger):
             "reuse_candidates": [],
         }
 
-    sbr = _superboss_register()
+    # Real fix (independent review, PR #20): _superboss_register() now
+    # transitively triggers superboss-register.py's own module-level
+    # resolve_superboss_db_path() (OCID-068, UMR-20260804-180210-9e2c) on
+    # its first real call in this process's lifetime -- and that function
+    # raises a real SuperbossDbPathError on any verification failure (by
+    # design, never a silent fallback). Since submit() is, by this
+    # function's own docstring, the single load-bearing UMR-creation
+    # chokepoint every scheduled trigger depends on, and resource_governor.py
+    # runs as a brand-new process every real tick (resource_governor_tick_loop.sh),
+    # letting that exception propagate uncaught here would take down real
+    # task submission platform-wide on any transient DB-verification hiccup
+    # -- not just the opt-in OCID-linkage feature. Fail-open here, same
+    # philosophy the reuse-check three lines above already applies: a
+    # broken/unavailable Superboss Register must be a real, clearly-labeled
+    # rejection (never a crash), never silently treated as an accepted
+    # submission either.
+    try:
+        sbr = _superboss_register()
+    except Exception as e:
+        reason = f"superboss_register_unavailable: {e}"
+        return {"accepted": False, "umr_id": None, "reason": reason,
+                "reuse_check_result": reuse_check_result}
+
     with sbr._write_lock():
         conn = sbr._connect()
         sbr._ensure_umr_table(conn)
+        # Real fix (independent review, PR #20): grouped with the
+        # _ensure_umr_table() call above, both at the very start of this
+        # transaction, rather than later inline (its old position). Both
+        # _ensure_*_table() functions call conn.commit() internally
+        # (matching their own pre-existing DDL convention) -- doing that
+        # once, up front, before any real row-level work in this
+        # transaction, avoids an extra mid-transaction commit point that
+        # the write-lock block's own single-commit-per-branch design
+        # otherwise implies.
+        sbr._ensure_ocid_artifact_links_table(conn)
         existing = sbr.find_active_umr_by_identity(conn, task_identity)
         if existing:
             reason = (
@@ -454,7 +486,6 @@ def submit(task_spec, tier, source_trigger):
         inputs = task_spec.get("inputs", {}) or {}
         ocid_number = inputs.get("ocid_number")
         if ocid_number:
-            sbr._ensure_ocid_artifact_links_table(conn)
             sbr.insert_ocid_artifact_link(
                 conn, ocid_number=ocid_number, umr_id=umr_id,
                 repo=inputs.get("repo") or "unknown", link_kind="registration",

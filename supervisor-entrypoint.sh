@@ -367,23 +367,41 @@ elif [ "$VERDICT" = "approve" ] && [ "$TIER" = "tier1" ] && [ "$SCOPE_OK" = "1" 
     # so this silently records nothing rather than inventing a fake umr_id --
     # ocid_artifact_links.umr_id is a real NOT NULL foreign key, never
     # fabricated to satisfy it.
+    #
+    # Real fix (independent review, PR #20): the real values below (BRANCH
+    # especially -- sourced from task.yaml's branch field, and git branch
+    # names permit ', ", and backtick characters) are passed via real
+    # environment variables and read with os.environ.get(), never
+    # interpolated directly into the Python source text -- matching the
+    # safer pattern this same file already established for
+    # AUDIT_RUN_JSON/AUDIT_HEAD_SHA above. Raw bash-substitution into a
+    # Python string literal (the prior version of this block) is a real
+    # code-injection risk in a script that holds this pipeline's actual
+    # merge/DB-write authority.
+    OCID_LINK_BRANCH="$BRANCH" OCID_LINK_TASK_ID="$TASK_ID" OCID_LINK_REPO="$REPO" \
+    OCID_LINK_PR_URL="$PR_URL" OCID_LINK_MERGE_SHA="$MERGE_COMMIT_SHA" \
     timeout 10 python3 -c "
-import re, importlib.util
+import os, re, importlib.util
 _spec = importlib.util.spec_from_file_location('superboss_register_supervisor', '/opt/veridian/scripts/superboss-register.py')
 sbr = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(sbr)
-m = re.search(r'ocid-?0*([0-9]+)', '''$BRANCH''', re.IGNORECASE)
+branch = os.environ.get('OCID_LINK_BRANCH', '')
+task_id = os.environ.get('OCID_LINK_TASK_ID', '')
+repo = os.environ.get('OCID_LINK_REPO', '')
+pr_url = os.environ.get('OCID_LINK_PR_URL', '')
+merge_sha = os.environ.get('OCID_LINK_MERGE_SHA', '')
+m = re.search(r'ocid-?0*([0-9]+)', branch, re.IGNORECASE)
 if m:
     ocid_number = f'OCID-{int(m.group(1)):03d}'
     conn = sbr._connect()
     sbr._ensure_umr_table(conn)
     sbr._ensure_ocid_artifact_links_table(conn)
-    rows = sbr.query_umr_tasks(conn, task_identity='$TASK_ID', limit=1)
+    rows = sbr.query_umr_tasks(conn, task_identity=task_id, limit=1)
     if rows:
         sbr.insert_ocid_artifact_link(
-            conn, ocid_number=ocid_number, umr_id=rows[0]['umr_id'], repo='$REPO',
-            pr_number=int('$PR_URL'.rstrip('/').rsplit('/', 1)[-1]),
-            commit_sha='$MERGE_COMMIT_SHA' or None, link_kind='merge',
+            conn, ocid_number=ocid_number, umr_id=rows[0]['umr_id'], repo=repo,
+            pr_number=int(pr_url.rstrip('/').rsplit('/', 1)[-1]),
+            commit_sha=merge_sha or None, link_kind='merge',
         )
         conn.commit()
     conn.close()

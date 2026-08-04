@@ -198,11 +198,53 @@ def test_insert_is_idempotent_on_repeat_call():
         print(f"PASS: test_insert_is_idempotent_on_repeat_call -> id={id1}")
 
 
+def test_submit_gracefully_handles_broken_db_path():
+    """Real regression test for the independent review's real finding on
+    PR #20: resource_governor.py's submit() must never let an uncaught
+    SuperbossDbPathError (raised by superboss-register.py's own
+    resolve_superboss_db_path(), OCID-068 UMR-20260804-180210-9e2c) crash
+    task submission -- it must fail open with a real, clearly-labeled
+    rejection instead, matching the same philosophy already applied to the
+    reuse-check three lines above submit()'s own _superboss_register() call.
+    Forces a real SuperbossDbPathError via SUPERBOSS_REGISTER_DB pointing at
+    a real, existing, non-zero-size file that is a real SQLite database but
+    is missing the umr_tasks table (so step 2's own exists+non-zero
+    pre-check accepts it as the candidate, and step 4's schema check then
+    genuinely fails) -- not a synthetic mock, the real function's real
+    failure path."""
+    with tempfile.TemporaryDirectory() as d:
+        wrong_schema_db = os.path.join(d, "wrong-schema.sqlite")
+        conn = sqlite3.connect(wrong_schema_db)
+        conn.execute("CREATE TABLE unrelated_table (id INTEGER PRIMARY KEY)")
+        conn.commit()
+        conn.close()
+        assert os.path.getsize(wrong_schema_db) > 0
+
+        env = {"SUPERBOSS_REGISTER_DB": wrong_schema_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
+        rg = _load("rg_test_broken_db", "resource_governor.py", env=env)
+
+        os.environ["SUPERBOSS_REGISTER_DB"] = wrong_schema_db
+        try:
+            result = rg.submit(
+                task_spec={"task_identity": "test-broken-db-path", "task_kind": "veridian_task_create", "inputs": {}},
+                tier=2, source_trigger="unit_test",
+            )
+        finally:
+            del os.environ["SUPERBOSS_REGISTER_DB"]
+
+        assert result["accepted"] is False, result
+        assert result["umr_id"] is None, result
+        assert "superboss_register_unavailable" in result["reason"], result
+        assert "umr_tasks table" in result["reason"], result
+        print(f"PASS: test_submit_gracefully_handles_broken_db_path -> {result['reason']}")
+
+
 if __name__ == "__main__":
     tests = [
         test_call_site_1_resource_governor_submit,
         test_call_site_2_supervisor_merge_wiring,
         test_insert_is_idempotent_on_repeat_call,
+        test_submit_gracefully_handles_broken_db_path,
     ]
     failed = 0
     for t in tests:

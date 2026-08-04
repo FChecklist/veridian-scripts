@@ -385,6 +385,73 @@ if [ "$VERDICT" = "approve" ] && [ "$SCOPE_OK" = "1" ]; then
       --work-item-id "$TASK_ID" --source deployment --medium github-merge \
       --content "$REPO" --term "${MERGE_COMMIT_SHA:-unknown}" --result merged \
       >> "$TASK_DIR/supervisor.log" 2>&1 || true
+    # OCID-068 real requirement addendum (UMR-20260804-170055-a069, Owner
+    # real-time implementation override on the standing hard-rule-7 lock):
+    # structured OCID -> UMR -> PR -> commit linkage, recorded at this real,
+    # canonical merge chokepoint -- only after the merge above is
+    # independently confirmed (never a self-report), same discipline the
+    # surrounding merge-detection block already established. Best-effort,
+    # `|| true`, same convention as log-action/backfill_phase_self_report.py
+    # immediately above/below -- must never affect the already-confirmed
+    # merge result. ocid_number is derived from the branch name via the same
+    # "ocid-NNN"/"ocidNNN" naming convention every real OCID branch this
+    # session used; umr_id is looked up by real task_identity match against
+    # umr_tasks -- many real tasks (adopted branches, direct veridian-task.py
+    # create calls) have no such row at all (a real, separately-documented
+    # gap, see ai-os/VERIDIAN_OCID_068_..._OWNER_REVIEW_PACKAGE_2026-08-04.md),
+    # so this silently records nothing rather than inventing a fake umr_id --
+    # ocid_artifact_links.umr_id is a real NOT NULL foreign key, never
+    # fabricated to satisfy it.
+    #
+    # Real fix (independent review, PR #20): the real values below (BRANCH
+    # especially -- sourced from task.yaml's branch field, and git branch
+    # names permit ', ", and backtick characters) are passed via real
+    # environment variables and read with os.environ.get(), never
+    # interpolated directly into the Python source text -- matching the
+    # safer pattern this same file already established for
+    # AUDIT_RUN_JSON/AUDIT_HEAD_SHA above. Raw bash-substitution into a
+    # Python string literal (the prior version of this block) is a real
+    # code-injection risk in a script that holds this pipeline's actual
+    # merge/DB-write authority.
+    OCID_LINK_BRANCH="$BRANCH" OCID_LINK_TASK_ID="$TASK_ID" OCID_LINK_REPO="$REPO" \
+    OCID_LINK_PR_URL="$PR_URL" OCID_LINK_MERGE_SHA="$MERGE_COMMIT_SHA" \
+    timeout 10 python3 -c "
+import os, re, importlib.util
+_spec = importlib.util.spec_from_file_location('superboss_register_supervisor', '/opt/veridian/scripts/superboss-register.py')
+sbr = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(sbr)
+branch = os.environ.get('OCID_LINK_BRANCH', '')
+task_id = os.environ.get('OCID_LINK_TASK_ID', '')
+repo = os.environ.get('OCID_LINK_REPO', '')
+pr_url = os.environ.get('OCID_LINK_PR_URL', '')
+merge_sha = os.environ.get('OCID_LINK_MERGE_SHA', '')
+m = re.search(r'ocid-?0*([0-9]+)', branch, re.IGNORECASE)
+if m:
+    ocid_number = f'OCID-{int(m.group(1)):03d}'
+    conn = sbr._connect()
+    sbr._ensure_umr_table(conn)
+    sbr._ensure_ocid_artifact_links_table(conn)
+    rows = sbr.query_umr_tasks(conn, task_identity=task_id, limit=1)
+    if rows:
+        sbr.insert_ocid_artifact_link(
+            conn, ocid_number=ocid_number, umr_id=rows[0]['umr_id'], repo=repo,
+            pr_number=int(pr_url.rstrip('/').rsplit('/', 1)[-1]),
+            commit_sha=merge_sha or None, link_kind='merge',
+        )
+        conn.commit()
+    conn.close()
+" >> "$TASK_DIR/supervisor.log" 2>&1 || true
+    # Real conflict resolution (merge of the recovered pre-PR20 local hotfix
+    # and PR #20's own change to this same checkpoint call -- see PR #21's
+    # own description for the full real conflict record): both real
+    # improvements kept together. The OCID-linkage wiring immediately above
+    # is PR #20's own real addition; the more detailed note text below
+    # (citing the real tier/hold_for_owner_signoff values and the actual
+    # Owner directive this autonomous-merge authority traces back to) is the
+    # recovered local hotfix's own real improvement over PR #20's plainer
+    # "tier1, Superboss-approved, merged autonomously" text -- kept in favor
+    # of discarding it, since it is real, more informative, and does not
+    # conflict with anything the OCID-linkage wiring needs.
     python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status completed --note "Superboss-approved (tier=$TIER, hold_for_owner_signoff=$HOLD_FOR_OWNER_SIGNOFF), merged autonomously per Owner's 2026-07-31 full-approval-autonomy directive: $PR_URL"
     # Root cause 1 (real incidents: VERIDIAN_ARCHITECTURE_V2 phase_1/PR #559,
     # phase_2/PR #560 -- both merged for real, neither worker updated its own

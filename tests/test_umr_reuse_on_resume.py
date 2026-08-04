@@ -21,6 +21,7 @@ Every test uses a real, isolated, temp-file SQLite database seeded with the
 real schema -- never the live production database.
 """
 import importlib.util
+import json
 import os
 import sqlite3
 import sys
@@ -218,6 +219,159 @@ def test_reused_umr_preserves_original_ts_submitted():
         assert second["umr_id"] == first["umr_id"], second
         assert reused_ts == original_ts, f"expected original ts_submitted {original_ts!r} preserved, got {reused_ts!r}"
         print(f"PASS: test_reused_umr_preserves_original_ts_submitted -> ts_submitted={original_ts}")
+
+
+def test_reuse_skips_rejected_duplicate_stubs_picks_real_terminal_row():
+    """Round-1 review finding (PR #26): find_most_recent_umr_by_identity()
+    must not pick a rejected_duplicate STUB row over the real historical row
+    for the same task_identity. Reproduces the real failure sequence: first
+    submission accepted and goes terminal (completed); a SECOND accepted
+    submission for a DIFFERENT task_identity is irrelevant noise; then a
+    same-identity resubmission is deliberately made WHILE a fresh row is
+    still active, producing a real rejected_duplicate stub with a LATER
+    ts_submitted than the original terminal row -- exactly what
+    resume_interrupted_workers_tick() ticking every cycle produces in real
+    operation. A subsequent genuine resume must still land on the real
+    terminal row, not the newer rejected_duplicate stub."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        env = {"SUPERBOSS_REGISTER_DB": scratch_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
+        rg = _load("rg_reuse_skip_stub", "resource_governor.py", env=env)
+        sbr = _load("sbr_reuse_skip_stub", "superboss-register.py", env=env)
+
+        os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
+        try:
+            real_first = rg.submit(
+                task_spec={"task_identity": "test-resume-reuse-task-5", "task_kind": "systemctl_action",
+                           "unit_name": "veridian-worker@test-resume-reuse-task-5.service",
+                           "inputs": {"action": "start"}},
+                tier=2, source_trigger="unit_test",
+            )
+            assert real_first["accepted"] is True, real_first
+            real_first_umr_id = real_first["umr_id"]
+
+            conn = sbr._connect()
+            try:
+                sbr.update_umr_task(conn, real_first_umr_id, status="completed", reason="test: simulated real completion")
+                conn.commit()
+            finally:
+                conn.close()
+
+            # A fresh submission for the SAME identity, now active again --
+            # this is the row a racing duplicate call gets rejected against.
+            reactivated = rg.submit(
+                task_spec={"task_identity": "test-resume-reuse-task-5", "task_kind": "systemctl_action",
+                           "unit_name": "veridian-worker@test-resume-reuse-task-5.service",
+                           "inputs": {"action": "start"}},
+                tier=1, source_trigger="unit_test:resume",
+            )
+            assert reactivated["accepted"] is True, reactivated
+            assert reactivated["umr_id"] == real_first_umr_id, "sanity: this reuse itself must pick the real row"
+
+            # Now simulate resume_interrupted_workers_tick() ticking again
+            # while that reactivated row is still active (queued) -- this is
+            # rejected as a real duplicate, producing the real stub row with
+            # a later ts_submitted than real_first_umr_id's own row.
+            stub = rg.submit(
+                task_spec={"task_identity": "test-resume-reuse-task-5", "task_kind": "systemctl_action",
+                           "unit_name": "veridian-worker@test-resume-reuse-task-5.service",
+                           "inputs": {"action": "start"}},
+                tier=1, source_trigger="unit_test:tick",
+            )
+            assert stub["accepted"] is False, stub
+            assert stub["umr_id"] != real_first_umr_id, (
+                "sanity: the rejection path mints its own fresh rejected_duplicate stub row "
+                "(pre-existing, unmodified behavior) -- if this ever starts reusing the real "
+                "umr_id instead, the rest of this test's premise no longer holds"
+            )
+
+            # Real check: find_most_recent_umr_by_identity() must still
+            # resolve to the real row, not treat the rejection as "newer."
+            conn = sbr._connect()
+            try:
+                resolved = sbr.find_most_recent_umr_by_identity(conn, "test-resume-reuse-task-5")
+            finally:
+                conn.close()
+        finally:
+            del os.environ["SUPERBOSS_REGISTER_DB"]
+
+        assert resolved["umr_id"] == real_first_umr_id, resolved
+        assert resolved["status"] != "rejected_duplicate", (
+            f"Rule 1 violation: find_most_recent_umr_by_identity() resolved to a rejected_duplicate "
+            f"stub (status={resolved['status']!r}) instead of the real row"
+        )
+        print(f"PASS: test_reuse_skips_rejected_duplicate_stubs_picks_real_terminal_row -> resolved umr_id={resolved['umr_id']}, status={resolved['status']}")
+
+
+def test_reuse_preserves_prior_outputs_logs_metrics_completion():
+    """Round-1 review finding (PR #26): reusing a terminal row's umr_id must
+    not silently wipe its real outputs/logs/metrics/completion timestamp via
+    upsert_umr_task()'s pre-existing ON CONFLICT DO UPDATE path -- that would
+    destroy exactly the audit history this feature claims to preserve."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        env = {"SUPERBOSS_REGISTER_DB": scratch_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
+        rg = _load("rg_reuse_preserve_evidence", "resource_governor.py", env=env)
+        sbr = _load("sbr_reuse_preserve_evidence", "superboss-register.py", env=env)
+
+        os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
+        try:
+            first = rg.submit(
+                task_spec={"task_identity": "test-resume-reuse-task-6", "task_kind": "systemctl_action",
+                           "unit_name": "veridian-worker@test-resume-reuse-task-6.service",
+                           "inputs": {"action": "start"}},
+                tier=2, source_trigger="unit_test",
+            )
+            umr_id = first["umr_id"]
+
+            conn = sbr._connect()
+            try:
+                sbr.update_umr_task(
+                    conn, umr_id, status="completed",
+                    reason="test: simulated real completion",
+                    outputs={"real_note": "this run produced real evidence"},
+                    logs_ref="/opt/veridian/ai-os/tasks/test-resume-reuse-task-6/worker.log",
+                    metric_snapshot={"cpu": 12.5},
+                )
+                conn.execute(
+                    "UPDATE umr_tasks SET ts_dispatched=?, ts_sigterm=?, ts_completed=? WHERE umr_id=?",
+                    ("2026-08-04T20:00:00+00:00", None, "2026-08-04T20:05:00+00:00", umr_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            second = rg.submit(
+                task_spec={"task_identity": "test-resume-reuse-task-6", "task_kind": "systemctl_action",
+                           "unit_name": "veridian-worker@test-resume-reuse-task-6.service",
+                           "inputs": {"action": "reset_failed_and_start"}},
+                tier=1, source_trigger="unit_test:resume",
+            )
+            assert second["umr_id"] == umr_id, second
+
+            conn = sbr._connect()
+            try:
+                row = conn.execute(
+                    "SELECT outputs_json, logs_ref, metric_snapshot_json, ts_dispatched, ts_completed "
+                    "FROM umr_tasks WHERE umr_id=?", (umr_id,),
+                ).fetchone()
+            finally:
+                conn.close()
+        finally:
+            del os.environ["SUPERBOSS_REGISTER_DB"]
+
+        outputs = json.loads(row["outputs_json"]) if row["outputs_json"] else {}
+        metric_snapshot = json.loads(row["metric_snapshot_json"]) if row["metric_snapshot_json"] else None
+        assert outputs.get("real_note") == "this run produced real evidence", (
+            f"Rule 1 violation: reuse wiped prior outputs, got {outputs!r}"
+        )
+        assert row["logs_ref"] == "/opt/veridian/ai-os/tasks/test-resume-reuse-task-6/worker.log", row["logs_ref"]
+        assert metric_snapshot == {"cpu": 12.5}, metric_snapshot
+        assert row["ts_dispatched"] == "2026-08-04T20:00:00+00:00", row["ts_dispatched"]
+        assert row["ts_completed"] == "2026-08-04T20:05:00+00:00", row["ts_completed"]
+        print(f"PASS: test_reuse_preserves_prior_outputs_logs_metrics_completion -> outputs/logs/metrics/ts_completed all survived reuse")
 
 
 if __name__ == "__main__":

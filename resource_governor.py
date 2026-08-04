@@ -671,6 +671,22 @@ def submit(task_spec, tier, source_trigger):
         prior = sbr.find_most_recent_umr_by_identity(conn, task_identity)
         reused_umr_id = prior["umr_id"] if prior else None
 
+        # Real fix (independent review, PR #26 round 1): upsert_umr_task()'s
+        # existing ON CONFLICT(umr_id) DO UPDATE path unconditionally
+        # overwrites outputs_json/logs_ref/metric_snapshot_json/
+        # ts_dispatched/ts_sigterm/ts_completed with whatever this record
+        # supplies -- a fresh submit() record supplies none of them, which
+        # would silently wipe the prior terminal run's real execution
+        # evidence the moment its umr_id is reused, defeating the whole
+        # point of "one real, continuous UMR history." Carry the prior row's
+        # own values forward here so a reuse preserves them; the resumed
+        # run's own worker/supervisor overwrites them for real via its own
+        # later update_umr_task() checkpoint calls as it actually progresses
+        # -- this only prevents the reuse INSERT itself from clobbering them
+        # with nulls before that real progress happens.
+        prior_outputs = json.loads(prior["outputs_json"]) if prior and prior.get("outputs_json") else {}
+        prior_metric_snapshot = json.loads(prior["metric_snapshot_json"]) if prior and prior.get("metric_snapshot_json") else None
+
         umr_id = sbr.upsert_umr_task(conn, {
             "umr_id": reused_umr_id,
             "task_identity": task_identity,
@@ -683,6 +699,12 @@ def submit(task_spec, tier, source_trigger):
             "inputs": task_spec.get("inputs", {}),
             "reason": "queued" if not reused_umr_id else f"resubmitted (reused umr_id, prior status was {prior['status']!r})",
             "metadata": metadata,
+            "outputs": prior_outputs if reused_umr_id else {},
+            "logs_ref": prior["logs_ref"] if reused_umr_id else None,
+            "metric_snapshot": prior_metric_snapshot if reused_umr_id else None,
+            "ts_dispatched": prior["ts_dispatched"] if reused_umr_id else None,
+            "ts_sigterm": prior["ts_sigterm"] if reused_umr_id else None,
+            "ts_completed": prior["ts_completed"] if reused_umr_id else None,
         })
         # OCID-068 real requirement addendum (UMR-20260804-170055-a069, Owner
         # real-time implementation override on the standing hard-rule-7 lock):

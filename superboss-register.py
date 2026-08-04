@@ -3143,9 +3143,23 @@ def find_most_recent_umr_by_identity(conn, task_identity):
     reuse a prior (now-terminal) UMR id instead of minting a fresh one -- the
     real, previously-documented gap this closes (see this file's own
     resource_governor.py callers and the module comment above
-    find_active_umr_by_identity() describing exactly this limitation)."""
+    find_active_umr_by_identity() describing exactly this limitation).
+
+    Real fix (independent review, PR #26 round 1): excludes
+    status='rejected_duplicate' rows. The primary real caller,
+    resource_governor.py's resume_interrupted_workers_tick() path, calls
+    submit() every tick for a task that is still active -- each of those
+    calls, while the real row is queued/dispatched/running, inserts a
+    rejected_duplicate STUB row (via find_active_umr_by_identity()'s own
+    rejection path) with a LATER ts_submitted than the real row it rejected.
+    Without this exclusion, a genuine later resume (after the real row
+    finally goes terminal) would pick the newest rejected_duplicate stub
+    instead of the real historical row -- grafting the resume onto a
+    spurious placeholder rather than continuing the real UMR's own history,
+    the opposite of this function's purpose."""
     row = conn.execute(
-        "SELECT * FROM umr_tasks WHERE task_identity=? ORDER BY ts_submitted DESC LIMIT 1",
+        "SELECT * FROM umr_tasks WHERE task_identity=? AND status != 'rejected_duplicate' "
+        "ORDER BY ts_submitted DESC LIMIT 1",
         (task_identity,),
     ).fetchone()
     return dict(row) if row else None

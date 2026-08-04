@@ -534,6 +534,24 @@ def submit(task_spec, tier, source_trigger):
     inputs = task_spec.get("inputs", {})
     if not isinstance(inputs, dict):
         raise ValueError(f"inputs must be a JSON object, got {type(inputs).__name__}")
+
+    # OCID-068 seven-rule guardrails addendum, Rule 3 (UMR-20260804-180711-7f96,
+    # UMR-20260804-203846-e722): "validate the input, the OCID, the task
+    # identity, the database, and zero duplication in that order, and only
+    # mint a UMR and write the database and create the task after every
+    # validation passes." Real, previously-unvalidated gap this closes:
+    # inputs.ocid_number (the optional OCID-linkage field wired into
+    # insert_ocid_artifact_link() below, per UMR-20260804-170055-a069) was
+    # only ever read AFTER upsert_umr_task() had already minted the row --
+    # a malformed value would silently fail to link (insert_ocid_artifact_link()
+    # never raises, by design) rather than being rejected up front. Validated
+    # here, before any database write, same fail-fast style as
+    # tenant_id/correlation_id above. Optional: every caller that omits
+    # ocid_number (the overwhelming majority) is completely unaffected.
+    ocid_number = inputs.get("ocid_number")
+    if ocid_number is not None and (not isinstance(ocid_number, str) or not re.match(r"^OCID-\d+$", ocid_number)):
+        raise ValueError(f"inputs.ocid_number must be a string matching 'OCID-<digits>', got {ocid_number!r}")
+
     task_kind = task_spec.get("task_kind", "systemctl_action")
     if task_kind not in ("systemctl_action", "veridian_task_create"):
         raise ValueError(

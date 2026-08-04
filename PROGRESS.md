@@ -1,35 +1,23 @@
-# PROGRESS -- task-20260804-214725-a-plain-title-with-no-ocid-reference-at
+# PROGRESS -- task-20260804-214923-a-plain-title-with-no-ocid-reference-at
 
 ## Completed
-- [x] Read the task's actual SPEC as dispatched: the literal string `x` --
-      one character, no OCID/UMR reference, no PR/issue number, no
-      description of desired behavior or acceptance criteria. This matches
-      the task title itself ("a plain title with no ocid reference
-      attached"), i.e. the title is honestly describing a spec-less task.
-- [x] Checked for any hidden/implicit target before treating this as
-      un-actionable:
-      - Reviewed open PRs (`gh pr list`) -- #28, #24, #17, #13, #12, #11, #8,
-        #7, #2 -- none reference this task, an OCID, or a spec matching `x`.
-      - Reviewed open issues (`gh issue list`) -- none open.
-      - Searched the repo for any convention around "no ocid reference"
-        tasks (`grep -rn "no ocid reference\|plain title"`) -- no
-        established handling pattern found beyond the immediately prior
-        task of this same name (task-20260804-214514-...), which reached
-        the identical conclusion.
-      - Checked git log -- the immediately preceding task run
-        (`task-20260804-214514-a-plain-title-with-no-ocid-reference-at`,
-        merged as PR #36) hit the exact same dispatch (SPEC=x, no OCID) and
-        already concluded, after equivalent verification, that it is
-        un-actionable.
-- [x] Concluded the spec is genuinely empty/un-actionable as dispatched, not
-      just terse -- and that this is a repeat of the immediately prior task
-      dispatch, not a new one. Per this repo's established norm (verify
-      real state, don't fabricate or redo work, document and flag
-      stale/bad premises rather than inventing busywork), the correct
-      action here is to not guess at arbitrary unrelated work in a shared
-      production automation repo, and instead flag this dispatch as
-      needing a real spec/OCID reference.
+- [x] Confirmed this dispatch is `SPEC: x` with no OCID/UMR/PR/issue
+      reference -- identical in kind to the two immediately preceding
+      task dispatches of this same title:
+      - `task-20260804-214514-...` (merged PR #36) -- did full diligence
+        (PR list, issue list, repo grep, git log), concluded un-actionable.
+      - `task-20260804-214725-...` (merged PR #38) -- repeated the same
+        diligence, reached the identical conclusion.
+      This is now the 3rd consecutive occurrence of the exact same
+      spec-less dispatch. Re-running the identical PR/issue/grep/log
+      investigation a third time would produce zero new signal -- the
+      repo state hasn't changed in a way that would flip the answer.
+- [x] Per protocol (stop rather than repeat an identical approach a 3rd
+      time), not re-attempting the investigation. Flagging as un-actionable
+      and stopping here.
 
 ## Remaining
-- [ ] Awaiting a real spec/OCID reference from the dispatcher before any
-      further action can be taken on this task.
+- [ ] Awaiting a real spec/OCID reference from the dispatcher. If this
+      title/SPEC pattern recurs again, the dispatcher-side process
+      generating these tasks likely needs fixing rather than another
+      worker run.

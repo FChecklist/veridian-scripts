@@ -1,38 +1,29 @@
-# PROGRESS -- task-20260805-114126-pm-decision--reconcile-ocid-068-umr-book
+# PROGRESS -- task-20260805-131404-extend-ocid-canonical-mapping-methodolog
 
 ## Completed
-- [x] Read live `umr_tasks` rows for `UMR-20260804-170055-a069` and `UMR-20260804-184014-9a18`
-      directly from `superboss-register.sqlite`.
-- [x] Ran the canonical `superboss-register.py reconcile-umr-status --umr-id
-      UMR-20260804-170055-a069` (real, live GH PR-evidence cross-check, not raw SQL): result
-      `is_stale: false` -- row is already `status=completed`,
-      `ts_completed=2026-08-05T02:45:07.495957+00:00`, with the exact required PR/commit
-      evidence already cited in `reason`. No write needed or performed (the module's own
-      `--apply` path only writes when `is_stale` is true).
-- [x] Confirmed `UMR-20260804-184014-9a18` already carries the required annotation
-      (`metadata_json.pm_annotation_umr20260805024319_b1e6`) cross-referencing that its
-      underlying deploy goal was accomplished via PR #21 + the live-deploy step confirmed under
-      `UMR-20260805-024319-b1e6`; status correctly remains `rejected_duplicate`, not
-      `completed`.
-- [x] Identified the real marker function/line for each of the 7 OCID-068 guardrail rules from
-      the actual PR merge commits (#26, #29, #30, #32, #33, #34, #35) in the `veridian-scripts`
-      repo checkout.
-- [x] Verified each of the 7 markers present, live, and callable in the live deployed files
-      under `/opt/veridian/scripts` via direct `grep` + dynamic `importlib` load + functional
-      smoke calls (Rule 2 classifier, Rule 7 evidence validator) -- all 7 PASS.
-- [x] Confirmed byte-for-byte identity between the 4 live rule-bearing files
-      (`resource_governor.py`, `superboss-register.py`, `dispatch-tick.py`, `veridian-task.py`)
-      and the `origin/main` repo checkout, plus `dispatch-owner-task.sh`'s
-      `check-content-duplicate` wiring -- no deploy gap found, no fix/redeploy needed.
-- [x] Wrote `OCID_068_UMR_BOOK_RECONCILIATION_REVERIFICATION_2026-08-05.md` documenting all
-      independent re-verification evidence.
+- [x] Read the real live target document
+      (`OCID_001_069_CANONICAL_UMR_MAPPING_METHODOLOGY_2026-08-05.md`) and confirmed it already
+      exists in the fully-extended, correct form this SPEC requires (renamed, title/result say
+      OCID-001..069 / 69 of 69, dedicated OCID-069 section citing `UMR-20260805-051109-77a9`,
+      status `completed`).
+- [x] Diffed the pre-extension file against the post-extension file
+      (`git diff d27cf95~1 d27cf95`) and confirmed all existing OCID-001..068 findings are
+      byte-for-byte unaltered -- extension only, as required.
+- [x] Queried the live `ocid_canonical_registry` table directly: confirmed 69 real rows, and
+      confirmed the OCID-069 row's `canonical_umr_id`/`status` match the document exactly.
+- [x] Confirmed this extension was already merged via veridian-scripts PR #56 (merge commit
+      `717083d`), which already received a real structured independent-review "AUDIT: PASS"
+      comment (AGENTS.md Operating Rule 7c protocol) before merge, and that this merge commit is
+      a real ancestor of the current live `main` tip.
+- [x] Wrote `OCID_069_METHODOLOGY_EXTENSION_REVERIFICATION_2026-08-05.md` documenting all
+      independent re-verification evidence above.
 - [x] Determined this task's own SPEC had already been fully executed by a prior session
-      (`UMR-20260805-024319-b1e6`, formalized in `UMR-20260805-032731-b412`'s permanent closure
-      record) before this task was dispatched -- correctly performed zero redundant DB writes
-      and zero redundant redeploys, per that record's own "do not reopen absent a real
-      regression" standing rule. No regression was found this session.
+      (`UMR-20260805-083516-d73c`, PR #56) before this task was dispatched -- correctly performed
+      zero redundant edits to the already-correct target document. No regression found.
+- [x] Committed and pushed the re-verification note; opened a real pull request for real
+      independent review before merge.
 
 ## Remaining
-- [ ] None. All three SPEC requirements (DB completion correction, dedup annotation, seven-rule
-      live-deployment verification) independently re-verified already true; nothing further to
-      do absent a future real regression.
+- [ ] None. The SPEC's required document state was already true and independently re-confirmed;
+      nothing further to do absent a future real regression. Awaiting real independent review +
+      merge of this task's own PR (re-verification note only, no change to the target document).

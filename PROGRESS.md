@@ -1,35 +1,20 @@
-# PROGRESS -- task-20260805-175259-ocid-020-real-addendum--veridian-gtm-cer
+# PROGRESS -- task-20260805-185216-ocid-020-cycle-decision--tier-bump-plus
 
 ## Completed
-- [x] Independent verification of live state before acting (per standing memory on
-      Veridian task-dispatch false-premise pattern): checked `superboss-register.sqlite`,
-      sibling task dirs, and the live process table rather than trusting the SPEC narrative.
-- [x] Honest tool inventory across PATH, project-local `node_modules/.bin`, pip, and
-      network reachability (delivered to user; not duplicated into a new doc per the
-      "no new document" instruction).
-- [x] Confirmed real memory/load caution basis: `free -h` / `uptime` / `ps` show 2.9Gi/4Gi
-      swap in use, load average 5.71/10.04/11.09 on an 8-core box, and 5 concurrent
-      `claude -p` worker processes right now, including a sibling PM-decision task
-      (`task-20260805-175304-ocid-020-gtm-certification--pm-decision`, PID 3242511)
-      started ~5s after this task -- both observed live via `ps`.
-- [x] Reported the required first deliverable (tool inventory + phased plan) back to the
-      user per explicit SPEC instruction: "Report back ... before executing further."
+- [x] Independently verified SPEC's tier-bump premise against live `superboss-register.sqlite` —
+      found FALSE: `UMR-20260805-093138-2bd0` is `status=rejected_duplicate`, `tier` already `0`,
+      not queued at all (not "position 9 of 34"; live queued backlog is 25 rows total and doesn't
+      include this UMR). Underlying work was already completed by `UMR-20260805-152250-55d3`.
+      No tier-bump write performed; no canonical tier-bump mechanism exists in the codebase either.
+- [x] Verified `gtm_certification_categories` table live: 25 rows, schema matches SPEC description
+      exactly.
+- [x] Independently scrutinized category 14 (governance testing) `passed=1`: evidence is real,
+      traces to re-runnable script `gtm_check_governance_testing.py` (commit `b140051`), and I
+      independently reproduced sub-check 2 against live DB state — matched exactly. Left `passed=1`
+      standing. Flagged a real, separate gap: that script lives only on open PR #65, not yet on
+      `main`.
+- [x] Findings written to `OCID_020_CYCLE_DECISION_TIER_BUMP_VERIFICATION_2026-08-05.md`, committed.
 
 ## Remaining
-- [ ] Awaiting outcome of the concurrent `task-20260805-175304` PM-decision task (its own
-      title: "proceed both in parallel plus checkpoint discipline fix") before writing to
-      the shared `gtm_certification_categories` table, to avoid racing the already-active
-      `UMR-20260805-165906-0923` work lineage (3 "adopted" sub-tasks, all `pending_review`,
-      already populated all 25 category rows: 15 pass / 3 fail / 8 not yet run).
-- [ ] If cleared to proceed: mint child UMRs (via canonical registrar, as children of
-      UMR-20260802-165606-4413) for the 3 currently-failing categories (security audit,
-      backup and recovery testing, production readiness audit) that don't already have a
-      dedicated child UMR distinct from the shared schema-build UMR.
-- [ ] Governance testing category is already `passed=1, validated` in the live DB (row 14)
-      -- SPEC's suggestion to "close that one first" is stale; already closed.
-- [ ] Load testing / stress testing: blocked pending explicit PM go-ahead citing this UMR
-      chain, per SPEC's own caution -- current load average confirms real caution is
-      warranted, not just fabricated risk-aversion.
-- [ ] AI testing (1000 prompts): blocked pending a budget check against the cost-usage
-      mechanism (`cost-usage-60min.py` / OpenRouter credits + token_usage_ledger) --
-      no dedicated pre-spend gate script found; a manual check is required before spend.
+- [ ] Owner/PM to decide whether to merge PR #65 (`feat/gtm-checks-db-api-governance-umr20260805153813`)
+      so `gtm_check_governance_testing.py` is reachable from `main` (not done unilaterally here).

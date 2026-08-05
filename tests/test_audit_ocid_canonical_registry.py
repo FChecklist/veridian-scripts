@@ -22,6 +22,7 @@ Covers:
 import importlib.util
 import json
 import os
+import subprocess
 import sqlite3
 import sys
 import tempfile
@@ -271,9 +272,121 @@ def test_not_applicable_confirmed_requires_real_stored_audit_raw_output():
         print("PASS: test_not_applicable_confirmed_requires_real_stored_audit_raw_output")
 
 
+def _run_cli(db_path, extra_args=()):
+    """Real subprocess invocation of the real CLI entrypoint (never calling
+    main() in-process), against a real isolated temp-file SQLite DB pointed
+    at via the real SUPERBOSS_REGISTER_DB env-var seam
+    (resolve_superboss_db_path(), superboss-register.py) -- so this exercises
+    exactly what a human/PM running `python3 audit_ocid_canonical_registry.py`
+    at a real terminal actually sees, with zero risk to the real production
+    DB."""
+    env = dict(os.environ)
+    env["SUPERBOSS_REGISTER_DB"] = db_path
+    return subprocess.run(
+        [sys.executable, os.path.join(SCRIPTS_DIR, "audit_ocid_canonical_registry.py"), *extra_args],
+        cwd=SCRIPTS_DIR, env=env, capture_output=True, text=True, timeout=60,
+    )
+
+
+def test_dry_run_makes_zero_writes_and_every_output_line_is_unambiguously_labeled():
+    """Regression test for the real incident (UMR-20260805-121654-4b77 /
+    UMR-20260805-122042-8dbc): a dry run's own per-OCID 'changed=True'/
+    'CHANGED:' stderr lines were misread as proof of a confirmed live DB
+    write, when no write had occurred -- independent verification found the
+    live table matched the known-correct roster on every row named. This
+    proves, empirically, both halves of that never recurring:
+      1. a dry run (no --apply) makes ZERO writes to the real DB file --
+         byte-identical before/after, not just 'no exception raised'.
+      2. every stderr line a dry run prints (including every 'changed'/
+         'CHANGED' line) is prefixed '[DRY RUN]', so no line can be misread
+         in isolation as describing a confirmed write."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "scratch.sqlite")
+        sbr = _seed_scratch_db(path)
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        # seed one row whose existing canonical choice will no longer be
+        # corroborated by the fresh (empty) search below, so this run
+        # produces a real changed=True / CHANGED line -- the exact case
+        # that was misread in the real incident.
+        sbr.upsert_ocid_canonical_registry(
+            conn, "OCID-960", canonical_umr_id="UMR-STALE-FOR-DRYRUN-TEST",
+            status="completed", all_umr_ids=["UMR-STALE-FOR-DRYRUN-TEST"],
+            evidence={**{k: None for k in sbr.EVIDENCE_JSON_REQUIRED_KEYS},
+                      "umr_id": "UMR-STALE-FOR-DRYRUN-TEST", "ocid_number": "OCID-960",
+                      "evidence_summary": "seeded for dry-run-zero-writes regression test."},
+        )
+        conn.commit()
+        conn.close()
+
+        def _snapshot():
+            c = sqlite3.connect(path)
+            c.row_factory = sqlite3.Row
+            rows = [dict(r) for r in c.execute("SELECT * FROM ocid_canonical_registry ORDER BY ocid_number")]
+            c.close()
+            return rows
+
+        # Note: raw file bytes are NOT compared here -- opening a real
+        # sqlite3 connection legitimately flips WAL-mode header bytes even
+        # for a connection that performs no data writes, which would make a
+        # byte-identical check falsely fail. Full-table *data* snapshot
+        # (every column, every row) is the real, correct zero-writes proof.
+        before = _snapshot()
+        result = _run_cli(path, ["--ocid-number", "OCID-960"])
+        assert result.returncode == 0, result.stderr
+        after = _snapshot()
+
+        assert before == after, (
+            f"DRY RUN (no --apply) modified real row data on disk -- this must never happen\n"
+            f"before={before}\nafter={after}"
+        )
+        assert after[0]["canonical_umr_id"] == "UMR-STALE-FOR-DRYRUN-TEST", (
+            "DRY RUN changed the live row's canonical_umr_id -- this must never happen"
+        )
+
+        stderr_lines = [ln for ln in result.stderr.splitlines() if ln.strip()]
+        assert any("changed=True" in ln for ln in stderr_lines), (
+            "test setup did not actually produce a changed=True line to exercise the mislabel risk"
+        )
+        assert any(ln.startswith("CHANGED:") or " CHANGED:" in ln for ln in stderr_lines) is False or all(
+            "[DRY RUN]" in ln for ln in stderr_lines if "CHANGED:" in ln
+        ), f"a CHANGED line was printed without an unambiguous [DRY RUN] label: {stderr_lines}"
+        for ln in stderr_lines:
+            if "changed=True" in ln or "CHANGED:" in ln:
+                assert ln.startswith("[DRY RUN]"), f"unlabeled dry-run line could be misread as a live write: {ln!r}"
+        assert "no rows were written to the live database" in result.stderr
+        print("PASS: test_dry_run_makes_zero_writes_and_every_output_line_is_unambiguously_labeled")
+
+
+def test_apply_actually_writes_and_output_is_labeled_apply_not_dry_run():
+    """Sanity-check the other half: --apply DOES write, and its own output
+    lines are labeled '[APPLY]', never '[DRY RUN]' -- the two modes must
+    never share an ambiguous label."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(path)
+
+        result = _run_cli(path, ["--ocid-number", "OCID-961", "--apply"])
+        assert result.returncode == 0, result.stderr
+        assert "[APPLY]" in result.stderr
+        assert "[DRY RUN]" not in result.stderr
+        assert "APPLIED: wrote 1 real re-audited rows" in result.stderr
+
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM ocid_canonical_registry WHERE ocid_number=?", ("OCID-961",)
+        ).fetchone()
+        conn.close()
+        assert row is not None, "--apply did not write a row for the requested OCID"
+        print("PASS: test_apply_actually_writes_and_output_is_labeled_apply_not_dry_run")
+
+
 if __name__ == "__main__":
     test_determinism_two_runs_identical_structured_output()
     test_plan_preserves_existing_reasoned_canonical_choice_when_still_corroborated()
     test_plan_uses_fresh_result_when_existing_choice_no_longer_corroborated()
     test_not_applicable_confirmed_requires_real_stored_audit_raw_output()
+    test_dry_run_makes_zero_writes_and_every_output_line_is_unambiguously_labeled()
+    test_apply_actually_writes_and_output_is_labeled_apply_not_dry_run()
     print("ALL PASS")

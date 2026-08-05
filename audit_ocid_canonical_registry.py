@@ -143,25 +143,38 @@ def main():
     existing_rows = sbr.query_ocid_canonical_registry(conn)
     existing_by_ocid = {r["ocid_number"]: r for r in existing_rows}
 
+    # Every line of this run's terminal output is prefixed so a reader can
+    # never mistake a proposed/in-memory comparison for a confirmed live
+    # write by skimming only part of the output (real incident:
+    # UMR-20260805-121654-4b77 / UMR-20260805-122042-8dbc -- a dry run's
+    # per-OCID "changed=True"/"CHANGED:" lines, unprefixed, were misread as
+    # proof of a live DB write that never happened; independent verification
+    # found the live table matched the known-correct roster on every row).
+    tag = "[DRY RUN] " if not args.apply else "[APPLY] "
+
     plans = []
     for ocid_number in ocid_numbers:
         plan = plan_for_ocid(sbr, conn, ocid_number, existing_by_ocid)
         plans.append(plan)
-        print(f"  {ocid_number}: not_found={plan['not_found']} canonical_umr_id={plan['canonical_umr_id']} "
+        print(f"{tag}{ocid_number}: not_found={plan['not_found']} canonical_umr_id={plan['canonical_umr_id']} "
               f"preserved_existing={plan['preserved_existing_canonical_choice']} "
               f"changed={plan['changed_from_existing']}", file=sys.stderr)
 
     changed = [p for p in plans if p["changed_from_existing"]]
-    print(f"SUMMARY: {len(plans)} real OCIDs re-audited | {len(changed)} changed vs existing row "
-          f"(not_found flip or canonical_umr_id no longer corroborated by fresh evidence)", file=sys.stderr)
+    print(f"{tag}SUMMARY: {len(plans)} real OCIDs re-audited | {len(changed)} changed vs existing row "
+          f"(not_found flip or canonical_umr_id no longer corroborated by fresh evidence)"
+          + ("" if args.apply else " -- PROPOSED ONLY, NOT YET WRITTEN"), file=sys.stderr)
     for p in changed:
-        print(f"  CHANGED: {p['ocid_number']} -> canonical_umr_id={p['canonical_umr_id']} not_found={p['not_found']}",
+        print(f"{tag}CHANGED: {p['ocid_number']} -> canonical_umr_id={p['canonical_umr_id']} not_found={p['not_found']}"
+              + ("" if args.apply else " (proposed only -- not written; pass --apply to write)"),
               file=sys.stderr)
 
     if not args.apply:
         conn.close()
         print(json.dumps(plans, indent=2, default=str))
-        print("DRY RUN -- pass --apply to actually write these rows", file=sys.stderr)
+        print("DRY RUN -- no rows were written to the live database; every 'changed'/'CHANGED' line above "
+              "describes an in-memory comparison only. Pass --apply to actually write these rows.",
+              file=sys.stderr)
         return 0
 
     with sbr._write_lock():

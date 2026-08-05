@@ -7,6 +7,7 @@
 - [x] Confirmed 8/69 OCIDs (OCID-007..014) are correctly, honestly excluded from compliance-state rows (`not_found=1`, no real UMR to audit) -- not a gap.
 - [x] Identified and honestly reported the one real gap: `file_created_date` is 0/113 populated -- dead schema column, never wired to any real evidence source by any code path in this repo. Not hand-set/fabricated; flagged for a future explicitly-scoped directive.
 - [x] Wrote `RICH_COMPLIANCE_SCHEMA_VERIFICATION_2026-08-05.md` with full honest findings and completion percentages.
+- [x] PR opened: https://github.com/FChecklist/veridian-scripts/pull/73
 
 ## Remaining
 - [ ] None for this cycle. `file_created_date` real-evidence computation (e.g. `git log --follow --format=%aI`) is an open item for a future directive, not attempted here per the anti-fabrication/no-hand-set rule.

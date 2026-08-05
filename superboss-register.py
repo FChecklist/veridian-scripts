@@ -672,6 +672,7 @@ def _migrate_schema(conn):
     _migrate_wiring_registry_entity_types(conn)
     _ensure_umr_table(conn)
     _ensure_ocid_artifact_links_table(conn)
+    _ensure_ocid_canonical_registry_table(conn)
     _migrate_instructions_content_hash(conn)
     _migrate_capability_registry_utm(conn)
 
@@ -2172,6 +2173,19 @@ def check_task_key(args):
     }, indent=2, default=str))
 
 
+def cmd_query_ocid_canonical(args):
+    """Real, read-only CLI lookup over ocid_canonical_registry
+    (UMR-20260805-032326-becc) -- no _write_lock needed, same convention as
+    check_task_key/lookup-entity above. --ocid-number for a single real row,
+    omitted for the whole real roster."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_ocid_canonical_registry_table(conn)
+    rows = query_ocid_canonical_registry(conn, ocid_number=args.ocid_number)
+    conn.close()
+    print(json.dumps(rows, indent=2, default=str))
+
+
 def _ensure_capability_registry_table(conn):
     """Standalone idempotent create, same defensiveness convention as
     _ensure_knowledge_engine_table -- works even if init_db() was never run
@@ -2856,6 +2870,98 @@ def _ensure_ocid_artifact_links_table(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ocid_links_umr ON ocid_artifact_links(umr_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ocid_links_pr ON ocid_artifact_links(repo, pr_number)")
     conn.commit()
+
+
+def _ensure_ocid_canonical_registry_table(conn):
+    """UMR-20260805-032326-becc (Owner directive): a real, complete, permanent
+    OCID-001..068 -> canonical UMR roster, stored durably here (the same
+    umr_tasks database, not a separate scratch file) so it stays the single
+    real source of truth and does not drift out of date. Distinct in purpose
+    from ocid_artifact_links above: that table records many-to-many real
+    (OCID, UMR, PR/commit/file) EVIDENCE LINKS as they're discovered during
+    normal work; this table is a one-row-per-OCID ROLLUP naming the single
+    real CANONICAL UMR for each OCID (when one exists), explicitly carrying
+    every other real UMR ever minted for the same OCID (a real duplicate
+    dispatch is not silently dropped, just marked non-canonical with a real
+    reason), and explicitly recording the honest case where a thorough real
+    search found nothing at all -- a case ocid_artifact_links has no way to
+    represent (it only stores rows for links that exist).
+
+    One row per real OCID number (PRIMARY KEY, not AUTOINCREMENT -- there is
+    exactly one real row per OCID by construction, upserts replace it).
+    canonical_umr_id is nullable: NULL means a real, thorough search found no
+    real UMR for this OCID (see not_found/search_note), not an unfilled gap.
+    all_umr_ids_json is always a real JSON array, even for a single-UMR OCID
+    (so callers never need an isinstance check to know how many were found).
+    evidence_json records, per real search method used, what was actually
+    run and what it found -- the real methodology note UMR-20260805-032326-becc
+    asked for, kept alongside the data it justifies rather than in a
+    separate doc that could drift out of sync with it."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS ocid_canonical_registry (
+        ocid_number TEXT PRIMARY KEY,
+        canonical_umr_id TEXT REFERENCES umr_tasks(umr_id),
+        status TEXT NOT NULL,
+        pr_number INTEGER,
+        pr_repo TEXT,
+        all_umr_ids_json TEXT NOT NULL,
+        duplicate_reason TEXT,
+        not_found INTEGER NOT NULL DEFAULT 0,
+        evidence_json TEXT NOT NULL,
+        last_verified_at TEXT NOT NULL
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ocid_canonical_status ON ocid_canonical_registry(status)")
+    conn.commit()
+
+
+def upsert_ocid_canonical_registry(conn, ocid_number, *, canonical_umr_id, status,
+                                    all_umr_ids, evidence, pr_number=None, pr_repo=None,
+                                    duplicate_reason=None, not_found=False):
+    """Real, idempotent per-OCID upsert -- re-running the real search for the
+    same OCID and writing the result again is always safe, matching
+    upsert_umr_task()'s own ON CONFLICT DO UPDATE convention. `all_umr_ids`
+    and `evidence` are real Python lists/dicts, JSON-encoded here so callers
+    never hand-serialize. Caller owns conn/transaction/commit, same
+    convention as insert_ocid_artifact_link()/update_umr_task() above."""
+    conn.execute("""
+        INSERT INTO ocid_canonical_registry
+            (ocid_number, canonical_umr_id, status, pr_number, pr_repo,
+             all_umr_ids_json, duplicate_reason, not_found, evidence_json, last_verified_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(ocid_number) DO UPDATE SET
+            canonical_umr_id=excluded.canonical_umr_id,
+            status=excluded.status,
+            pr_number=excluded.pr_number,
+            pr_repo=excluded.pr_repo,
+            all_umr_ids_json=excluded.all_umr_ids_json,
+            duplicate_reason=excluded.duplicate_reason,
+            not_found=excluded.not_found,
+            evidence_json=excluded.evidence_json,
+            last_verified_at=excluded.last_verified_at
+    """, (
+        ocid_number, canonical_umr_id, status, pr_number, pr_repo,
+        json.dumps(all_umr_ids), duplicate_reason, 1 if not_found else 0,
+        json.dumps(evidence), _now_iso(),
+    ))
+
+
+def query_ocid_canonical_registry(conn, ocid_number=None):
+    """Real lookup -- a single OCID's real canonical-UMR row, or the whole
+    real roster (ordered by ocid_number) when called with no argument."""
+    if ocid_number:
+        rows = conn.execute(
+            "SELECT * FROM ocid_canonical_registry WHERE ocid_number=?", (ocid_number,)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM ocid_canonical_registry ORDER BY ocid_number"
+        ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["all_umr_ids"] = json.loads(d.pop("all_umr_ids_json"))
+        d["evidence"] = json.loads(d.pop("evidence_json"))
+        out.append(d)
+    return out
 
 
 def _migrate_umr_last_heartbeat(conn):
@@ -3681,6 +3787,10 @@ if __name__ == "__main__":
     p_checktk = sub.add_parser("check-task-key")
     p_checktk.add_argument("--task-key", dest="task_key", required=True)
 
+    p_qocidc = sub.add_parser("query-ocid-canonical")
+    p_qocidc.add_argument("--ocid-number", dest="ocid_number", default=None,
+                           help="e.g. OCID-038; omit for the whole real roster")
+
     args = p.parse_args()
     if args.cmd == "init":
         with _write_lock():
@@ -3768,3 +3878,5 @@ if __name__ == "__main__":
             claim_task_key(args)
     elif args.cmd == "check-task-key":
         check_task_key(args)
+    elif args.cmd == "query-ocid-canonical":
+        cmd_query_ocid_canonical(args)

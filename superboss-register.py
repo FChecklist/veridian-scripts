@@ -56,6 +56,7 @@ import os
 import re
 import secrets
 import sqlite3
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -673,6 +674,7 @@ def _migrate_schema(conn):
     _ensure_umr_table(conn)
     _ensure_ocid_artifact_links_table(conn)
     _ensure_ocid_canonical_registry_table(conn)
+    _ensure_ocid_master_standard_audit_log_table(conn)
     _migrate_instructions_content_hash(conn)
     _migrate_capability_registry_utm(conn)
 
@@ -2186,6 +2188,73 @@ def cmd_query_ocid_canonical(args):
     print(json.dumps(rows, indent=2, default=str))
 
 
+def cmd_resolve_ocid_canonical(args):
+    """OCID Master Standard v6 Phase 1 (UMR-20260805-042152-e559) CLI entry
+    point over resolve_ocid_canonical(). Read-only unless --apply is passed,
+    same convention as cmd_reconcile_umr_status below -- resolving/searching
+    never mutates the real registry by itself; --apply performs the real
+    upsert_ocid_canonical_registry() write under _write_lock()."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_ocid_canonical_registry_table(conn)
+    result = resolve_ocid_canonical(args.ocid_number, conn)
+    if args.apply:
+        with _write_lock():
+            upsert_ocid_canonical_registry(
+                conn, result["ocid_number"],
+                canonical_umr_id=result["canonical_umr_id"], status=result["status"],
+                all_umr_ids=result["all_umr_ids"], evidence=result["evidence"],
+                pr_number=result["pr_number"], pr_repo=result["pr_repo"],
+                duplicate_reason=result["duplicate_reason"], not_found=result["not_found"],
+            )
+            conn.commit()
+    conn.close()
+    print(json.dumps(result, indent=2, default=str))
+
+
+def cmd_reconcile_umr_status(args):
+    """OCID Master Standard v6 Phase 1 (UMR-20260805-042152-e559) CLI entry
+    point over reconcile_umr_status_against_pr(). Real, read-only by default
+    (reports the proposed correction, never silently applies it) -- pass
+    --apply to actually call the existing real update_umr_task() under
+    _write_lock(), matching how UMR-20260805-024319-b1e6's earlier real
+    correction was done."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_umr_table(conn)
+    _ensure_ocid_master_standard_audit_log_table(conn)
+    result = reconcile_umr_status_against_pr(conn, args.umr_id)
+    if args.apply and result["is_stale"]:
+        with _write_lock():
+            update_umr_task(
+                conn, args.umr_id,
+                status=result["proposed_status"],
+                ts_completed=result["proposed_ts_completed"],
+            )
+            conn.commit()
+    conn.close()
+    print(json.dumps(result, indent=2, default=str))
+
+
+def cmd_certify_pr_merge(args):
+    """OCID Master Standard v6 Phase 1 (UMR-20260805-042152-e559) CLI entry
+    point over refuse_certification_if_merged_without_required_checks(), via
+    the real caller-side apply_certification_verdict() wrapper (records a
+    real 'certification_refused' audit event on refusal). --pr-record-json
+    is a path to a real JSON file matching pr_merge_record's own documented
+    shape -- this command performs no live GitHub API calls itself."""
+    with open(args.pr_record_json) as f:
+        pr_merge_record = json.load(f)
+    init_db_silent()
+    conn = _connect()
+    _ensure_ocid_master_standard_audit_log_table(conn)
+    verdict, reason = apply_certification_verdict(conn, pr_merge_record)
+    conn.close()
+    print(json.dumps({"verdict": verdict, "reason": reason}, indent=2, default=str))
+    if not verdict:
+        sys.exit(1)
+
+
 def _ensure_capability_registry_table(conn):
     """Standalone idempotent create, same defensiveness convention as
     _ensure_knowledge_engine_table -- works even if init_db() was never run
@@ -2962,6 +3031,556 @@ def query_ocid_canonical_registry(conn, ocid_number=None):
         d["evidence"] = json.loads(d.pop("evidence_json"))
         out.append(d)
     return out
+
+
+# ---------------------------------------------------------------------------
+# OCID Master Standard v6 -- Phase 1 (UMR-20260805-042152-e559, Owner
+# directive; parent references UMR-20260804-170055-a069, canonical OCID-068
+# UMR, real status completed, and UMR-20260805-032731-b412, OCID-068
+# permanent closure record, real status completed, PR #52 merge commit
+# c46da9b777e2a8a60e15230dacd72f2329e885af). This is a deliberately narrow
+# first slice of the full "VERIDIAN Deterministic OCID Master Standard
+# version six" the Owner directive describes -- three real corrections
+# named as real problems hit this session, plus one minimal real append-only
+# audit log, NOT the full 11-state lifecycle machine, ownership-chain
+# resolution, universal artifact graph, bootstrap/checkpoint-recovery
+# sequencing, registry integrity checks, or the strict-JSON-only automated
+# output contract (all explicitly deferred -- see
+# OCID_MASTER_STANDARD_V6_PHASE1_2026-08-05.md at the repo root for the
+# honest scope/phasing writeup).
+#
+# resolve_ocid_canonical() below reuses and locks down, as one canonical
+# implementation, the ad-hoc OCID-verification methodology that already
+# informed PR #53's ocid_canonical_registry table (see
+# upsert_ocid_canonical_registry/query_ocid_canonical_registry above) --
+# this function is the real, callable, testable version of that same
+# methodology, not a second competing one.
+# ---------------------------------------------------------------------------
+
+_UMR_ID_RE = re.compile(r"UMR-\d{8}-\d{6}-[0-9a-f]{4}")
+
+DEFAULT_OCID_RESOLVER_REPOS = ("compliance-tracker", "veridian-scripts", "projexa")
+
+DEFAULT_OCID_RESOLVER_REPO_LOCAL_PATHS = {
+    "compliance-tracker": "/opt/veridian/repos/compliance-tracker",
+    "veridian-scripts": "/opt/veridian/repos/veridian-scripts",
+    "projexa": "/opt/veridian/repos/projexa",
+}
+
+
+def _ensure_ocid_master_standard_audit_log_table(conn):
+    """Real, minimal, append-only audit log for OCID Master Standard v6 Phase
+    1 -- deliberately NOT the full standard's own generic append-only
+    registry-mutation log (explicitly out of scope, see the module comment
+    above and OCID_MASTER_STANDARD_V6_PHASE1_2026-08-05.md), just a real,
+    working, durable trail for the two real event kinds this PR's own
+    functions produce (status_reconciliation, certification_refused), so a
+    stale-status finding or a certification refusal is never only a
+    transient function return value. Same idempotent CREATE TABLE IF NOT
+    EXISTS convention as every other _ensure_*_table function in this file;
+    called from _migrate_schema() the same way. Genuinely append-only:
+    record_ocid_master_standard_audit_event() below only ever INSERTs, never
+    UPDATEs/DELETEs any row here."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS ocid_master_standard_audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ocid_number TEXT,
+        umr_id TEXT,
+        event_type TEXT NOT NULL,
+        detail_json TEXT NOT NULL,
+        recorded_at TEXT NOT NULL
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ocid_master_standard_audit_umr "
+                 "ON ocid_master_standard_audit_log(umr_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ocid_master_standard_audit_ocid "
+                 "ON ocid_master_standard_audit_log(ocid_number)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ocid_master_standard_audit_event_type "
+                 "ON ocid_master_standard_audit_log(event_type)")
+    conn.commit()
+
+
+def record_ocid_master_standard_audit_event(conn, event_type, detail, ocid_number=None, umr_id=None):
+    """Genuinely append-only real event record: only ever INSERTs. `detail`
+    is a real Python dict, JSON-encoded here so callers never hand-serialize
+    (same convention as upsert_ocid_canonical_registry's evidence/all_umr_ids
+    handling above). Does NOT commit by default -- callers that already own
+    an outer transaction (e.g. a future CLI cmd_* wrapper under
+    _write_lock()) should commit themselves; reconcile_umr_status_against_pr()
+    below calls conn.commit() itself right after this insert, since that
+    call site does not open its own outer transaction."""
+    conn.execute(
+        "INSERT INTO ocid_master_standard_audit_log "
+        "(ocid_number, umr_id, event_type, detail_json, recorded_at) VALUES (?, ?, ?, ?, ?)",
+        (ocid_number, umr_id, event_type, json.dumps(detail), _now_iso()),
+    )
+
+
+def _default_ocid_resolver_runner(cmd, cwd=None):
+    """Real default subprocess runner -- the only place this module actually
+    shells out to gh/git for OCID resolution. Every helper below takes this
+    (or a test double) as an explicit `_runner` parameter rather than calling
+    subprocess.run directly, so real unit tests never spawn a real
+    subprocess or depend on real network/gh-auth state (same testability
+    requirement, and same injectable-callable pattern, as this repo's own
+    JS precedent scripts/check-sec07-ocid-lock.mjs's evaluate() in the
+    sibling compliance-tracker repo, which splits pure decision logic from
+    the I/O that feeds it)."""
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=60)
+
+
+def _ocid_casing_variants(ocid_number):
+    """Real requirement (methods a/b below): try multiple real casings/
+    separators of the OCID number -- e.g. OCID-038 / ocid-038 / ocid_038 /
+    OCID038 -- since umr_tasks.task_identity and other free-text columns are
+    not written under one single enforced casing convention."""
+    m = re.search(r"(\d+)", ocid_number)
+    digits = m.group(1) if m else None
+    variants = {ocid_number, ocid_number.upper(), ocid_number.lower()}
+    if digits:
+        base = f"OCID-{digits}"
+        variants |= {
+            base, base.lower(),
+            base.replace("-", "_"), base.replace("-", "_").lower(),
+            base.replace("-", ""), base.replace("-", "").lower(),
+        }
+    return sorted(variants)
+
+
+def _umr_tasks_substring_query(conn, ocid_number):
+    """Method (a): real live umr_tasks.task_identity substring match, tried
+    against multiple real casings/separators of the OCID number. Returns a
+    dict umr_id -> task_identity for every real row matched (empty dict, not
+    None, when nothing matches -- callers record that honestly rather than
+    treating an empty result as an error)."""
+    matched = {}
+    for variant in _ocid_casing_variants(ocid_number):
+        rows = conn.execute(
+            "SELECT umr_id, task_identity FROM umr_tasks WHERE task_identity LIKE ?",
+            (f"%{variant}%",),
+        ).fetchall()
+        for r in rows:
+            matched[r["umr_id"]] = r["task_identity"]
+    return matched
+
+
+_UMR_TASKS_TEXT_COLUMNS = (
+    "umr_id", "task_identity", "source_trigger", "unit_name",
+    "inputs_json", "outputs_json", "logs_ref", "reason", "metadata_json",
+)
+
+
+def _umr_tasks_full_dump_grep(conn, ocid_number):
+    """Method (b): a real full dump + case-insensitive grep of every real
+    text column of the ENTIRE umr_tasks table -- never rely on (a)'s
+    substring/fuzzy search alone. This exact gap (an OCID string present in
+    outputs_json/metadata_json/reason/logs_ref rather than task_identity,
+    so (a) alone finds nothing) caused real missed matches this session for
+    OCID-022, OCID-023, OCID-058, and OCID-060. Returns a dict
+    umr_id -> the real matched row text (for evidence), empty dict when
+    nothing matches anywhere."""
+    variants = [v.lower() for v in _ocid_casing_variants(ocid_number)]
+    cols_sql = ", ".join(_UMR_TASKS_TEXT_COLUMNS)
+    rows = conn.execute(f"SELECT {cols_sql} FROM umr_tasks").fetchall()
+    matched = {}
+    for r in rows:
+        row_text = " ".join(str(r[c]) for c in _UMR_TASKS_TEXT_COLUMNS if r[c] is not None)
+        row_text_lower = row_text.lower()
+        if any(v in row_text_lower for v in variants):
+            matched[r["umr_id"]] = row_text
+    return matched
+
+
+def _gh_pr_search(ocid_number, repo, _runner):
+    """Method (c): real `gh pr list --repo FChecklist/<repo> --state all
+    --search "<OCID> in:title,body"` -- commit-message/git-log search alone
+    misses real documentation-only PRs, a real gap found this session.
+    Returns {"ok": bool, "prs": [...]} -- "prs" is the real parsed
+    --json output on success, [] on any real failure (never raises)."""
+    cmd = [
+        "gh", "pr", "list", "--repo", f"FChecklist/{repo}", "--state", "all",
+        "--search", f"{ocid_number} in:title,body",
+        "--json", "number,title,body,url,state,mergedAt",
+    ]
+    try:
+        result = _runner(cmd, None)
+    except Exception as exc:  # pragma: no cover -- real subprocess/env failure, never silently swallowed
+        return {"ok": False, "error": str(exc), "prs": []}
+    if getattr(result, "returncode", 1) != 0:
+        return {"ok": False, "error": getattr(result, "stderr", ""), "prs": []}
+    try:
+        prs = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        prs = []
+    return {"ok": True, "prs": prs}
+
+
+def _git_log_grep(ocid_number, repo, _runner, repo_path=None):
+    """Method (d): `git log --all --oneline -i --grep=<OCID>`, used only as
+    a real cross-check -- never the sole source, since it misses real
+    documentation-only PRs the way (c) does not."""
+    path = repo_path or DEFAULT_OCID_RESOLVER_REPO_LOCAL_PATHS.get(repo)
+    cmd = ["git", "log", "--all", "--oneline", "-i", f"--grep={ocid_number}"]
+    try:
+        result = _runner(cmd, path)
+    except Exception as exc:  # pragma: no cover
+        return {"ok": False, "error": str(exc), "lines": []}
+    if getattr(result, "returncode", 1) != 0:
+        return {"ok": False, "error": getattr(result, "stderr", ""), "lines": []}
+    lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
+    return {"ok": True, "lines": lines}
+
+
+def _extract_umr_ids(text):
+    """Method (e): extract real UMR IDs (regex UMR-\\d{8}-\\d{6}-[0-9a-f]{4})
+    from real matched PR body/title text. Sorted + de-duplicated; sorted
+    order is also chronological order since the UMR ID format is
+    timestamp-prefixed."""
+    if not text:
+        return []
+    return sorted(set(_UMR_ID_RE.findall(text)))
+
+
+def _master_tracker_and_active_claims_grep(ocid_number, _runner, repo_path=None):
+    """Method (f): MASTER-TRACKER.yaml/ACTIVE-CLAIMS.yaml (compliance-tracker
+    repo) grep -- real last resort, only consulted by resolve_ocid_canonical()
+    below when methods (a)-(e) found nothing at all. Returns a dict
+    filename -> list of real matched lines (empty list = real, honest zero
+    matches for that file; a leading "error: ..." dict value means the file
+    itself could not be read, distinct from a real empty match)."""
+    path = repo_path or DEFAULT_OCID_RESOLVER_REPO_LOCAL_PATHS["compliance-tracker"]
+    found = {}
+    for fname in ("ai-os/MASTER-TRACKER.yaml", "ai-os/registry/ACTIVE-CLAIMS.yaml",
+                  "MASTER-TRACKER.yaml", "ACTIVE-CLAIMS.yaml"):
+        full_path = os.path.join(path, fname)
+        cmd = ["grep", "-i", ocid_number, full_path]
+        try:
+            result = _runner(cmd, None)
+        except Exception as exc:  # pragma: no cover
+            found[fname] = f"error: {exc}"
+            continue
+        returncode = getattr(result, "returncode", 1)
+        if returncode == 0:
+            found[fname] = [line for line in (result.stdout or "").splitlines() if line.strip()]
+        elif returncode == 1:
+            found[fname] = []  # real, honest zero matches (grep's own convention)
+        else:
+            found[fname] = f"error: {getattr(result, 'stderr', '') or ('grep exit ' + str(returncode))}"
+    return found
+
+
+def resolve_ocid_canonical(ocid_number, conn, repos=DEFAULT_OCID_RESOLVER_REPOS,
+                            _runner=None, repo_paths=None):
+    """The one locked canonical implementation of the real OCID-verification
+    methodology (UMR-20260805-042152-e559 Phase 1), run in this exact
+    order/precedence:
+      (a) real umr_tasks.task_identity substring match, multiple casings
+      (b) real full dump + grep of every umr_tasks text column (never (a)
+          alone -- see _umr_tasks_full_dump_grep's own docstring for the
+          real OCID-022/023/058/060 gap this closes)
+      (c) real `gh pr list --search "<OCID> in:title,body"` across all
+          `repos`, --state all (catches real documentation-only PRs)
+      (d) real `git log --all --oneline -i --grep=<OCID>` across `repos`,
+          used only as a cross-check, never the sole source
+      (e) real UMR ID extraction from matched PR body/title text
+      (f) real MASTER-TRACKER.yaml/ACTIVE-CLAIMS.yaml grep, last resort
+          only, consulted only if (a)-(e) found nothing at all
+
+    Returns a dict shaped to be passed straight into
+    upsert_ocid_canonical_registry(conn, ocid_number, **result) (minus the
+    ocid_number key itself, which the return value also carries for the
+    caller's own convenience/logging):
+      ocid_number, canonical_umr_id, status, not_found, all_umr_ids,
+      evidence, pr_number, pr_repo, duplicate_reason
+
+    If more than one distinct UMR ID is found for this OCID, ALL of them are
+    returned in all_umr_ids, plus an explicit canonical_umr_id choice (the
+    chronologically-earliest, since the UMR ID format is timestamp-prefixed)
+    and a non-None duplicate_reason explaining that choice has NOT been
+    human-reviewed -- this function never silently picks one and hides the
+    rest. If truly nothing is found after every method, not_found=True is
+    returned with per-method evidence of the real empty search recorded in
+    `evidence` -- fields are never left blank or guessed.
+
+    Every real subprocess call (gh/git/grep) goes through the injectable
+    `_runner` callable (default: real subprocess.run via
+    _default_ocid_resolver_runner) so this function -- and every small pure
+    helper it calls -- is fully unit-testable without spawning a real
+    subprocess, same pattern as this repo's own JS precedent
+    scripts/check-sec07-ocid-lock.mjs's evaluate() (sibling compliance-tracker
+    repo)."""
+    runner = _runner or _default_ocid_resolver_runner
+    repo_paths = repo_paths or DEFAULT_OCID_RESOLVER_REPO_LOCAL_PATHS
+    evidence = {}
+    all_umr_ids = set()
+
+    # (a)
+    substring_matches = _umr_tasks_substring_query(conn, ocid_number)
+    evidence["umr_tasks_task_identity_substring"] = substring_matches if substring_matches else "zero rows"
+    all_umr_ids.update(substring_matches.keys())
+
+    # (b)
+    dump_matches = _umr_tasks_full_dump_grep(conn, ocid_number)
+    evidence["umr_tasks_full_dump_grep"] = dump_matches if dump_matches else "zero rows"
+    all_umr_ids.update(dump_matches.keys())
+
+    # (c)
+    pr_hits = []  # list of (repo, pr_dict)
+    for repo in repos:
+        res = _gh_pr_search(ocid_number, repo, runner)
+        evidence[f"gh_pr_search_{repo}"] = res
+        if res.get("ok"):
+            for pr in res.get("prs", []):
+                pr_hits.append((repo, pr))
+
+    # (d) -- cross-check only, never the sole source of a found/not-found decision
+    for repo in repos:
+        res = _git_log_grep(ocid_number, repo, runner, repo_paths.get(repo))
+        evidence[f"git_log_{repo}"] = res.get("lines") if res.get("ok") else res
+
+    # (e)
+    pr_umr_ids = set()
+    canonical_pr_number = None
+    canonical_pr_repo = None
+    for repo, pr in pr_hits:
+        text = f"{pr.get('title', '')}\n{pr.get('body', '')}"
+        found = _extract_umr_ids(text)
+        if found:
+            pr_umr_ids.update(found)
+            if canonical_pr_number is None:
+                canonical_pr_number = pr.get("number")
+                canonical_pr_repo = repo
+    all_umr_ids.update(pr_umr_ids)
+    evidence["umr_ids_extracted_from_pr_bodies"] = sorted(pr_umr_ids) if pr_umr_ids else "zero matches"
+
+    # (f) -- real last resort, only if nothing found by (a)-(e)
+    if not all_umr_ids:
+        mt = _master_tracker_and_active_claims_grep(ocid_number, runner, repo_paths.get("compliance-tracker"))
+        evidence["master_tracker_and_active_claims_grep"] = mt
+        for lines in mt.values():
+            if isinstance(lines, list):
+                for line in lines:
+                    all_umr_ids.update(_extract_umr_ids(line))
+    else:
+        evidence["master_tracker_and_active_claims_grep"] = (
+            "skipped -- real last resort only, methods (a)-(e) already found a real match"
+        )
+
+    all_umr_ids = sorted(all_umr_ids)
+
+    if not all_umr_ids:
+        return {
+            "ocid_number": ocid_number, "canonical_umr_id": None,
+            "status": "not_found", "not_found": True, "all_umr_ids": [],
+            "evidence": evidence, "pr_number": None, "pr_repo": None,
+            "duplicate_reason": None,
+        }
+
+    if len(all_umr_ids) == 1:
+        return {
+            "ocid_number": ocid_number, "canonical_umr_id": all_umr_ids[0],
+            "status": "found", "not_found": False, "all_umr_ids": all_umr_ids,
+            "evidence": evidence, "pr_number": canonical_pr_number,
+            "pr_repo": canonical_pr_repo, "duplicate_reason": None,
+        }
+
+    # multiple distinct real UMR IDs found -- never silently pick one
+    canonical_choice = all_umr_ids[0]
+    return {
+        "ocid_number": ocid_number, "canonical_umr_id": canonical_choice,
+        "status": "multiple_umr_ids_found_needs_review", "not_found": False,
+        "all_umr_ids": all_umr_ids, "evidence": evidence,
+        "pr_number": canonical_pr_number, "pr_repo": canonical_pr_repo,
+        "duplicate_reason": (
+            f"resolve_ocid_canonical() found {len(all_umr_ids)} distinct real UMR IDs for "
+            f"{ocid_number}: {', '.join(all_umr_ids)}. Defaulted canonical_umr_id to the "
+            f"chronologically-earliest by UMR-ID timestamp ordering ({canonical_choice}) -- "
+            "this default has NOT been human-reviewed and must be confirmed or corrected "
+            "before being treated as final, per the real duplicate-UMR gap found this "
+            "session for OCID-022, OCID-023, OCID-058, and OCID-060."
+        ),
+    }
+
+
+def _find_pr_evidence_for_umr(conn, umr_id, repos, runner):
+    """Real helper for reconcile_umr_status_against_pr()'s live-search path:
+    finds the real OCID number(s) mentioned in this umr_id's own umr_tasks
+    row, then reuses _gh_pr_search (the same method (c) resolve_ocid_canonical
+    uses) per repo/OCID, keeping only PRs whose own real title/body actually
+    mentions this exact umr_id -- so this never proposes a correction based
+    on a PR for someone else's UMR that merely shares the same OCID."""
+    row = conn.execute("SELECT * FROM umr_tasks WHERE umr_id=?", (umr_id,)).fetchone()
+    if row is None:
+        return []
+    row_text = " ".join(str(row[c]) for c in row.keys() if row[c] is not None)
+    ocid_numbers = sorted(set(re.findall(r"OCID-\d+", row_text, re.IGNORECASE)))
+    evidence = []
+    for repo in repos:
+        for ocid in ocid_numbers:
+            res = _gh_pr_search(ocid, repo, runner)
+            if not res.get("ok"):
+                continue
+            for pr in res.get("prs", []):
+                text = f"{pr.get('title', '')}\n{pr.get('body', '')}"
+                if umr_id in text:
+                    evidence.append({"repo": repo, **pr})
+    return evidence
+
+
+def reconcile_umr_status_against_pr(conn, umr_id, pr_evidence=None, _runner=None,
+                                     repos=DEFAULT_OCID_RESOLVER_REPOS):
+    """Cross-checks a given real UMR's real umr_tasks.status/ts_completed
+    against real, independently-found PR-merge evidence -- directly targets
+    the exact real bug class just found and fixed for
+    UMR-20260805-032731-b412 (canonical UMR stuck at 'running'/ts_completed
+    null despite the real underlying work being done and the real PR merged).
+
+    `pr_evidence` may be pre-fetched by the caller (a list of dicts with at
+    least "state"/"mergedAt" keys, e.g. gh's own --json output shape) for
+    fully deterministic/offline testing; when omitted, this function does a
+    real live search via _find_pr_evidence_for_umr() (reusing
+    resolve_ocid_canonical's own PR-finding method (c)).
+
+    Never silently auto-applies a correction -- returns
+    {is_stale, current_status, proposed_status, proposed_ts_completed,
+    evidence} and leaves it to the caller to actually apply the correction
+    via the existing real update_umr_task(), consistent with how
+    UMR-20260805-024319-b1e6's earlier real correction was done. When a real
+    stale status is found, this function DOES record a real, permanent
+    'status_reconciliation' audit event via
+    record_ocid_master_standard_audit_event() (and commits it) -- the
+    finding itself is real and durable even though the correction is not
+    auto-applied."""
+    row = conn.execute("SELECT * FROM umr_tasks WHERE umr_id=?", (umr_id,)).fetchone()
+    if row is None:
+        return {
+            "umr_id": umr_id, "is_stale": False, "current_status": None,
+            "proposed_status": None, "proposed_ts_completed": None,
+            "evidence": {"error": f"no real umr_tasks row found for umr_id={umr_id}"},
+        }
+
+    current_status = row["status"]
+    current_ts_completed = row["ts_completed"]
+
+    if pr_evidence is None:
+        runner = _runner or _default_ocid_resolver_runner
+        pr_evidence = _find_pr_evidence_for_umr(conn, umr_id, repos, runner)
+
+    merged_prs = [pr for pr in pr_evidence if pr.get("state") == "MERGED" or pr.get("mergedAt")]
+
+    if not merged_prs:
+        return {
+            "umr_id": umr_id, "is_stale": False, "current_status": current_status,
+            "proposed_status": None, "proposed_ts_completed": None,
+            "evidence": {"pr_evidence": pr_evidence,
+                         "note": "no real merged-PR evidence found -- no reconciliation needed"},
+        }
+
+    merged_prs_sorted = sorted(merged_prs, key=lambda p: p.get("mergedAt") or "")
+    completing_pr = merged_prs_sorted[0]
+    merged_at = completing_pr.get("mergedAt")
+
+    stale_statuses = {"queued", "dispatched", "running"}
+    is_stale = current_status in stale_statuses
+
+    result = {
+        "umr_id": umr_id,
+        "is_stale": is_stale,
+        "current_status": current_status,
+        "proposed_status": "completed" if is_stale else current_status,
+        "proposed_ts_completed": merged_at if is_stale else current_ts_completed,
+        "evidence": {"pr_evidence": pr_evidence, "completing_pr": completing_pr},
+    }
+
+    if is_stale:
+        record_ocid_master_standard_audit_event(
+            conn, "status_reconciliation",
+            {
+                "current_status": current_status,
+                "proposed_status": result["proposed_status"],
+                "proposed_ts_completed": result["proposed_ts_completed"],
+                "evidence": result["evidence"],
+            },
+            umr_id=umr_id,
+        )
+        conn.commit()
+
+    return result
+
+
+def refuse_certification_if_merged_without_required_checks(pr_merge_record):
+    """Pure function, zero I/O (no live GitHub API calls) -- this standard's
+    own independent, redundant certification-refusal logic, operationalizing
+    the real branch-protection incident (compliance-tracker PR #932 merged
+    at a real failing 'Metadata Index Coverage Check' state with zero real
+    reviews; PR #933 the same) that UMR-20260805-034917-33a9 already fixed
+    going forward at the GitHub-settings level. This function is a second,
+    redundant layer that would have refused to certify either of those two
+    real merges even though GitHub itself let them merge.
+
+    pr_merge_record (explicit structured input, no live calls made here):
+      {
+        "repo": str, "pr_number": int, "merged_at": str,
+        "required_status_checks": [{"name": str, "conclusion": str}, ...],
+        "approving_reviews_count": int,
+        "required_approving_review_count": int,
+      }
+    "conclusion" values treated as passing: success/neutral/skipped (case-
+    insensitive) -- anything else (failure, cancelled, timed_out, action_required,
+    stale, or missing) is treated as not passing and refuses certification.
+
+    Returns (verdict: bool, reason: str) -- verdict True means certification
+    is allowed; False means refused, with `reason` naming every real cause."""
+    repo = pr_merge_record.get("repo")
+    pr_number = pr_merge_record.get("pr_number")
+    checks = pr_merge_record.get("required_status_checks") or []
+    passing_conclusions = {"success", "neutral", "skipped"}
+    failing_checks = [
+        c for c in checks
+        if str(c.get("conclusion", "")).lower() not in passing_conclusions
+    ]
+    reviews_count = pr_merge_record.get("approving_reviews_count", 0)
+    required_reviews = pr_merge_record.get("required_approving_review_count", 1)
+
+    reasons = []
+    if failing_checks:
+        names = ", ".join(c.get("name", "unknown") for c in failing_checks)
+        reasons.append(f"required status check(s) not passing at merge time: {names}")
+    if reviews_count < required_reviews:
+        reasons.append(
+            f"approving review count ({reviews_count}) below required "
+            f"({required_reviews}) at merge time"
+        )
+
+    if reasons:
+        reason = f"REFUSED certification for {repo}#{pr_number}: " + "; ".join(reasons) + "."
+        return False, reason
+
+    return True, (
+        f"Certification allowed for {repo}#{pr_number}: all required status checks "
+        "passing and required approving review count met at merge time."
+    )
+
+
+def apply_certification_verdict(conn, pr_merge_record):
+    """Real caller-side usage pattern for
+    refuse_certification_if_merged_without_required_checks(): calls the pure
+    function, and when it refuses, records a real, permanent
+    'certification_refused' audit event via
+    record_ocid_master_standard_audit_event() (and commits it) so the
+    refusal has a durable trail, not just a transient return value. Returns
+    the same (verdict, reason) tuple the pure function returns."""
+    verdict, reason = refuse_certification_if_merged_without_required_checks(pr_merge_record)
+    if not verdict:
+        record_ocid_master_standard_audit_event(
+            conn, "certification_refused",
+            {
+                "repo": pr_merge_record.get("repo"),
+                "pr_number": pr_merge_record.get("pr_number"),
+                "merged_at": pr_merge_record.get("merged_at"),
+                "reason": reason,
+            },
+        )
+        conn.commit()
+    return verdict, reason
 
 
 def _migrate_umr_last_heartbeat(conn):
@@ -3791,6 +4410,27 @@ if __name__ == "__main__":
     p_qocidc.add_argument("--ocid-number", dest="ocid_number", default=None,
                            help="e.g. OCID-038; omit for the whole real roster")
 
+    p_resolvec = sub.add_parser("resolve-ocid-canonical",
+                                 help="OCID Master Standard v6 Phase 1 (UMR-20260805-042152-e559): "
+                                      "run the real, canonical methods a-f OCID->UMR resolution")
+    p_resolvec.add_argument("--ocid-number", dest="ocid_number", required=True)
+    p_resolvec.add_argument("--apply", action="store_true",
+                             help="also write the real result into ocid_canonical_registry "
+                                  "(default: read-only report)")
+
+    p_reconc = sub.add_parser("reconcile-umr-status",
+                               help="OCID Master Standard v6 Phase 1: cross-check a real UMR's "
+                                    "status/ts_completed against real PR-merge evidence")
+    p_reconc.add_argument("--umr-id", dest="umr_id", required=True)
+    p_reconc.add_argument("--apply", action="store_true",
+                           help="also apply the proposed correction via update_umr_task() "
+                                "(default: read-only report, never silently applied)")
+
+    p_certify = sub.add_parser("certify-pr-merge",
+                                help="OCID Master Standard v6 Phase 1: real, offline certification "
+                                     "verdict against an explicit pr_merge_record JSON file")
+    p_certify.add_argument("--pr-record-json", dest="pr_record_json", required=True)
+
     args = p.parse_args()
     if args.cmd == "init":
         with _write_lock():
@@ -3880,3 +4520,9 @@ if __name__ == "__main__":
         check_task_key(args)
     elif args.cmd == "query-ocid-canonical":
         cmd_query_ocid_canonical(args)
+    elif args.cmd == "resolve-ocid-canonical":
+        cmd_resolve_ocid_canonical(args)
+    elif args.cmd == "reconcile-umr-status":
+        cmd_reconcile_umr_status(args)
+    elif args.cmd == "certify-pr-merge":
+        cmd_certify_pr_merge(args)

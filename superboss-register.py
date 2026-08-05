@@ -3874,6 +3874,137 @@ def apply_certification_verdict(conn, pr_merge_record):
 
 
 # ---------------------------------------------------------------------------
+# PR review/authoring identity independence check (Owner directive, this
+# cycle; UMR-20260805-034917-33a9 lineage, Owner Decision OD-20260805-001:
+# future violations of the same class must be blocked before merge, not
+# only detected afterward).
+#
+# Real finding this cycle, independently verified against the live GitHub
+# API (not assumed from the dispatch text): compliance-tracker's real branch
+# protection currently has required_approving_review_count=0 (not 1 as the
+# originating directive claimed), FChecklist is the sole real collaborator
+# on the repo (admin, the only account with any permission at all), and
+# every credential present in this environment (`gh auth status` default,
+# $GITHUB_PAT, $GITHUB_PAT_ZAI_KIMI) independently resolves via a live
+# `GET /user` call to that exact same account login. There were 100+ real
+# open PRs at check time (`gh api` pagination), not "roughly 12". None of
+# this contradicts the underlying problem the directive names -- a single
+# account is genuinely both the sole author and the only possible approver
+# of every PR -- but it does mean the specific numbers in the directive were
+# stale/inaccurate, and, more importantly, that no second, genuinely
+# independent credential exists anywhere in this environment to provision
+# from. See OCID_070_SECOND_REVIEWER_IDENTITY_PROVISIONING_FINDING_2026-08-05.md
+# for the full writeup, including why actually provisioning a second GitHub
+# identity (a new personal account needing real human/email verification, or
+# a GitHub App needing an interactive browser session to create and download
+# its private key) is a one-time action only a human with GitHub web-UI
+# access can complete -- not something achievable from headless API/CLI
+# tools alone, and explicitly NOT something this function or its caller
+# attempt to fake by reusing the existing FChecklist credential under a new
+# label.
+#
+# What this section DOES deliver now, ahead of that human step: the actual
+# identity-independence check itself, as a real, structural, non-bypassable
+# gate ready to wire in the moment a genuinely independent reviewing
+# identity exists. Same "second independent layer, explicit structured
+# input, no live I/O inside the pure function" design as
+# refuse_certification_if_merged_without_required_checks() above, and the
+# same audit-log wiring (record_ocid_master_standard_audit_event(),
+# event_type="review_identity_independence_refused") as
+# apply_certification_verdict() uses for event_type="certification_refused".
+#
+# Deliberately NOT wired into branch protection yet: flipping
+# required_approving_review_count to 1 before a second identity is actually
+# installed as a collaborator would immediately block 100% of future PRs
+# (GitHub already forbids self-approval), which is a regression against
+# OD-20260805-001's stated goal of unblocking queued work, not a fix.
+# ---------------------------------------------------------------------------
+
+def refuse_review_if_reviewer_is_author(pr_review_record):
+    """Pure function, zero I/O (no live GitHub API calls) -- refuses to
+    certify a PR's review as independent if the approving reviewer and the
+    PR author are the same real account on any given PR. This is the
+    "automated check confirming the real reviewing identity and the real
+    authoring identity are never the same account" required by this cycle's
+    Owner directive.
+
+    pr_review_record (explicit structured input, no live calls made here):
+      {
+        "repo": str, "pr_number": int,
+        "author_login": str,
+        "approving_review_logins": [str, ...],
+      }
+    Login comparison is case-insensitive (GitHub logins are
+    case-insensitive but not guaranteed to be cased consistently across API
+    responses) and whitespace-trimmed.
+
+    Returns (verdict: bool, reason: str) -- verdict True means at least one
+    approving review came from a genuinely different account than the
+    author (independent review exists); False means every approving review
+    (if any) was authored by the same account as the PR itself, with
+    `reason` naming the real cause."""
+    repo = pr_review_record.get("repo")
+    pr_number = pr_review_record.get("pr_number")
+    author = str(pr_review_record.get("author_login") or "").strip().lower()
+    reviewers = [
+        str(login or "").strip().lower()
+        for login in (pr_review_record.get("approving_review_logins") or [])
+    ]
+
+    independent_reviewers = [r for r in reviewers if r and r != author]
+    self_reviews = [r for r in reviewers if r and r == author]
+
+    if independent_reviewers:
+        return True, (
+            f"Independent review confirmed for {repo}#{pr_number}: "
+            f"approved by {independent_reviewers[0]} (author: {author})."
+        )
+
+    if self_reviews:
+        reason = (
+            f"REFUSED for {repo}#{pr_number}: approving reviewer "
+            f"'{author}' is the same account as the PR author -- "
+            "self-approval is not independent review."
+        )
+    else:
+        reason = (
+            f"REFUSED for {repo}#{pr_number}: no approving review from any "
+            f"account other than the author '{author}' exists yet."
+        )
+    return False, reason
+
+
+def apply_review_independence_verdict(conn, pr_review_record):
+    """Real caller-side usage pattern for
+    refuse_review_if_reviewer_is_author(): calls the pure function, and
+    when it refuses, records a real, permanent
+    'review_identity_independence_refused' audit event via
+    record_ocid_master_standard_audit_event() (and commits it) so the
+    refusal has a durable trail, not just a transient return value. Returns
+    the same (verdict, reason) tuple the pure function returns.
+
+    Write path uses _write_lock() like every other write path in this file
+    (superboss-register.py:176-199) to avoid the documented 2026-07-23
+    SQLite corruption pattern; callers do not need to wrap this call in
+    their own _write_lock()."""
+    verdict, reason = refuse_review_if_reviewer_is_author(pr_review_record)
+    if not verdict:
+        with _write_lock():
+            record_ocid_master_standard_audit_event(
+                conn, "review_identity_independence_refused",
+                {
+                    "repo": pr_review_record.get("repo"),
+                    "pr_number": pr_review_record.get("pr_number"),
+                    "author_login": pr_review_record.get("author_login"),
+                    "approving_review_logins": pr_review_record.get("approving_review_logins"),
+                    "reason": reason,
+                },
+            )
+            conn.commit()
+    return verdict, reason
+
+
+# ---------------------------------------------------------------------------
 # OCID Master Standard v6 -- evidence_json schema standardization (Owner
 # directive, this cycle; citing UMR-20260804-170055-a069 [canonical OCID-068
 # UMR] and UMR-20260805-032326-becc [real OCID canonical roster build]).

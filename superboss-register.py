@@ -675,6 +675,9 @@ def _migrate_schema(conn):
     _ensure_ocid_artifact_links_table(conn)
     _ensure_ocid_canonical_registry_table(conn)
     _ensure_ocid_master_standard_audit_log_table(conn)
+    _ensure_ocid_compliance_tables(conn)
+    _ensure_registry_taxonomy_notes_table(conn)
+    _seed_registry_taxonomy_notes(conn)
     _migrate_instructions_content_hash(conn)
     _migrate_capability_registry_utm(conn)
 
@@ -2193,7 +2196,15 @@ def cmd_resolve_ocid_canonical(args):
     point over resolve_ocid_canonical(). Read-only unless --apply is passed,
     same convention as cmd_reconcile_umr_status below -- resolving/searching
     never mutates the real registry by itself; --apply performs the real
-    upsert_ocid_canonical_registry() write under _write_lock()."""
+    upsert_ocid_canonical_registry() write under _write_lock().
+
+    UMR-20260805-092408-4f97: --apply now also writes `audit_raw_output`
+    (this real run's own `evidence` dict, verbatim -- the exact real
+    zero-AI-judgment mechanical search output, not a narrated summary), so
+    every real write through this CLI command structurally earns
+    not_applicable_confirmed (when honestly not_found) via the
+    ocid_canonical_registry_completion_ai/_au triggers, rather than that
+    marker ever depending on a caller's separately hand-typed claim."""
     init_db_silent()
     conn = _connect()
     _ensure_ocid_canonical_registry_table(conn)
@@ -2206,6 +2217,7 @@ def cmd_resolve_ocid_canonical(args):
                 all_umr_ids=result["all_umr_ids"], evidence=result["evidence"],
                 pr_number=result["pr_number"], pr_repo=result["pr_repo"],
                 duplicate_reason=result["duplicate_reason"], not_found=result["not_found"],
+                audit_raw_output=result["evidence"],
             )
             conn.commit()
     conn.close()
@@ -2980,22 +2992,212 @@ def _ensure_ocid_canonical_registry_table(conn):
     )""")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ocid_canonical_status ON ocid_canonical_registry(status)")
     conn.commit()
+    _migrate_ocid_canonical_registry_completion_columns(conn)
+    _ensure_ocid_canonical_registry_completion_triggers(conn)
+
+
+def _migrate_ocid_canonical_registry_completion_columns(conn):
+    """OCID-068 Phase 2 real registry-schema extension (Owner directive
+    UMR-20260805-090549-9710, extending the now-superseded
+    UMR-20260805-085025-c257; citing the canonical OCID-068 UMR
+    UMR-20260804-170055-a069 and its permanent closure record
+    UMR-20260805-032731-b412). Additive, idempotent ALTER TABLE ADD COLUMN
+    migration for DBs created before these columns existed -- same
+    PRAGMA-table_info-then-ALTER convention as _migrate_schema's own
+    system_index.tags migration above, since SQLite's
+    `ALTER TABLE ... ADD COLUMN` errors out if the column already exists.
+
+    Adds real dedicated evidence columns (commit_sha, file_name, file_path,
+    merge_status, evidence_summary) so this data no longer lives only inside
+    the unstructured evidence_json text blob, plus seven real completion-gate
+    boolean columns (has_real_umr, has_real_pr, has_real_commit,
+    has_real_merge, has_real_file_path, has_real_evidence_summary,
+    is_fully_complete). The seven booleans are NEVER meant to be hand-set by
+    this function or by any Python caller -- they default to 0 here purely so
+    the column exists with a real, valid NOT NULL value immediately after
+    ADD COLUMN; the AFTER INSERT/AFTER UPDATE triggers created by
+    _ensure_ocid_canonical_registry_completion_triggers() below immediately
+    recompute and overwrite them from the row's own real underlying columns
+    on every subsequent write. Existing rows added before this migration ran
+    keep their ADD-COLUMN default of 0 until the next write to that row (an
+    ALTER TABLE ADD COLUMN backfill does not itself fire an UPDATE trigger)
+    -- the backfill step of this same directive re-writes every one of the 69
+    existing rows via upsert_ocid_canonical_registry(), which does fire the
+    trigger and correctly recomputes every row's real boolean values.
+
+    `not_applicable_confirmed` (Owner reinforcement directive
+    UMR-20260805-091934-86a2, extending UMR-20260805-090549-9710): a real,
+    trigger-computed (never hand-set, same governance as the 7 has_real_*/
+    is_fully_complete columns) explicit marker for the 8 real rows honestly
+    confirmed `not_found` (OCID-007..OCID-011, OCID-012, OCID-013,
+    OCID-014) -- these are the only real rows where "no file path" is a
+    genuine, confirmed non-applicability (the OCID itself was never real /
+    never registered), not an unattempted gap.
+
+    `audit_raw_output` (Owner urgent correction UMR-20260805-092408-4f97):
+    a real, verbatim, JSON-encoded dump of resolve_ocid_canonical()'s own
+    `evidence` dict -- the SAME already-merged (UMR-20260805-042152-e559),
+    zero-AI-judgment, fully mechanical 6-method search this file already
+    runs (umr_tasks substring match, full-table grep, `gh pr list` x3 repos,
+    `git log --grep` x3 repos as cross-check, UMR-ID regex extraction from
+    PR bodies, MASTER-TRACKER/ACTIVE-CLAIMS grep as last resort -- see that
+    function's own docstring for the exact order). `audit_raw_output` is
+    populated exclusively by audit_ocid_canonical_registry.py (a thin,
+    deterministic orchestration script that calls resolve_ocid_canonical()
+    and upsert_ocid_canonical_registry(), with zero interpretive logic of
+    its own beyond what resolve_ocid_canonical() itself already does) --
+    never hand-typed prose, never a second parallel search implementation.
+    `not_applicable_confirmed` is deliberately gated on BOTH `not_found = 1`
+    AND `audit_raw_output` being genuinely present (non-NULL, non-empty) --
+    a bare `not_found=True` parameter with no real stored evidence behind it
+    is no longer sufficient to earn the confirmed marker (see the trigger
+    body below), closing the real fabrication risk UMR-20260805-092408-4f97
+    named: a caller writing a plausible-sounding boolean+reason without ever
+    genuinely re-running the real search."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(ocid_canonical_registry)").fetchall()}
+    new_columns = [
+        ("commit_sha", "TEXT"),
+        ("file_name", "TEXT"),
+        ("file_path", "TEXT"),
+        ("merge_status", "TEXT"),
+        ("evidence_summary", "TEXT"),
+        ("has_real_umr", "INTEGER NOT NULL DEFAULT 0"),
+        ("has_real_pr", "INTEGER NOT NULL DEFAULT 0"),
+        ("has_real_commit", "INTEGER NOT NULL DEFAULT 0"),
+        ("has_real_merge", "INTEGER NOT NULL DEFAULT 0"),
+        ("has_real_file_path", "INTEGER NOT NULL DEFAULT 0"),
+        ("has_real_evidence_summary", "INTEGER NOT NULL DEFAULT 0"),
+        ("is_fully_complete", "INTEGER NOT NULL DEFAULT 0"),
+        ("not_applicable_confirmed", "INTEGER NOT NULL DEFAULT 0"),
+        ("audit_raw_output", "TEXT"),
+    ]
+    changed = False
+    for name, decl in new_columns:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE ocid_canonical_registry ADD COLUMN {name} {decl}")
+            changed = True
+    if changed:
+        conn.commit()
+
+
+def _ensure_ocid_canonical_registry_completion_triggers(conn):
+    """OCID-068 Phase 2 (UMR-20260805-090549-9710, reinforced by
+    UMR-20260805-091934-86a2's not_applicable_confirmed addition): the real,
+    code-enforced completion gate. No Python code path, no caller, and no
+    future direct SQL write should be able to set any of the 8 boolean
+    columns (the original 7 has_real_*/is_fully_complete, plus
+    not_applicable_confirmed) to a value inconsistent with the row's own
+    real underlying data -- the only way to truly guarantee that in SQLite
+    is a real AFTER INSERT / AFTER UPDATE trigger that recomputes and
+    overwrites all 8 booleans from the row's own real columns on every
+    single write, whatever the caller passed. Using
+    `CREATE TRIGGER IF NOT EXISTS` matches this file's own idempotent
+    migration-function convention -- safe to call on every write path/every
+    process start, including against a pre-existing DB that predates these
+    triggers.
+
+    Each trigger's own UPDATE targets `WHERE rowid = NEW.rowid` (this table's
+    PRIMARY KEY is `ocid_number`, not an implicit INTEGER rowid alias, so
+    rowid is still the correct, unambiguous single-row target and is not the
+    same column as ocid_number). SQLite's default `PRAGMA recursive_triggers`
+    is OFF for any connection that never explicitly turns it on (this file's
+    _connect() does not), so the AFTER UPDATE trigger's own internal UPDATE
+    does not recursively re-fire itself -- real behavior independently
+    verified by this task's own test suite
+    (tests/test_ocid_registry_completion_gate.py), not merely assumed from
+    the SQLite docs."""
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS ocid_canonical_registry_completion_ai
+        AFTER INSERT ON ocid_canonical_registry
+        BEGIN
+            UPDATE ocid_canonical_registry SET
+                has_real_umr = CASE WHEN NEW.canonical_umr_id IS NOT NULL AND NEW.not_found = 0 THEN 1 ELSE 0 END,
+                has_real_pr = CASE WHEN NEW.pr_number IS NOT NULL THEN 1 ELSE 0 END,
+                has_real_commit = CASE WHEN NEW.commit_sha IS NOT NULL THEN 1 ELSE 0 END,
+                has_real_merge = CASE WHEN NEW.merge_status = 'merged' THEN 1 ELSE 0 END,
+                has_real_file_path = CASE WHEN NEW.file_path IS NOT NULL THEN 1 ELSE 0 END,
+                has_real_evidence_summary = CASE WHEN NEW.evidence_summary IS NOT NULL AND length(NEW.evidence_summary) > 0 THEN 1 ELSE 0 END,
+                not_applicable_confirmed = CASE WHEN NEW.not_found = 1 AND NEW.audit_raw_output IS NOT NULL AND length(NEW.audit_raw_output) > 0 THEN 1 ELSE 0 END,
+                is_fully_complete = CASE WHEN
+                    (CASE WHEN NEW.canonical_umr_id IS NOT NULL AND NEW.not_found = 0 THEN 1 ELSE 0 END) = 1
+                    AND (CASE WHEN NEW.pr_number IS NOT NULL THEN 1 ELSE 0 END) = 1
+                    AND (CASE WHEN NEW.commit_sha IS NOT NULL THEN 1 ELSE 0 END) = 1
+                    AND (CASE WHEN NEW.merge_status = 'merged' THEN 1 ELSE 0 END) = 1
+                    AND (CASE WHEN NEW.file_path IS NOT NULL THEN 1 ELSE 0 END) = 1
+                    AND (CASE WHEN NEW.evidence_summary IS NOT NULL AND length(NEW.evidence_summary) > 0 THEN 1 ELSE 0 END) = 1
+                    THEN 1 ELSE 0 END
+            WHERE rowid = NEW.rowid;
+        END;
+    """)
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS ocid_canonical_registry_completion_au
+        AFTER UPDATE ON ocid_canonical_registry
+        BEGIN
+            UPDATE ocid_canonical_registry SET
+                has_real_umr = CASE WHEN NEW.canonical_umr_id IS NOT NULL AND NEW.not_found = 0 THEN 1 ELSE 0 END,
+                has_real_pr = CASE WHEN NEW.pr_number IS NOT NULL THEN 1 ELSE 0 END,
+                has_real_commit = CASE WHEN NEW.commit_sha IS NOT NULL THEN 1 ELSE 0 END,
+                has_real_merge = CASE WHEN NEW.merge_status = 'merged' THEN 1 ELSE 0 END,
+                has_real_file_path = CASE WHEN NEW.file_path IS NOT NULL THEN 1 ELSE 0 END,
+                has_real_evidence_summary = CASE WHEN NEW.evidence_summary IS NOT NULL AND length(NEW.evidence_summary) > 0 THEN 1 ELSE 0 END,
+                not_applicable_confirmed = CASE WHEN NEW.not_found = 1 AND NEW.audit_raw_output IS NOT NULL AND length(NEW.audit_raw_output) > 0 THEN 1 ELSE 0 END,
+                is_fully_complete = CASE WHEN
+                    (CASE WHEN NEW.canonical_umr_id IS NOT NULL AND NEW.not_found = 0 THEN 1 ELSE 0 END) = 1
+                    AND (CASE WHEN NEW.pr_number IS NOT NULL THEN 1 ELSE 0 END) = 1
+                    AND (CASE WHEN NEW.commit_sha IS NOT NULL THEN 1 ELSE 0 END) = 1
+                    AND (CASE WHEN NEW.merge_status = 'merged' THEN 1 ELSE 0 END) = 1
+                    AND (CASE WHEN NEW.file_path IS NOT NULL THEN 1 ELSE 0 END) = 1
+                    AND (CASE WHEN NEW.evidence_summary IS NOT NULL AND length(NEW.evidence_summary) > 0 THEN 1 ELSE 0 END) = 1
+                    THEN 1 ELSE 0 END
+            WHERE rowid = NEW.rowid;
+        END;
+    """)
+    conn.commit()
 
 
 def upsert_ocid_canonical_registry(conn, ocid_number, *, canonical_umr_id, status,
                                     all_umr_ids, evidence, pr_number=None, pr_repo=None,
-                                    duplicate_reason=None, not_found=False):
+                                    duplicate_reason=None, not_found=False,
+                                    commit_sha=None, file_name=None, file_path=None,
+                                    merge_status=None, evidence_summary=None,
+                                    audit_raw_output=None):
     """Real, idempotent per-OCID upsert -- re-running the real search for the
     same OCID and writing the result again is always safe, matching
     upsert_umr_task()'s own ON CONFLICT DO UPDATE convention. `all_umr_ids`
     and `evidence` are real Python lists/dicts, JSON-encoded here so callers
     never hand-serialize. Caller owns conn/transaction/commit, same
-    convention as insert_ocid_artifact_link()/update_umr_task() above."""
+    convention as insert_ocid_artifact_link()/update_umr_task() above.
+
+    OCID-068 Phase 2 (UMR-20260805-090549-9710): `commit_sha`, `file_name`,
+    `file_path`, `merge_status`, `evidence_summary` are the real new
+    dedicated evidence columns (not a duplicate of evidence_json -- see
+    _migrate_ocid_canonical_registry_completion_columns()'s own docstring).
+
+    `audit_raw_output` (UMR-20260805-092408-4f97): a real Python dict/list
+    (typically resolve_ocid_canonical()'s own `evidence` dict, verbatim),
+    JSON-encoded here same as `evidence`/`all_umr_ids` -- intended to be
+    written exclusively by audit_ocid_canonical_registry.py, never hand-
+    typed. Nothing in this function enforces that provenance by itself
+    (this function stays a plain, generic, reusable upsert); the real
+    enforcement is the ocid_canonical_registry_completion_ai/_au triggers'
+    own not_applicable_confirmed computation, which requires a genuinely
+    non-empty audit_raw_output to ever read true, regardless of what any
+    caller passes.
+
+    Deliberately no `has_real_*`/`is_fully_complete`/`not_applicable_confirmed`
+    parameters here -- those 8 columns are governed exclusively by the
+    ocid_canonical_registry_completion_ai/_au triggers
+    (_ensure_ocid_canonical_registry_completion_triggers()), which recompute
+    and overwrite them from this row's own real underlying columns on every
+    INSERT/UPDATE. No caller-supplied value could ever reach them even if one
+    were accepted here, so the parameters are omitted entirely rather than
+    accepted-and-silently-dropped, to keep the real call contract honest."""
     conn.execute("""
         INSERT INTO ocid_canonical_registry
             (ocid_number, canonical_umr_id, status, pr_number, pr_repo,
-             all_umr_ids_json, duplicate_reason, not_found, evidence_json, last_verified_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             all_umr_ids_json, duplicate_reason, not_found, evidence_json, last_verified_at,
+             commit_sha, file_name, file_path, merge_status, evidence_summary, audit_raw_output)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(ocid_number) DO UPDATE SET
             canonical_umr_id=excluded.canonical_umr_id,
             status=excluded.status,
@@ -3005,17 +3207,30 @@ def upsert_ocid_canonical_registry(conn, ocid_number, *, canonical_umr_id, statu
             duplicate_reason=excluded.duplicate_reason,
             not_found=excluded.not_found,
             evidence_json=excluded.evidence_json,
-            last_verified_at=excluded.last_verified_at
+            last_verified_at=excluded.last_verified_at,
+            commit_sha=excluded.commit_sha,
+            file_name=excluded.file_name,
+            file_path=excluded.file_path,
+            merge_status=excluded.merge_status,
+            evidence_summary=excluded.evidence_summary,
+            audit_raw_output=excluded.audit_raw_output
     """, (
         ocid_number, canonical_umr_id, status, pr_number, pr_repo,
         json.dumps(all_umr_ids), duplicate_reason, 1 if not_found else 0,
         json.dumps(evidence), _now_iso(),
+        commit_sha, file_name, file_path, merge_status, evidence_summary,
+        json.dumps(audit_raw_output, sort_keys=True, default=str) if audit_raw_output is not None else None,
     ))
 
 
 def query_ocid_canonical_registry(conn, ocid_number=None):
     """Real lookup -- a single OCID's real canonical-UMR row, or the whole
-    real roster (ordered by ocid_number) when called with no argument."""
+    real roster (ordered by ocid_number) when called with no argument. Uses
+    `SELECT *`, so the OCID-068 Phase 2 (UMR-20260805-090549-9710) real
+    columns -- commit_sha, file_name, file_path, merge_status,
+    evidence_summary, and the 7 trigger-computed has_real_*/is_fully_complete
+    gate columns -- are already included in every returned row with no
+    change needed here."""
     if ocid_number:
         rows = conn.execute(
             "SELECT * FROM ocid_canonical_registry WHERE ocid_number=?", (ocid_number,)
@@ -3029,6 +3244,8 @@ def query_ocid_canonical_registry(conn, ocid_number=None):
         d = dict(r)
         d["all_umr_ids"] = json.loads(d.pop("all_umr_ids_json"))
         d["evidence"] = json.loads(d.pop("evidence_json"))
+        if d.get("audit_raw_output") is not None:
+            d["audit_raw_output"] = json.loads(d["audit_raw_output"])
         out.append(d)
     return out
 
@@ -3920,6 +4137,580 @@ def find_active_umr_by_ocid(conn, ocid_number):
     return dict(row) if row else None
 
 
+# ---------------------------------------------------------------------------
+# OCID-068 seven-rule compliance tracking -- full historical roster
+# (UMR-20260805-093138-2bd0 + scope clarification UMR-20260805-093254-056e,
+# extending UMR-20260805-092408-4f97 / UMR-20260805-091934-86a2 /
+# UMR-20260805-090549-9710, citing the canonical OCID-068 UMR
+# UMR-20260804-170055-a069). Tables named ocid_compliance_state /
+# ocid_compliance_audit_log -- renamed from the originally-requested
+# ocid_068_compliance_state/ocid_068_compliance_audit_log per
+# UMR-20260805-093254-056e's own explicit authorization to rename for
+# clarity once real row coverage became the full OCID-001..069 roster (every
+# real OCID x every real UMR in its own all_umr_ids_json), not literally
+# scoped to the OCID-068 number alone -- disclosed here and in the PR
+# description, not a silent divergence from what was literally asked.
+#
+# Same anti-fabrication principle as ocid_canonical_registry's has_real_*/
+# is_fully_complete columns: none of the boolean columns below are ever
+# caller-settable. The ONLY real write path is run_ocid_compliance_audit()
+# -> record_ocid_compliance_audit(), which always writes a real
+# ocid_compliance_audit_log row (raw, verbatim evidence) for every field in
+# the SAME real transaction as the ocid_compliance_state upsert, so current
+# state and full history can never drift apart. This is a real, Python-API-
+# level guarantee (one function, one transaction, no other function accepts
+# these booleans as plain parameters) -- not a SQL-trigger-level one the way
+# has_real_*/is_fully_complete are; SQLite triggers cannot verify a value
+# was genuinely produced by running real rule-check logic, only that stored
+# columns are internally self-consistent. Documented plainly rather than
+# overclaiming a guarantee SQLite cannot actually give.
+# ---------------------------------------------------------------------------
+
+# Real merge timestamps (UTC) of each rule's own real mechanism PR --
+# independently fetched via `gh pr view --repo FChecklist/veridian-scripts
+# --json mergedAt` this session (2026-08-05), not guessed. A rule's
+# mechanism cannot have been satisfied by any real OCID/UMR pair registered
+# (ts_submitted) before its own real merge date -- recorded honestly as
+# `false` with a real explanation in that case, never `true`, never
+# silently null (UMR-20260805-093254-056e's own explicit instruction).
+OCID_068_RULE_MECHANISM_MERGED_AT = {
+    "rule_1_umr_reuse_verified": ("2026-08-04T20:18:42Z", "veridian-scripts PR #26"),
+    "rule_2_outcome_classification_verified": ("2026-08-04T20:45:42Z", "veridian-scripts PR #29"),
+    "rule_3_no_premature_minting_verified": ("2026-08-04T20:52:22Z", "veridian-scripts PR #30"),
+    "rule_4_pm_visible_counts_verified": ("2026-08-04T21:09:40Z", "veridian-scripts PR #32"),
+    "rule_5_stall_detection_verified": ("2026-08-04T21:20:34Z", "veridian-scripts PR #33"),
+    "rule_6_zero_duplication_verified": ("2026-08-04T21:20:24Z", "veridian-scripts PR #34"),
+    "rule_7_structured_evidence_verified": (
+        "2026-08-04T21:33:12Z",
+        "veridian-scripts PR #35 (also depends on ocid_artifact_links, PR #20, merged earlier)",
+    ),
+}
+
+
+def _ensure_ocid_compliance_tables(conn):
+    """Idempotent CREATE TABLE IF NOT EXISTS for both real tables, same
+    convention as every other _ensure_*_table function in this file. One
+    real row per real (ocid_number, umr_id) pair in ocid_compliance_state
+    (composite PRIMARY KEY -- upserts replace it); ocid_compliance_audit_log
+    is genuinely append-only, one real row per real field/rule per real
+    audit run, never UPDATEd or DELETEd (same append-only convention as
+    ocid_master_standard_audit_log above)."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS ocid_compliance_state (
+        ocid_number TEXT NOT NULL,
+        umr_id TEXT NOT NULL,
+        rule_1_umr_reuse_verified INTEGER NOT NULL DEFAULT 0,
+        rule_2_outcome_classification_verified INTEGER NOT NULL DEFAULT 0,
+        rule_3_no_premature_minting_verified INTEGER NOT NULL DEFAULT 0,
+        rule_4_pm_visible_counts_verified INTEGER NOT NULL DEFAULT 0,
+        rule_5_stall_detection_verified INTEGER NOT NULL DEFAULT 0,
+        rule_6_zero_duplication_verified INTEGER NOT NULL DEFAULT 0,
+        rule_7_structured_evidence_verified INTEGER NOT NULL DEFAULT 0,
+        file_path TEXT,
+        file_path_checked INTEGER NOT NULL DEFAULT 0,
+        file_checked INTEGER NOT NULL DEFAULT 0,
+        file_path_available INTEGER NOT NULL DEFAULT 0,
+        file_path_validated INTEGER NOT NULL DEFAULT 0,
+        file_existing INTEGER NOT NULL DEFAULT 0,
+        file_work_implemented INTEGER NOT NULL DEFAULT 0,
+        file_details TEXT,
+        file_created_date TEXT,
+        file_last_reviewed_date TEXT,
+        version_history TEXT,
+        version_date TEXT,
+        status_one_word TEXT,
+        status_one_sentence TEXT,
+        audit_done INTEGER NOT NULL DEFAULT 0,
+        audit_passed INTEGER NOT NULL DEFAULT 0,
+        last_audit_timestamp TEXT,
+        PRIMARY KEY (ocid_number, umr_id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ocid_compliance_state_ocid ON ocid_compliance_state(ocid_number)")
+    conn.execute("""CREATE TABLE IF NOT EXISTS ocid_compliance_audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ocid_number TEXT NOT NULL,
+        umr_id TEXT NOT NULL,
+        audit_timestamp TEXT NOT NULL,
+        rule_or_field_name TEXT NOT NULL,
+        result INTEGER,
+        raw_output TEXT NOT NULL,
+        audited_by TEXT NOT NULL
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ocid_compliance_audit_ocid ON ocid_compliance_audit_log(ocid_number)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ocid_compliance_audit_umr ON ocid_compliance_audit_log(umr_id)")
+    conn.commit()
+    _ensure_ocid_compliance_state_derive_triggers(conn)
+
+
+# The 13 real boolean fields on ocid_compliance_state that are NEVER
+# caller-settable -- every one is trigger-derived from
+# ocid_compliance_audit_log's own real, append-only, verbatim-evidence
+# rows, not from whatever a caller's INSERT/UPDATE statement supplied.
+OCID_COMPLIANCE_STATE_BOOLEAN_FIELDS = (
+    "rule_1_umr_reuse_verified", "rule_2_outcome_classification_verified",
+    "rule_3_no_premature_minting_verified", "rule_4_pm_visible_counts_verified",
+    "rule_5_stall_detection_verified", "rule_6_zero_duplication_verified",
+    "rule_7_structured_evidence_verified",
+    "file_path_checked", "file_checked", "file_path_available",
+    "file_path_validated", "file_existing", "file_work_implemented",
+)
+OCID_COMPLIANCE_STATE_RULE_FIELDS = tuple(
+    f for f in OCID_COMPLIANCE_STATE_BOOLEAN_FIELDS if f.startswith("rule_")
+)
+
+
+def _ensure_ocid_compliance_state_derive_triggers(conn):
+    """UMR-20260805-093138-2bd0 / UMR-20260805-092408-4f97's same real
+    anti-fabrication principle, applied here the same structural way as
+    ocid_canonical_registry's own has_real_*/is_fully_complete triggers:
+    a real AFTER INSERT / AFTER UPDATE trigger on ocid_compliance_state
+    that OVERWRITES every one of the 13 real boolean columns (7 rules + 6
+    file-tracking fields) with a real, correlated-subquery lookup of the
+    MOST RECENT matching row in ocid_compliance_audit_log for this exact
+    (ocid_number, umr_id, rule_or_field_name) -- never trusting whatever a
+    caller's own INSERT/UPDATE statement supplied for those columns. A
+    field with NO real audit_log row at all (never audited) derives to a
+    real, honest 0/false via COALESCE, never a fabricated pass.
+    `audit_done`/`audit_passed` are likewise derived, not caller-settable:
+    audit_done = 1 iff at least one real audit_log row exists for this
+    pair; audit_passed = 1 iff all 7 real rule_* columns derive to 1.
+
+    This closes the real fabrication gap a purely Python-API-level
+    convention (record_ocid_compliance_audit() being "the only real write
+    path") cannot fully close by itself: even a bare, hand-typed
+    `INSERT INTO ocid_compliance_state (...) VALUES (...)` bypassing that
+    function entirely still has every one of its 13 real booleans
+    immediately overwritten by this trigger from the real, append-only
+    evidence log -- exactly the same structural guarantee already proven
+    for ocid_canonical_registry's own completion-gate columns, just
+    correlated across two tables via subqueries instead of within one row.
+    `file_path`/`file_details`/`status_one_word`/etc. (plain data columns,
+    not gate booleans) are deliberately NOT trigger-derived here, same
+    precedent as ocid_canonical_registry's own commit_sha/file_path/
+    merge_status/evidence_summary columns above."""
+    def _latest_result_subquery(field):
+        return (
+            f"COALESCE((SELECT result FROM ocid_compliance_audit_log "
+            f"WHERE ocid_number = NEW.ocid_number AND umr_id = NEW.umr_id "
+            f"AND rule_or_field_name = '{field}' "
+            f"ORDER BY audit_timestamp DESC, id DESC LIMIT 1), 0)"
+        )
+
+    set_clauses = ",\n                ".join(
+        f"{field} = {_latest_result_subquery(field)}" for field in OCID_COMPLIANCE_STATE_BOOLEAN_FIELDS
+    )
+    audit_done_clause = (
+        "audit_done = CASE WHEN EXISTS (SELECT 1 FROM ocid_compliance_audit_log "
+        "WHERE ocid_number = NEW.ocid_number AND umr_id = NEW.umr_id) THEN 1 ELSE 0 END"
+    )
+    audit_passed_terms = " AND ".join(
+        f"{_latest_result_subquery(field)} = 1" for field in OCID_COMPLIANCE_STATE_RULE_FIELDS
+    )
+    audit_passed_clause = f"audit_passed = CASE WHEN {audit_passed_terms} THEN 1 ELSE 0 END"
+
+    for trigger_name, event in (
+        ("ocid_compliance_state_derive_ai", "AFTER INSERT"),
+        ("ocid_compliance_state_derive_au", "AFTER UPDATE"),
+    ):
+        conn.execute(f"""
+            CREATE TRIGGER IF NOT EXISTS {trigger_name}
+            {event} ON ocid_compliance_state
+            BEGIN
+                UPDATE ocid_compliance_state SET
+                {set_clauses},
+                {audit_done_clause},
+                {audit_passed_clause}
+                WHERE rowid = NEW.rowid;
+            END;
+        """)
+    conn.commit()
+
+
+def _rule_mechanism_existed(ts_submitted, merged_at, pr_ref):
+    """Real, honest comparison: could this specific real UMR possibly have
+    been subject to a rule whose own real mechanism did not exist yet at
+    its real mint time? Returns (True/False/None, note) -- False means "the
+    mechanism did not exist yet, honestly record false, not skipped"; None
+    means "cannot determine (no real ts_submitted on this row)", which the
+    caller also honestly records as a real None result, never guessed."""
+    if not ts_submitted:
+        return None, (f"no real ts_submitted on this umr_tasks row; cannot compare against "
+                       f"{pr_ref}'s real merge date {merged_at}")
+    try:
+        ts_dt = datetime.fromisoformat(ts_submitted.replace("Z", "+00:00"))
+        merged_dt = datetime.fromisoformat(merged_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        return None, f"could not parse a real timestamp for mechanism-existed comparison: {exc}"
+    if ts_dt < merged_dt:
+        return False, (f"this UMR's real ts_submitted={ts_submitted} is before {pr_ref}'s real merge "
+                        f"date {merged_at}; the rule's own mechanism did not exist yet")
+    return True, None
+
+
+def _check_rule_1_umr_reuse(conn, ocid_number, umr_id, umr_row, all_umr_ids):
+    """Real check: this umr_id was not minted while another real UMR for
+    the same real OCID was already active (per that other UMR's own real
+    ts_submitted/ts_completed window) at this umr's own real ts_submitted
+    moment -- i.e. a real resume correctly reused the existing active UMR
+    instead of minting a real duplicate. umr_tasks.ts_submitted/ts_completed
+    are always written via this file's own _now_iso(), so plain string
+    comparison of those two columns is real, valid ISO-8601 ordering."""
+    ts = umr_row["ts_submitted"] if umr_row else None
+    if not ts:
+        return None, f"no real umr_tasks row found for {umr_id}; cannot verify reuse-on-resume"
+    others = [u for u in all_umr_ids if u != umr_id]
+    if not others:
+        return True, f"{umr_id} is the only real UMR ever minted for {ocid_number}; no possible reuse violation"
+    placeholders = ",".join("?" * len(others))
+    rows = conn.execute(
+        f"SELECT umr_id, ts_submitted, ts_completed FROM umr_tasks WHERE umr_id IN ({placeholders})",
+        others,
+    ).fetchall()
+    overlapping = []
+    for r in rows:
+        r_start, r_end = r["ts_submitted"], r["ts_completed"] or "9999-12-31T23:59:59+00:00"
+        if r_start and r_start <= ts <= r_end:
+            overlapping.append(r["umr_id"])
+    if overlapping:
+        return False, (f"real umr_tasks row(s) {overlapping} were still real-active (no ts_completed) "
+                        f"at/after {ts} when {umr_id} was minted for the same {ocid_number} -- real "
+                        f"reuse-on-resume violation")
+    return True, (f"no other real UMR among {others} for {ocid_number} was active when {umr_id} "
+                  f"(ts_submitted={ts}) was minted")
+
+
+def _check_rule_2_outcome_classification(umr_row):
+    """Real check: this UMR's own real status is a real, recognized
+    classified outcome (PR #29's own real 5-canonical-outcomes vocabulary
+    plus the 2 real active pre-outcome states), grounded directly in the
+    real umr_tasks.status column, never inferred."""
+    if not umr_row:
+        return None, "no real umr_tasks row found"
+    valid_terminal = {"completed", "failed", "killed", "rejected_duplicate"}
+    valid_active = {"queued", "dispatched", "running"}
+    status = umr_row["status"]
+    if status in valid_terminal or status in valid_active:
+        return True, f"real status={status!r} is in the known real classified vocabulary {sorted(valid_terminal | valid_active)}"
+    return False, f"real status={status!r} is NOT in the known real classified vocabulary {sorted(valid_terminal | valid_active)}"
+
+
+def _check_rule_3_no_premature_minting(umr_row, ocid_number):
+    """Real check (PR #30: 'validate inputs.ocid_number before any UMR
+    mint'): this UMR's own real task_identity/inputs_json/metadata_json
+    text actually contains a real reference to this ocid_number -- real
+    evidence the ocid_number was recorded/validated at mint time, rather
+    than a UMR existing with no real, discoverable tie back to the OCID it
+    is being audited under."""
+    if not umr_row:
+        return None, "no real umr_tasks row found"
+    text = " ".join(str(umr_row[c]) for c in ("task_identity", "inputs_json", "metadata_json") if umr_row[c] is not None)
+    variants = [ocid_number.lower(), ocid_number.upper(), ocid_number.replace("-", "_").lower()]
+    text_lower = text.lower()
+    if any(v in text_lower for v in variants):
+        return True, f"real {ocid_number} reference found in this umr_tasks row's own task_identity/inputs_json/metadata_json"
+    return False, f"no real {ocid_number} reference found anywhere in this umr_tasks row's own text fields"
+
+
+def _check_rule_4_pm_visible_counts(conn, umr_id):
+    """Real check: this real umr_id is present and queryable via a real
+    direct SELECT against umr_tasks -- the real precondition for it to be
+    counted in any real PM-facing rollup."""
+    row = conn.execute("SELECT umr_id FROM umr_tasks WHERE umr_id=?", (umr_id,)).fetchone()
+    if row:
+        return True, f"real umr_tasks row for {umr_id} is present and queryable via a real SELECT"
+    return False, f"no real umr_tasks row found for {umr_id}"
+
+
+def _check_rule_5_stall_detection(umr_row):
+    """Real check: a real terminal-status UMR must have a real
+    ts_completed; a real still-active UMR must have a real last_heartbeat
+    -- either missing is the real stall signature Rule 5's own mechanism
+    (PR #33) is meant to catch."""
+    if not umr_row:
+        return None, "no real umr_tasks row found"
+    status = umr_row["status"]
+    if status in ("completed", "failed", "killed", "rejected_duplicate"):
+        ok = umr_row["ts_completed"] is not None
+        return ok, f"real terminal status={status!r}; ts_completed={'present' if ok else 'MISSING'}"
+    ok = umr_row["last_heartbeat"] is not None
+    return ok, f"real active status={status!r}; last_heartbeat={'present' if ok else 'MISSING -- real stall risk'}"
+
+
+def _check_rule_6_zero_duplication(conn, ocid_number, umr_id):
+    """Real check: reuses find_active_umr_by_ocid() -- the exact real,
+    already-merged Rule 6 mechanism function above -- rather than
+    reimplementing a second, parallel duplication check."""
+    active = find_active_umr_by_ocid(conn, ocid_number)
+    if active is None:
+        return True, f"real find_active_umr_by_ocid({ocid_number!r}) found no currently-active duplicate UMR"
+    if active["umr_id"] == umr_id:
+        return True, f"real find_active_umr_by_ocid({ocid_number!r}) found only {umr_id} itself active -- no duplicate"
+    return False, (f"real find_active_umr_by_ocid({ocid_number!r}) found a DIFFERENT active UMR "
+                    f"{active['umr_id']!r} alongside {umr_id} -- real duplication")
+
+
+def _check_rule_7_structured_evidence(conn, ocid_number, umr_id):
+    """Real check: at least one real row exists in ocid_artifact_links for
+    this exact (ocid_number, umr_id) pair -- the real, already-merged (PR
+    #20) structured-evidence table Rule 7's own mechanism (PR #35) requires."""
+    row = conn.execute(
+        "SELECT COUNT(*) c FROM ocid_artifact_links WHERE ocid_number=? AND umr_id=?", (ocid_number, umr_id)
+    ).fetchone()
+    count = row["c"]
+    if count > 0:
+        return True, f"real ocid_artifact_links has {count} real linkage row(s) for ({ocid_number}, {umr_id})"
+    return False, f"real ocid_artifact_links has ZERO linkage rows for ({ocid_number}, {umr_id})"
+
+
+def _check_file_tracking_fields(conn, canonical_row, runner=None):
+    """Real file-tracking checks, grounded in ocid_canonical_registry's own
+    real columns (file_path/commit_sha/pr_repo/merge_status -- populated by
+    backfill_ocid_registry_phase2_columns.py's own real active gh fetches),
+    plus a real `git show` existence check against a real local repo clone.
+    `file_path_checked` and `file_checked` are intentionally closely related
+    "an attempt was made" markers at two different checkpoints (path
+    discovery vs. existence verification) -- documented honestly as
+    overlapping by design, not claimed as two independently distinct
+    signals they are not."""
+    runner = runner or _default_ocid_resolver_runner
+    file_path = canonical_row.get("file_path") if canonical_row else None
+    file_path_available = bool(file_path)
+    file_path_validated = False
+    file_existing = False
+    validated_detail = "no real file_path on record to validate"
+    existing_detail = "no real file_path on record to check current existence"
+
+    if file_path and canonical_row.get("pr_repo"):
+        repo_path = DEFAULT_OCID_RESOLVER_REPO_LOCAL_PATHS.get(canonical_row["pr_repo"])
+        if repo_path:
+            if canonical_row.get("commit_sha"):
+                cmd = ["git", "show", f"{canonical_row['commit_sha']}:{file_path}"]
+                try:
+                    result = runner(cmd, repo_path)
+                    file_path_validated = getattr(result, "returncode", 1) == 0
+                    validated_detail = f"git show {canonical_row['commit_sha']}:{file_path} (in {repo_path}) -> returncode={getattr(result, 'returncode', None)}"
+                except Exception as exc:
+                    validated_detail = f"real git show failed: {exc}"
+            else:
+                validated_detail = "no real commit_sha on record; cannot validate file existed at a specific real commit"
+            cmd2 = ["git", "show", f"HEAD:{file_path}"]
+            try:
+                result2 = runner(cmd2, repo_path)
+                file_existing = getattr(result2, "returncode", 1) == 0
+                existing_detail = f"git show HEAD:{file_path} (in {repo_path}) -> returncode={getattr(result2, 'returncode', None)}"
+            except Exception as exc:
+                existing_detail = f"real git show failed: {exc}"
+
+    file_work_implemented = bool(
+        canonical_row and canonical_row.get("merge_status") == "merged" and canonical_row.get("commit_sha")
+    )
+    return {
+        "file_path": file_path,
+        "file_path_checked": True,
+        "file_checked": True,
+        "file_path_available": file_path_available,
+        "file_path_validated": file_path_validated,
+        "file_existing": file_existing,
+        "file_work_implemented": file_work_implemented,
+        "_raw": {
+            "file_path_checked": "this real audit run always attempts real file-path discovery from ocid_canonical_registry",
+            "file_checked": "this real audit run always attempts a real existence check when a file_path is available",
+            "file_path_available": f"ocid_canonical_registry.file_path = {file_path!r}",
+            "file_path_validated": validated_detail,
+            "file_existing": existing_detail,
+            "file_work_implemented": (
+                f"ocid_canonical_registry.merge_status={canonical_row.get('merge_status') if canonical_row else None!r}, "
+                f"commit_sha={'present' if (canonical_row and canonical_row.get('commit_sha')) else 'absent'}"
+            ),
+        },
+    }
+
+
+def record_ocid_compliance_audit(conn, ocid_number, umr_id, results, audited_by, now, file_path, audit_done, audit_passed):
+    """The ONLY real write path for ocid_compliance_state. Always writes a
+    matching ocid_compliance_audit_log row per field (real, verbatim
+    raw_output) in the SAME real transaction as the ocid_compliance_state
+    upsert -- caller commits once, after this returns -- so current state
+    and full history can never drift apart. `results` is a dict of
+    field_name -> (bool_or_None, raw_output_str); a None result (real
+    "cannot determine", e.g. no umr_tasks row found at all) is stored as a
+    real NULL in the audit log's own `result` column (preserving that exact
+    nuance for history) but coerced to 0/false in the summary
+    ocid_compliance_state row (a real, honest "not verified", not a
+    fabricated pass)."""
+    for field, (result, raw_output) in results.items():
+        conn.execute(
+            "INSERT INTO ocid_compliance_audit_log "
+            "(ocid_number, umr_id, audit_timestamp, rule_or_field_name, result, raw_output, audited_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ocid_number, umr_id, now, field, None if result is None else (1 if result else 0), raw_output, audited_by),
+        )
+    cols = {k: (1 if v[0] is True else 0) for k, v in results.items()}
+    conn.execute("""
+        INSERT INTO ocid_compliance_state
+            (ocid_number, umr_id, rule_1_umr_reuse_verified, rule_2_outcome_classification_verified,
+             rule_3_no_premature_minting_verified, rule_4_pm_visible_counts_verified,
+             rule_5_stall_detection_verified, rule_6_zero_duplication_verified,
+             rule_7_structured_evidence_verified, file_path, file_path_checked, file_checked,
+             file_path_available, file_path_validated, file_existing, file_work_implemented,
+             audit_done, audit_passed, last_audit_timestamp)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(ocid_number, umr_id) DO UPDATE SET
+            rule_1_umr_reuse_verified=excluded.rule_1_umr_reuse_verified,
+            rule_2_outcome_classification_verified=excluded.rule_2_outcome_classification_verified,
+            rule_3_no_premature_minting_verified=excluded.rule_3_no_premature_minting_verified,
+            rule_4_pm_visible_counts_verified=excluded.rule_4_pm_visible_counts_verified,
+            rule_5_stall_detection_verified=excluded.rule_5_stall_detection_verified,
+            rule_6_zero_duplication_verified=excluded.rule_6_zero_duplication_verified,
+            rule_7_structured_evidence_verified=excluded.rule_7_structured_evidence_verified,
+            file_path=excluded.file_path,
+            file_path_checked=excluded.file_path_checked,
+            file_checked=excluded.file_checked,
+            file_path_available=excluded.file_path_available,
+            file_path_validated=excluded.file_path_validated,
+            file_existing=excluded.file_existing,
+            file_work_implemented=excluded.file_work_implemented,
+            audit_done=excluded.audit_done,
+            audit_passed=excluded.audit_passed,
+            last_audit_timestamp=excluded.last_audit_timestamp
+    """, (
+        ocid_number, umr_id,
+        cols["rule_1_umr_reuse_verified"], cols["rule_2_outcome_classification_verified"],
+        cols["rule_3_no_premature_minting_verified"], cols["rule_4_pm_visible_counts_verified"],
+        cols["rule_5_stall_detection_verified"], cols["rule_6_zero_duplication_verified"],
+        cols["rule_7_structured_evidence_verified"], file_path,
+        cols["file_path_checked"], cols["file_checked"], cols["file_path_available"],
+        cols["file_path_validated"], cols["file_existing"], cols["file_work_implemented"],
+        1 if audit_done else 0, 1 if audit_passed else 0, now,
+    ))
+
+
+def run_ocid_compliance_audit(conn, ocid_number, umr_id, all_umr_ids, canonical_row, audited_by, runner=None):
+    """The one real, mechanical, zero-AI-judgment (beyond what the fixed
+    check functions above already encode) entry point that computes every
+    real rule/field result for a single (ocid_number, umr_id) pair and
+    writes both real tables together via record_ocid_compliance_audit()."""
+    runner = runner or _default_ocid_resolver_runner
+    umr_row = conn.execute("SELECT * FROM umr_tasks WHERE umr_id=?", (umr_id,)).fetchone()
+    umr_row = dict(umr_row) if umr_row else None
+    ts_submitted = umr_row["ts_submitted"] if umr_row else None
+
+    rule_checkers = {
+        "rule_1_umr_reuse_verified": lambda: _check_rule_1_umr_reuse(conn, ocid_number, umr_id, umr_row, all_umr_ids),
+        "rule_2_outcome_classification_verified": lambda: _check_rule_2_outcome_classification(umr_row),
+        "rule_3_no_premature_minting_verified": lambda: _check_rule_3_no_premature_minting(umr_row, ocid_number),
+        "rule_4_pm_visible_counts_verified": lambda: _check_rule_4_pm_visible_counts(conn, umr_id),
+        "rule_5_stall_detection_verified": lambda: _check_rule_5_stall_detection(umr_row),
+        "rule_6_zero_duplication_verified": lambda: _check_rule_6_zero_duplication(conn, ocid_number, umr_id),
+        "rule_7_structured_evidence_verified": lambda: _check_rule_7_structured_evidence(conn, ocid_number, umr_id),
+    }
+
+    results = {}
+    for field, checker in rule_checkers.items():
+        merged_at, pr_ref = OCID_068_RULE_MECHANISM_MERGED_AT[field]
+        existed, existed_note = _rule_mechanism_existed(ts_submitted, merged_at, pr_ref)
+        if existed is False:
+            results[field] = (False, f"mechanism did not exist yet: {existed_note}")
+        elif existed is None:
+            results[field] = (None, existed_note)
+        else:
+            results[field] = checker()
+
+    file_fields = _check_file_tracking_fields(conn, canonical_row, runner=runner)
+    for k in ("file_path_checked", "file_checked", "file_path_available", "file_path_validated",
+              "file_existing", "file_work_implemented"):
+        results[k] = (file_fields[k], file_fields["_raw"].get(k, f"{k}={file_fields[k]}"))
+
+    now = _now_iso()
+    rule_values = [v[0] for k, v in results.items() if k.startswith("rule_")]
+    audit_passed = all(v is True for v in rule_values)
+
+    record_ocid_compliance_audit(
+        conn, ocid_number, umr_id, results, audited_by=audited_by, now=now,
+        file_path=file_fields["file_path"], audit_done=True, audit_passed=audit_passed,
+    )
+    return {
+        "ocid_number": ocid_number, "umr_id": umr_id,
+        "results": {k: v[0] for k, v in results.items()},
+        "audit_passed": audit_passed,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Real UTR/UMR/single-source-of-truth taxonomy, recorded at the source
+# (UMR-20260805-093630-29d1, citing UMR-20260804-170055-a069, OCID-068, and
+# the schema work under UMR-20260805-090549-9710 / UMR-20260805-093138-2bd0).
+# No existing table in this file already serves this purpose (checked via
+# a direct sqlite_master query for schema/metadata/note/taxonomy-named
+# tables before adding this one) -- a real, small, dedicated table so any
+# future real query against this database, human or AI, finds this
+# taxonomy explained at the source, not needing to infer it from scattered
+# reports.
+# ---------------------------------------------------------------------------
+
+REGISTRY_TAXONOMY_UTR_UMR_NOTE = (
+    "UTR (Universal Task Registry) = the real `umr_tasks` table in this same "
+    "database, covering every real dispatched task (one row per real task, "
+    "keyed by `umr_id`, tracked from `queued` through a real terminal "
+    "status). UMR (Universal Metadata Registry) = the real, broader "
+    "knowledge/metadata layer this whole platform uses; the "
+    "`UMR-YYYYMMDD-HHMMSS-hash` identifiers already used throughout this "
+    "entire system (umr_tasks.umr_id, ocid_canonical_registry."
+    "canonical_umr_id/all_umr_ids_json, ocid_artifact_links.umr_id, "
+    "ocid_compliance_state/ocid_compliance_audit_log.umr_id, and every "
+    "real Owner-directive citation in every real commit/PR this session) "
+    "are the real individual entries within that UMR layer, not a separate "
+    "identifier scheme. This database file itself "
+    "(/opt/veridian/ai-os/memory/superboss-register.sqlite) is the one "
+    "real place of truth: it houses the UTR (umr_tasks) and the UMR layer "
+    "together with ocid_canonical_registry (per-OCID canonical-UMR/PR/"
+    "commit/file rollup + completion gate), ocid_artifact_links (many-to-"
+    "many OCID/UMR/PR/commit/file linkage graph), and ocid_compliance_state"
+    "/ocid_compliance_audit_log (per-OCID-068-seven-rule compliance state + "
+    "append-only history) -- all cross-referencing the same real `umr_id` "
+    "values, never a second parallel identifier space. "
+    "(UMR-20260805-093630-29d1, citing UMR-20260804-170055-a069, "
+    "UMR-20260805-090549-9710, UMR-20260805-093138-2bd0.)"
+)
+
+
+def _ensure_registry_taxonomy_notes_table(conn):
+    """Idempotent CREATE TABLE IF NOT EXISTS, same convention as every
+    other _ensure_*_table function in this file. One real row per real
+    `note_key` (PRIMARY KEY -- an upsert-by-key replaces it, same pattern
+    as ocid_canonical_registry's own per-OCID upsert), so a future real
+    correction to this taxonomy replaces the existing real note rather than
+    accumulating stale duplicates."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS registry_taxonomy_notes (
+        note_key TEXT PRIMARY KEY,
+        note_text TEXT NOT NULL,
+        recorded_at TEXT NOT NULL
+    )""")
+    conn.commit()
+
+
+def record_registry_taxonomy_note(conn, note_key, note_text):
+    """Real, idempotent upsert -- re-running this with the same note_key
+    and updated note_text is always safe, same ON CONFLICT DO UPDATE
+    convention as upsert_ocid_canonical_registry() above. Caller owns
+    conn/transaction/commit."""
+    conn.execute("""
+        INSERT INTO registry_taxonomy_notes (note_key, note_text, recorded_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(note_key) DO UPDATE SET
+            note_text=excluded.note_text,
+            recorded_at=excluded.recorded_at
+    """, (note_key, note_text, _now_iso()))
+
+
+def _seed_registry_taxonomy_notes(conn):
+    """Real, idempotent seed of the one real UTR/UMR taxonomy note --
+    called from _migrate_schema() alongside _ensure_registry_taxonomy_notes_table()
+    so it is always present on any real DB this module touches, exactly
+    like every other real, permanent registry content in this file."""
+    record_registry_taxonomy_note(conn, "utr_umr_single_source_of_truth_taxonomy", REGISTRY_TAXONOMY_UTR_UMR_NOTE)
+    conn.commit()
+
+
 def find_most_recent_umr_by_identity(conn, task_identity):
     """OCID-068 seven-rule guardrails addendum, Rule 1 (UMR-20260804-180711-7f96,
     UMR-20260804-194355-be9c): "one logical task shall have exactly one OCID,
@@ -4103,11 +4894,20 @@ def insert_ocid_artifact_link(conn, ocid_number, umr_id, repo, link_kind,
         return None
 
 
-def query_ocid_artifact_links(conn, ocid_number=None, umr_id=None, repo=None, pr_number=None, limit=50):
+def query_ocid_artifact_links(conn, ocid_number=None, umr_id=None, repo=None, pr_number=None,
+                               file_path=None, commit_sha=None, limit=50):
     """Real, read-only lookup -- deterministic linkage query, the whole point
     of this table existing (per the real Owner requirement this addendum
     implements): 'what closed OCID-X' or 'what OCID does PR/commit Y belong
-    to', without re-deriving it from governance-doc prose."""
+    to', without re-deriving it from governance-doc prose.
+
+    OCID-068 Phase 2 (UMR-20260805-090549-9710): `file_path` and
+    `commit_sha` are the real reverse-direction filters this same,
+    already-existing (PR #20) linkage graph was missing -- forward lookups
+    ('what closed OCID-X') were already covered by ocid_number/umr_id/
+    repo/pr_number above; these two answer the reverse direction ('given a
+    real file_path or commit_sha, find every real OCID/UMR it belongs to')
+    over the exact same table, not a second parallel mechanism."""
     clauses, params = [], []
     if ocid_number:
         clauses.append("ocid_number=?"); params.append(ocid_number)
@@ -4117,6 +4917,10 @@ def query_ocid_artifact_links(conn, ocid_number=None, umr_id=None, repo=None, pr
         clauses.append("repo=?"); params.append(repo)
     if pr_number is not None:
         clauses.append("pr_number=?"); params.append(pr_number)
+    if file_path:
+        clauses.append("file_path=?"); params.append(file_path)
+    if commit_sha:
+        clauses.append("commit_sha=?"); params.append(commit_sha)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(limit)
     rows = conn.execute(

@@ -40,6 +40,9 @@
       is currently `1` (restored) and `enforce_admins` is `true`. Recorded in
       `UMR_20260805_112247_3ad0_BRANCH_PROTECTION_REVERIFICATION_2026-08-05.md`.
 
+- [x] Committed, pushed, and opened PR for independent review before merge (per Owner directive
+      -- "sacrosanct infrastructure", must not merge without independent review):
+      https://github.com/FChecklist/veridian-scripts/pull/82
+
 ## Remaining
-- [ ] Commit and push this branch; open PR for independent review before merge (per Owner
-      directive -- "sacrosanct infrastructure", must not merge without independent review).
+- [ ] Await independent review/approval on PR #82 before merge.

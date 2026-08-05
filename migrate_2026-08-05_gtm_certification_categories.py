@@ -76,10 +76,18 @@ CATEGORIES = [
 # this session (tooling absent, needs Owner go-ahead, needs budget check,
 # etc.) so the row is honest about WHY it's pending, not just that it is.
 KNOWN_STATE = {
+    # Corrected 2026-08-05 (UMR-20260805-152508-d4c9, real independent
+    # scrutiny): this originally shipped as passed=1, citing
+    # ocid_master_standard_audit_log.id=3 as evidence -- but that row is a
+    # curated narrative of specific historical actions (real commands, real
+    # action IDs), not a single re-runnable script/check that computes a
+    # governance-testing boolean from real tool output on demand. No such
+    # deterministic check exists yet in this codebase for this category.
+    # Left honestly pending until one is built -- do not re-introduce a
+    # narrated pass here.
     14: {
-        "passed": 1,
-        "evidence_summary": "Session's own operational discipline: verified-before-acting on fabricated claims, zero-duplication enforcement, canonical-mechanism-only writes, durable checkpointing.",
-        "evidence_ref": "ocid_master_standard_audit_log.id=3 (event_type=gtm_certification_category_result, recorded this session)",
+        "passed": None,
+        "evidence_summary": "No re-runnable deterministic check exists yet for governance testing as its own category -- needs a real script before this can be a script-computed boolean rather than a narrated judgment call.",
     },
     10: {"passed": None, "evidence_summary": "Blocked pending explicit PM go-ahead citing this UMR chain, per prior OOM-adjacent-load caution (UMR-20260805-131542-121f)."},
     11: {"passed": None, "evidence_summary": "Blocked pending explicit PM go-ahead citing this UMR chain, per prior OOM-adjacent-load caution (UMR-20260805-131542-121f)."},

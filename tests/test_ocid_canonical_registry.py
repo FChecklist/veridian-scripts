@@ -70,7 +70,12 @@ def test_duplicate_umrs_recorded_with_canonical_choice_and_reason():
                               "rejected (status=rejected_duplicate) by the Stage 4/5/6 duplicate-PR "
                               "guard -- UMR-20260804-170055-a069 is canonical, the one real row "
                               "whose own work actually completed.",
-            evidence={"umr_tasks_dump_grep": "OCID-068"},
+            evidence={
+                **{k: None for k in sbr.EVIDENCE_JSON_REQUIRED_KEYS},
+                "umr_id": "UMR-20260804-170055-a069", "ocid_number": "OCID-068",
+                "evidence_summary": "real duplicate dispatch recorded; canonical choice confirmed by grep.",
+                "legacy_evidence": {"umr_tasks_dump_grep": "OCID-068"},
+            },
         )
         conn.commit()
         row = sbr.query_ocid_canonical_registry(conn, ocid_number="OCID-068")[0]

@@ -26,7 +26,9 @@ Covers:
 """
 import importlib.util
 import os
+import subprocess
 import sqlite3
+import sys
 import tempfile
 
 SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -232,3 +234,45 @@ def test_upsert_allows_completion_status_with_schema_complete_evidence():
         assert rows[0]["evidence"]["commit_sha"] == "deadbeef"
         conn.close()
         print("PASS: test_upsert_allows_completion_status_with_schema_complete_evidence")
+
+
+def test_refused_upsert_from_inside_an_outer_write_lock_does_not_deadlock():
+    """Real regression test (independent review, this cycle): every current
+    real production call site (audit_ocid_canonical_registry.py,
+    backfill_ocid_registry_phase2_columns.py,
+    backfill_evidence_json_schema.py, and this file's own CLI command) calls
+    upsert_ocid_canonical_registry() from INSIDE an already-held
+    `with sbr._write_lock():` block. flock() is per-open-file-description,
+    not per-process/re-entrant -- an earlier version of the evidence_json
+    schema gate's refusal path acquired a SECOND, nested `_write_lock()` for
+    its own audit-log insert, which hung forever (independently reproduced
+    with a real `timeout` wrapper) instead of raising
+    OcidEvidenceSchemaRefused. Run in a real subprocess with a hard
+    real timeout so a future regression fails this test loudly rather than
+    hanging the whole suite."""
+    script = (
+        "import importlib.util, tempfile, os, sys\n"
+        "spec = importlib.util.spec_from_file_location('sbr', %r)\n"
+        "sbr = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(sbr)\n"
+        "tmp = tempfile.mktemp(suffix='.sqlite')\n"
+        "sbr.DB_PATH = tmp\n"
+        "sbr._WRITE_LOCK_PATH = tmp + '.writelock'\n"
+        "conn = sbr._connect()\n"
+        "sbr._ensure_ocid_canonical_registry_table(conn)\n"
+        "with sbr._write_lock():\n"
+        "    try:\n"
+        "        sbr.upsert_ocid_canonical_registry(conn, 'OCID-999', canonical_umr_id='UMR-x',\n"
+        "            status='completed', all_umr_ids=['UMR-x'], evidence={'note': 'incomplete'})\n"
+        "        sys.exit(3)  # must have raised -- did not\n"
+        "    except sbr.OcidEvidenceSchemaRefused:\n"
+        "        pass\n"
+        "sys.exit(0)\n"
+    ) % os.path.join(SCRIPTS_DIR, "superboss-register.py")
+
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, (
+        f"nested _write_lock() deadlock or unexpected failure -- "
+        f"returncode={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}"
+    )
+    print("PASS: test_refused_upsert_from_inside_an_outer_write_lock_does_not_deadlock")

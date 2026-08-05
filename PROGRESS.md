@@ -64,6 +64,28 @@ UMR-20260805-032326-becc.
       claims completed/verified (OCID-002, 003, 038, 047-052, 068, 069)
       all pass the enforced gate.
 - [x] Full suite green: 113 passed, after the live backfill.
-- [ ] Commit + push the backfill script + PROGRESS.md.
-- [ ] Open the real PR citing UMR-20260804-170055-a069, get independent
-      review, merge.
+- [x] Committed + pushed the backfill script + PROGRESS.md.
+- [x] Opened PR #64 citing UMR-20260804-170055-a069:
+      https://github.com/FChecklist/veridian-scripts/pull/64
+- [x] Real independent review pass (this cycle) found and fixed a CONFIRMED
+      severe bug before merge: the refusal path's own `with _write_lock():`
+      around its audit-log insert deadlocked (independently reproduced with
+      a real `timeout` wrapper -- hung indefinitely) when
+      upsert_ocid_canonical_registry() is called from inside a caller that
+      already holds `_write_lock()` -- which is how every current real
+      production call site invokes it (audit_ocid_canonical_registry.py,
+      backfill_ocid_registry_phase2_columns.py,
+      backfill_evidence_json_schema.py, this file's own CLI command).
+      flock() is per-open-file-description, not re-entrant. Fixed: the
+      refusal path no longer self-locks, matching this function's own
+      established "caller owns the transaction/lock" convention (same as
+      its main INSERT). Added a real regression test (subprocess + hard
+      timeout) that independently reproduces the pre-fix hang and confirms
+      the fix. Also documented a known, real, un-fixed minor limitation of
+      the negation regex (hyphen/no-separator/multi-word negation forms
+      aren't excluded -- none of the 69 real rows use those forms today).
+- [x] Full suite green after the fix: 114 passed.
+- [x] Committed + pushed the fix.
+
+## Remaining
+- [ ] Get PR #64 merged (owner/PM review).

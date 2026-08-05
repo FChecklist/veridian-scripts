@@ -3203,25 +3203,42 @@ def upsert_ocid_canonical_registry(conn, ocid_number, *, canonical_umr_id, statu
     apply_certification_verdict() uses for 'certification_refused'), and
     OcidEvidenceSchemaRefused is raised -- no row is written. Rows whose
     status does not itself claim completion (open/running/not_found/etc.)
-    are never subject to this gate and are written exactly as before."""
+    are never subject to this gate and are written exactly as before.
+
+    Deliberately does NOT acquire its own _write_lock() around that
+    audit-log insert (unlike reconcile_umr_status_against_pr()/
+    apply_certification_verdict() above, which self-lock because THEIR own
+    callers do not reliably hold one). This function's own established
+    convention is the opposite: "Caller owns conn/transaction/commit" (see
+    above) -- every real current call site (audit_ocid_canonical_registry.py,
+    backfill_ocid_registry_phase2_columns.py,
+    backfill_evidence_json_schema.py, and this file's own CLI command) already
+    wraps its call to upsert_ocid_canonical_registry() in an outer
+    `with _write_lock():`. flock() is per-open-file-description, not
+    per-process/re-entrant, so a second nested `with _write_lock():` call
+    from inside one of those outer blocks would block forever waiting on a
+    lock the same process already holds -- independently confirmed (real
+    `timeout` reproduction, this cycle) to hang indefinitely rather than
+    raise. The main INSERT below has the exact same caller-owns-the-lock
+    contract already; this refusal-path insert matches it rather than
+    introducing a second, incompatible locking convention."""
     verdict, reason = refuse_ocid_registry_completion_if_evidence_incomplete(
         ocid_number, status, evidence
     )
     if not verdict:
         _ensure_ocid_master_standard_audit_log_table(conn)
-        with _write_lock():
-            record_ocid_master_standard_audit_event(
-                conn, "evidence_schema_refused",
-                {
-                    "status": status,
-                    "reason": reason,
-                    "evidence_keys_present": (
-                        sorted(evidence.keys()) if isinstance(evidence, dict) else None
-                    ),
-                },
-                ocid_number=ocid_number, umr_id=canonical_umr_id,
-            )
-            conn.commit()
+        record_ocid_master_standard_audit_event(
+            conn, "evidence_schema_refused",
+            {
+                "status": status,
+                "reason": reason,
+                "evidence_keys_present": (
+                    sorted(evidence.keys()) if isinstance(evidence, dict) else None
+                ),
+            },
+            ocid_number=ocid_number, umr_id=canonical_umr_id,
+        )
+        conn.commit()
         raise OcidEvidenceSchemaRefused(reason)
 
     conn.execute("""
@@ -3918,7 +3935,19 @@ def _status_claims_verified_or_completed(status):
     matches exactly the 11 rows whose status is a real completion claim
     (OCID-002, 003, 038, 047-052, 068, 069), and correctly excludes
     OCID-004/005 ('running, never completed (historical...)') and OCID-020
-    ('...status=running, ts_completed=null; ...NOT_VERIFIED...')."""
+    ('...status=running, ts_completed=null; ...NOT_VERIFIED...').
+
+    Known real limitation, honestly documented rather than silently assumed
+    away: the negation lookbehinds only match the exact literal "never "/
+    "not " (single space, immediately adjacent). A real future status
+    string using a hyphen ('not-verified'), no separator ('notcompleted'),
+    or a word in between ('not yet completed') would NOT be excluded by
+    this check and would incorrectly gate as a completion claim. None of
+    the 69 real existing rows use any of those forms; this is a real,
+    open gap for future free-text status values, not a closed one -- a
+    caller writing a genuinely-negated status in one of those forms should
+    expect this gate to (incorrectly) apply and should not silently work
+    around it, but should flag it for this detector to be extended."""
     if not status:
         return False
     return bool(re.search(r"(?<!never )(?<!not )\b(completed|verified)\b", status, re.IGNORECASE))

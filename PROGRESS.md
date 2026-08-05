@@ -1,15 +1,49 @@
-# PROGRESS -- task-20260805-161106-provision-a-real-second-github-reviewer
+# PROGRESS -- task-20260805-165226-clarification--real-precise-search-key-f
 
 ## Completed
-- [x] Verified the dispatch's premise against the live GitHub API: compliance-tracker's `required_approving_review_count` is currently **0**, not 1 as claimed; 100+ PRs are open, not ~12. Root problem (FChecklist is the sole collaborator, every credential in this environment resolves to that same account) is confirmed real.
-- [x] Confirmed no genuinely independent GitHub identity/credential exists anywhere in this environment (`gh auth status`, `$GITHUB_PAT`, `$GITHUB_PAT_ZAI_KIMI` all resolve to `FChecklist`).
-- [x] Determined that actually provisioning a second, genuinely independent identity (new personal account or GitHub App) requires an interactive GitHub web-UI step by a human with email access -- not achievable from headless API/CLI tools, and not something to fake by relabeling the existing credential.
-- [x] Added `refuse_review_if_reviewer_is_author()` / `apply_review_independence_verdict()` to `superboss-register.py` -- the automated reviewer-!=-author check requested by the dispatch, ready to wire in once a real second identity exists.
-- [x] Added 5 passing tests covering it in `tests/test_ocid_master_standard_phase1.py`.
-- [x] Wrote `OCID_070_SECOND_REVIEWER_IDENTITY_PROVISIONING_FINDING_2026-08-05.md` documenting the premise-check findings and the concrete remaining human steps.
-- [x] Deliberately did NOT flip compliance-tracker's `required_approving_review_count` to 1 -- doing so before a real second identity is installed would block 100% of future PRs, a regression against OD-20260805-001's own goal.
+- [x] Searched `umr_tasks` in the live DB (`/opt/veridian/ai-os/memory/superboss-register.sqlite`)
+      by exact `task_identity = 'owner-task-20260805-115043-1829823'` (not a `umr_id` text
+      search) per the PM's precise-key instruction.
+- [x] Result: **found, exactly 1 row** -- not a zero-row anomaly. No registration/persistence
+      gap during the tmux crash window.
+      - `umr_id` = `UMR-20260805-115044-b481` (matches)
+      - `task_identity` = `owner-task-20260805-115043-1829823` (matches)
+      - `status` = `running`, `ts_submitted` = `2026-08-05T11:50:44Z`,
+        `ts_dispatched` = `2026-08-05T16:52:20Z` (~5h after submission)
+      - `outputs_json` shows a **successful** dispatch: `new_task_id` =
+        `task-20260805-165217-urgent--stop-real-duplicate-workers-re-e`, `returncode: 0`,
+        worktree prepared. So the original warning ("tmux session not found, delivery had not
+        yet happened") was a transient/stale snapshot -- delivery has since genuinely happened,
+        just ~5h late, not a registration failure.
+      - Note: `instruction_id` (`INS-20260805-115043-c20a`) and `work_item_id`
+        (`WRK-20260805-115044-1197`) from the PM's original capture are not columns on
+        `umr_tasks` (no such fields in the schema) -- could not be cross-checked against this
+        table; only the `umr_id`/`task_identity` fields were verifiable here.
+- [x] Followed up on whether the duplicate-worker investigation (the content of
+      `task-20260805-165217-...`, dispatched from this same UMR) is still needed:
+      - Independently inspected all three suspect workspaces
+        (`task-20260805-114126-...ocid-068...`, `task-20260805-114207-...pre-merge-gate`,
+        `task-20260805-114214-...metadata-index-coverage...`): all three have **clean git
+        status** (no crash-shaped uncommitted state) and each had **already self-identified**,
+        on its own, as a duplicate dispatch of already-merged work and correctly stopped itself
+        without redoing anything (114126 -> PR #58 merged, nothing left; 114207 -> merged its
+        own docs-only correction PR, only an owner-actionable manual step remains; 114214 ->
+        closed as duplicate, PR #932/#933/#934 already covered the fix, nothing pushed).
+      - So "stop real duplicate workers" as an active intervention is **not needed** -- there is
+        nothing running away or stuck that needs killing; all three already halted themselves
+        correctly. This matches the "four running workers were never interrupted, no
+        crash-shaped state" finding.
+      - What **is** confirmed real and still open: the **bookkeeping-lag bug** the original
+        owner task asked to root-cause. `umr_tasks.status` still shows `running` (no
+        `ts_completed`) for both `UMR-20260805-024319-b1e6` (task 114126, merged via PR #58) and
+        `UMR-20260805-032243-185e` (task 114214, closed duplicate) even though both are fully
+        done. This is the same stale-status pattern flagged before, reproduced again -- a real,
+        recurring finding worth root-causing/fixing (status never gets written back to
+        `completed` on these self-resolved-duplicate closures), separate from any "stop the
+        worker" action.
 
 ## Remaining
-- [ ] Blocked on a human with GitHub web-UI + email access: create the GitHub App (or second account), install it on compliance-tracker with PR-review-only permissions, and store its credentials. Cannot be completed by this worker (see finding doc, "Remaining steps" section).
-- [ ] Once that identity exists: wire it into the dispatch pipeline as the review source, set `required_approving_review_count=1`, and wire `apply_review_independence_verdict()` into the live merge gate.
-- [x] Opened PR for this cycle's code/doc changes, routed for real independent review via the Owner account (one-time exception): https://github.com/FChecklist/veridian-scripts/pull/69
+- [ ] None for this clarification task. Recommend: hand the bookkeeping-lag finding to whichever
+      task owns the umr_tasks status-write path (worker exit / completion hook) so `status`/
+      `ts_completed` get set correctly on self-resolved-duplicate closures, not just on
+      code-producing completions.

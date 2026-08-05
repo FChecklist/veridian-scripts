@@ -12,10 +12,18 @@ What it does, every time it runs:
   2. Checks `gitleaks` and `trivy` are both present in PATH FIRST. If either is
      confirmed absent, calls the writer with --result blocked for the WHOLE
      category (never a partial/fabricated result for the missing tool).
-  3. Runs `gitleaks detect --source . --no-git --report-format json --report-path <tmp>`.
+  3. Runs `gitleaks detect --source . --no-git --report-format json --report-path <tmp>
+     --gitleaks-ignore-path gtm_security_audit_gitleaksignore.txt`.
      --no-git is used deliberately: this check scans the real files on disk as
      they exist in the checkout (working tree secrets), not git history, and
      that choice is fixed and documented here, not decided ad hoc per run.
+     The ignore-path excludes exactly 16 fingerprints, individually
+     investigated and confirmed real false positives (UMR-20260805-155908-b101,
+     child of UMR-20260802-165606-4413/OCID-020, per UMR-20260805-155838-6270)
+     -- see gtm_security_audit_gitleaksignore.txt's own header for the real
+     per-group classification. Fingerprint-scoped, not a pattern/rule
+     relaxation -- a new real secret anywhere else, including a new instance
+     of the SAME rule on a different line, still fails this check.
   4. Runs `trivy fs . --format json -o <tmp> --skip-version-check` (filesystem
      scan for known vulnerabilities in dependencies, e.g. bun.lock/requirements.txt).
   5. Captures REAL finding counts by severity from both tools' structured JSON
@@ -47,6 +55,7 @@ import tempfile
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 WRITER = os.path.join(SCRIPTS_DIR, "gtm_write_category_result.py")
+GITLEAKSIGNORE_PATH = os.path.join(SCRIPTS_DIR, "gtm_security_audit_gitleaksignore.txt")
 REPO_URL = "https://github.com/FChecklist/compliance-tracker.git"
 CATEGORY_INDEX = 3
 FAILING_TRIVY_SEVERITIES = ("CRITICAL", "HIGH")
@@ -120,11 +129,12 @@ def main():
 
         # --- gitleaks (working-tree scan, --no-git, JSON report) ---
         gitleaks_report = os.path.join(tempfile.mkdtemp(prefix="gitleaks-report-"), "report.json")
-        rc_gl, out_gl, err_gl = sh(
-            ["gitleaks", "detect", "--source", ".", "--no-git",
-             "--report-format", "json", "--report-path", gitleaks_report, "-v"],
-            cwd=clone_dir, timeout=300,
-        )
+        gitleaks_cmd = ["gitleaks", "detect", "--source", ".", "--no-git",
+                        "--report-format", "json", "--report-path", gitleaks_report]
+        used_ignore_path = os.path.isfile(GITLEAKSIGNORE_PATH)
+        if used_ignore_path:
+            gitleaks_cmd += ["--gitleaks-ignore-path", GITLEAKSIGNORE_PATH]
+        rc_gl, out_gl, err_gl = sh(gitleaks_cmd, cwd=clone_dir, timeout=300)
         gitleaks_findings = []
         if os.path.isfile(gitleaks_report):
             try:
@@ -140,6 +150,23 @@ def main():
         )
 
         # --- trivy (filesystem scan, JSON) ---
+        # Real bug found and fixed 2026-08-05 (UMR-20260805-155838-6270's own
+        # investigation): trivy's bun/npm dependency-vulnerability detection
+        # needs a real resolved node_modules to see actual installed package
+        # versions -- without it, trivy silently reports a false ZERO (an
+        # empty/near-empty Results list, not an error), which a prior manual
+        # re-run of this exact check produced and would have been trusted as
+        # a genuine pass had it not been independently cross-checked against
+        # the original run. `bun install` MUST run before trivy, every time.
+        rc_bi, out_bi, err_bi = sh(["bun", "install"], cwd=clone_dir, timeout=300)
+        if rc_bi != 0:
+            call_writer(
+                "blocked",
+                f"bun install failed (exit {rc_bi}) -- trivy's dependency scan would be a false negative without it, refusing to run trivy blind.",
+                {"commit_sha": commit_sha, "bun_install_exit_code": rc_bi, "bun_install_stderr_tail": (err_bi or "")[-2000:]},
+            )
+            return
+
         trivy_report = os.path.join(tempfile.mkdtemp(prefix="trivy-report-"), "report.json")
         rc_tv, out_tv, err_tv = sh(
             ["trivy", "fs", ".", "--format", "json", "--skip-version-check", "-o", trivy_report],
@@ -182,13 +209,17 @@ def main():
             "commit_sha": commit_sha,
             "repo_url": REPO_URL,
             "commands_run": [
-                "gitleaks detect --source . --no-git --report-format json --report-path <tmp> -v",
+                " ".join(gitleaks_cmd),
                 "trivy fs . --format json --skip-version-check -o <tmp>",
             ],
             "gitleaks_source_mode": "--no-git (working-tree file scan, not git history)",
+            "gitleaks_ignore_path_used": used_ignore_path,
+            "gitleaks_ignore_fingerprints_excluded": 16 if used_ignore_path else 0,
+            "gitleaks_ignore_investigation_umr": "UMR-20260805-155908-b101" if used_ignore_path else None,
             "gitleaks_exit_code": rc_gl,
             "gitleaks_finding_count": gitleaks_count,
             "gitleaks_rule_ids": gitleaks_rule_ids,
+            "trivy_findings_status": "NOT investigated/excluded this round -- any trivy CRITICAL/HIGH count above is real and unaddressed, only the 16 gitleaks fingerprints were reviewed",
             "trivy_exit_code": rc_tv,
             "trivy_severity_counts": trivy_severity_counts,
             "trivy_failing_severities": list(FAILING_TRIVY_SEVERITIES),

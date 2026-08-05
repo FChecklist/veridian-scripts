@@ -693,6 +693,7 @@ def _migrate_schema(conn):
     _ensure_ocid_master_standard_audit_log_table(conn)
     _ensure_ocid_compliance_tables(conn)
     _ensure_pm_decisions_pending_table(conn)
+    _ensure_ocid_master_standard_phase2_tables(conn)
     _ensure_registry_taxonomy_notes_table(conn)
     _seed_registry_taxonomy_notes(conn)
     _migrate_instructions_content_hash(conn)
@@ -2312,6 +2313,59 @@ def cmd_certify_pr_merge(args):
     conn.close()
     print(json.dumps({"verdict": verdict, "reason": reason}, indent=2, default=str))
     if not verdict:
+        sys.exit(1)
+
+
+def cmd_transition_ocid_lifecycle(args):
+    """OCID Master Standard v6 Phase 2 CLI entry point over
+    transition_ocid_lifecycle_state(). Always a real write (there is no
+    read-only/--apply split here -- unlike resolve/reconcile above, there is
+    no meaningful 'proposed but not applied' state for a lifecycle
+    transition attempt; the attempt itself, legal or refused, is always
+    durably audited)."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_umr_table(conn)
+    _ensure_ocid_master_standard_audit_log_table(conn)
+    _ensure_ocid_lifecycle_state_table(conn)
+    result = transition_ocid_lifecycle_state(conn, args.ocid_number, args.umr_id, args.to_state)
+    conn.close()
+    print(json.dumps(result, indent=2, default=str))
+    if not result["ok"]:
+        sys.exit(1)
+
+
+def cmd_resume_ocid_lifecycle(args):
+    """OCID Master Standard v6 Phase 2 CLI entry point over
+    resume_ocid_lifecycle() -- real, read-only checkpoint lookup so a
+    resume/retry/redispatch caller can continue from the last real state
+    instead of restarting from zero."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_ocid_lifecycle_state_table(conn)
+    result = resume_ocid_lifecycle(conn, args.ocid_number)
+    conn.close()
+    print(json.dumps(result, indent=2, default=str))
+
+
+def cmd_check_registry_integrity(args):
+    """OCID Master Standard v6 Phase 2 CLI entry point over
+    check_registry_integrity(). Real, read-only -- pass
+    --establish-baseline to instead call
+    establish_ocid_registry_schema_baseline() explicitly (a separate, real
+    write, never implicit inside the read-only check)."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_ocid_master_standard_phase2_tables(conn)
+    if args.establish_baseline:
+        checksum = establish_ocid_registry_schema_baseline(conn)
+        conn.close()
+        print(json.dumps({"baseline_established": True, "checksum": checksum}, indent=2, default=str))
+        return
+    result = check_registry_integrity(conn)
+    conn.close()
+    print(json.dumps(result, indent=2, default=str))
+    if not result["all_ok"]:
         sys.exit(1)
 
 
@@ -4220,6 +4274,443 @@ def refuse_ocid_registry_completion_if_evidence_incomplete(ocid_number, status, 
     )
 
 
+# OCID Master Standard v6 Phase 2 -- lifecycle state machine + registry
+# integrity checks (Owner directive, this task; parent references
+# UMR-20260804-170055-a069 (canonical OCID-068 UMR, real status completed)
+# and UMR-20260805-032731-b412 (OCID-068 permanent closure record, real
+# status completed, PR #52 merge commit
+# c46da9b777e2a8a60e15230dacd72f2329e885af)). This is Phase 2 of the two
+# phases OCID_MASTER_STANDARD_V6_PHASE1_2026-08-05.md proposed to Owner/PM:
+# "Phase 2: lifecycle state machine + registry integrity checks". Still
+# explicitly NOT the full standard -- ownership-chain resolution, the
+# universal artifact graph, bootstrap/checkpoint-recovery sequencing,
+# canonical-component discovery/locking as a generic mechanism, and the full
+# strict-JSON-only automated output contract remain deferred (see
+# OCID_MASTER_STANDARD_V6_PHASE2_2026-08-05.md for the honest scope/phasing
+# writeup), same narrow-PR discipline as Phase 1 and as OCID-068's seven
+# guardrail rules (each its own PR: #26, #29, #30, #32, #33, #34, #35).
+#
+# Deliberately a SEPARATE concept from umr_tasks.status (UMR_STATUSES above:
+# queued/dispatched/running/... -- a single dispatched task's own execution
+# status) -- this is a per-OCID lifecycle, tracked in its own new
+# ocid_lifecycle_state table, keyed by ocid_number, spanning potentially many
+# umr_tasks rows over an OCID's life (retries/redispatches reuse the same
+# OCID+UMR per the Owner directive's own "never mint a second one" rule --
+# this table's job is not to fight that, only to record the OCID's own
+# state independent of any one umr_tasks row's status).
+# ---------------------------------------------------------------------------
+
+OCID_LIFECYCLE_STATES = (
+    "created", "registered", "dispatched", "running", "testing",
+    "pull_request_created", "merged", "verified", "closed",
+    "failed", "rolled_back",
+)
+
+# Real, locked transition table -- the only place "legal" is decided.
+# Strict sequential main path (created -> ... -> closed); "failed" is
+# reachable from every non-terminal state (a real failure can occur at any
+# phase, not only the end); "rolled_back" is reachable only from "failed"
+# (rollback undoes a failure, it is not a parallel path off the happy path);
+# "closed" and "rolled_back" are terminal -- no outgoing transitions at all,
+# matching the Owner directive's "no illegal transitions" requirement and
+# its separate "rollback must never delete the UMR or OCID" requirement
+# (rolled_back is a real terminal state here, never a delete).
+_OCID_LIFECYCLE_MAIN_PATH = (
+    "created", "registered", "dispatched", "running", "testing",
+    "pull_request_created", "merged", "verified", "closed",
+)
+
+OCID_LIFECYCLE_TRANSITIONS = {}
+for _i, _state in enumerate(_OCID_LIFECYCLE_MAIN_PATH[:-1]):
+    OCID_LIFECYCLE_TRANSITIONS[_state] = {_OCID_LIFECYCLE_MAIN_PATH[_i + 1], "failed"}
+OCID_LIFECYCLE_TRANSITIONS["closed"] = set()
+OCID_LIFECYCLE_TRANSITIONS["failed"] = {"rolled_back"}
+OCID_LIFECYCLE_TRANSITIONS["rolled_back"] = set()
+del _i, _state
+
+
+def validate_lifecycle_transition(from_state, to_state):
+    """Pure function, zero I/O -- the one real, locked decision of whether an
+    OCID lifecycle transition is legal, same pure-decision-separate-from-I/O
+    pattern as refuse_certification_if_merged_without_required_checks()
+    above. `from_state` is None for the real initial transition (no row yet
+    -> "created" is the only legal first state). Returns (ok: bool,
+    reason: str)."""
+    if to_state not in OCID_LIFECYCLE_STATES:
+        return False, f"'{to_state}' is not a real OCID lifecycle state (valid: {OCID_LIFECYCLE_STATES})"
+    if from_state is None:
+        if to_state == "created":
+            return True, "real initial transition to 'created'"
+        return False, "no existing lifecycle state -- the only legal initial transition is to 'created'"
+    if from_state not in OCID_LIFECYCLE_STATES:
+        return False, f"'{from_state}' is not a real OCID lifecycle state (valid: {OCID_LIFECYCLE_STATES})"
+    if to_state in OCID_LIFECYCLE_TRANSITIONS.get(from_state, set()):
+        return True, f"legal transition '{from_state}' -> '{to_state}'"
+    return False, (
+        f"illegal transition '{from_state}' -> '{to_state}': from '{from_state}' only "
+        f"{sorted(OCID_LIFECYCLE_TRANSITIONS.get(from_state, set())) or '(none -- terminal state)'} "
+        "is/are legal"
+    )
+
+
+def _ensure_ocid_lifecycle_state_table(conn):
+    """New table: one real row per OCID, tracking its current lifecycle
+    state. Same idempotent CREATE TABLE IF NOT EXISTS + standalone-callable
+    convention as every other _ensure_*_table function in this file; called
+    from _migrate_schema(). umr_id is a real FOREIGN KEY into umr_tasks (see
+    _ensure_ocid_artifact_links_table's docstring above re: SQLite's
+    foreign_keys pragma being opt-in -- check_registry_integrity() below
+    uses PRAGMA foreign_key_check, which does not require that pragma to be
+    on, to catch real violations regardless)."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS ocid_lifecycle_state (
+        ocid_number TEXT PRIMARY KEY,
+        umr_id TEXT NOT NULL REFERENCES umr_tasks(umr_id),
+        current_state TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ocid_lifecycle_state_state "
+                 "ON ocid_lifecycle_state(current_state)")
+    conn.commit()
+
+
+def get_ocid_lifecycle_state(conn, ocid_number):
+    """Real, read-only checkpoint lookup -- the same function a resume/retry
+    caller uses to find where an OCID's real lifecycle actually is, so a
+    resume genuinely continues from the last checkpoint (Owner directive:
+    'never a restart from zero') instead of re-deriving it ad hoc. Returns
+    None when no real row exists yet (the OCID has never entered the
+    lifecycle), or a dict {ocid_number, umr_id, current_state, updated_at}."""
+    row = conn.execute(
+        "SELECT ocid_number, umr_id, current_state, updated_at "
+        "FROM ocid_lifecycle_state WHERE ocid_number=?",
+        (ocid_number,),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def transition_ocid_lifecycle_state(conn, ocid_number, umr_id, to_state):
+    """Real, durable OCID lifecycle transition. Reads the real current state
+    (None if this OCID has never entered the lifecycle), validates the
+    transition via the pure validate_lifecycle_transition() above, and only
+    on a legal transition does it upsert ocid_lifecycle_state and record a
+    real, permanent 'lifecycle_transition' audit event via
+    record_ocid_master_standard_audit_event() (reusing the same Phase 1
+    audit log, not a second one). An illegal transition performs NO write to
+    ocid_lifecycle_state, but IS still recorded as a real
+    'lifecycle_transition_refused' audit event -- the Owner directive asks
+    for an immutable append-only audit log of 'every state transition', and
+    an attempted-but-refused transition is real audit-worthy information
+    too, same principle as apply_certification_verdict()'s
+    'certification_refused' event above.
+
+    umr_id passed on every call (not only the first) is intentional: the
+    Owner directive requires every retry/resume/redispatch to reuse the same
+    real OCID+UMR, never mint a second one -- if a caller ever passes a
+    DIFFERENT umr_id for an OCID that already has a lifecycle row, that is
+    itself exactly the real violation this standard exists to catch, so it
+    is checked explicitly and refused (audited, not silently overwritten).
+
+    Returns {ok: bool, reason: str, from_state: str|None, to_state: str}.
+    Real write path -- like every other write path in this file, the
+    upsert+audit-event insert is wrapped in _write_lock()."""
+    existing = get_ocid_lifecycle_state(conn, ocid_number)
+    from_state = existing["current_state"] if existing else None
+
+    if existing is not None and existing["umr_id"] != umr_id:
+        reason = (
+            f"REFUSED: ocid_number={ocid_number} already has real lifecycle state under "
+            f"umr_id={existing['umr_id']!r} -- a transition was requested under a different "
+            f"umr_id={umr_id!r}. Every retry/resume/redispatch must reuse the same real "
+            "OCID+UMR; this call would mint a second UMR for the same unit of work."
+        )
+        with _write_lock():
+            record_ocid_master_standard_audit_event(
+                conn, "lifecycle_transition_refused",
+                {"from_state": from_state, "to_state": to_state, "reason": reason,
+                 "requested_umr_id": umr_id, "existing_umr_id": existing["umr_id"]},
+                ocid_number=ocid_number, umr_id=umr_id,
+            )
+            conn.commit()
+        return {"ok": False, "reason": reason, "from_state": from_state, "to_state": to_state}
+
+    ok, reason = validate_lifecycle_transition(from_state, to_state)
+
+    with _write_lock():
+        record_ocid_master_standard_audit_event(
+            conn, "lifecycle_transition" if ok else "lifecycle_transition_refused",
+            {"from_state": from_state, "to_state": to_state, "reason": reason},
+            ocid_number=ocid_number, umr_id=umr_id,
+        )
+        if ok:
+            now = _now_iso()
+            conn.execute(
+                "INSERT INTO ocid_lifecycle_state (ocid_number, umr_id, current_state, updated_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(ocid_number) DO UPDATE SET "
+                "umr_id=excluded.umr_id, current_state=excluded.current_state, updated_at=excluded.updated_at",
+                (ocid_number, umr_id, to_state, now),
+            )
+        conn.commit()
+
+    return {"ok": ok, "reason": reason, "from_state": from_state, "to_state": to_state}
+
+
+def resume_ocid_lifecycle(conn, ocid_number):
+    """Real resume entry point: 'never a restart from zero after an
+    interrupt when a checkpoint exists' (Owner directive). Returns the real
+    checkpoint {ocid_number, umr_id, current_state, updated_at} to resume
+    from (same shape as get_ocid_lifecycle_state()), or None when this OCID
+    has no real lifecycle row at all -- in that case (and only that case) a
+    caller legitimately starts fresh at 'created', because there is no
+    checkpoint to lose."""
+    return get_ocid_lifecycle_state(conn, ocid_number)
+
+
+# --- Registry integrity checks -----------------------------------------
+
+OCID_REGISTRY_SCHEMA_VERSION = 1
+
+# The real, locked set of tables this standard's own integrity check covers
+# -- deliberately scoped to the OCID Master Standard v6 registry tables
+# themselves, not every table in this 5000+ line file's much larger general
+# schema (which has its own long, unrelated migration history and would
+# make a checksum here fire on every unrelated change elsewhere in the
+# file).
+OCID_REGISTRY_INTEGRITY_TABLES = (
+    "ocid_canonical_registry", "ocid_artifact_links",
+    "ocid_master_standard_audit_log", "ocid_lifecycle_state",
+    "ocid_compliance_state", "ocid_compliance_audit_log",
+)
+
+
+def _ensure_ocid_registry_schema_baseline_table(conn):
+    """One real row per schema version, recording the real checksum
+    (sha256 of the real, live sqlite_master DDL text for
+    OCID_REGISTRY_INTEGRITY_TABLES) observed the first time
+    establish_ocid_registry_schema_baseline() is explicitly run for that
+    version -- never auto-established silently by a read-only check, same
+    never-auto-apply convention as reconcile_umr_status_against_pr() and
+    resolve_ocid_canonical()'s --apply above."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS ocid_registry_schema_baseline (
+        schema_version INTEGER PRIMARY KEY,
+        checksum TEXT NOT NULL,
+        recorded_at TEXT NOT NULL
+    )""")
+    conn.commit()
+
+
+def _compute_ocid_registry_checksum(conn):
+    """Real, deterministic sha256 over the live CREATE TABLE/CREATE INDEX
+    DDL text (from sqlite_master itself, not a hand-maintained copy) for
+    every table in OCID_REGISTRY_INTEGRITY_TABLES, sorted by name so result
+    order never depends on sqlite_master's own physical row order. Any real,
+    unreviewed schema drift in these tables (a column added/removed/typed
+    differently, an index added/removed) changes this checksum."""
+    rows = conn.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type IN ('table', 'index') "
+        "AND (name IN ({}) OR tbl_name IN ({})) AND sql IS NOT NULL ORDER BY name".format(
+            ",".join("?" * len(OCID_REGISTRY_INTEGRITY_TABLES)),
+            ",".join("?" * len(OCID_REGISTRY_INTEGRITY_TABLES)),
+        ),
+        OCID_REGISTRY_INTEGRITY_TABLES + OCID_REGISTRY_INTEGRITY_TABLES,
+    ).fetchall()
+    blob = "\n".join(f"{r['name']}:{r['sql']}" for r in rows)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def establish_ocid_registry_schema_baseline(conn):
+    """Explicit, caller-invoked write: records the real current checksum for
+    OCID_REGISTRY_SCHEMA_VERSION as the trusted baseline. Real write path,
+    wrapped in _write_lock() like every other write path in this file.
+    Idempotent (INSERT OR REPLACE) -- re-running it after a real, reviewed
+    schema change is the correct way to move the baseline forward, exactly
+    analogous to bumping OCID_REGISTRY_SCHEMA_VERSION itself for a real
+    breaking change."""
+    checksum = _compute_ocid_registry_checksum(conn)
+    with _write_lock():
+        conn.execute(
+            "INSERT INTO ocid_registry_schema_baseline (schema_version, checksum, recorded_at) "
+            "VALUES (?, ?, ?) ON CONFLICT(schema_version) DO UPDATE SET "
+            "checksum=excluded.checksum, recorded_at=excluded.recorded_at",
+            (OCID_REGISTRY_SCHEMA_VERSION, checksum, _now_iso()),
+        )
+        conn.commit()
+    return checksum
+
+
+def check_registry_integrity(conn):
+    """Real, read-only registry integrity check across the Owner directive's
+    five named dimensions: checksum, foreign keys, orphan rows, duplicate
+    indexes, and schema version. Never writes anything (establishing a
+    checksum baseline is a separate, explicit
+    establish_ocid_registry_schema_baseline() call, never implicit here --
+    same never-auto-apply discipline as the rest of this module). Returns a
+    dict with one real boolean per dimension plus an overall all_ok, and the
+    real evidence behind each:
+
+      schema_version_ok    -- PRAGMA user_version equals the locked
+                               OCID_REGISTRY_SCHEMA_VERSION
+      checksum_ok           -- live DDL checksum matches the stored baseline
+                               for this schema version (None/not-ok, with an
+                               explanation, when no baseline has ever been
+                               established -- an unknown checksum is never
+                               silently treated as passing)
+      foreign_keys_ok       -- PRAGMA foreign_key_check reports zero real
+                               violations (works regardless of whether the
+                               connection has 'PRAGMA foreign_keys = ON')
+      orphan_rows_ok        -- zero real business-level orphans: compliance
+                               rows for an (ocid_number) with no real
+                               ocid_canonical_registry row at all (a
+                               narrower, OCID-specific check than the
+                               generic FK check above, which only covers
+                               columns with a declared REFERENCES clause)
+      duplicate_index_ok    -- zero real duplicate indexes (two indexes on
+                               the exact same table+column-set) among
+                               OCID_REGISTRY_INTEGRITY_TABLES
+      all_ok                -- real AND of all five booleans above
+    """
+    user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    schema_version_ok = (user_version == OCID_REGISTRY_SCHEMA_VERSION)
+
+    live_checksum = _compute_ocid_registry_checksum(conn)
+    baseline_row = conn.execute(
+        "SELECT checksum FROM ocid_registry_schema_baseline WHERE schema_version=?",
+        (OCID_REGISTRY_SCHEMA_VERSION,),
+    ).fetchone()
+    if baseline_row is None:
+        checksum_ok = False
+        checksum_detail = {
+            "live_checksum": live_checksum, "baseline_checksum": None,
+            "note": "no real baseline established yet for this schema version -- run "
+                    "establish_ocid_registry_schema_baseline() once, explicitly, after "
+                    "reviewing the current live schema is trusted",
+        }
+    else:
+        checksum_ok = (live_checksum == baseline_row["checksum"])
+        checksum_detail = {"live_checksum": live_checksum, "baseline_checksum": baseline_row["checksum"]}
+
+    fk_violations = [dict(r) for r in conn.execute("PRAGMA foreign_key_check").fetchall()]
+    foreign_keys_ok = len(fk_violations) == 0
+
+    orphan_rows = [
+        dict(r) for r in conn.execute(
+            "SELECT 'ocid_compliance_state' AS source_table, ocid_number, umr_id FROM ocid_compliance_state "
+            "WHERE ocid_number NOT IN (SELECT ocid_number FROM ocid_canonical_registry) "
+            "UNION ALL "
+            "SELECT 'ocid_artifact_links' AS source_table, ocid_number, umr_id FROM ocid_artifact_links "
+            "WHERE ocid_number NOT IN (SELECT ocid_number FROM ocid_canonical_registry) "
+            "UNION ALL "
+            "SELECT 'ocid_lifecycle_state' AS source_table, ocid_number, umr_id FROM ocid_lifecycle_state "
+            "WHERE ocid_number NOT IN (SELECT ocid_number FROM ocid_canonical_registry)"
+        ).fetchall()
+    ]
+    orphan_rows_ok = len(orphan_rows) == 0
+
+    index_rows = conn.execute(
+        "SELECT name, tbl_name FROM sqlite_master WHERE type='index' AND tbl_name IN ({})".format(
+            ",".join("?" * len(OCID_REGISTRY_INTEGRITY_TABLES))
+        ),
+        OCID_REGISTRY_INTEGRITY_TABLES,
+    ).fetchall()
+    column_sets = {}
+    for idx in index_rows:
+        cols = tuple(sorted(r["name"] for r in conn.execute(f"PRAGMA index_info({idx['name']})").fetchall()))
+        column_sets.setdefault((idx["tbl_name"], cols), []).append(idx["name"])
+    duplicate_indexes = [
+        {"table": tbl, "columns": list(cols), "index_names": names}
+        for (tbl, cols), names in column_sets.items() if len(names) > 1
+    ]
+    duplicate_index_ok = len(duplicate_indexes) == 0
+
+    all_ok = schema_version_ok and checksum_ok and foreign_keys_ok and orphan_rows_ok and duplicate_index_ok
+
+    return {
+        "schema_version_ok": schema_version_ok,
+        "schema_version": user_version,
+        "expected_schema_version": OCID_REGISTRY_SCHEMA_VERSION,
+        "checksum_ok": checksum_ok,
+        "checksum_detail": checksum_detail,
+        "foreign_keys_ok": foreign_keys_ok,
+        "foreign_key_violations": fk_violations,
+        "orphan_rows_ok": orphan_rows_ok,
+        "orphan_rows": orphan_rows,
+        "duplicate_index_ok": duplicate_index_ok,
+        "duplicate_indexes": duplicate_indexes,
+        "all_ok": all_ok,
+    }
+
+
+def _set_ocid_registry_schema_version(conn):
+    """Real, idempotent PRAGMA user_version write -- SQLite's own built-in
+    per-database integer version counter, set to OCID_REGISTRY_SCHEMA_VERSION
+    once the OCID Master Standard v6 Phase 2 tables exist. PRAGMA statements
+    cannot be parameterized; OCID_REGISTRY_SCHEMA_VERSION is a locked
+    module-level int constant, never external/user input, so an f-string is
+    real and safe here (same reasoning as this file's other PRAGMA calls)."""
+    conn.execute(f"PRAGMA user_version = {OCID_REGISTRY_SCHEMA_VERSION}")
+    conn.commit()
+
+
+def build_step_result_contract(step_order, results, failed_at=None):
+    """Real, minimal, scoped primitive for the Owner directive's mandatory
+    output-contract requirement: 'every step and check resolved to an
+    explicit real boolean, and every step after a real failure point
+    explicitly false, never omitted'. This is NOT the full standard's
+    strict-JSON-only automated output contract (that remains deferred, see
+    the module comment above and OCID_MASTER_STANDARD_V6_PHASE2_2026-08-05.md
+    -- it needs the full phase sequence, ownership chain, and artifact graph
+    this phase does not implement yet, and building only its JSON shape
+    without the real checks behind it would be exactly the kind of narrated,
+    unearned certification this standard exists to prevent). What IS real
+    and implemented here is the specific, testable guarantee the Owner
+    directive names: given an ordered list of step names and a dict of this
+    run's real per-step boolean results, force every step at or after the
+    first real failure (either the first False actually found in `results`,
+    scanned in `step_order` order, or an explicit `failed_at` step name,
+    whichever comes first in `step_order`) to False in the returned dict --
+    never silently omitted, never left as a stale True/absent from an
+    earlier partial run.
+
+    step_order: real, ordered list/tuple of step-name strings.
+    results: dict of step_name -> bool for steps actually run so far (a step
+      in step_order not yet present in `results` is treated as not-yet-run,
+      i.e. False, in the returned contract -- 'never omitted').
+    failed_at: optional explicit step name to force failure from, even if
+      `results` itself claims a later step succeeded (e.g. a caller-known
+      hard stop) -- the more restrictive of `results`' own first False and
+      `failed_at` wins.
+
+    Returns a strict JSON-serializable dict: every key in step_order maps to
+    a real bool, plus "all_ok": bool (AND of every step)."""
+    first_failure_index = None
+    for i, step in enumerate(step_order):
+        if not results.get(step, False):
+            first_failure_index = i
+            break
+    if failed_at is not None and failed_at in step_order:
+        failed_at_index = step_order.index(failed_at)
+        if first_failure_index is None or failed_at_index < first_failure_index:
+            first_failure_index = failed_at_index
+
+    contract = {}
+    for i, step in enumerate(step_order):
+        if first_failure_index is not None and i >= first_failure_index:
+            contract[step] = False
+        else:
+            contract[step] = bool(results.get(step, False))
+    contract["all_ok"] = all(contract[s] for s in step_order)
+    return contract
+
+
+def _ensure_ocid_master_standard_phase2_tables(conn):
+    """Single real entry point wiring every Phase 2 table into
+    _migrate_schema(), same convention as _ensure_ocid_compliance_tables()
+    etc. above -- one canonical migration call, not several ad hoc ones
+    scattered through _migrate_schema()."""
+    _ensure_ocid_lifecycle_state_table(conn)
+    _ensure_ocid_registry_schema_baseline_table(conn)
+    _set_ocid_registry_schema_version(conn)
+
+
 def _migrate_umr_last_heartbeat(conn):
     """2026-07-29 (Stage 3 reconciliation-sweep fix for 'task exits cleanly but
     umr_tasks status never reconciles', 5 real historical instances): additive
@@ -6112,6 +6603,27 @@ if __name__ == "__main__":
     p_compprop.add_argument("--artifact-path", dest="artifact_path", required=True)
     p_compprop.add_argument("--commit-sha", dest="commit_sha", required=True)
     p_compprop.add_argument("--evidence", required=True)
+    p_translc = sub.add_parser("transition-ocid-lifecycle",
+                                help="OCID Master Standard v6 Phase 2: attempt a real OCID "
+                                     "lifecycle state transition (always durably audited, "
+                                     "legal or refused)")
+    p_translc.add_argument("--ocid-number", dest="ocid_number", required=True)
+    p_translc.add_argument("--umr-id", dest="umr_id", required=True)
+    p_translc.add_argument("--to-state", dest="to_state", required=True,
+                            choices=OCID_LIFECYCLE_STATES)
+
+    p_resumelc = sub.add_parser("resume-ocid-lifecycle",
+                                 help="OCID Master Standard v6 Phase 2: real, read-only "
+                                      "checkpoint lookup to resume from the last real state")
+    p_resumelc.add_argument("--ocid-number", dest="ocid_number", required=True)
+
+    p_regint = sub.add_parser("check-registry-integrity",
+                               help="OCID Master Standard v6 Phase 2: real checksum/foreign-key/"
+                                    "orphan-row/duplicate-index/schema-version integrity check")
+    p_regint.add_argument("--establish-baseline", action="store_true",
+                           help="explicitly record the current live schema checksum as the "
+                                "trusted baseline (default: read-only check against the "
+                                "existing baseline)")
 
     args = p.parse_args()
     if args.cmd == "init":
@@ -6218,3 +6730,9 @@ if __name__ == "__main__":
         cmd_decide_owner_proposal(args)
     elif args.cmd == "record-owner-proposal-completion":
         cmd_record_owner_proposal_completion(args)
+    elif args.cmd == "transition-ocid-lifecycle":
+        cmd_transition_ocid_lifecycle(args)
+    elif args.cmd == "resume-ocid-lifecycle":
+        cmd_resume_ocid_lifecycle(args)
+    elif args.cmd == "check-registry-integrity":
+        cmd_check_registry_integrity(args)

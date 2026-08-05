@@ -3251,7 +3251,10 @@ def _master_tracker_and_active_claims_grep(ocid_number, _runner, repo_path=None)
     for fname in ("ai-os/MASTER-TRACKER.yaml", "ai-os/registry/ACTIVE-CLAIMS.yaml",
                   "MASTER-TRACKER.yaml", "ACTIVE-CLAIMS.yaml"):
         full_path = os.path.join(path, fname)
-        cmd = ["grep", "-i", ocid_number, full_path]
+        # Real fix (independent review, round 1): "--" before the pattern so
+        # an ocid_number value starting with "-" is never misparsed as a
+        # grep flag instead of a pattern.
+        cmd = ["grep", "-i", "--", ocid_number, full_path]
         try:
             result = _runner(cmd, None)
         except Exception as exc:  # pragma: no cover
@@ -3491,17 +3494,29 @@ def reconcile_umr_status_against_pr(conn, umr_id, pr_evidence=None, _runner=None
     }
 
     if is_stale:
-        record_ocid_master_standard_audit_event(
-            conn, "status_reconciliation",
-            {
-                "current_status": current_status,
-                "proposed_status": result["proposed_status"],
-                "proposed_ts_completed": result["proposed_ts_completed"],
-                "evidence": result["evidence"],
-            },
-            umr_id=umr_id,
-        )
-        conn.commit()
+        # Real fix (independent review, round 1): this INSERT+commit is a
+        # real write path -- MUST go through _write_lock() like every other
+        # write path in this file (superboss-register.py:176-199), or it
+        # risks repeating the exact documented 2026-07-23 SQLite corruption
+        # incident (3 distinct signatures): a concurrent writer contending
+        # for SQLite's own write lock inside its 30s busy_timeout, SIGKILLed
+        # by an outer caller after only 10s, corrupting b-tree pages
+        # mid-transaction. This function is called unconditionally (not
+        # only from an --apply CLI path), so the lock is acquired here,
+        # scoped to just this write, rather than relying on a caller that
+        # may not always wrap it.
+        with _write_lock():
+            record_ocid_master_standard_audit_event(
+                conn, "status_reconciliation",
+                {
+                    "current_status": current_status,
+                    "proposed_status": result["proposed_status"],
+                    "proposed_ts_completed": result["proposed_ts_completed"],
+                    "evidence": result["evidence"],
+                },
+                umr_id=umr_id,
+            )
+            conn.commit()
 
     return result
 
@@ -3567,19 +3582,28 @@ def apply_certification_verdict(conn, pr_merge_record):
     'certification_refused' audit event via
     record_ocid_master_standard_audit_event() (and commits it) so the
     refusal has a durable trail, not just a transient return value. Returns
-    the same (verdict, reason) tuple the pure function returns."""
+    the same (verdict, reason) tuple the pure function returns.
+
+    Real fix (independent review, round 1): this function's own audit-log
+    INSERT+commit is a real write path and, like every other write path in
+    this file (superboss-register.py:176-199), MUST be acquired via
+    _write_lock() -- not doing so risks repeating the exact documented
+    2026-07-23 SQLite corruption incident. Callers (e.g. cmd_certify_pr_merge)
+    do not need to wrap this call in their own _write_lock() -- the lock is
+    acquired and released here, fully, before this function returns."""
     verdict, reason = refuse_certification_if_merged_without_required_checks(pr_merge_record)
     if not verdict:
-        record_ocid_master_standard_audit_event(
-            conn, "certification_refused",
-            {
-                "repo": pr_merge_record.get("repo"),
-                "pr_number": pr_merge_record.get("pr_number"),
-                "merged_at": pr_merge_record.get("merged_at"),
-                "reason": reason,
-            },
-        )
-        conn.commit()
+        with _write_lock():
+            record_ocid_master_standard_audit_event(
+                conn, "certification_refused",
+                {
+                    "repo": pr_merge_record.get("repo"),
+                    "pr_number": pr_merge_record.get("pr_number"),
+                    "merged_at": pr_merge_record.get("merged_at"),
+                    "reason": reason,
+                },
+            )
+            conn.commit()
     return verdict, reason
 
 

@@ -1,94 +1,60 @@
-# PROGRESS -- task-20260805-151450-standardize-and-backfill-evidence-json-s
+# PROGRESS -- task-20260805-161157-close-a-real-fabrication-loophole--not-a
 
-Real dispatch: standardize evidence_json's required shape for
-ocid_canonical_registry rows going forward, enforce it as a real gate
-inside the OCID Master Standard v6 audit/certification refusal machinery
-(PR #54), and backfill the 69 real existing rows honestly (real
-commit_sha/file_path recovered from cited PR numbers where possible, null
-where genuinely not recoverable). Citing UMR-20260804-170055-a069 and
-UMR-20260805-032326-becc.
+## Duplicate-check finding (real, disclosed up front)
+
+This task's directive is, in substance, a near-verbatim restatement of
+Owner directives already dispatched and already fully implemented/merged
+earlier the same day: `UMR-20260805-092408-4f97` (extending
+`UMR-20260805-090549-9710` / `UMR-20260805-091934-86a2`), merged via PR #57
+(`768fd6e`). The `audit_raw_output` column, the trigger-computed
+`not_applicable_confirmed` gate, the 7 `has_real_*`/`is_fully_complete`
+gates, `audit_ocid_canonical_registry.py`, and tests proving determinism +
+bypass-resistance all already existed on `main` before this task started.
+Per this repo's own established precedent (OCID-069 redispatch duplicate
+check), this task does **not** start a second parallel implementation --
+it re-verifies the existing real work, then does the one real thing this
+task's own SPEC asks for that had genuinely never been done: **actually
+executing** the audit script for real against live production data (every
+prior run was either `--dry-run` or against a scratch test DB --
+`audit_raw_output` was NULL on all 69 live rows before this task).
 
 ## Completed
-- [x] Independently confirmed the real gap against the live DB: OCID-068
-      Phase 2's dedicated commit_sha/file_name/file_path/merge_status/
-      evidence_summary columns exist (PR #57) but were never actually
-      backfilled -- all 69 rows had them NULL; evidence_json itself remains
-      a free-form per-search-method text dump with no fixed shape.
-- [x] Defined `EVIDENCE_JSON_REQUIRED_KEYS` (commit_sha, file_name,
-      file_path, merge_status, umr_id, ocid_number, pr_number, pr_repo,
-      evidence_summary) and `validate_evidence_json_schema()` in
-      superboss-register.py.
-- [x] Added `_status_claims_verified_or_completed()` -- real, deterministic
-      whole-word/non-negated detector, independently verified against all
-      69 real existing rows (11 real matches, correctly excludes the 2 real
-      false-positive traps: "running, never completed" / "ts_completed=
-      null"+"NOT_VERIFIED").
-- [x] Added `refuse_ocid_registry_completion_if_evidence_incomplete()` --
-      pure, zero-I/O, second independent gate, alongside (not replacing)
-      `refuse_certification_if_merged_without_required_checks()` from PR 54.
-- [x] Wired the gate into `upsert_ocid_canonical_registry()` itself: refuses
-      (raises `OcidEvidenceSchemaRefused`, writes nothing, records a real
-      'evidence_schema_refused' audit event via
-      `record_ocid_master_standard_audit_event()`) whenever a row's status
-      genuinely claims completed/verified and evidence_json is incomplete.
-      Rows not claiming completion are unaffected.
-- [x] Added `tests/test_evidence_json_schema_gate.py` (11 real tests).
-- [x] Fixed 3 already-merged tests whose seed fixtures used status=
-      "completed" with legacy-shape evidence (test_audit_ocid_canonical_registry.py
-      x2, test_ocid_canonical_registry.py x1) -- updated to schema-complete
-      evidence, preserving each test's original assertions/intent.
-- [x] Full suite green: 113 passed.
-- [x] Committed + pushed the schema/gate change.
-
-- [x] Wrote backfill_evidence_json_schema.py. Discovered mid-task, live: a
-      separate, already-real, concurrently-running backfill
-      (backfill_ocid_registry_phase2_columns.py, OCID-068 Phase 2, PR #57)
-      had just actually executed against the same live production DB and
-      genuinely populated the dedicated commit_sha/file_name/file_path/
-      merge_status/evidence_summary columns for all 69 rows (49/69
-      commit_sha, 23/69 file_path, 57/69 merge_status, 69/69
-      evidence_summary, honest nulls elsewhere). Rather than duplicate
-      that real `gh pr view` recovery a second time, this script reads
-      those now-real dedicated columns directly and folds them into the
-      new standardized evidence_json shape (9 required keys + this row's
-      own pre-existing evidence_json preserved verbatim under
-      "legacy_evidence") -- zero duplicate implementation, per this
-      codebase's own convention.
-- [x] Took a real pre-write DB backup
-      (superboss-register.sqlite.bak-pre-evidence-json-schema-backfill-20260805T152822Z).
-- [x] Dry-run reviewed the full 69-row plan; every row validated clean
-      against the new schema; 0 "never fetched by Phase 2 backfill"
-      warnings.
-- [x] Applied the backfill to the live DB (--apply). Verified after:
-      all 69 rows schema-compliant; the 11 rows whose status genuinely
-      claims completed/verified (OCID-002, 003, 038, 047-052, 068, 069)
-      all pass the enforced gate.
-- [x] Full suite green: 113 passed, after the live backfill.
-- [x] Committed + pushed the backfill script + PROGRESS.md.
-- [x] Opened PR #64 citing UMR-20260804-170055-a069:
-      https://github.com/FChecklist/veridian-scripts/pull/64
-- [x] Real independent review pass (this cycle) found and fixed a CONFIRMED
-      severe bug before merge: the refusal path's own `with _write_lock():`
-      around its audit-log insert deadlocked (independently reproduced with
-      a real `timeout` wrapper -- hung indefinitely) when
-      upsert_ocid_canonical_registry() is called from inside a caller that
-      already holds `_write_lock()` -- which is how every current real
-      production call site invokes it (audit_ocid_canonical_registry.py,
-      backfill_ocid_registry_phase2_columns.py,
-      backfill_evidence_json_schema.py, this file's own CLI command).
-      flock() is per-open-file-description, not re-entrant. Fixed: the
-      refusal path no longer self-locks, matching this function's own
-      established "caller owns the transaction/lock" convention (same as
-      its main INSERT). Added a real regression test (subprocess + hard
-      timeout) that independently reproduces the pre-fix hang and confirms
-      the fix. Also documented a known, real, un-fixed minor limitation of
-      the negation regex (hyphen/no-separator/multi-word negation forms
-      aren't excluded -- none of the 69 real rows use those forms today).
-- [x] Full suite green after the fix: 114 passed.
-- [x] Committed + pushed the fix.
-
-- [x] Merged: https://github.com/FChecklist/veridian-scripts/pull/64
-      (merge commit d21659e123e7650ec8ec47e55f5b788412b456a2).
+- [x] Re-verified all 4 test files covering this area pass (16/16 repo-wide test files pass)
+- [x] Confirmed live DB (`/opt/veridian/ai-os/memory/superboss-register.sqlite`) had
+      `audit_raw_output` NULL on all 69 rows -- the real script had never actually
+      been `--apply`'d against production data before this task
+- [x] **Real, serious finding from the first live run**: real production `umr_tasks`
+      rows now carry multi-MB `metadata_json` (a separate, pre-existing dedup-engine
+      data-quality issue, not caused by this task) that method (b)'s full-table grep
+      legitimately matches -- would have added an estimated 1-2+ GB to the live DB
+      in one `--apply` run. Fixed with a deterministic, disclosed, identically-applied
+      per-OCID char cap (`_bounded_for_storage()`), not interpretation/narrative.
+- [x] **Second, more serious real finding**: for the real, already-honestly-confirmed
+      `not_found` OCIDs (007-014), a fresh live run's method (b) full-table grep
+      matches this task's *own meta-dispatch UMRs* (which merely *discuss* "OCID-007
+      through OCID-014 not_found" in their prompt text) as if they were real evidence
+      FOR OCID-007 -- flipping `not_found=True` to a false `status=multiple_umr_ids_found_needs_review`
+      / `has_real_umr=1`. Applying this blindly would have fabricated exactly the kind
+      of false boolean this whole task exists to prevent. **Investigating a deterministic
+      fix before any live `--apply` run** (see Remaining).
+- [x] Added `_bounded_for_storage()` + doc + tests (2 new tests,
+      `tests/test_audit_ocid_canonical_registry.py`, now 6/6 passing)
 
 ## Remaining
-- [ ] None. Task complete.
+- [ ] Design + implement a deterministic (no AI judgment) guard against the
+      self-referential-contamination false positive found above, before
+      running any live `--apply`
+- [ ] Full dry run across all 69 real OCIDs against live data, inspect every
+      proposed change by hand before applying anything
+- [ ] `--apply` for real against the live production DB (fresh, current
+      evidence for every OCID, per this task's SPEC)
+- [ ] Confirm post-apply: all 8 real not_found rows correctly earn
+      `not_applicable_confirmed=1` with genuine, bounded, non-contaminated evidence
+- [ ] Add/extend automated tests proving the boolean cannot be set true
+      through any path that doesn't call this real script (mostly already
+      covered by existing tests -- confirm coverage of the new contamination guard)
+- [ ] Update the OCID-068 addendum: plain statement that no boolean/completion
+      claim may ever be hand-set or narrated again (existing Section 5 already
+      says this near-verbatim -- confirm/extend, don't duplicate)
+- [ ] Independent review before merge
+- [ ] Commit + push, open PR

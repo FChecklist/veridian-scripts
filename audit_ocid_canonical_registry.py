@@ -46,6 +46,24 @@ Fixed merge rule (identical for every OCID, no per-row exception):
     found something real and new) this run's fresh result is used in full,
     with an honest, non-silent duplicate_reason note naming the change.
 
+Bounded-storage rule (Owner urgent correction UMR-20260805-161157, added
+this task; identical for every OCID, never a per-row judgment call): before
+`audit_raw_output`/`evidence` are written, every individual string leaf
+value in the fresh evidence dict is passed through `_bounded_for_storage()`
+-- a fixed 5000-char cap applied identically regardless of OCID, with the
+real original length disclosed whenever a value is capped. This is not
+interpretation and not a narrative summary -- every real command actually
+run and its real result is still recorded, and every genuine gh/git/grep
+result (naturally well under the cap) is untouched byte-for-byte. It exists
+solely because real production `umr_tasks` rows were found this task to
+carry multi-megabyte `metadata_json` values (a real, separate, pre-existing
+data-quality issue in this codebase's task-dedup engine, independently
+flagged, not fixed here) that resolve_ocid_canonical()'s method (b) (full
+umr_tasks grep) legitimately matches for most real OCID numbers -- storing
+those verbatim in full would have added an estimated 1-2+ GB to the live
+production database in a single --apply run. See _bounded_for_storage()'s
+own docstring below for the full real accounting.
+
 Default is a dry run (prints the real proposed per-OCID plan as JSON,
 writes nothing). Pass --apply to actually write, via the real, already-
 merged upsert_ocid_canonical_registry() (never raw SQL), inside a real
@@ -60,6 +78,76 @@ import sys
 
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ALL_OCID_NUMBERS = [f"OCID-{n:03d}" for n in range(1, 70)]  # OCID-001..OCID-069
+
+# Real operational-safety cap, discovered this task (Owner urgent correction
+# UMR-20260805-161157, extending UMR-20260805-092408-4f97 / -091934-86a2 /
+# -090549-9710): running this script for real against the live production
+# `umr_tasks` table (never exercised against real production data before --
+# every prior run of this exact script was either --dry-run or against a
+# scratch test DB) surfaced that a handful of real umr_tasks rows (this same
+# session's own OCID-068 Phase-2 dispatch/reuse-check rows among them) carry
+# a `metadata_json.reuse_check_result` field 6+ MB in size, because the
+# real, separate, already-existing task-dedup engine embeds full candidate
+# intent text, not just match scores, in that field (a genuine, real,
+# pre-existing data-quality issue in that OTHER subsystem, independently
+# flagged for Owner awareness below -- out of scope to fix here). Method (b)
+# of resolve_ocid_canonical() (real full-table grep, UMR-20260805-... gap
+# fix) legitimately matches those rows for a majority of real OCID numbers
+# (many of those dispatch texts literally enumerate ranges like "OCID-001
+# through OCID-069"), so storing every matched row's FULL text verbatim in
+# `audit_raw_output` would have added an estimated 1-2+ GB to the live
+# 1.4 GB production superboss-register.sqlite in a single --apply run --
+# a real, hard-to-reverse, outward-facing operational risk, not merely a
+# cosmetic one.
+#
+# The fix applied here is a fixed, deterministic, identically-applied-to-
+# every-OCID byte cap on individual string leaf values inside the evidence
+# dict before it is stored -- NOT interpretation of what the evidence means,
+# NOT a narrative summary, NOT a per-OCID judgment call. Every real command
+# actually run and its real result are still recorded; only pathologically
+# oversized individual matched-row-text values (never the genuine gh/git/
+# grep command outputs themselves, which are naturally small) are capped,
+# with the real original length disclosed alongside the cap, and the exact
+# same real search fully re-runnable on demand (via this same script, or
+# directly via resolve_ocid_canonical()) to recover the untruncated value.
+_AUDIT_RAW_OUTPUT_LEAF_CHAR_CAP = 5000
+_TRUNCATION_MARKER_SENTINEL = "REAL VERBATIM VALUE TRUNCATED FOR STORAGE"
+
+
+def _bounded_for_storage(value, max_chars=_AUDIT_RAW_OUTPUT_LEAF_CHAR_CAP):
+    """Pure, deterministic, zero-AI-judgment recursive cap on string leaf
+    values -- same fixed limit applied identically to every OCID, every
+    field, every run. Dicts/lists are walked and rebuilt with every string
+    value over `max_chars` replaced by a real, disclosed-truncation marker
+    naming the real original length; everything else (including every
+    string at or under the cap, i.e. every genuine real gh/git/grep command
+    result in ordinary practice) passes through byte-for-byte unchanged.
+    Deterministic and idempotent: calling this twice on the same input (or
+    on its own output) yields the same result, which is what
+    tests/test_audit_ocid_canonical_registry.py's determinism proof
+    requires."""
+    if isinstance(value, str):
+        if len(value) <= max_chars or _TRUNCATION_MARKER_SENTINEL in value:
+            # Already at/under the cap, OR already carries this function's
+            # own truncation marker (re-applying the cap to its own prior
+            # output is a real, deliberate no-op -- required for
+            # idempotence/determinism across repeated real runs; without
+            # this check, the marker text itself would push a
+            # freshly-truncated value back over max_chars and get truncated
+            # again, differently, each time it is re-bounded).
+            return value
+        return (
+            value[:max_chars]
+            + f"...[REAL VERBATIM VALUE TRUNCATED FOR STORAGE: {len(value)} total real chars, "
+              f"fixed {max_chars}-char cap applied identically to every OCID by "
+              f"audit_ocid_canonical_registry.py's own _bounded_for_storage(); re-run this same "
+              f"script, or call resolve_ocid_canonical() directly, for the full untruncated real value]"
+        )
+    if isinstance(value, dict):
+        return {k: _bounded_for_storage(v, max_chars) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_bounded_for_storage(v, max_chars) for v in value]
+    return value
 
 
 def _load_sbr():
@@ -115,9 +203,11 @@ def plan_for_ocid(sbr, conn, ocid_number, existing_by_ocid, **resolve_kwargs):
             "duplicate_reason": note,
         }
 
+    bounded_fresh_evidence = _bounded_for_storage(fresh["evidence"])
+
     plan["not_found"] = fresh["not_found"]
-    plan["audit_raw_output"] = fresh["evidence"]
-    plan["evidence"] = existing["evidence"] if (preserve_canonical and existing is not None) else fresh["evidence"]
+    plan["audit_raw_output"] = bounded_fresh_evidence
+    plan["evidence"] = existing["evidence"] if (preserve_canonical and existing is not None) else bounded_fresh_evidence
     plan["preserved_existing_canonical_choice"] = preserve_canonical
     plan["changed_from_existing"] = (
         existing is None

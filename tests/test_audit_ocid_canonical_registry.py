@@ -271,9 +271,105 @@ def test_not_applicable_confirmed_requires_real_stored_audit_raw_output():
         print("PASS: test_not_applicable_confirmed_requires_real_stored_audit_raw_output")
 
 
+def test_bounded_for_storage_caps_oversized_leaf_values_deterministically():
+    """Real regression proof (Owner urgent correction UMR-20260805-161157):
+    this task's own first real --apply attempt against real (not test-
+    fixture) production data found real umr_tasks rows with multi-megabyte
+    metadata_json values, which resolve_ocid_canonical()'s real method (b)
+    (full-table grep) legitimately matches for most real OCID numbers --
+    storing those verbatim would have added an estimated 1-2+ GB to the
+    live database in a single run. _bounded_for_storage() must cap any
+    individual string leaf value over the fixed 5000-char limit, leave every
+    value at or under it untouched byte-for-byte (so genuine, naturally-
+    small real gh/git/grep command output is never altered), and disclose
+    the real original length whenever it truncates -- and must be
+    deterministic/idempotent (same input -> same output, every time,
+    applying it twice is a no-op), the same determinism guarantee this
+    file's own two-runs proof requires of the search itself."""
+    audit = _load_audit_script()
+
+    small = "a real, small, genuine gh/git/grep result"
+    assert audit._bounded_for_storage(small) == small, "must not alter values at/under the cap"
+
+    exactly_at_cap = "x" * audit._AUDIT_RAW_OUTPUT_LEAF_CHAR_CAP
+    assert audit._bounded_for_storage(exactly_at_cap) == exactly_at_cap, "must not alter a value exactly at the cap"
+
+    oversized = "y" * (audit._AUDIT_RAW_OUTPUT_LEAF_CHAR_CAP * 3)
+    bounded_once = audit._bounded_for_storage(oversized)
+    assert len(bounded_once) < len(oversized), "oversized value must actually be shortened"
+    assert bounded_once.startswith("y" * audit._AUDIT_RAW_OUTPUT_LEAF_CHAR_CAP), "prefix must be real, untouched original bytes"
+    assert str(len(oversized)) in bounded_once, "real original length must be disclosed, not silently dropped"
+    assert "TRUNCATED" in bounded_once
+
+    # idempotent: running the cap again on its own already-bounded output is a no-op
+    bounded_twice = audit._bounded_for_storage(bounded_once)
+    assert bounded_twice == bounded_once, "cap must be idempotent/deterministic across repeated application"
+
+    # real, nested evidence shape (dicts/lists) must be walked and rebuilt, not skipped
+    nested = {
+        "umr_tasks_full_dump_grep": {
+            "UMR-real-small": "short real match",
+            "UMR-real-huge": oversized,
+        },
+        "gh_pr_search_veridian-scripts": {"ok": True, "prs": [{"title": "short", "body": oversized}]},
+    }
+    bounded_nested = audit._bounded_for_storage(nested)
+    assert bounded_nested["umr_tasks_full_dump_grep"]["UMR-real-small"] == "short real match"
+    assert len(bounded_nested["umr_tasks_full_dump_grep"]["UMR-real-huge"]) < len(oversized)
+    assert len(bounded_nested["gh_pr_search_veridian-scripts"]["prs"][0]["body"]) < len(oversized)
+    print("PASS: test_bounded_for_storage_caps_oversized_leaf_values_deterministically")
+
+
+def test_apply_style_write_of_pathologically_large_real_evidence_stays_bounded():
+    """End-to-end proof through plan_for_ocid() -> upsert_ocid_canonical_registry()
+    -> the live row: a real umr_tasks row with a multi-megabyte matching
+    field must not result in a multi-megabyte audit_raw_output on the
+    written row, and not_applicable_confirmed must still correctly derive
+    from the (now-bounded, but still genuinely non-empty and genuinely
+    real) stored evidence."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "scratch.sqlite")
+        sbr = _seed_scratch_db(path)
+        audit = _load_audit_script()
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+
+        # real-shaped pathological row: a huge task_identity match for OCID-960,
+        # same real-world shape as this task's own production discovery.
+        huge_identity = "owner-task mentions OCID-960 " + ("z" * 500_000)
+        _insert_umr_task(conn, "UMR-20260805-000000-9999", huge_identity, "completed",
+                          ts_completed="2026-08-05T10:00:00+00:00")
+        conn.commit()
+
+        runner = _make_runner({
+            ("compliance-tracker", "OCID-960"): [], ("veridian-scripts", "OCID-960"): [],
+            ("projexa", "OCID-960"): [],
+        })
+        plan = audit.plan_for_ocid(sbr, conn, "OCID-960", {}, _runner=runner)
+        assert len(json.dumps(plan["audit_raw_output"])) < 50_000, (
+            f"real audit_raw_output was not bounded: {len(json.dumps(plan['audit_raw_output']))} chars"
+        )
+
+        with sbr._write_lock():
+            sbr.upsert_ocid_canonical_registry(
+                conn, plan["ocid_number"], canonical_umr_id=plan["canonical_umr_id"], status=plan["status"],
+                all_umr_ids=plan["all_umr_ids"], evidence=plan["evidence"], pr_number=plan["pr_number"],
+                pr_repo=plan["pr_repo"], duplicate_reason=plan["duplicate_reason"], not_found=plan["not_found"],
+                audit_raw_output=plan["audit_raw_output"],
+            )
+            conn.commit()
+        row = dict(conn.execute("SELECT * FROM ocid_canonical_registry WHERE ocid_number=?", ("OCID-960",)).fetchone())
+        assert len(row["audit_raw_output"]) < 50_000, f"real stored row audit_raw_output was not bounded: {len(row['audit_raw_output'])} chars"
+        assert "UMR-20260805-000000-9999" in row["audit_raw_output"]
+        conn.close()
+        print("PASS: test_apply_style_write_of_pathologically_large_real_evidence_stays_bounded")
+
+
 if __name__ == "__main__":
     test_determinism_two_runs_identical_structured_output()
     test_plan_preserves_existing_reasoned_canonical_choice_when_still_corroborated()
     test_plan_uses_fresh_result_when_existing_choice_no_longer_corroborated()
     test_not_applicable_confirmed_requires_real_stored_audit_raw_output()
+    test_bounded_for_storage_caps_oversized_leaf_values_deterministically()
+    test_apply_style_write_of_pathologically_large_real_evidence_stays_bounded()
     print("ALL PASS")

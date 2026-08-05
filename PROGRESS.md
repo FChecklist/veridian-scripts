@@ -87,5 +87,8 @@ UMR-20260805-032326-becc.
 - [x] Full suite green after the fix: 114 passed.
 - [x] Committed + pushed the fix.
 
+- [x] Merged: https://github.com/FChecklist/veridian-scripts/pull/64
+      (merge commit d21659e123e7650ec8ec47e55f5b788412b456a2).
+
 ## Remaining
-- [ ] Get PR #64 merged (owner/PM review).
+- [ ] None. Task complete.

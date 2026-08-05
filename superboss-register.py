@@ -3191,7 +3191,56 @@ def upsert_ocid_canonical_registry(conn, ocid_number, *, canonical_umr_id, statu
     and overwrite them from this row's own real underlying columns on every
     INSERT/UPDATE. No caller-supplied value could ever reach them even if one
     were accepted here, so the parameters are omitted entirely rather than
-    accepted-and-silently-dropped, to keep the real call contract honest."""
+    accepted-and-silently-dropped, to keep the real call contract honest.
+
+    Real evidence_json schema gate (this cycle's directive, citing
+    UMR-20260804-170055-a069/UMR-20260805-032326-becc): before writing
+    anything, calls refuse_ocid_registry_completion_if_evidence_incomplete()
+    -- when `status` genuinely claims completed/verified and `evidence`
+    does not satisfy EVIDENCE_JSON_REQUIRED_KEYS, the write is refused: a
+    real, permanent 'evidence_schema_refused' audit event is recorded via
+    record_ocid_master_standard_audit_event() (same table/function
+    apply_certification_verdict() uses for 'certification_refused'), and
+    OcidEvidenceSchemaRefused is raised -- no row is written. Rows whose
+    status does not itself claim completion (open/running/not_found/etc.)
+    are never subject to this gate and are written exactly as before.
+
+    Deliberately does NOT acquire its own _write_lock() around that
+    audit-log insert (unlike reconcile_umr_status_against_pr()/
+    apply_certification_verdict() above, which self-lock because THEIR own
+    callers do not reliably hold one). This function's own established
+    convention is the opposite: "Caller owns conn/transaction/commit" (see
+    above) -- every real current call site (audit_ocid_canonical_registry.py,
+    backfill_ocid_registry_phase2_columns.py,
+    backfill_evidence_json_schema.py, and this file's own CLI command) already
+    wraps its call to upsert_ocid_canonical_registry() in an outer
+    `with _write_lock():`. flock() is per-open-file-description, not
+    per-process/re-entrant, so a second nested `with _write_lock():` call
+    from inside one of those outer blocks would block forever waiting on a
+    lock the same process already holds -- independently confirmed (real
+    `timeout` reproduction, this cycle) to hang indefinitely rather than
+    raise. The main INSERT below has the exact same caller-owns-the-lock
+    contract already; this refusal-path insert matches it rather than
+    introducing a second, incompatible locking convention."""
+    verdict, reason = refuse_ocid_registry_completion_if_evidence_incomplete(
+        ocid_number, status, evidence
+    )
+    if not verdict:
+        _ensure_ocid_master_standard_audit_log_table(conn)
+        record_ocid_master_standard_audit_event(
+            conn, "evidence_schema_refused",
+            {
+                "status": status,
+                "reason": reason,
+                "evidence_keys_present": (
+                    sorted(evidence.keys()) if isinstance(evidence, dict) else None
+                ),
+            },
+            ocid_number=ocid_number, umr_id=canonical_umr_id,
+        )
+        conn.commit()
+        raise OcidEvidenceSchemaRefused(reason)
+
     conn.execute("""
         INSERT INTO ocid_canonical_registry
             (ocid_number, canonical_umr_id, status, pr_number, pr_repo,
@@ -3822,6 +3871,153 @@ def apply_certification_verdict(conn, pr_merge_record):
             )
             conn.commit()
     return verdict, reason
+
+
+# ---------------------------------------------------------------------------
+# OCID Master Standard v6 -- evidence_json schema standardization (Owner
+# directive, this cycle; citing UMR-20260804-170055-a069 [canonical OCID-068
+# UMR] and UMR-20260805-032326-becc [real OCID canonical roster build]).
+#
+# Real finding, independently confirmed this cycle: ocid_canonical_registry
+# has no dedicated real column for umr_id, pr_repo, or a short human evidence
+# sentence tied 1:1 to a given row's own real evidence -- the commit_sha/
+# file_name/file_path/merge_status/evidence_summary columns OCID-068 Phase 2
+# added (_migrate_ocid_canonical_registry_completion_columns() above) are
+# real dedicated columns, but evidence_json itself remained a free-form,
+# per-search-method text dump with no fixed real shape, and (independently
+# confirmed against the live DB) those Phase 2 columns had never actually
+# been backfilled -- every one of the 69 real existing rows still had them
+# NULL. This section locks down one real required shape for evidence_json
+# itself, going forward, for every real row: the same facts as the 5
+# dedicated Phase 2 columns, plus umr_id/ocid_number/pr_number/pr_repo/a
+# short evidence_summary sentence, all carried INSIDE evidence_json too so a
+# caller reading only evidence_json (never joining the dedicated columns)
+# still gets the complete real picture. Wired into
+# upsert_ocid_canonical_registry() itself as a real, structural,
+# non-bypassable gate -- redundant with, and deliberately never a
+# replacement for, refuse_certification_if_merged_without_required_checks()
+# above: that function gates a PR-merge certification decision; this one
+# gates an OCID-registry-row completion claim. Same "second independent
+# layer, explicit structured input, no live I/O inside the pure function"
+# design as that function, and the same audit-log wiring
+# (record_ocid_master_standard_audit_event(), event_type=
+# "evidence_schema_refused") as apply_certification_verdict() uses for
+# event_type="certification_refused".
+# ---------------------------------------------------------------------------
+
+EVIDENCE_JSON_REQUIRED_KEYS = (
+    "commit_sha", "file_name", "file_path", "merge_status",
+    "umr_id", "ocid_number", "pr_number", "pr_repo", "evidence_summary",
+)
+
+
+class OcidEvidenceSchemaRefused(ValueError):
+    """Raised by upsert_ocid_canonical_registry() when a row whose own
+    status text genuinely claims completion/verification (see
+    _status_claims_verified_or_completed()) is written with an evidence_json
+    that does not satisfy EVIDENCE_JSON_REQUIRED_KEYS (see
+    validate_evidence_json_schema()). Never raised for a row whose status
+    does not itself claim completion (e.g. 'open', 'running, never
+    completed', 'not_found') -- those rows are real and legitimately still
+    in flight or honestly absent, not yet subject to this gate."""
+
+
+def _status_claims_verified_or_completed(status):
+    """Real, deterministic, zero-AI-judgment detector for whether a row's
+    own free-text status genuinely claims 'completed' or 'verified' -- a
+    real whole-word, non-negated match only. Excludes negated phrasing
+    ('never completed', 'not completed', 'not verified') and excludes
+    substring false-positives where the word is fused to a preceding
+    identifier rather than standing alone (e.g. 'ts_completed=null',
+    'NOT_VERIFIED' -- '_' is a real word character, so there is no real word
+    boundary there for \\b to match). Independently verified against all 69
+    real existing ocid_canonical_registry rows before this gate shipped:
+    matches exactly the 11 rows whose status is a real completion claim
+    (OCID-002, 003, 038, 047-052, 068, 069), and correctly excludes
+    OCID-004/005 ('running, never completed (historical...)') and OCID-020
+    ('...status=running, ts_completed=null; ...NOT_VERIFIED...').
+
+    Known real limitation, honestly documented rather than silently assumed
+    away: the negation lookbehinds only match the exact literal "never "/
+    "not " (single space, immediately adjacent). A real future status
+    string using a hyphen ('not-verified'), no separator ('notcompleted'),
+    or a word in between ('not yet completed') would NOT be excluded by
+    this check and would incorrectly gate as a completion claim. None of
+    the 69 real existing rows use any of those forms; this is a real,
+    open gap for future free-text status values, not a closed one -- a
+    caller writing a genuinely-negated status in one of those forms should
+    expect this gate to (incorrectly) apply and should not silently work
+    around it, but should flag it for this detector to be extended."""
+    if not status:
+        return False
+    return bool(re.search(r"(?<!never )(?<!not )\b(completed|verified)\b", status, re.IGNORECASE))
+
+
+def validate_evidence_json_schema(evidence):
+    """Pure, zero-I/O schema check. Returns (ok, missing_or_invalid, reason):
+      - ok: bool
+      - missing_or_invalid: sorted list of the real problem key names
+      - reason: human-readable string naming every real problem, or None
+
+    Every key in EVIDENCE_JSON_REQUIRED_KEYS must be PRESENT. A real, honest
+    None/null is a valid value for every key except evidence_summary -- per
+    the backfill directive, a genuinely unrecoverable commit_sha/file_path/
+    etc. is recorded as null, never guessed. evidence_summary must be
+    present AND a non-empty (after stripping whitespace) real string -- a
+    short sentence is always required, even for a row where every other
+    field is honestly null.
+
+    Extra keys beyond the required 9 (e.g. a nested 'search_evidence' key
+    preserving a row's own pre-existing free-text search evidence) are
+    always allowed -- this validator only ever checks for a required
+    subset, never a closed/exact key set, so no real prior evidence is ever
+    forced out just to satisfy it."""
+    if not isinstance(evidence, dict):
+        return False, ["<evidence is not a dict>"], (
+            "evidence_json must be a JSON object, not " + type(evidence).__name__
+        )
+    problems = [k for k in EVIDENCE_JSON_REQUIRED_KEYS if k not in evidence]
+    if "evidence_summary" not in problems:
+        summary = evidence.get("evidence_summary")
+        if not isinstance(summary, str) or not summary.strip():
+            problems.append("evidence_summary")
+    problems = sorted(set(problems))
+    if problems:
+        return False, problems, (
+            "evidence_json is missing or has an invalid value for required key(s): "
+            + ", ".join(problems)
+        )
+    return True, [], None
+
+
+def refuse_ocid_registry_completion_if_evidence_incomplete(ocid_number, status, evidence):
+    """Pure function, zero I/O -- the real, second, independent refusal gate
+    this directive asks for, deliberately alongside (never replacing)
+    refuse_certification_if_merged_without_required_checks() above: that
+    function's real incident was a PR merging without required GitHub
+    checks/reviews; this one's real gap is an OCID registry row claiming
+    'completed'/'verified' status while its own evidence_json carries none
+    of the structured facts (commit sha, file path, merge status, PR/UMR
+    linkage, a short human evidence sentence) that claim should be backed
+    by. Returns (verdict: bool, reason: str) -- verdict True means the write
+    is allowed (either the row's status does not itself claim completion, or
+    it does and the schema is satisfied); False means refused, with `reason`
+    naming every real missing/invalid key."""
+    if not _status_claims_verified_or_completed(status):
+        return True, (
+            f"{ocid_number}: status {status!r} does not itself claim completed/verified -- "
+            "evidence_json schema not required for this write."
+        )
+    ok, _problems, reason = validate_evidence_json_schema(evidence)
+    if not ok:
+        return False, (
+            f"REFUSED write for {ocid_number}: status {status!r} claims completed/verified but "
+            + reason + "."
+        )
+    return True, (
+        f"{ocid_number}: status {status!r} claims completed/verified and evidence_json schema "
+        "is satisfied."
+    )
 
 
 def _migrate_umr_last_heartbeat(conn):

@@ -151,7 +151,12 @@ def test_plan_preserves_existing_reasoned_canonical_choice_when_still_corroborat
             conn, "OCID-951", canonical_umr_id="UMR-20260804-090000-bbbb",
             status="completed", all_umr_ids=["UMR-20260804-080000-aaaa", "UMR-20260804-090000-bbbb"],
             duplicate_reason="UMR-...-aaaa correctly rejected as duplicate; -bbbb is canonical.",
-            evidence={"prior": "curated by original 5-agent methodology run"},
+            evidence={
+                **{k: None for k in sbr.EVIDENCE_JSON_REQUIRED_KEYS},
+                "umr_id": "UMR-20260804-090000-bbbb", "ocid_number": "OCID-951",
+                "evidence_summary": "seeded pre-existing curated canonical choice for this test.",
+                "legacy_evidence": {"prior": "curated by original 5-agent methodology run"},
+            },
         )
         conn.commit()
 
@@ -192,7 +197,12 @@ def test_plan_uses_fresh_result_when_existing_choice_no_longer_corroborated():
         sbr.upsert_ocid_canonical_registry(
             conn, "OCID-952", canonical_umr_id="UMR-STALE-NO-LONGER-REAL",
             status="completed", all_umr_ids=["UMR-STALE-NO-LONGER-REAL"],
-            evidence={"prior": "stale"},
+            evidence={
+                **{k: None for k in sbr.EVIDENCE_JSON_REQUIRED_KEYS},
+                "umr_id": "UMR-STALE-NO-LONGER-REAL", "ocid_number": "OCID-952",
+                "evidence_summary": "seeded pre-existing (now stale) canonical choice for this test.",
+                "legacy_evidence": {"prior": "stale"},
+            },
         )
         conn.commit()
 

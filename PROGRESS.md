@@ -1,48 +1,91 @@
-# PROGRESS -- task-20260805-151455-make-superboss-register-sqlite-the-deter
+# PROGRESS -- task-20260805-151450-standardize-and-backfill-evidence-json-s
 
-## Duplicate-check finding (before starting new work)
-
-Independently verified: the schema/trigger/linkage/test infrastructure this
-SPEC asks for was **already built and merged** in PR #57
-(`feat/ocid-registry-phase2-schema-triggers`, commit `768fd6e`, an ancestor of
-this branch's own base) under `UMR-20260805-090549-9710` and its
-reinforcement UMRs, documented in
-`OCID_068_PHASE_2_REGISTRY_SCHEMA_AND_LINKAGE_EXTENSION_2026-08-05.md`:
-- `commit_sha`, `file_name`, `file_path`, `merge_status`, `evidence_summary`
-  real columns on `ocid_canonical_registry` -- present in the live DB schema.
-- `has_real_umr`/`has_real_pr`/`has_real_commit`/`has_real_merge`/
-  `has_real_file_path`/`has_real_evidence_summary`/`is_fully_complete` --
-  present, DB-trigger-computed, not hand-settable -- confirmed live.
-- Reverse+forward linkage via `query_ocid_artifact_links()` (extends the
-  existing `ocid_artifact_links` graph from PR #20, not a second mechanism).
-- Tests already exist and pass: `tests/test_ocid_registry_completion_gate.py`,
-  `tests/test_audit_ocid_canonical_registry.py`, `tests/test_ocid_068_compliance.py`.
-
-**Real gap found or which this task's dispatch has real, non-duplicate work:**
-`backfill_ocid_registry_phase2_columns.py` (also already merged in PR #57)
-had never actually been run with `--apply` against the live production DB --
-independently confirmed: every one of the 69 rows' new evidence columns were
-still `NULL` live, and `ocid_artifact_links` had only 3 rows, despite the code
-existing. This task executes that real backfill for real, backs up the live
-DB first, and documents the result as a Phase 2 addendum -- it does not
-rebuild schema/triggers/tests that already exist (would be duplication).
+Real dispatch: standardize evidence_json's required shape for
+ocid_canonical_registry rows going forward, enforce it as a real gate
+inside the OCID Master Standard v6 audit/certification refusal machinery
+(PR #54), and backfill the 69 real existing rows honestly (real
+commit_sha/file_path recovered from cited PR numbers where possible, null
+where genuinely not recoverable). Citing UMR-20260804-170055-a069 and
+UMR-20260805-032326-becc.
 
 ## Completed
-- [x] Confirmed PR #57 schema/trigger/linkage/test work already live and merged (no rebuild needed)
-- [x] Confirmed the real gap: backfill script never run with `--apply` against the live DB
+- [x] Independently confirmed the real gap against the live DB: OCID-068
+      Phase 2's dedicated commit_sha/file_name/file_path/merge_status/
+      evidence_summary columns exist (PR #57) but were never actually
+      backfilled -- all 69 rows had them NULL; evidence_json itself remains
+      a free-form per-search-method text dump with no fixed shape.
+- [x] Defined `EVIDENCE_JSON_REQUIRED_KEYS` (commit_sha, file_name,
+      file_path, merge_status, umr_id, ocid_number, pr_number, pr_repo,
+      evidence_summary) and `validate_evidence_json_schema()` in
+      superboss-register.py.
+- [x] Added `_status_claims_verified_or_completed()` -- real, deterministic
+      whole-word/non-negated detector, independently verified against all
+      69 real existing rows (11 real matches, correctly excludes the 2 real
+      false-positive traps: "running, never completed" / "ts_completed=
+      null"+"NOT_VERIFIED").
+- [x] Added `refuse_ocid_registry_completion_if_evidence_incomplete()` --
+      pure, zero-I/O, second independent gate, alongside (not replacing)
+      `refuse_certification_if_merged_without_required_checks()` from PR 54.
+- [x] Wired the gate into `upsert_ocid_canonical_registry()` itself: refuses
+      (raises `OcidEvidenceSchemaRefused`, writes nothing, records a real
+      'evidence_schema_refused' audit event via
+      `record_ocid_master_standard_audit_event()`) whenever a row's status
+      genuinely claims completed/verified and evidence_json is incomplete.
+      Rows not claiming completion are unaffected.
+- [x] Added `tests/test_evidence_json_schema_gate.py` (11 real tests).
+- [x] Fixed 3 already-merged tests whose seed fixtures used status=
+      "completed" with legacy-shape evidence (test_audit_ocid_canonical_registry.py
+      x2, test_ocid_canonical_registry.py x1) -- updated to schema-complete
+      evidence, preserving each test's original assertions/intent.
+- [x] Full suite green: 113 passed.
+- [x] Committed + pushed the schema/gate change.
 
-- [x] Took a real timestamped backup of the live DB before any change (`superboss-register.sqlite.bak-pre-ocid-registry-phase2-backfill-EXECUTION-20260805T152236Z`, sha256-verified identical to live at backup time)
-- [x] Minted real new UMR `UMR-20260805-152250-55d3` via `resource_governor.submit()` (tier=2, `source_trigger=owner_dispatch_gateway`)
-- [x] Ran `backfill_ocid_registry_phase2_columns.py --apply` for real against the live DB (69 rows, 211 new linkage rows, 0 gh failures)
-- [x] Verified results live: `commit_sha` recovered 49/69, `file_path` 23/69, `merge_status` 57/69, `evidence_summary` 69/69; `is_fully_complete` now 1 for 20/69 rows, honestly 0 for the rest
-- [x] Adversarially proved the gate cannot be hand-set, live: a raw `UPDATE ... SET is_fully_complete=1` on an incomplete row was overwritten back to 0 by the live DB trigger
-- [x] Ran full test suite -- 133 passed; 4 pre-existing, unrelated fixture errors in `test_ocid063_handoff_envelope.py` (predates this task, out of scope)
-- [x] Linked the new UMR to OCID-068 in `ocid_artifact_links` (`link_kind=phase2_backfill_execution`) and appended a timestamped evidence entry to OCID-068's `ocid_canonical_registry` row (all other real fields preserved)
-- [x] Wrote new addendum doc `OCID_068_PHASE_2_BACKFILL_EXECUTION_ADDENDUM_2026-08-05.md` (does not alter/reopen OCID-068's permanent closure record or the Phase 2 design record)
-- [x] Marked `UMR-20260805-152250-55d3` completed
-- [x] Committed + pushed, opened PR for independent review
-
-PR: https://github.com/FChecklist/veridian-scripts/pull/63
+- [x] Wrote backfill_evidence_json_schema.py. Discovered mid-task, live: a
+      separate, already-real, concurrently-running backfill
+      (backfill_ocid_registry_phase2_columns.py, OCID-068 Phase 2, PR #57)
+      had just actually executed against the same live production DB and
+      genuinely populated the dedicated commit_sha/file_name/file_path/
+      merge_status/evidence_summary columns for all 69 rows (49/69
+      commit_sha, 23/69 file_path, 57/69 merge_status, 69/69
+      evidence_summary, honest nulls elsewhere). Rather than duplicate
+      that real `gh pr view` recovery a second time, this script reads
+      those now-real dedicated columns directly and folds them into the
+      new standardized evidence_json shape (9 required keys + this row's
+      own pre-existing evidence_json preserved verbatim under
+      "legacy_evidence") -- zero duplicate implementation, per this
+      codebase's own convention.
+- [x] Took a real pre-write DB backup
+      (superboss-register.sqlite.bak-pre-evidence-json-schema-backfill-20260805T152822Z).
+- [x] Dry-run reviewed the full 69-row plan; every row validated clean
+      against the new schema; 0 "never fetched by Phase 2 backfill"
+      warnings.
+- [x] Applied the backfill to the live DB (--apply). Verified after:
+      all 69 rows schema-compliant; the 11 rows whose status genuinely
+      claims completed/verified (OCID-002, 003, 038, 047-052, 068, 069)
+      all pass the enforced gate.
+- [x] Full suite green: 113 passed, after the live backfill.
+- [x] Committed + pushed the backfill script + PROGRESS.md.
+- [x] Opened PR #64 citing UMR-20260804-170055-a069:
+      https://github.com/FChecklist/veridian-scripts/pull/64
+- [x] Real independent review pass (this cycle) found and fixed a CONFIRMED
+      severe bug before merge: the refusal path's own `with _write_lock():`
+      around its audit-log insert deadlocked (independently reproduced with
+      a real `timeout` wrapper -- hung indefinitely) when
+      upsert_ocid_canonical_registry() is called from inside a caller that
+      already holds `_write_lock()` -- which is how every current real
+      production call site invokes it (audit_ocid_canonical_registry.py,
+      backfill_ocid_registry_phase2_columns.py,
+      backfill_evidence_json_schema.py, this file's own CLI command).
+      flock() is per-open-file-description, not re-entrant. Fixed: the
+      refusal path no longer self-locks, matching this function's own
+      established "caller owns the transaction/lock" convention (same as
+      its main INSERT). Added a real regression test (subprocess + hard
+      timeout) that independently reproduces the pre-fix hang and confirms
+      the fix. Also documented a known, real, un-fixed minor limitation of
+      the negation regex (hyphen/no-separator/multi-word negation forms
+      aren't excluded -- none of the 69 real rows use those forms today).
+- [x] Full suite green after the fix: 114 passed.
+- [x] Committed + pushed the fix.
 
 ## Remaining
-- [ ] Independent review + merge of the PR (cannot self-merge foundational infra per directive)
+- [ ] Get PR #64 merged (owner/PM review).

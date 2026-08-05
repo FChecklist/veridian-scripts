@@ -2,6 +2,7 @@
 
 ## Completed
 - [x] Independently verified the SPEC's premises before any write (per [[veridian-task-prompt-false-premise-pattern]]) — found material mismatches with live state, documented below, and stopped before duplicating or colliding with in-flight work.
+- [x] PR opened: https://github.com/FChecklist/veridian-scripts/pull/89
 
 ## Remaining
 - [ ] Owner decision needed: which of the two already-complete-or-in-flight items (schema+25 rows, brand fix PR #954) still need net-new action from this task, if any.

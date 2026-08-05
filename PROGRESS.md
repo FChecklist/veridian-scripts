@@ -19,3 +19,6 @@ Verified before writing anything: `ocid_compliance_state` and `ocid_compliance_a
 
 ## Remaining
 - [ ] None outstanding for this task's scope
+
+## PR
+https://github.com/FChecklist/veridian-scripts/pull/68

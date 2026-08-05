@@ -26,5 +26,7 @@
 - [x] Wrote `DUPLICATE_WORKER_VERIFICATION_2026-08-05T165217Z.md` with full evidence and a concrete, actionable recommendation for whichever in-flight session ends up owning the dispatch pipeline.
 - [x] Cleaned up my own stray background `grep` processes (left running past their 120s timeout while I switched to `rg`) that were themselves adding to load.
 
+- [x] Rebased onto current `origin/main`, committed, pushed, opened PR: https://github.com/FChecklist/veridian-scripts/pull/77
+
 ## Remaining
-- [ ] Rebase onto current `origin/main`, commit, push, open PR for review (this repo's convention -- no direct push to main).
+- [ ] Get PR #77 through independent review and merged.

@@ -1,12 +1,14 @@
-# OCID-001..068 Canonical UMR Mapping — Real Methodology Note
+# OCID-001..069 Canonical UMR Mapping — Real Methodology Note
 
-**Real dispatch instruction:** `UMR-20260805-032326-becc` (Owner directive)
-**Related:** `UMR-20260802-165606-4413` (OCID-020), `UMR-20260802-173631-ca85` (OCID-021)
+**Real dispatch instruction:** `UMR-20260805-032326-becc` (Owner directive) — extended by `UMR-20260805-083516-d73c` (Owner directive, OCID-069 addition)
+**Related:** `UMR-20260802-165606-4413` (OCID-020), `UMR-20260802-173631-ca85` (OCID-021), `UMR-20260805-051109-77a9` (OCID-069's own real registration)
 **Infrastructure PR:** veridian-scripts #53 (`b42a01e7509370aa32565667580054f90277005f`) — `ocid_canonical_registry` table + `upsert_ocid_canonical_registry()`/`query_ocid_canonical_registry()` + `query-ocid-canonical` CLI subcommand, real independent review, merged 2026-08-05.
 
 ## What this record is
 
-This documents the real, complete population of the live `ocid_canonical_registry` table in `/opt/veridian/ai-os/memory/superboss-register.sqlite` with all 68 real rows (`OCID-001` through `OCID-068`). The full structured data — canonical UMR, all UMR IDs, status, PR number/repo, duplicate reasoning, not-found flag, evidence — lives in that live table itself (`python3 superboss-register.py query-ocid-canonical` or `query-ocid-canonical --ocid-number OCID-NNN`), not duplicated here. This note records methodology and headline findings only.
+This documents the real, complete population of the live `ocid_canonical_registry` table in `/opt/veridian/ai-os/memory/superboss-register.sqlite` with all 69 real rows (`OCID-001` through `OCID-069`). The full structured data — canonical UMR, all UMR IDs, status, PR number/repo, duplicate reasoning, not-found flag, evidence — lives in that live table itself (`python3 superboss-register.py query-ocid-canonical` or `query-ocid-canonical --ocid-number OCID-NNN`), not duplicated here. This note records methodology and headline findings only.
+
+OCID-001 through OCID-068 were populated together under `UMR-20260805-032326-becc` (5 parallel research agents, real search methodology below). OCID-069 was added separately, later the same day, under `UMR-20260805-083516-d73c`, extending this same document rather than starting a new one — see its own dedicated section below.
 
 ## Real search methodology (applied per OCID, in this order)
 
@@ -22,9 +24,10 @@ Work was split across 5 parallel research agents (OCID-001–014, 015–028, 029
 
 ## Result
 
-**68 of 68** real rows written, covering the complete OCID-001 through OCID-068 range with no gaps.
+**69 of 69** real rows written, covering the complete OCID-001 through OCID-069 range with no gaps.
 - **8 honestly recorded as not_found** after exhausting all real search methods: OCID-007, OCID-008, OCID-009, OCID-010, OCID-011, OCID-012, OCID-013, OCID-014.
 - **36 had more than one real UMR ID found**, each recorded in full with an explicit canonical choice and reason (never silently picked).
+- **OCID-069** (added under `UMR-20260805-083516-d73c`, see below) is real, `completed`, and single-UMR — not part of the original 68-OCID batch or its 8/36 counts above.
 
 ## Notable real findings surfaced during this research (not resolved here — flagged for Owner awareness)
 
@@ -36,8 +39,20 @@ Work was split across 5 parallel research agents (OCID-001–014, 015–028, 029
 - **OCID-053 / OCID-054 / OCID-055**: each dispatched for registration 3 times in the same session due to the same `umr_tasks` exact-match false-negative pattern this methodology is designed to guard against. None of the three have ever merged into `main`.
 - **Live-deploy gap found and fixed during this task**: `/opt/veridian/scripts/superboss-register.py` (the actual file every cron job and dispatch script runs) was one real merge behind `origin/main` — missing PR #53's `ocid_canonical_registry` table/functions entirely. Fixed via `git pull --ff-only` (clean fast-forward, no local edits at risk) before any data could be written. A stray `OCID-999-TEST`/`UMR-TEST-1` smoke-test row, unrelated to this task, was also found already present in the live table and removed as contaminant cleanup.
 
+## OCID-069 (added under `UMR-20260805-083516-d73c`)
+
+- **Real canonical UMR:** `UMR-20260805-051109-77a9`
+- **Real status:** `completed`
+- **What it covers:** administrative registration of the real, already-completed Z.ai session-analysis export folder (`/home/rajat/claude-session-analysis`) — a real Claude Code session transcript export + `parser.py` + `INSTRUCTIONS_FOR_ANALYST.md` grounding document, prepared for an external AI reviewer. Administrative/infrastructure work, not implementation, gap closure, or certification work under the OCID-021 lock.
+- **How the OCID number was determined:** no real dedicated OCID-minting/allocator function exists anywhere in the codebase (`superboss-register.py`, `resource_governor.py`, `dispatch-owner-task.sh` all checked directly) — `PR #53`'s `ocid_canonical_registry` is a lookup/mapping table for already-assigned OCIDs, not a number generator. `OCID-069` was determined deterministically as the real live `MAX(existing OCID)+1` (highest was `OCID-068`) via direct query against the canonical registry itself, cross-checked against a full `umr_tasks` text scan confirming no OCID number ≥ 69 existed anywhere before this — not hand-picked arbitrarily, though also not literally "minted through a registrar" as the originating directive assumed.
+- **How the UMR was minted:** the real `resource_governor.submit()` path (tier=2, `source_trigger=owner_dispatch_gateway`) — the same canonical UMR-minting mechanism used throughout this session — then marked `completed` immediately (not left `queued`) since the underlying work already existed, so `dispatch-tick.py` would never attempt to spawn a real worker for a pure registration task.
+- **Real discrepancy independently found and disclosed, not silently corrected:** the real folder is confirmed present with 594MB total (matches the originating directive's claim) and all three named support files present, but its real file count is **48 raw session `.jsonl` transcripts (51 files total including the 3 support files), not 432** as claimed in the dispatch text.
+- **Full evidence:** `python3 superboss-register.py query-ocid-canonical --ocid-number OCID-069` on the live database.
+
 ## Real citations
 
-- `UMR-20260805-032326-becc` (this task's own dispatch instruction, Owner directive)
+- `UMR-20260805-032326-becc` (original dispatch instruction for OCID-001..068, Owner directive)
+- `UMR-20260805-083516-d73c` (this document's OCID-069 extension, Owner directive)
+- `UMR-20260805-051109-77a9` (OCID-069's own real registration UMR)
 - `UMR-20260802-165606-4413` (OCID-020), `UMR-20260802-173631-ca85` (OCID-021) — related master initiatives, discovery/registration only, no new implementation under either lock
 - veridian-scripts PR #53 (`b42a01e7`) — the real schema/API/CLI infrastructure this data was written through

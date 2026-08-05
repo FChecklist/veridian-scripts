@@ -16,6 +16,9 @@ audit log:
   - refuse_certification_if_merged_without_required_checks(): refusal
     against PR #932/#933's real historical facts (failing check + 0
     reviews), plus a certification-allowed case
+  - refuse_review_if_reviewer_is_author(): refusal when the only approving
+    review is the same account as the PR author (or no review at all),
+    plus an independent-review-confirmed case
 """
 import importlib.util
 import json
@@ -425,6 +428,112 @@ def test_apply_certification_verdict_records_real_audit_event_on_refusal():
         print("PASS: test_apply_certification_verdict_records_real_audit_event_on_refusal")
 
 
+# ---------------------------------------------------------------------------
+# refuse_review_if_reviewer_is_author()
+# ---------------------------------------------------------------------------
+
+def test_review_refused_when_no_approving_review_exists():
+    """The real current compliance-tracker state for every open PR: FChecklist
+    authors it and nobody else has approved -- refused, not silently passed."""
+    sbr = _load_sbr()
+    record = {
+        "repo": "compliance-tracker", "pr_number": 959,
+        "author_login": "FChecklist",
+        "approving_review_logins": [],
+    }
+    verdict, reason = sbr.refuse_review_if_reviewer_is_author(record)
+    assert verdict is False
+    assert "no approving review from any account other than the author" in reason
+    print("PASS: test_review_refused_when_no_approving_review_exists")
+
+
+def test_review_refused_when_only_approval_is_self_approval():
+    """Same account approving its own PR must be refused even though a
+    review technically exists."""
+    sbr = _load_sbr()
+    record = {
+        "repo": "compliance-tracker", "pr_number": 960,
+        "author_login": "FChecklist",
+        "approving_review_logins": ["FChecklist"],
+    }
+    verdict, reason = sbr.refuse_review_if_reviewer_is_author(record)
+    assert verdict is False
+    assert "self-approval is not independent review" in reason
+    print("PASS: test_review_refused_when_only_approval_is_self_approval")
+
+
+def test_review_confirmed_independent_for_genuinely_different_account():
+    """A real second, distinct account approving must be accepted as
+    independent, case-insensitively."""
+    sbr = _load_sbr()
+    record = {
+        "repo": "compliance-tracker", "pr_number": 961,
+        "author_login": "FChecklist",
+        "approving_review_logins": ["fchecklist-reviewer-bot"],
+    }
+    verdict, reason = sbr.refuse_review_if_reviewer_is_author(record)
+    assert verdict is True
+    assert "Independent review confirmed" in reason
+    print("PASS: test_review_confirmed_independent_for_genuinely_different_account")
+
+
+def test_review_confirmed_independent_even_with_mixed_self_and_other_reviews():
+    """A self-approval alongside a genuinely independent approval must still
+    pass -- at least one independent reviewer is the real requirement, not
+    the absence of any self-review."""
+    sbr = _load_sbr()
+    record = {
+        "repo": "compliance-tracker", "pr_number": 962,
+        "author_login": "FChecklist",
+        "approving_review_logins": ["FChecklist", "fchecklist-reviewer-bot"],
+    }
+    verdict, reason = sbr.refuse_review_if_reviewer_is_author(record)
+    assert verdict is True
+    print("PASS: test_review_confirmed_independent_even_with_mixed_self_and_other_reviews")
+
+
+def test_apply_review_independence_verdict_records_real_audit_event_on_refusal():
+    """The caller-side usage pattern: apply_review_independence_verdict()
+    must record a real, permanent 'review_identity_independence_refused'
+    audit event when the pure function refuses, and must NOT record one
+    when it allows."""
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "scratch.sqlite")
+        sbr = _seed_scratch_db(path)
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+
+        self_approved = {
+            "repo": "compliance-tracker", "pr_number": 959,
+            "author_login": "FChecklist",
+            "approving_review_logins": [],
+        }
+        verdict, reason = sbr.apply_review_independence_verdict(conn, self_approved)
+        assert verdict is False
+        rows = conn.execute(
+            "SELECT * FROM ocid_master_standard_audit_log "
+            "WHERE event_type='review_identity_independence_refused'"
+        ).fetchall()
+        assert len(rows) == 1
+        detail = json.loads(rows[0]["detail_json"])
+        assert detail["pr_number"] == 959
+
+        independently_reviewed = {
+            "repo": "compliance-tracker", "pr_number": 961,
+            "author_login": "FChecklist",
+            "approving_review_logins": ["fchecklist-reviewer-bot"],
+        }
+        verdict2, _ = sbr.apply_review_independence_verdict(conn, independently_reviewed)
+        assert verdict2 is True
+        rows2 = conn.execute(
+            "SELECT * FROM ocid_master_standard_audit_log "
+            "WHERE event_type='review_identity_independence_refused'"
+        ).fetchall()
+        assert len(rows2) == 1  # unchanged -- no new refusal event for an allowed verdict
+        conn.close()
+        print("PASS: test_apply_review_independence_verdict_records_real_audit_event_on_refusal")
+
+
 if __name__ == "__main__":
     test_resolve_ocid_canonical_multi_umr_found_reports_all_with_canonical_choice()
     test_resolve_ocid_canonical_not_found_honest_reporting()
@@ -437,4 +546,9 @@ if __name__ == "__main__":
     test_certification_allowed_when_checks_pass_and_reviews_met()
     test_certification_refused_only_for_review_count_when_checks_pass()
     test_apply_certification_verdict_records_real_audit_event_on_refusal()
+    test_review_refused_when_no_approving_review_exists()
+    test_review_refused_when_only_approval_is_self_approval()
+    test_review_confirmed_independent_for_genuinely_different_account()
+    test_review_confirmed_independent_even_with_mixed_self_and_other_reviews()
+    test_apply_review_independence_verdict_records_real_audit_event_on_refusal()
     print("ALL PASS")

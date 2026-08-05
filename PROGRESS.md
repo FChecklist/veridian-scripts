@@ -1,38 +1,24 @@
-# PROGRESS -- task-20260805-114126-pm-decision--reconcile-ocid-068-umr-book
+# PROGRESS -- task-20260805-131359-register-real-ocid-and-umr-for-the-compl
 
 ## Completed
-- [x] Read live `umr_tasks` rows for `UMR-20260804-170055-a069` and `UMR-20260804-184014-9a18`
-      directly from `superboss-register.sqlite`.
-- [x] Ran the canonical `superboss-register.py reconcile-umr-status --umr-id
-      UMR-20260804-170055-a069` (real, live GH PR-evidence cross-check, not raw SQL): result
-      `is_stale: false` -- row is already `status=completed`,
-      `ts_completed=2026-08-05T02:45:07.495957+00:00`, with the exact required PR/commit
-      evidence already cited in `reason`. No write needed or performed (the module's own
-      `--apply` path only writes when `is_stale` is true).
-- [x] Confirmed `UMR-20260804-184014-9a18` already carries the required annotation
-      (`metadata_json.pm_annotation_umr20260805024319_b1e6`) cross-referencing that its
-      underlying deploy goal was accomplished via PR #21 + the live-deploy step confirmed under
-      `UMR-20260805-024319-b1e6`; status correctly remains `rejected_duplicate`, not
-      `completed`.
-- [x] Identified the real marker function/line for each of the 7 OCID-068 guardrail rules from
-      the actual PR merge commits (#26, #29, #30, #32, #33, #34, #35) in the `veridian-scripts`
-      repo checkout.
-- [x] Verified each of the 7 markers present, live, and callable in the live deployed files
-      under `/opt/veridian/scripts` via direct `grep` + dynamic `importlib` load + functional
-      smoke calls (Rule 2 classifier, Rule 7 evidence validator) -- all 7 PASS.
-- [x] Confirmed byte-for-byte identity between the 4 live rule-bearing files
-      (`resource_governor.py`, `superboss-register.py`, `dispatch-tick.py`, `veridian-task.py`)
-      and the `origin/main` repo checkout, plus `dispatch-owner-task.sh`'s
-      `check-content-duplicate` wiring -- no deploy gap found, no fix/redeploy needed.
-- [x] Wrote `OCID_068_UMR_BOOK_RECONCILIATION_REVERIFICATION_2026-08-05.md` documenting all
-      independent re-verification evidence.
-- [x] Determined this task's own SPEC had already been fully executed by a prior session
-      (`UMR-20260805-024319-b1e6`, formalized in `UMR-20260805-032731-b412`'s permanent closure
-      record) before this task was dispatched -- correctly performed zero redundant DB writes
-      and zero redundant redeploys, per that record's own "do not reopen absent a real
-      regression" standing rule. No regression was found this session.
+- [x] Resolved canonical DB path: `SUPERBOSS_REGISTER_DB` unset -> fallback `/opt/veridian/ai-os/memory/superboss-register.sqlite` used (matches directive).
+- [x] Located real registrar built in veridian-scripts PR #53 (`ocid_canonical_registry` + `query-ocid-canonical` CLI) and queried it directly.
+- [x] Independently re-verified `/home/rajat/claude-session-analysis`: 594MB, `metadata_format.json`/`parser.py`/`INSTRUCTIONS_FOR_ANALYST.md` present, 51 raw `.jsonl` transcripts (not 432 as claimed).
+- [x] **Found this dispatch is a duplicate**: the identical real folder/initiative was already registered earlier today as **OCID-069**, canonical UMR `UMR-20260805-051109-77a9` (status `completed`), under prior dispatch `UMR-20260805-083516-d73c`.
+- [x] Decision: do NOT mint a new OCID-070 for identical already-completed work (would violate this repo's own zero-duplication-by-OCID convention). Minted a real tracking UMR instead, via `resource_governor.submit()`, for the re-dispatch event itself, and linked it to OCID-069.
+- [x] Minted real UMR `UMR-20260805-131705-e23f` (tier=2, source_trigger=owner_dispatch_gateway), marked `completed`, linked to OCID-069 via `insert_ocid_artifact_link()`.
+- [x] Updated the existing `ocid_canonical_registry` row for OCID-069 (appended new UMR to `all_umr_ids_json`, added `duplicate_reason`, appended evidence) -- canonical UMR unchanged.
+- [x] Wrote findings doc: `OCID_069_REDISPATCH_DUPLICATE_CHECK_2026-08-05T131359.md`.
 
 ## Remaining
-- [ ] None. All three SPEC requirements (DB completion correction, dedup annotation, seven-rule
-      live-deployment verification) independently re-verified already true; nothing further to
-      do absent a future real regression.
+- [ ] Commit + push this doc and PROGRESS.md update, open PR.
+- [ ] Report OCID-069 / canonical UMR `UMR-20260805-051109-77a9` / tracking UMR `UMR-20260805-131705-e23f` back to PM plainly.
+
+## Report for PM
+
+**No new OCID was minted.** This dispatch describes the identical real work already registered as:
+
+- **Real OCID:** `OCID-069`
+- **Real canonical UMR:** `UMR-20260805-051109-77a9` (status: `completed`)
+
+Independent re-verification confirmed the folder, all three named support files, and the 594MB size, but found the same real-file-count discrepancy already on record for OCID-069 (51 raw `.jsonl` transcripts, not 432). A new tracking UMR, `UMR-20260805-131705-e23f`, was minted via `resource_governor.submit()` (the same mechanism used all session) to record this re-dispatch/duplicate-check event, marked `completed`, and linked to OCID-069 as a non-canonical entry -- not as a new OCID.

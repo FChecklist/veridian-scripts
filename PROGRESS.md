@@ -30,3 +30,27 @@
 
 ## Remaining
 - [ ] Get PR #77 through independent review and merged.
+
+---
+
+# PROGRESS -- UMR-20260805-165909-4d8b (child-umr-ocid020-permanent-sqlite-backup-generator-fix)
+
+OCID-020 GTM certification category_index=19 ("backup and recovery testing"), parent UMR-20260802-165606-4413. Resumed per explicit PM instruction UMR-20260805-171657-01de.
+
+## Completed
+- [x] Fetched the full, exact original task instructions via direct read-only sqlite query against `umr_tasks.inputs_json.prompt` (never `git show`/truncation-prone tooling for this) -- confirmed complete (4089 chars, ends cleanly, no truncation marker).
+- [x] Verified the corruption precondition's current state BEFORE writing any code: queried `gtm_certification_categories` (category_index=19, currently `passed=0`, failing on `superboss-register.sqlite` backup staleness -- last real backup 2026-08-03, 64.3h+ old vs the 48h bar) and searched `umr_tasks` for any corruption-resolution UMR under the parent -- none found. Confirmed the precondition (no live full-database backup until `file_inventory` corruption resolves, Hard Rule 8) remains in force exactly as written, unweakened.
+- [x] Built `sqlite_daily_backup.py`: real, idempotent backup generator using SQLite's online backup API (`sqlite3.Connection.backup()`, never a raw file copy), with an independent `PRAGMA integrity_check` against the resulting backup file itself, loud failure (non-zero exit, quarantined artifact) on any corrupt/zero-byte result.
+- [x] Built `tests/test_sqlite_daily_backup.py`: 8 real tests against synthetic sqlite fixtures only (built in a tempdir), including a deliberately-corrupted synthetic database (real, empirically-verified structural corruption, not fabricated) proving the failure-detection logic actually works. 8/8 pass, both in the original working tree and independently re-confirmed in a fresh isolated `git clone` of the branch.
+- [x] Built `systemd/veridian-cron-sqlite-daily-backup.service` + `.timer`, matching the existing `veridian-cron-credit-ledger-prune.service`/`.timer` pattern exactly. `systemd-analyze --user verify`: clean, exit 0. Committed to the repo's `systemd/` dir only -- **deliberately NOT copied into `~/.config/systemd/user/`, NOT enabled, NOT started**, per the task's explicit instruction and per the separately-flagged `~/.config/systemd/user/README.md` closed-set-of-18 rule (a genuinely new unit needs an explicit Owner decision this PM-level authorization does not itself constitute -- disclosed in both unit files' own header comments and in the PR body).
+- [x] Real branch `feat/ocid020-sqlite-daily-backup-generator-umr20260805165909-4d8b`, real commit `7e45dda`, pushed, PR opened: https://github.com/FChecklist/veridian-scripts/pull/78
+- [x] Mid-task concurrency hazard: the shared working checkout at `/opt/veridian/repos/veridian-scripts` was switched to a different branch by another concurrent session partway through (after the commit/push had already completed safely). Moved all further verification to a fresh, isolated `git clone` of the pushed branch rather than continuing to fight the shared checkout -- re-confirmed the commit, all 4 files, and all 8 tests there independently.
+- [x] Did NOT start a new `veridian-supervisor@` unit for this task: `systemctl --user list-units 'veridian-worker@*' 'veridian-supervisor@*' --state=running` showed exactly 5 already running (the standing cap) at the time this PR was opened -- held rather than exceed it.
+
+## Explicit confirmation (per task instruction)
+At no point did any command in this task read from, write to, or run any check (including `PRAGMA integrity_check`) against the real live `file_inventory` table, or attempt a real full-database backup or full-database `PRAGMA integrity_check` against the real live `superboss-register.sqlite`. All script development and all 8 tests ran exclusively against synthetic sqlite fixtures. The only real-database interaction was read-only `SELECT` queries (via `sqlite3 -readonly`) against `umr_tasks` and `gtm_certification_categories` to fetch instructions and verify the precondition's state.
+
+## Remaining
+- [ ] Get PR #78 through independent review and merged.
+- [ ] A real Owner decision on installing this as systemd unit #19 (closed-set rule) -- separate from and in addition to the corruption-resolution decision, both must clear before real installation/enable.
+- [ ] Once BOTH gates above clear: install to `~/.config/systemd/user/`, enable+start the real timer, confirm a real successful backup against the real live database, then re-run `gtm_check_backup_recovery_testing.py` and update category 19 honestly. Not attempted in this task by design.

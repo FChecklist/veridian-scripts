@@ -4962,6 +4962,36 @@ def run_ocid_compliance_audit(conn, ocid_number, umr_id, all_umr_ids, canonical_
     }
 
 
+def query_ocid_compliance_state(conn, ocid_number=None):
+    """Real, read-only lookup -- a single OCID's real compliance-state rows
+    (one row per real (ocid_number, umr_id) pair, since ocid_compliance_state's
+    real PRIMARY KEY is composite), or the whole real roster (ordered by
+    ocid_number, umr_id) when called with no argument. Zero writes, zero
+    audit re-run, zero subprocess/network calls -- every column returned here
+    (all 13 real rule_*/file_* booleans plus audit_done/audit_passed) is
+    already trigger-derived by ocid_compliance_state_derive_ai/_au
+    (_ensure_ocid_compliance_state_derive_triggers()) at write time, so this
+    function only ever reads back what those triggers already computed from
+    ocid_compliance_audit_log's own real, append-only evidence -- it never
+    computes anything itself.
+
+    This is the one real read path audit_ocid_compliance.py's `--report` flag
+    calls (Owner directive UMR-20260805-093138-2bd0's real report command,
+    citing UMR-20260805-092408-4f97): a PM (human or AI) runs
+    `audit_ocid_compliance.py --report` and reports this function's own
+    output verbatim, performing no analysis or interpretation of its own."""
+    if ocid_number:
+        rows = conn.execute(
+            "SELECT * FROM ocid_compliance_state WHERE ocid_number=? ORDER BY umr_id",
+            (ocid_number,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM ocid_compliance_state ORDER BY ocid_number, umr_id"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # Real UTR/UMR/single-source-of-truth taxonomy, recorded at the source
 # (UMR-20260805-093630-29d1, citing UMR-20260804-170055-a069, OCID-068, and

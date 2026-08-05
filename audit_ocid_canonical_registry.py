@@ -51,6 +51,20 @@ writes nothing). Pass --apply to actually write, via the real, already-
 merged upsert_ocid_canonical_registry() (never raw SQL), inside a real
 _write_lock(). --ocid-number limits to a single OCID (debugging / targeted
 re-run); default is the full real OCID-001..OCID-069 range.
+
+Terminal-output labeling fix (this cycle, closing the exact real failure
+mode UMR-20260805-092408-4f97 named): a real false data-corruption alarm
+was raised this cycle when the PM read this script's own real terminal
+output and misread a dry-run/in-memory comparison line as a confirmed live
+write -- independently confirmed after the fact that no live write had
+happened and the real live data was correct throughout. Every line this
+script prints now, in both modes, is explicitly prefixed `[DRY_RUN]` or
+`[APPLY]`, wrapped in an opening/closing mode banner, and its stdout JSON is
+wrapped in an explicit `{"mode": ..., "wrote_to_database": ...}` envelope --
+no single line, read in isolation, can be mistaken for the other mode. See
+tests/test_audit_ocid_canonical_registry.py's
+test_dry_run_and_apply_terminal_output_are_unambiguously_labeled for the
+automated proof.
 """
 import argparse
 import importlib.util
@@ -127,6 +141,65 @@ def plan_for_ocid(sbr, conn, ocid_number, existing_by_ocid, **resolve_kwargs):
     return plan
 
 
+# --- Real, pure output-formatting helpers (Owner urgent correction ---------
+# UMR-20260805-092408-4f97): this exact ambiguity -- a real per-OCID line
+# that looked identical in dry-run and --apply mode -- caused a real false
+# data-corruption alarm this cycle, when the PM read one of these lines and
+# interpreted it as a confirmed live write when it was, in fact, a dry-run/
+# in-memory comparison (independently confirmed after the fact that no live
+# write had happened and the real live data was correct throughout). Kept as
+# pure functions of (mode, plan(s)) -- no conn, no I/O -- so real tests can
+# call them directly with zero DB/subprocess dependency and prove every real
+# line, in EITHER mode, carries an explicit, unmissable [DRY_RUN]/[APPLY]
+# tag, same testability-seam convention as plan_for_ocid() above.
+def _mode_label(apply_mode):
+    return "APPLY" if apply_mode else "DRY_RUN"
+
+
+def format_mode_banner(apply_mode):
+    mode = _mode_label(apply_mode)
+    return (
+        "=" * 78 + "\n"
+        f"[{mode}] MODE: {mode} -- this run "
+        + ("WILL WRITE to the real ocid_canonical_registry database.\n" if apply_mode
+           else "WILL NOT WRITE anything; it only prints the proposed plan.\n")
+        + "=" * 78
+    )
+
+
+def format_ocid_line(apply_mode, plan):
+    mode = _mode_label(apply_mode)
+    return (f"[{mode}]   {plan['ocid_number']}: not_found={plan['not_found']} "
+            f"canonical_umr_id={plan['canonical_umr_id']} "
+            f"preserved_existing={plan['preserved_existing_canonical_choice']} "
+            f"changed={plan['changed_from_existing']}")
+
+
+def format_summary_line(apply_mode, plans, changed):
+    mode = _mode_label(apply_mode)
+    return (f"[{mode}] SUMMARY: {len(plans)} real OCIDs re-audited | {len(changed)} changed vs existing row "
+            f"(not_found flip or canonical_umr_id no longer corroborated by fresh evidence)")
+
+
+def format_changed_line(apply_mode, plan):
+    mode = _mode_label(apply_mode)
+    return (f"[{mode}]   CHANGED: {plan['ocid_number']} -> canonical_umr_id={plan['canonical_umr_id']} "
+            f"not_found={plan['not_found']}")
+
+
+def format_completion_line(apply_mode, n):
+    mode = _mode_label(apply_mode)
+    if apply_mode:
+        return f"[{mode}] APPLY COMPLETE -- {n} real re-audited rows WERE WRITTEN to ocid_canonical_registry."
+    return (f"[{mode}] DRY RUN COMPLETE -- NOTHING WAS WRITTEN to the database. "
+            f"Pass --apply to actually write these rows.")
+
+
+def format_stdout_envelope(apply_mode, plans):
+    return {"mode": "apply" if apply_mode else "dry_run", "wrote_to_database": apply_mode, "plans": plans}
+# ---------------------------------------------------------------------------
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true",
@@ -143,25 +216,23 @@ def main():
     existing_rows = sbr.query_ocid_canonical_registry(conn)
     existing_by_ocid = {r["ocid_number"]: r for r in existing_rows}
 
+    print(format_mode_banner(args.apply), file=sys.stderr)
+
     plans = []
     for ocid_number in ocid_numbers:
         plan = plan_for_ocid(sbr, conn, ocid_number, existing_by_ocid)
         plans.append(plan)
-        print(f"  {ocid_number}: not_found={plan['not_found']} canonical_umr_id={plan['canonical_umr_id']} "
-              f"preserved_existing={plan['preserved_existing_canonical_choice']} "
-              f"changed={plan['changed_from_existing']}", file=sys.stderr)
+        print(format_ocid_line(args.apply, plan), file=sys.stderr)
 
     changed = [p for p in plans if p["changed_from_existing"]]
-    print(f"SUMMARY: {len(plans)} real OCIDs re-audited | {len(changed)} changed vs existing row "
-          f"(not_found flip or canonical_umr_id no longer corroborated by fresh evidence)", file=sys.stderr)
+    print(format_summary_line(args.apply, plans, changed), file=sys.stderr)
     for p in changed:
-        print(f"  CHANGED: {p['ocid_number']} -> canonical_umr_id={p['canonical_umr_id']} not_found={p['not_found']}",
-              file=sys.stderr)
+        print(format_changed_line(args.apply, p), file=sys.stderr)
 
     if not args.apply:
         conn.close()
-        print(json.dumps(plans, indent=2, default=str))
-        print("DRY RUN -- pass --apply to actually write these rows", file=sys.stderr)
+        print(json.dumps(format_stdout_envelope(args.apply, plans), indent=2, default=str))
+        print(format_completion_line(args.apply, len(plans)), file=sys.stderr)
         return 0
 
     with sbr._write_lock():
@@ -176,7 +247,8 @@ def main():
             )
         conn.commit()
     conn.close()
-    print(f"APPLIED: wrote {len(plans)} real re-audited rows to ocid_canonical_registry", file=sys.stderr)
+    print(json.dumps(format_stdout_envelope(args.apply, plans), indent=2, default=str))
+    print(format_completion_line(args.apply, len(plans)), file=sys.stderr)
     return 0
 
 

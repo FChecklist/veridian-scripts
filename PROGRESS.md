@@ -1,32 +1,83 @@
-# PROGRESS -- task-20260805-164950-verify-and-complete-the-rich-compliance
+# PROGRESS -- task-20260805-172722-urgent--real-database-lock-contention-bl
+
+Related: UMR-20260805-121654-4b77 (blocked corruption-fix investigation)
+Target DB: /opt/veridian/ai-os/memory/superboss-register.sqlite (1.4GB, WAL mode)
 
 ## Completed
-- [x] Reproduced the reported finding: `audit_ocid_compliance.py` dry-run output only ever shows `ocid_number`/`umr_id`/`real_umr_tasks_row_exists` -- confirmed this is a fixed 3-field preview by design (lines 80-92), not evidence of missing data.
-- [x] Queried the live `ocid_compliance_state` / `ocid_compliance_audit_log` tables directly in `/opt/veridian/ai-os/memory/superboss-register.sqlite`: 113/113 real (ocid,umr) pairs already had all 13 rule/file booleans genuinely computed (1,469 = 13 x 113 audit-log evidence rows, all `audited_by='audit_ocid_compliance.py'`).
-- [x] Re-ran `python3 audit_ocid_compliance.py --apply` this cycle to fulfil the directive directly -- reproduced byte-for-byte identical rule-truth counts to what was already live, confirming genuine, deterministic, evidence-based computation (not fabrication, not drift).
-- [x] Confirmed 8/69 OCIDs (OCID-007..014) are correctly, honestly excluded from compliance-state rows (`not_found=1`, no real UMR to audit) -- not a gap.
-- [x] Identified and honestly reported the one real gap: `file_created_date` is 0/113 populated -- dead schema column, never wired to any real evidence source by any code path in this repo. Not hand-set/fabricated; flagged for a future explicitly-scoped directive.
-- [x] Wrote `RICH_COMPLIANCE_SCHEMA_VERIFICATION_2026-08-05.md` with full honest findings and completion percentages.
-- [x] PR opened: https://github.com/FChecklist/veridian-scripts/pull/73
+- [x] Checked for processes holding the DB file open (`fuser -v`, `lsof`): only
+      one process, PID 3095615 (`/opt/veridian/scripts/health-check-15min.py`,
+      the legitimate 15-min periodic health-check job, started 17:19:41,
+      state `S` sleeping/blocked in `do_poll`, i.e. idle, not stuck).
+- [x] Checked actual byte-range locks with `lslocks` (authoritative for
+      SQLite's real lock state, unlike `fuser`'s coarse open-fd view): PID
+      3095615 holds only **POSIX READ locks** on the db file and `-shm` file
+      (normal WAL-mode reader-mark locks) plus its own `flock` on
+      `.health-check-15min.lock` (its private run-lock, unrelated to the DB).
+      **No exclusive/write lock held by anyone.**
+- [x] Investigated `superboss-register.sqlite.writelock`: read the live
+      `_write_lock()` implementation in `/opt/veridian/scripts/superboss-register.py`
+      (lines 172-203). It's an `fcntl.flock` advisory lock acquired *before*
+      opening any write connection, added 2026-07-23 specifically so a killed
+      waiter can never hold the DB mid-transaction -- flock is released
+      automatically by the kernel if the holder dies, so it cannot leave an
+      orphaned/stuck lock. Confirmed via `lslocks` no process currently holds
+      this flock either.
+- [x] Root-caused the 2026-07-23 corruption incidents referenced in that code
+      comment: caused by an *outer* caller (`veridian-task.py`'s
+      `_log_to_register()`) SIGKILLing a child after only a 10s wait while it
+      was still blocked acquiring SQLite's internal write lock -- a kill
+      landing mid-transaction/mid-WAL-checkpoint left torn b-tree pages. This
+      is exactly the failure mode the `.writelock` flock (see above) was
+      built to make impossible, and it predates/is unrelated to today's
+      report.
+- [x] Verified: no stuck or orphaned transaction/process was found. Nothing
+      was force-killed (none needed -- no process was in fact holding a
+      blocking lock at time of check).
+- [x] Ran the actual blocked query for real:
+      `SELECT umr_id, status, tier, ts_submitted, ts_completed FROM umr_tasks
+      WHERE umr_id = 'UMR-20260805-121654-4b77';`
+      Result: returned in **9ms** (`status=running`, `tier=1`,
+      `ts_submitted=2026-08-05T12:16:54`, `ts_completed` empty). Re-ran a
+      second time (`SELECT COUNT(*) FROM umr_tasks` = 5618 rows) in 8ms.
+      Confirms the query is unblocked and the corruption investigation can
+      proceed.
+- [x] Noted longer-term finding (not implemented, per instruction): see below.
 
 ## Remaining
-- [ ] None for this cycle. `file_created_date` real-evidence computation (e.g. `git log --follow --format=%aI`) is an open item for a future directive, not attempted here per the anti-fabrication/no-hand-set rule.
+- [ ] None for this task -- investigation complete, query confirmed
+      unblocked. Longer-term DB-health note handed off to PM/owner (see
+      report), not actioned here.
 
----
+## Findings summary (for PM)
 
-# PROGRESS -- task-20260805-165217-urgent--stop-real-duplicate-workers-re-e
+**No stuck lock was found or cleared.** By the time this was investigated,
+`superboss-register.sqlite` had zero exclusive/write locks held by any
+process (verified with `lslocks`, which reads real POSIX/flock state, not
+just open-fd lists). The only process touching the file was the legitimate
+15-min health-check job holding ordinary WAL read locks. The `.writelock`
+mechanism that guards writers was specifically engineered on 2026-07-23 to be
+unable to strand a lock if its holder is killed (kernel auto-releases
+`flock`), so "leftover write transaction from an earlier run" is not
+mechanically possible with the current code path.
 
-## Completed
-- [x] Located the three named task directories (SPEC's spelling of the first one, `task-20260805-114126-pm-decision-reconcile-ocid-068-umr-book`, is missing a `--`; the real directory is `task-20260805-114126-pm-decision--reconcile-ocid-068-umr-book`, found via `rg` for the cited UMR IDs).
-- [x] Verified live state of all three directly (`task.yaml` `status:`, `.task.lock` + `fuser`, PROGRESS.md, `ps -eo pid,etimes,cmd` at 16:52Z and again at 17:02Z, `systemctl --user list-units --all`): **none is currently running.** All three reached a terminal state (`completed`/`blocked`) between 11:48Z and 12:20Z, 4.5-5+ hours before this SPEC's "right now" claim, and no process/systemd-unit anywhere references any of the three task IDs.
-- [x] Verified each task's own worker had already independently re-checked live state and correctly declined to redo already-merged work (see `DUPLICATE_WORKER_VERIFICATION_2026-08-05T165217Z.md` for full per-task evidence): #114126 made zero DB writes, #114207 made one small non-duplicate governance-doc fix (already committed+pushed) instead of rebuilding the already-merged gate, #114214 made zero commits.
-- [x] Sampled load average twice (2.22/2.43/3.88 at 16:52Z, then 14.42/12.19/8.21 at 17:02Z -- a real spike did occur) and cross-checked the live process table at spike time: no process tied to any of the three named tasks. Attributed the spike to the platform's much larger pre-existing backlog (`PM_TRIAGE_ALERTS.md`'s own 16:33Z entry: 604 tasks stuck >30min, 62 with fresh audit-reject verdicts), which is out of this task's scope.
-- [x] **Conclusion: nothing was stopped, because nothing was live to stop.** Did not stop a legitimate task by mistake -- confirmed all three were already terminal before considering any stop action.
-- [x] Investigated root cause of the re-dispatch. Ruled out a recurrence of the already-fixed DB-path bookkeeping bug (`resolve_superboss_db_path()`, commit `5130153`, merged `2026-08-04T18:12:32Z` -- ~17h before these dispatches; task 114126's own live DB re-check confirms the row was already correctly `completed` at dispatch time, so the DB was not lagging). Found the real cause: the dispatch prompts themselves were minted from an already-hours-stale GH PR/CI snapshot (task 114214's prompt describes PR #932/#933 as "currently blocked," ~8h after both had actually merged) -- a different instance of the same "trust a cached snapshot instead of live-checking at the point of action" bug class, living in the alert-to-dispatch step rather than the DB-read step. Documented in full, including why a fix was not unilaterally written into the live shared dispatcher (`dispatch-tick.py`) here: high blast radius, and at least four other concurrently-dispatched tasks already actively working this exact area -- writing a competing fix would itself be the kind of duplicate work this task exists to prevent.
-- [x] Wrote `DUPLICATE_WORKER_VERIFICATION_2026-08-05T165217Z.md` with full evidence and a concrete, actionable recommendation for whichever in-flight session ends up owning the dispatch pipeline.
-- [x] Cleaned up my own stray background `grep` processes (left running past their 120s timeout while I switched to `rg`) that were themselves adding to load.
+Direct proof: the actual PK-lookup query from the corruption investigation,
+run for real against the live DB, returned in 9ms -- not 100+ seconds. The
+reported 1m40s+ hang was real but was **transient contention**, not a
+persistent stuck lock: most likely a momentary writer holding SQLite's
+internal write lock under the existing 30s `busy_timeout` (already set in
+`superboss-register.py`'s `_connect()`), compounded by this being a 1.4GB
+file with a 13MB WAL under concurrent access from multiple simultaneous
+tasks this session. It had cleared on its own by the time of this check.
 
-- [x] Rebased onto current `origin/main`, committed, pushed, opened PR: https://github.com/FChecklist/veridian-scripts/pull/77
-
-## Remaining
-- [ ] Get PR #77 through independent review and merged.
+**Longer-term finding, noted per instruction, not implemented:** the DB is
+already in WAL mode and the primary write-path script
+(`superboss-register.py`) already sets `busy_timeout=30000`, so those two
+specific mitigations exist at the application level already. However, at
+1.4GB+ and growing, under heavy concurrent access from many simultaneous
+tasks this session, other/ad-hoc readers (e.g. plain `sqlite3` CLI calls,
+which default to `busy_timeout=0`) can still hit instant `SQLITE_BUSY` or
+contend for the write lock without backing off. Recommend auditing all
+callers (not just `superboss-register.py`) to consistently set a
+`busy_timeout`, and considering `PRAGMA wal_autocheckpoint` tuning /
+periodic `wal_checkpoint(TRUNCATE)` given the 13MB WAL, as a longer-term
+follow-up. Not implemented now, per instruction.

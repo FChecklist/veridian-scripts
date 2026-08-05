@@ -271,9 +271,73 @@ def test_not_applicable_confirmed_requires_real_stored_audit_raw_output():
         print("PASS: test_not_applicable_confirmed_requires_real_stored_audit_raw_output")
 
 
+def test_dry_run_and_apply_terminal_output_are_unambiguously_labeled():
+    """Owner urgent correction UMR-20260805-092408-4f97: a real false data-
+    corruption alarm was raised this cycle when the PM read this script's
+    own real terminal output and misread a dry-run/in-memory comparison
+    line as a confirmed live write -- independently confirmed after the
+    fact that no live write had happened. Proves, mechanically (no eyeballing
+    required): every real line format_*() emits, in BOTH modes, carries an
+    explicit `[DRY_RUN]`/`[APPLY]` tag; the two modes' own tags are never
+    equal to each other; and the stdout JSON envelope's own `mode`/
+    `wrote_to_database` fields correctly and unambiguously distinguish the
+    two, so a real human or real AI reading only ONE line (any line) in
+    isolation still cannot mistake one mode for the other."""
+    audit = _load_audit_script()
+
+    fake_plan = {
+        "ocid_number": "OCID-999", "not_found": False, "canonical_umr_id": "UMR-20260805-000000-zzzz",
+        "preserved_existing_canonical_choice": True, "changed_from_existing": False,
+    }
+    plans = [fake_plan]
+    changed = []
+
+    dry_lines = [
+        audit.format_mode_banner(False),
+        audit.format_ocid_line(False, fake_plan),
+        audit.format_summary_line(False, plans, changed),
+        audit.format_completion_line(False, len(plans)),
+    ]
+    apply_lines = [
+        audit.format_mode_banner(True),
+        audit.format_ocid_line(True, fake_plan),
+        audit.format_summary_line(True, plans, changed),
+        audit.format_completion_line(True, len(plans)),
+    ]
+
+    # Every single real line, in EITHER mode, must carry an explicit tag --
+    # no line is allowed to be silent about which mode produced it.
+    for line in dry_lines:
+        assert "[DRY_RUN]" in line, f"real dry-run line missing its explicit mode tag: {line!r}"
+        assert "[APPLY]" not in line, f"real dry-run line wrongly carries the APPLY tag: {line!r}"
+    for line in apply_lines:
+        assert "[APPLY]" in line, f"real apply line missing its explicit mode tag: {line!r}"
+        assert "[DRY_RUN]" not in line, f"real apply line wrongly carries the DRY_RUN tag: {line!r}"
+
+    # The two modes' own per-line-type output must never be byte-identical
+    # (this is the exact real ambiguity UMR-20260805-092408-4f97 named).
+    for dry_line, apply_line in zip(dry_lines, apply_lines):
+        assert dry_line != apply_line, f"real dry-run and real apply lines are identical: {dry_line!r}"
+
+    # The dry-run completion line must never claim a write happened; the
+    # apply completion line must always explicitly claim one did.
+    assert "NOTHING WAS WRITTEN" in audit.format_completion_line(False, 5)
+    assert "WERE WRITTEN" in audit.format_completion_line(True, 5)
+
+    # The real stdout JSON envelope itself must be unambiguous even with NO
+    # stderr lines present at all (e.g. stdout captured/piped alone).
+    dry_envelope = audit.format_stdout_envelope(False, plans)
+    apply_envelope = audit.format_stdout_envelope(True, plans)
+    assert dry_envelope["mode"] == "dry_run" and dry_envelope["wrote_to_database"] is False
+    assert apply_envelope["mode"] == "apply" and apply_envelope["wrote_to_database"] is True
+    assert dry_envelope["mode"] != apply_envelope["mode"]
+    print("PASS: test_dry_run_and_apply_terminal_output_are_unambiguously_labeled")
+
+
 if __name__ == "__main__":
     test_determinism_two_runs_identical_structured_output()
     test_plan_preserves_existing_reasoned_canonical_choice_when_still_corroborated()
     test_plan_uses_fresh_result_when_existing_choice_no_longer_corroborated()
     test_not_applicable_confirmed_requires_real_stored_audit_raw_output()
+    test_dry_run_and_apply_terminal_output_are_unambiguously_labeled()
     print("ALL PASS")

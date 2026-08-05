@@ -1,32 +1,45 @@
-# PROGRESS -- task-20260805-164950-verify-and-complete-the-rich-compliance
+# PROGRESS -- task-20260805-172731-build-a-real-deterministic-deposit-and-r
 
 ## Completed
-- [x] Reproduced the reported finding: `audit_ocid_compliance.py` dry-run output only ever shows `ocid_number`/`umr_id`/`real_umr_tasks_row_exists` -- confirmed this is a fixed 3-field preview by design (lines 80-92), not evidence of missing data.
-- [x] Queried the live `ocid_compliance_state` / `ocid_compliance_audit_log` tables directly in `/opt/veridian/ai-os/memory/superboss-register.sqlite`: 113/113 real (ocid,umr) pairs already had all 13 rule/file booleans genuinely computed (1,469 = 13 x 113 audit-log evidence rows, all `audited_by='audit_ocid_compliance.py'`).
-- [x] Re-ran `python3 audit_ocid_compliance.py --apply` this cycle to fulfil the directive directly -- reproduced byte-for-byte identical rule-truth counts to what was already live, confirming genuine, deterministic, evidence-based computation (not fabrication, not drift).
-- [x] Confirmed 8/69 OCIDs (OCID-007..014) are correctly, honestly excluded from compliance-state rows (`not_found=1`, no real UMR to audit) -- not a gap.
-- [x] Identified and honestly reported the one real gap: `file_created_date` is 0/113 populated -- dead schema column, never wired to any real evidence source by any code path in this repo. Not hand-set/fabricated; flagged for a future explicitly-scoped directive.
-- [x] Wrote `RICH_COMPLIANCE_SCHEMA_VERIFICATION_2026-08-05.md` with full honest findings and completion percentages.
-- [x] PR opened: https://github.com/FChecklist/veridian-scripts/pull/73
+- [x] Surveyed existing OCID-068 infrastructure: `ocid_canonical_registry` (deposit via
+      `upsert_ocid_canonical_registry`, compute via `ocid_canonical_registry_completion_ai/_au`
+      SQLite triggers deriving `has_real_*`/`is_fully_complete`/`not_applicable_confirmed`) and
+      `ocid_compliance_state`/`ocid_compliance_audit_log` (deposit via
+      `record_ocid_compliance_audit`, compute via `ocid_compliance_state_derive_ai/_au` triggers
+      deriving all 7 `rule_*_verified` booleans) already implement the real deposit/compute
+      separation this task's spec calls for -- confirmed no caller-settable path exists for any
+      of these booleans (re-confirmed by existing test suites, all still passing).
+- [x] Added `query_ocid_compliance_state()` (superboss-register.py) -- real, read-only lookup of
+      the already-trigger-computed `ocid_compliance_state` rows; zero writes, zero re-audit.
+- [x] Added the real **report command**: `audit_ocid_compliance.py --report` -- read-only, no
+      gh/git subprocess calls, no writes; prints the current compliance analysis (all 7 rules +
+      completion booleans) verbatim via `build_compliance_report()`, so the PM runs this flag and
+      reports its output directly instead of interpreting anything itself.
+- [x] Fixed `audit_ocid_canonical_registry.py`'s real terminal-output ambiguity (the exact root
+      cause of this cycle's false data-corruption alarm): every line in both modes is now tagged
+      `[DRY_RUN]`/`[APPLY]`, wrapped in an explicit mode banner, and stdout's JSON is wrapped in a
+      `{"mode": ..., "wrote_to_database": ...}` envelope. Applied the same labeling fix to
+      `audit_ocid_compliance.py`'s dry-run/apply paths for consistency (zero-exception guardrail).
+      Extracted the formatting into pure, directly-testable functions
+      (`format_mode_banner`/`format_ocid_line`/`format_summary_line`/`format_changed_line`/
+      `format_completion_line`/`format_stdout_envelope`).
+- [x] Added real automated tests:
+  - `tests/test_audit_ocid_canonical_registry.py::test_dry_run_and_apply_terminal_output_are_unambiguously_labeled`
+    -- proves every real line in both modes carries its own explicit tag, the two modes' lines are
+    never identical, and the stdout envelope alone (no stderr) disambiguates mode.
+  - `tests/test_audit_ocid_compliance_report.py` (new) -- proves `--report` reads back real
+    trigger-computed state verbatim, never fabricates a pass for an unaudited pair, and (the
+    spec's explicit compute-determinism requirement) that the real compute step
+    (`query_ocid_compliance_state`) and the `--report` output are byte-identical across two
+    separate real runs against the same unchanged data.
+  - All pre-existing test suites (18 files) re-run and still pass; zero regressions.
+- [x] Consolidated into the two existing scripts (`audit_ocid_canonical_registry.py`,
+      `audit_ocid_compliance.py`) per zero duplication -- no third parallel script built.
+- [x] Independently confirmed (real `gh api` call, not narrated) UMR-20260805-112247-3ad0: the
+      real, live `compliance-tracker` `main` branch protection `required_approving_review_count`
+      is currently `1` (restored) and `enforce_admins` is `true`. Recorded in
+      `UMR_20260805_112247_3ad0_BRANCH_PROTECTION_REVERIFICATION_2026-08-05.md`.
 
 ## Remaining
-- [ ] None for this cycle. `file_created_date` real-evidence computation (e.g. `git log --follow --format=%aI`) is an open item for a future directive, not attempted here per the anti-fabrication/no-hand-set rule.
-
----
-
-# PROGRESS -- task-20260805-165217-urgent--stop-real-duplicate-workers-re-e
-
-## Completed
-- [x] Located the three named task directories (SPEC's spelling of the first one, `task-20260805-114126-pm-decision-reconcile-ocid-068-umr-book`, is missing a `--`; the real directory is `task-20260805-114126-pm-decision--reconcile-ocid-068-umr-book`, found via `rg` for the cited UMR IDs).
-- [x] Verified live state of all three directly (`task.yaml` `status:`, `.task.lock` + `fuser`, PROGRESS.md, `ps -eo pid,etimes,cmd` at 16:52Z and again at 17:02Z, `systemctl --user list-units --all`): **none is currently running.** All three reached a terminal state (`completed`/`blocked`) between 11:48Z and 12:20Z, 4.5-5+ hours before this SPEC's "right now" claim, and no process/systemd-unit anywhere references any of the three task IDs.
-- [x] Verified each task's own worker had already independently re-checked live state and correctly declined to redo already-merged work (see `DUPLICATE_WORKER_VERIFICATION_2026-08-05T165217Z.md` for full per-task evidence): #114126 made zero DB writes, #114207 made one small non-duplicate governance-doc fix (already committed+pushed) instead of rebuilding the already-merged gate, #114214 made zero commits.
-- [x] Sampled load average twice (2.22/2.43/3.88 at 16:52Z, then 14.42/12.19/8.21 at 17:02Z -- a real spike did occur) and cross-checked the live process table at spike time: no process tied to any of the three named tasks. Attributed the spike to the platform's much larger pre-existing backlog (`PM_TRIAGE_ALERTS.md`'s own 16:33Z entry: 604 tasks stuck >30min, 62 with fresh audit-reject verdicts), which is out of this task's scope.
-- [x] **Conclusion: nothing was stopped, because nothing was live to stop.** Did not stop a legitimate task by mistake -- confirmed all three were already terminal before considering any stop action.
-- [x] Investigated root cause of the re-dispatch. Ruled out a recurrence of the already-fixed DB-path bookkeeping bug (`resolve_superboss_db_path()`, commit `5130153`, merged `2026-08-04T18:12:32Z` -- ~17h before these dispatches; task 114126's own live DB re-check confirms the row was already correctly `completed` at dispatch time, so the DB was not lagging). Found the real cause: the dispatch prompts themselves were minted from an already-hours-stale GH PR/CI snapshot (task 114214's prompt describes PR #932/#933 as "currently blocked," ~8h after both had actually merged) -- a different instance of the same "trust a cached snapshot instead of live-checking at the point of action" bug class, living in the alert-to-dispatch step rather than the DB-read step. Documented in full, including why a fix was not unilaterally written into the live shared dispatcher (`dispatch-tick.py`) here: high blast radius, and at least four other concurrently-dispatched tasks already actively working this exact area -- writing a competing fix would itself be the kind of duplicate work this task exists to prevent.
-- [x] Wrote `DUPLICATE_WORKER_VERIFICATION_2026-08-05T165217Z.md` with full evidence and a concrete, actionable recommendation for whichever in-flight session ends up owning the dispatch pipeline.
-- [x] Cleaned up my own stray background `grep` processes (left running past their 120s timeout while I switched to `rg`) that were themselves adding to load.
-
-- [x] Rebased onto current `origin/main`, committed, pushed, opened PR: https://github.com/FChecklist/veridian-scripts/pull/77
-
-## Remaining
-- [ ] Get PR #77 through independent review and merged.
+- [ ] Commit and push this branch; open PR for independent review before merge (per Owner
+      directive -- "sacrosanct infrastructure", must not merge without independent review).

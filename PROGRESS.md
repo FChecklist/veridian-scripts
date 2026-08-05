@@ -10,9 +10,10 @@
 - [x] Updated the existing `ocid_canonical_registry` row for OCID-069 (appended new UMR to `all_umr_ids_json`, added `duplicate_reason`, appended evidence) -- canonical UMR unchanged.
 - [x] Wrote findings doc: `OCID_069_REDISPATCH_DUPLICATE_CHECK_2026-08-05T131359.md`.
 
+- [x] Committed, pushed, opened PR: https://github.com/FChecklist/veridian-scripts/pull/59
+
 ## Remaining
-- [ ] Commit + push this doc and PROGRESS.md update, open PR.
-- [ ] Report OCID-069 / canonical UMR `UMR-20260805-051109-77a9` / tracking UMR `UMR-20260805-131705-e23f` back to PM plainly.
+- [ ] PR #59 merge (owner/PM review)
 
 ## Report for PM
 

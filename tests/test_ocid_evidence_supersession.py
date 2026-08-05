@@ -35,6 +35,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -206,7 +207,19 @@ def test_older_evidence_before_submission_does_not_supersede():
     elsewhere while it waited. Evidence from before submission just means
     the OCID had prior, unrelated history (this session's own real OCID-068
     has ~15 real UMRs across its whole lifetime), not that THIS specific
-    queued task is now redundant."""
+    queued task is now redundant.
+
+    Real fix, 2026-08-05 (found while writing the OCID-068 permanent closure
+    record): insert_ocid_artifact_link() has no explicit created_at
+    parameter -- it always stamps the real current time at insert. This
+    test's own ts_submitted used to be a hardcoded literal ("2026-08-04
+    23:59:59"), so once a real calendar day passed, "now" (whenever this
+    test actually runs) was always after that fixed literal -- the seeded
+    "old" evidence stopped looking old, and this test started failing for a
+    reason that had nothing to do with the real code under test. Fixed by
+    computing ts_submitted dynamically, always safely in the future
+    relative to real insert time, so the test's own real intent holds
+    regardless of what day it runs."""
     with tempfile.TemporaryDirectory() as d:
         scratch_db = os.path.join(d, "scratch.sqlite")
         sbr, conn = _seed_scratch_db(scratch_db)
@@ -215,6 +228,7 @@ def test_older_evidence_before_submission_does_not_supersede():
             repo="veridian-scripts", pr_number=20, link_kind="merge",
         )
         conn.commit()
+        ts_submitted_after_evidence = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         sbr.upsert_umr_task(conn, {
             "task_identity": "owner-task-after-old-evidence", "tier": 2,
             "status": "queued", "source_trigger": "owner_dispatch_gateway",
@@ -222,7 +236,7 @@ def test_older_evidence_before_submission_does_not_supersede():
             "inputs": {"title": "OCID-068 a real, distinct, later directive",
                        "prompt": "x", "repo": "veridian-scripts"},
             "reason": "queued",
-            "ts_submitted": "2026-08-04T23:59:59+00:00",  # after the evidence above
+            "ts_submitted": ts_submitted_after_evidence,  # real "now" + 1h -- always after the evidence above
         })
         conn.commit()
         conn.close()

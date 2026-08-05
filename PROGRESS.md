@@ -18,43 +18,58 @@ executing** the audit script for real against live production data (every
 prior run was either `--dry-run` or against a scratch test DB --
 `audit_raw_output` was NULL on all 69 live rows before this task).
 
+**This task itself has no discoverable real UMR ID**: a direct query of
+live `umr_tasks` found no row matching this task's identity. Rather than
+invent a plausible-looking `UMR-YYYYMMDD-HHMMSS-hash` citation, all new
+code/tests/docs cite it honestly by its real task-directory identifier
+(`task-20260805-161157-close-a-real-fabrication-loophole--not-a`) with that
+caveat stated -- fitting, given the task's own subject.
+
 ## Completed
-- [x] Re-verified all 4 test files covering this area pass (16/16 repo-wide test files pass)
-- [x] Confirmed live DB (`/opt/veridian/ai-os/memory/superboss-register.sqlite`) had
-      `audit_raw_output` NULL on all 69 rows -- the real script had never actually
-      been `--apply`'d against production data before this task
-- [x] **Real, serious finding from the first live run**: real production `umr_tasks`
-      rows now carry multi-MB `metadata_json` (a separate, pre-existing dedup-engine
-      data-quality issue, not caused by this task) that method (b)'s full-table grep
-      legitimately matches -- would have added an estimated 1-2+ GB to the live DB
-      in one `--apply` run. Fixed with a deterministic, disclosed, identically-applied
-      per-OCID char cap (`_bounded_for_storage()`), not interpretation/narrative.
-- [x] **Second, more serious real finding**: for the real, already-honestly-confirmed
-      `not_found` OCIDs (007-014), a fresh live run's method (b) full-table grep
-      matches this task's *own meta-dispatch UMRs* (which merely *discuss* "OCID-007
-      through OCID-014 not_found" in their prompt text) as if they were real evidence
-      FOR OCID-007 -- flipping `not_found=True` to a false `status=multiple_umr_ids_found_needs_review`
-      / `has_real_umr=1`. Applying this blindly would have fabricated exactly the kind
-      of false boolean this whole task exists to prevent. **Investigating a deterministic
-      fix before any live `--apply` run** (see Remaining).
-- [x] Added `_bounded_for_storage()` + doc + tests (2 new tests,
-      `tests/test_audit_ocid_canonical_registry.py`, now 6/6 passing)
+- [x] Re-verified all pre-existing real work; 16/16 test files pass
+- [x] Confirmed live DB had `audit_raw_output` NULL on all 69 rows -- never
+      actually `--apply`'d against production before this task
+- [x] **Real finding #1**: production `umr_tasks` rows carry multi-MB
+      `metadata_json` (separate pre-existing dedup-engine data-quality
+      issue, not caused by this task) that method (b) legitimately matches
+      -- would have added an estimated 1-2+ GB to the live DB in one
+      `--apply`. **Fixed**: deterministic, disclosed, identical-per-OCID
+      `_bounded_for_storage()` char cap (5000 chars/leaf value), not
+      interpretation. 2 new tests.
+- [x] **Real finding #2 (more serious)**: a live, unattended full-text
+      re-run's "otherwise use fresh result in full" fallback would have
+      SILENTLY OVERWRITTEN real, carefully-reasoned existing rows --
+      live-verified: OCID-001's historical `rejected_duplicate` judgment
+      would have been replaced by a spurious match against an unrelated
+      batch-registration UMR that merely enumerates "OCID-001 through
+      OCID-068" in its own prompt text; OCID-007/011 (real, honestly
+      confirmed `not_found`) would have been flipped to a false "found"
+      by matching this very task's own meta-discussion text. **Fixed**:
+      `plan_for_ocid()`'s merge rule rewritten -- existing
+      canonical_umr_id/status/all_umr_ids/pr_number/pr_repo/not_found are
+      now ALWAYS preserved for every real existing row, no exception;
+      `audit_raw_output` is always refreshed; any disagreement is appended
+      (never replacing prior reasoning) as an explicit, idempotent NEEDS
+      HUMAN REVIEW note. Rewrote the test that encoded the old (now-proven
+      unsafe) behavior; added an idempotence proof.
+- [x] Caught and fixed a fabricated-looking self-citation in my own new
+      code before it could be written to the live DB (killed an in-flight
+      `--apply` run mid-computation, before any write occurred, once this
+      was found) -- replaced with an honest task-directory citation.
+- [x] Full 16-file test suite passes after all fixes
+- [x] Live production DB backed up:
+      `superboss-register.sqlite.bak-pre-audit-raw-output-live-apply-20260805T163658Z`
+- [x] Committed + pushed WIP
 
 ## Remaining
-- [ ] Design + implement a deterministic (no AI judgment) guard against the
-      self-referential-contamination false positive found above, before
-      running any live `--apply`
-- [ ] Full dry run across all 69 real OCIDs against live data, inspect every
-      proposed change by hand before applying anything
-- [ ] `--apply` for real against the live production DB (fresh, current
-      evidence for every OCID, per this task's SPEC)
-- [ ] Confirm post-apply: all 8 real not_found rows correctly earn
-      `not_applicable_confirmed=1` with genuine, bounded, non-contaminated evidence
-- [ ] Add/extend automated tests proving the boolean cannot be set true
-      through any path that doesn't call this real script (mostly already
-      covered by existing tests -- confirm coverage of the new contamination guard)
-- [ ] Update the OCID-068 addendum: plain statement that no boolean/completion
-      claim may ever be hand-set or narrated again (existing Section 5 already
-      says this near-verbatim -- confirm/extend, don't duplicate)
+- [ ] Re-run the live `--apply` across all 69 OCIDs with the corrected script
+      (in progress / re-launching)
+- [ ] Confirm post-apply: all 8 real not_found rows earn
+      `not_applicable_confirmed=1`; no existing canonical choice silently changed
+- [ ] Spot-check DB size delta is bounded (expect low tens of MB, not GB)
+- [ ] Write/extend the OCID-068 addendum documenting this task's real
+      findings + the permanent "no boolean/claim ever hand-set" restatement
+      (existing addendum Section 5 already states this near-verbatim --
+      confirm/extend, don't duplicate)
 - [ ] Independent review before merge
-- [ ] Commit + push, open PR
+- [ ] Final commit + push, open PR

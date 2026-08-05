@@ -182,11 +182,22 @@ def test_plan_preserves_existing_reasoned_canonical_choice_when_still_corroborat
         print("PASS: test_plan_preserves_existing_reasoned_canonical_choice_when_still_corroborated")
 
 
-def test_plan_uses_fresh_result_when_existing_choice_no_longer_corroborated():
-    """When the fresh real audit run no longer finds the existing
-    canonical_umr_id anywhere in its own real evidence, the plan must use
-    the fresh result in full, with a real, non-silent explanatory note --
-    never keep citing evidence that no longer exists."""
+def test_plan_preserves_existing_record_and_flags_review_when_fresh_evidence_disagrees():
+    """Real regression proof (this task -- no matching umr_tasks row was found for this exact task_identity, so it is cited by its real task-directory identifier task-20260805-161157-close-a-real-fabrication-loophole--not-a rather than an unverified UMR ID):
+    this script's own FIRST real run against real live production data
+    found that a fully mechanical full-text search over a corpus that
+    increasingly contains real meta-discussion ABOUT OCIDs (not just
+    genuine completion evidence FOR them) produces real false
+    "corrections" -- live-verified this task, OCID-001's real, careful,
+    historical `rejected_duplicate` judgment would have been silently
+    overwritten by a spurious match against an unrelated batch-registration
+    dispatch UMR that merely enumerates a broad OCID range in its own
+    prompt text. So: when the fresh real search no longer corroborates an
+    existing real record, the existing record must be PRESERVED unchanged
+    (never silently replaced), with a real, non-silent, appended NEEDS
+    HUMAN REVIEW note -- the opposite of this test's own prior (now
+    disproven-unsafe) expectation that the fresh result should be used in
+    full."""
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "scratch.sqlite")
         sbr = _seed_scratch_db(path)
@@ -197,6 +208,7 @@ def test_plan_uses_fresh_result_when_existing_choice_no_longer_corroborated():
         sbr.upsert_ocid_canonical_registry(
             conn, "OCID-952", canonical_umr_id="UMR-STALE-NO-LONGER-REAL",
             status="completed", all_umr_ids=["UMR-STALE-NO-LONGER-REAL"],
+            duplicate_reason="Real, careful, human-reasoned historical choice.",
             evidence={
                 **{k: None for k in sbr.EVIDENCE_JSON_REQUIRED_KEYS},
                 "umr_id": "UMR-STALE-NO-LONGER-REAL", "ocid_number": "OCID-952",
@@ -218,13 +230,36 @@ def test_plan_uses_fresh_result_when_existing_choice_no_longer_corroborated():
             ("projexa", "OCID-952"): [],
         })
         plan = audit.plan_for_ocid(sbr, conn, "OCID-952", existing_by_ocid, _runner=runner)
-        conn.close()
 
-        assert plan["preserved_existing_canonical_choice"] is False
-        assert plan["canonical_umr_id"] == "UMR-20260805-000000-cccc"
-        assert "no longer corroborates" in plan["duplicate_reason"]
-        assert "UMR-STALE-NO-LONGER-REAL" in plan["duplicate_reason"]
-        print("PASS: test_plan_uses_fresh_result_when_existing_choice_no_longer_corroborated")
+        assert plan["preserved_existing_canonical_choice"] is True
+        assert plan["fresh_evidence_corroborates_existing"] is False
+        assert plan["canonical_umr_id"] == "UMR-STALE-NO-LONGER-REAL", (
+            "the real, existing, human-reasoned record must be PRESERVED, never silently overwritten"
+        )
+        assert "Real, careful, human-reasoned historical choice." in plan["duplicate_reason"]
+        assert "NEEDS HUMAN REVIEW" in plan["duplicate_reason"]
+        assert "UMR-20260805-000000-cccc" in plan["duplicate_reason"], "fresh disagreement must be disclosed, not silently dropped"
+        # audit_raw_output must still carry the real fresh evidence (the
+        # actual point of this whole task), even though nothing else changed
+        assert "UMR-20260805-000000-cccc" in json.dumps(plan["audit_raw_output"])
+
+        # real idempotence proof: applying the plan and re-running must not
+        # grow the NEEDS HUMAN REVIEW note on every subsequent real re-run
+        with sbr._write_lock():
+            sbr.upsert_ocid_canonical_registry(
+                conn, plan["ocid_number"], canonical_umr_id=plan["canonical_umr_id"], status=plan["status"],
+                all_umr_ids=plan["all_umr_ids"], evidence=plan["evidence"], pr_number=plan["pr_number"],
+                pr_repo=plan["pr_repo"], duplicate_reason=plan["duplicate_reason"], not_found=plan["not_found"],
+                audit_raw_output=plan["audit_raw_output"],
+            )
+            conn.commit()
+        existing_by_ocid_2 = {r["ocid_number"]: r for r in sbr.query_ocid_canonical_registry(conn)}
+        plan2 = audit.plan_for_ocid(sbr, conn, "OCID-952", existing_by_ocid_2, _runner=runner)
+        conn.close()
+        assert plan2["duplicate_reason"].count("NEEDS HUMAN REVIEW") == 1, (
+            f"NEEDS HUMAN REVIEW note must not grow across repeated real re-runs: {plan2['duplicate_reason']!r}"
+        )
+        print("PASS: test_plan_preserves_existing_record_and_flags_review_when_fresh_evidence_disagrees")
 
 
 def test_not_applicable_confirmed_requires_real_stored_audit_raw_output():
@@ -272,7 +307,7 @@ def test_not_applicable_confirmed_requires_real_stored_audit_raw_output():
 
 
 def test_bounded_for_storage_caps_oversized_leaf_values_deterministically():
-    """Real regression proof (Owner urgent correction UMR-20260805-161157):
+    """Real regression proof (this task -- no matching umr_tasks row was found for this exact task_identity, so it is cited by its real task-directory identifier task-20260805-161157-close-a-real-fabrication-loophole--not-a rather than an unverified UMR ID):
     this task's own first real --apply attempt against real (not test-
     fixture) production data found real umr_tasks rows with multi-megabyte
     metadata_json values, which resolve_ocid_canonical()'s real method (b)
@@ -368,7 +403,7 @@ def test_apply_style_write_of_pathologically_large_real_evidence_stays_bounded()
 if __name__ == "__main__":
     test_determinism_two_runs_identical_structured_output()
     test_plan_preserves_existing_reasoned_canonical_choice_when_still_corroborated()
-    test_plan_uses_fresh_result_when_existing_choice_no_longer_corroborated()
+    test_plan_preserves_existing_record_and_flags_review_when_fresh_evidence_disagrees()
     test_not_applicable_confirmed_requires_real_stored_audit_raw_output()
     test_bounded_for_storage_caps_oversized_leaf_values_deterministically()
     test_apply_style_write_of_pathologically_large_real_evidence_stays_bounded()

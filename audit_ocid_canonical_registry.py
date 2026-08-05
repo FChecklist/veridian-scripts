@@ -5,6 +5,17 @@ correction UMR-20260805-092408-4f97, extending UMR-20260805-090549-9710 /
 UMR-20260805-091934-86a2, citing the canonical OCID-068 UMR
 UMR-20260804-170055-a069).
 
+Real citation honesty note (this module's own real safety-rule revision
+below, task-20260805-161157-close-a-real-fabrication-loophole--not-a): a
+real, direct query of the live `umr_tasks` table found no row whose
+`task_identity` matches this exact task -- no real UMR ID with a hash
+suffix could be independently verified for it as of this writing. Rather
+than write an unverified, plausible-looking `UMR-YYYYMMDD-HHMMSS-hash`
+citation into this module or into any real database row (exactly the kind
+of unverifiable claim this whole task exists to close off), this task is
+cited below and in `_THIS_TASK_CITATION` by its real, literal task-
+directory identifier instead, with this same honest caveat.
+
 Zero AI judgment inside this script: its only logic is (1) iterate over a
 real list of OCID numbers, (2) call the already-merged, already-locked
 resolve_ocid_canonical() (UMR-20260805-042152-e559) for each -- the one
@@ -26,28 +37,40 @@ to overwrite the existing row's canonical_umr_id/status/all_umr_ids/
 pr_number/pr_repo/duplicate_reason with this run's fresh result, or
 preserve the existing values while still recording the fresh raw evidence.
 
-Fixed merge rule (identical for every OCID, no per-row exception):
-  - `not_found` and `audit_raw_output` are ALWAYS overwritten with this
-    run's fresh result -- per UMR-20260805-092408-4f97, these two fields'
-    real provenance must always trace to the latest real mechanical run,
-    never to a stale or hand-typed value.
-  - canonical_umr_id/status/all_umr_ids/pr_number/pr_repo/duplicate_reason
-    are PRESERVED from the existing row when the existing canonical_umr_id
-    is still present in this run's fresh all_umr_ids set (fresh evidence
-    still corroborates the prior choice). This avoids silently downgrading
-    a real, carefully-reasoned canonical choice (e.g. OCID-068's own is
-    explicitly NOT "chronologically earliest UMR" -- see
-    OCID_068_GUARDRAIL_RULES_PERMANENT_CLOSURE_2026-08-05.md) to
-    resolve_ocid_canonical()'s own simpler automatic "earliest UMR wins"
-    default, which that function's own docstring explicitly documents as
-    an un-reviewed default, not a considered choice.
-  - Otherwise (no existing canonical_umr_id, or the fresh run no longer
-    corroborates it, or the row was previously not_found and this run
-    found something real and new) this run's fresh result is used in full,
-    with an honest, non-silent duplicate_reason note naming the change.
+Fixed merge rule (identical for every OCID, no per-row exception --
+REVISED this task (see the module docstring's citation-honesty note),
+after this script's own first real
+run against live production data proved the original rule below unsafe;
+see plan_for_ocid()'s own docstring for the full real live-data proof):
+  - `audit_raw_output` is ALWAYS overwritten with this run's fresh, bounded,
+    verbatim result -- per UMR-20260805-092408-4f97, its real provenance
+    must always trace to the latest real mechanical run, never to a stale
+    or hand-typed value. This is the one real mechanism that structurally
+    closes the `not_applicable_confirmed` fabrication loophole this whole
+    task exists for.
+  - canonical_umr_id/status/all_umr_ids/pr_number/pr_repo/not_found are
+    ALWAYS PRESERVED exactly as already recorded on the existing row, for
+    every real existing OCID row, with no exception -- this script never
+    silently overwrites a real, already-reasoned canonical choice, ever,
+    regardless of what the fresh mechanical search finds. (Superseded
+    behavior, kept here only as a documented historical note: the original
+    version of this rule preserved only when the fresh run still
+    corroborated the existing choice, and otherwise silently substituted
+    the fresh result in full. That was proven live-data-unsafe this task --
+    a fully mechanical full-text search over a corpus that increasingly
+    contains real meta-discussion ABOUT OCIDs, not just genuine completion
+    evidence FOR them, produces real false "corrections" that would have
+    overwritten real, carefully-reasoned historical judgments, e.g.
+    OCID-001's `rejected_duplicate (historical, ...)` status.)
+  - Any real disagreement between the fresh search and the existing record
+    is appended (never replacing the original reasoning) to
+    `duplicate_reason` as an explicit, honest NEEDS HUMAN REVIEW note.
+  - Only when no existing row exists at all for an OCID number (not
+    currently possible for OCID-001..069; kept for real forward-
+    compatibility) is this run's fresh result used to populate the row.
 
-Bounded-storage rule (Owner urgent correction UMR-20260805-161157, added
-this task; identical for every OCID, never a per-row judgment call): before
+Bounded-storage rule (this task -- see the module docstring's citation-
+honesty note; identical for every OCID, never a per-row judgment call): before
 `audit_raw_output`/`evidence` are written, every individual string leaf
 value in the fresh evidence dict is passed through `_bounded_for_storage()`
 -- a fixed 5000-char cap applied identically regardless of OCID, with the
@@ -79,9 +102,9 @@ import sys
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 ALL_OCID_NUMBERS = [f"OCID-{n:03d}" for n in range(1, 70)]  # OCID-001..OCID-069
 
-# Real operational-safety cap, discovered this task (Owner urgent correction
-# UMR-20260805-161157, extending UMR-20260805-092408-4f97 / -091934-86a2 /
-# -090549-9710): running this script for real against the live production
+# Real operational-safety cap, discovered this task (see the module
+# docstring's citation-honesty note; extending UMR-20260805-092408-4f97 /
+# -091934-86a2 / -090549-9710): running this script for real against the live production
 # `umr_tasks` table (never exercised against real production data before --
 # every prior run of this exact script was either --dry-run or against a
 # scratch test DB) surfaced that a handful of real umr_tasks rows (this same
@@ -112,6 +135,16 @@ ALL_OCID_NUMBERS = [f"OCID-{n:03d}" for n in range(1, 70)]  # OCID-001..OCID-069
 # directly via resolve_ocid_canonical()) to recover the untruncated value.
 _AUDIT_RAW_OUTPUT_LEAF_CHAR_CAP = 5000
 _TRUNCATION_MARKER_SENTINEL = "REAL VERBATIM VALUE TRUNCATED FOR STORAGE"
+_NEEDS_HUMAN_REVIEW_SENTINEL = "NEEDS HUMAN REVIEW"
+# See the module docstring's "Real citation honesty note": no real umr_tasks
+# row could be found for this exact task, so it is cited by its real
+# task-directory identifier rather than an unverified UMR ID.
+_THIS_TASK_CITATION = (
+    "task-20260805-161157-close-a-real-fabrication-loophole--not-a "
+    "(no matching umr_tasks row found for this task_identity as of this "
+    "writing; cited by its real task-directory identifier, not an "
+    "unverified UMR ID)"
+)
 
 
 def _bounded_for_storage(value, max_chars=_AUDIT_RAW_OUTPUT_LEAF_CHAR_CAP):
@@ -164,35 +197,93 @@ def plan_for_ocid(sbr, conn, ocid_number, existing_by_ocid, **resolve_kwargs):
     existing row snapshot) decision function -- the one fixed merge rule
     documented above, applied identically to every OCID. Kept separate from
     main() so real tests can call it directly with an injected fake
-    `_runner`/`conn`, no live network or live DB required."""
+    `_runner`/`conn`, no live network or live DB required.
+
+    Real safety rule (this task -- see the module docstring's citation-honesty
+    note -- replacing
+    this function's own original "overwrite when no longer corroborated"
+    fallback -- live-data-proven unsafe, not merely theorized): this
+    script's very first real run against the live production database (this
+    same task) found that resolve_ocid_canonical()'s method (b) (full-table
+    `umr_tasks` grep) legitimately, mechanically, but WRONGLY matches
+    unrelated meta-dispatch UMRs whose own real prompt text enumerates
+    broad OCID ranges ("populate OCID-001 through OCID-068", "the real
+    not_found rows OCID-007 through OCID-014") as if those UMRs were real
+    completion evidence for every individual OCID number they merely
+    mention. Concretely, live-verified this task: OCID-001's real, careful,
+    historical `canonical_umr_id=UMR-20260802-034545-3388` /
+    `status=rejected_duplicate (historical, pre-OCID-numbering, no
+    implementation authorized)` -- a deliberate, reasoned prior judgment --
+    would have been silently overwritten by this function's OLD fallback
+    with a spurious match against the unrelated batch-registration dispatch
+    UMR, and OCID-007/OCID-011 (real, honestly-confirmed `not_found` rows)
+    would have been silently flipped to a false "found" status by matching
+    THIS VERY TASK's own meta-dispatch text discussing them.
+
+    A fully mechanical, zero-AI-judgment full-text search over an
+    ever-growing corpus that increasingly contains real meta-discussion
+    ABOUT OCIDs (not just genuine completion evidence FOR them) is
+    therefore not a safe unattended authority to silently overwrite an
+    existing, already-reasoned canonical_umr_id/status/all_umr_ids/
+    duplicate_reason/not_found -- so this function now NEVER does that.
+    canonical_umr_id/status/all_umr_ids/pr_number/pr_repo/not_found are
+    ALWAYS preserved exactly as already recorded, for every real existing
+    row, no per-OCID exception. This run's real, fresh, bounded, verbatim
+    evidence is still always captured in `audit_raw_output` (the actual
+    real fix this whole task exists to deliver: structurally gating
+    `not_applicable_confirmed` on real, re-runnable, stored evidence rather
+    than a hand-typed claim -- see the module docstring), and any real
+    disagreement between the fresh search and the existing record is
+    appended (never silently dropped, never replacing the original
+    reasoning) to `duplicate_reason` as an explicit NEEDS HUMAN REVIEW note
+    for the Owner. Only when no existing row exists at all (not currently
+    possible for OCID-001..069, all 69 of which already have a row; kept
+    for real forward-compatibility if a new OCID number is ever added) is
+    this run's fresh result used to populate the row, since there is then
+    nothing real to protect from being overwritten."""
     fresh = sbr.resolve_ocid_canonical(ocid_number, conn, **resolve_kwargs)
     existing = existing_by_ocid.get(ocid_number)
+    bounded_fresh_evidence = _bounded_for_storage(fresh["evidence"])
 
-    preserve_canonical = bool(
-        existing is not None
-        and existing.get("canonical_umr_id")
-        and existing["canonical_umr_id"] in fresh["all_umr_ids"]
-    )
+    if existing is not None:
+        if existing.get("not_found"):
+            corroborated = bool(fresh["not_found"])
+        else:
+            corroborated = bool(
+                existing.get("canonical_umr_id")
+                and existing["canonical_umr_id"] in fresh["all_umr_ids"]
+            )
 
-    if preserve_canonical:
+        note = existing.get("duplicate_reason")
+        if not corroborated and (not note or _NEEDS_HUMAN_REVIEW_SENTINEL not in note):
+            # `not note or sentinel not in note` keeps this idempotent across
+            # repeated real re-runs (required: this script must be
+            # genuinely re-runnable on demand without its own notes growing
+            # unboundedly each time) -- a prior run's own review note is
+            # never appended a second time.
+            note = (
+                (note + " " if note else "")
+                + f"[{_NEEDS_HUMAN_REVIEW_SENTINEL} -- real re-audit run ({_THIS_TASK_CITATION}) found "
+                  f"fresh mechanical evidence that does not corroborate this existing record (fresh "
+                  f"status={fresh['status']!r}, fresh all_umr_ids={fresh['all_umr_ids']!r}); the "
+                  f"existing record was deliberately PRESERVED unchanged rather than silently "
+                  f"overwritten, per the live-data over-aggressive full-text-match risk found and "
+                  f"fixed this task -- see audit_raw_output for the full real fresh evidence, and "
+                  f"have a real human confirm or correct this record before any further change.]"
+            )
+
         plan = {
             "ocid_number": ocid_number,
-            "canonical_umr_id": existing["canonical_umr_id"],
-            "status": existing["status"],
-            "all_umr_ids": existing["all_umr_ids"],
-            "pr_number": existing["pr_number"],
-            "pr_repo": existing["pr_repo"],
-            "duplicate_reason": existing["duplicate_reason"],
+            "canonical_umr_id": existing.get("canonical_umr_id"),
+            "status": existing.get("status"),
+            "all_umr_ids": existing.get("all_umr_ids"),
+            "pr_number": existing.get("pr_number"),
+            "pr_repo": existing.get("pr_repo"),
+            "duplicate_reason": note,
+            "not_found": bool(existing.get("not_found")),
         }
+        preserved = True
     else:
-        note = fresh.get("duplicate_reason")
-        if existing is not None and existing.get("canonical_umr_id"):
-            note = (
-                f"Real re-audit (UMR-20260805-092408-4f97) no longer corroborates the prior "
-                f"canonical_umr_id={existing['canonical_umr_id']!r} in this run's fresh "
-                f"all_umr_ids={fresh['all_umr_ids']!r}; using this run's fresh result in full. "
-                + (note or "")
-            )
         plan = {
             "ocid_number": ocid_number,
             "canonical_umr_id": fresh["canonical_umr_id"],
@@ -200,20 +291,17 @@ def plan_for_ocid(sbr, conn, ocid_number, existing_by_ocid, **resolve_kwargs):
             "all_umr_ids": fresh["all_umr_ids"],
             "pr_number": fresh["pr_number"],
             "pr_repo": fresh["pr_repo"],
-            "duplicate_reason": note,
+            "duplicate_reason": fresh.get("duplicate_reason"),
+            "not_found": fresh["not_found"],
         }
+        preserved = False
+        corroborated = None
 
-    bounded_fresh_evidence = _bounded_for_storage(fresh["evidence"])
-
-    plan["not_found"] = fresh["not_found"]
     plan["audit_raw_output"] = bounded_fresh_evidence
-    plan["evidence"] = existing["evidence"] if (preserve_canonical and existing is not None) else bounded_fresh_evidence
-    plan["preserved_existing_canonical_choice"] = preserve_canonical
-    plan["changed_from_existing"] = (
-        existing is None
-        or bool(existing.get("not_found")) != bool(plan["not_found"])
-        or existing.get("canonical_umr_id") != plan["canonical_umr_id"]
-    )
+    plan["evidence"] = existing["evidence"] if existing is not None else bounded_fresh_evidence
+    plan["preserved_existing_canonical_choice"] = preserved
+    plan["fresh_evidence_corroborates_existing"] = corroborated
+    plan["changed_from_existing"] = existing is None
     return plan
 
 
@@ -239,14 +327,17 @@ def main():
         plans.append(plan)
         print(f"  {ocid_number}: not_found={plan['not_found']} canonical_umr_id={plan['canonical_umr_id']} "
               f"preserved_existing={plan['preserved_existing_canonical_choice']} "
-              f"changed={plan['changed_from_existing']}", file=sys.stderr)
+              f"fresh_corroborates={plan['fresh_evidence_corroborates_existing']}", file=sys.stderr)
 
-    changed = [p for p in plans if p["changed_from_existing"]]
-    print(f"SUMMARY: {len(plans)} real OCIDs re-audited | {len(changed)} changed vs existing row "
-          f"(not_found flip or canonical_umr_id no longer corroborated by fresh evidence)", file=sys.stderr)
-    for p in changed:
-        print(f"  CHANGED: {p['ocid_number']} -> canonical_umr_id={p['canonical_umr_id']} not_found={p['not_found']}",
-              file=sys.stderr)
+    new_rows = [p for p in plans if p["changed_from_existing"]]
+    needs_review = [p for p in plans if p["fresh_evidence_corroborates_existing"] is False]
+    print(f"SUMMARY: {len(plans)} real OCIDs re-audited | {len(new_rows)} brand-new row(s) written in full | "
+          f"{len(needs_review)} existing row(s) PRESERVED unchanged but flagged NEEDS HUMAN REVIEW "
+          f"(fresh mechanical evidence did not corroborate the existing record -- never auto-applied, "
+          f"see plan_for_ocid()'s own docstring)", file=sys.stderr)
+    for p in needs_review:
+        print(f"  NEEDS HUMAN REVIEW: {p['ocid_number']} -- existing canonical_umr_id={p['canonical_umr_id']!r} "
+              f"preserved; fresh evidence disagreed", file=sys.stderr)
 
     if not args.apply:
         conn.close()

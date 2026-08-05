@@ -24,11 +24,9 @@
       correct stale bookkeeping (`running` -> `completed`, matching PR #57's real merge evidence).
 - [x] Wrote `OCID_068_UTR_UMR_TAXONOMY_INDEPENDENT_VERIFICATION_2026-08-05.md`, the new additive
       OCID-068 addendum documenting this duplicate-check finding and the bookkeeping correction.
-- [ ] Commit + push this task's own real changes (the new addendum doc, this PROGRESS.md).
-- [ ] Open PR, get real independent review, merge.
+- [x] Commit + push this task's own real changes (the new addendum doc, this PROGRESS.md).
+- [x] Opened PR #71: https://github.com/FChecklist/veridian-scripts/pull/71
 
 ## Remaining
-- [ ] Commit + push.
-- [ ] Open PR against `main`.
 - [ ] Confirm real independent review (the repo's automated pre-merge audit) before merging.
-- [ ] Merge, record the PR link here.
+- [ ] Merge, record the merge outcome here.

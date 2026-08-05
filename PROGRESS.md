@@ -12,4 +12,4 @@
 ## Remaining
 - [ ] Blocked on a human with GitHub web-UI + email access: create the GitHub App (or second account), install it on compliance-tracker with PR-review-only permissions, and store its credentials. Cannot be completed by this worker (see finding doc, "Remaining steps" section).
 - [ ] Once that identity exists: wire it into the dispatch pipeline as the review source, set `required_approving_review_count=1`, and wire `apply_review_independence_verdict()` into the live merge gate.
-- [ ] Open PR for this cycle's code/doc changes and route it through real independent review (Owner account, one-time exception, since the new reviewer identity doesn't exist yet to review its own creation).
+- [x] Opened PR for this cycle's code/doc changes, routed for real independent review via the Owner account (one-time exception): https://github.com/FChecklist/veridian-scripts/pull/69

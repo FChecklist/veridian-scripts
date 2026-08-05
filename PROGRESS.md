@@ -28,6 +28,11 @@
 - [x] Full findings written up:
       `PM_CORRECTION_VERIFICATION_2026-08-05T173727Z.md`.
 
+- [x] Committed, pushed, opened for independent review:
+      https://github.com/FChecklist/veridian-scripts/pull/87
+      (left open rather than self-merged -- same standing OCID-070 gap, no independently
+      provisioned reviewer identity exists in this environment).
+
 ## Remaining
 - [ ] None from this task's side. `UMR-20260805-121654-4b77` / `UMR-20260805-122042-8dbc`
       should be closed by their own owning tasks once veridian-scripts#83 merges (structural

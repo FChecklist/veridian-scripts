@@ -46,3 +46,55 @@
 
 ## Remaining
 - [ ] Await independent review/approval on PR #82 before merge.
+
+---
+
+# PROGRESS -- UMR-20260805-165906-0923 (child-umr-ocid020-gtm-remaining-8-category-scripts, OCID-020 GTM certification)
+
+Executes the 8-category continuation task queued at UMR-20260805-165906-0923 (parent
+UMR-20260802-165606-4413 / OCID-020), per PM instruction UMR-20260805-171657-01de. Categories
+5, 6, 7, 9, 15, 16, 24, 25 -- 25 total categories, 13 already had real scripts before this task.
+Before any DB write this session, independently confirmed (own grep, not assumed):
+`gtm_write_category_result.py` and `superboss-register.py`'s `_connect()`/`_write_lock()` contain
+zero references to `file_inventory` -- the one real, confirmed-corrupted table held under Hard
+Rule 8 -- and no `PRAGMA integrity_check` was run against the whole database this session, only a
+scoped, read-only probe confirming `file_inventory` alone still fails (`database disk image is
+malformed`), matching the standing hold exactly. This task is being executed across several small
+branches/PRs (one per natural category grouping, same pattern as the prior 13-category PRs). So
+far this session (real, independently DB-verified after each write):
+- category_index=5 (UI testing): pass. category_index=6 (end to end testing): pass. Branch
+  feat/gtm-checks-ui-e2e-testing, PR #79.
+- category_index=7 (regression testing): pass (fresh clone of compliance-tracker origin/main,
+  bun test -> 2512 pass, 0 fail). Branch feat/gtm-checks-regression-testing, PR #81.
+- category_index=9 (performance testing): pass (real lighthouse score 0.91). category_index=24
+  (lighthouse audit): pass (real scores, all categories >= 0.5). Branch
+  feat/gtm-checks-performance-lighthouse, PR #84.
+
+## Completed (this branch)
+- [x] category_index=15 (multi tenant testing) and category_index=16 (role permission testing):
+      **blocked**, real, deliberately -- both genuinely require an authenticated session on the
+      live product to test cross-tenant isolation / per-role permission boundaries.
+      `gtm_check_multi_tenant_testing.py` / `gtm_check_role_permission_testing.py` do NOT hardcode
+      "always blocked": every real run genuinely checks (1) environment variables plausibly naming
+      a GTM/tenant/role test credential, (2) compliance-tracker's real `.env.local` key names for
+      an Owner-provisioned test identity, (3) a real, bounded-depth (max depth 3, not an unbounded
+      recursive glob -- confirmed this session that an unbounded `glob.glob(..., recursive=True)`
+      over `/opt/veridian/ai-os/**` does not return within 15s) filename scan under
+      `/opt/veridian/ai-os` for an explicit Owner go-ahead doc. All three checks came back
+      genuinely empty this run (see evidence_json on each row for the full checked list: 0 env var
+      matches, 13 real `.env.local` keys scanned with 0 matches, 0 owner-doc matches). Per the
+      standing absolute rule (never enter a password/credential into any login/signup field, no
+      exceptions, no case-by-case judgment), both are `--result blocked` citing exactly that rule
+      -- neither script ever attempted a login.
+- [x] Both results independently re-verified by reading the `gtm_certification_categories` rows
+      (category_index 15 and 16) back directly from `/opt/veridian/ai-os/memory/superboss-register.sqlite`:
+      `passed IS NULL` and `validated_at IS NULL` on both, matching the blocked semantics exactly
+      (never trusted from script stdout alone).
+- [x] Branch: feat/gtm-checks-tenant-role-blocked.
+
+## Remaining (this task, so far)
+- [ ] category_index=25 (production readiness synthesis, built last, depends on all others above)
+      -- not yet reached in this session.
+- [ ] All PRs opened so far (#79, #81, #84, and this branch's) need `supervisor-sweep.sh` pickup
+      and a real independent audit verdict before merge, same standing discipline as every other
+      open PR in this repo.

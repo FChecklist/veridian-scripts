@@ -27,7 +27,13 @@
       all 11 pass together with `tests/test_ocid_canonical_registry.py`.
 - [x] Wrote up full findings:
       `OCID_CANONICAL_REGISTRY_DATA_CORRUPTION_FALSE_ALARM_VERIFICATION_2026-08-05T173527Z.md`.
-- [x] Committed and pushed; opened PR for independent review.
+- [x] Committed and pushed; opened PR for independent review:
+      https://github.com/FChecklist/veridian-scripts/pull/83
+      (Note: OCID-070's own finding documents that no genuinely independent reviewer identity
+      exists in this environment -- FChecklist is the sole collaborator/credential on every repo
+      here -- so this PR is left open rather than self-merged, same standing gap, not re-solved
+      here.)
 
 ## Remaining
-- [ ] None -- awaiting PR review/merge.
+- [ ] None from this task's side -- awaiting PR #83 review/merge (structural gap: no independent
+      reviewer identity currently provisioned, per OCID-070 finding).

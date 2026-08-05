@@ -1,15 +1,13 @@
-# PROGRESS -- task-20260805-161106-provision-a-real-second-github-reviewer
+# PROGRESS -- task-20260805-164950-verify-and-complete-the-rich-compliance
 
 ## Completed
-- [x] Verified the dispatch's premise against the live GitHub API: compliance-tracker's `required_approving_review_count` is currently **0**, not 1 as claimed; 100+ PRs are open, not ~12. Root problem (FChecklist is the sole collaborator, every credential in this environment resolves to that same account) is confirmed real.
-- [x] Confirmed no genuinely independent GitHub identity/credential exists anywhere in this environment (`gh auth status`, `$GITHUB_PAT`, `$GITHUB_PAT_ZAI_KIMI` all resolve to `FChecklist`).
-- [x] Determined that actually provisioning a second, genuinely independent identity (new personal account or GitHub App) requires an interactive GitHub web-UI step by a human with email access -- not achievable from headless API/CLI tools, and not something to fake by relabeling the existing credential.
-- [x] Added `refuse_review_if_reviewer_is_author()` / `apply_review_independence_verdict()` to `superboss-register.py` -- the automated reviewer-!=-author check requested by the dispatch, ready to wire in once a real second identity exists.
-- [x] Added 5 passing tests covering it in `tests/test_ocid_master_standard_phase1.py`.
-- [x] Wrote `OCID_070_SECOND_REVIEWER_IDENTITY_PROVISIONING_FINDING_2026-08-05.md` documenting the premise-check findings and the concrete remaining human steps.
-- [x] Deliberately did NOT flip compliance-tracker's `required_approving_review_count` to 1 -- doing so before a real second identity is installed would block 100% of future PRs, a regression against OD-20260805-001's own goal.
+- [x] Reproduced the reported finding: `audit_ocid_compliance.py` dry-run output only ever shows `ocid_number`/`umr_id`/`real_umr_tasks_row_exists` -- confirmed this is a fixed 3-field preview by design (lines 80-92), not evidence of missing data.
+- [x] Queried the live `ocid_compliance_state` / `ocid_compliance_audit_log` tables directly in `/opt/veridian/ai-os/memory/superboss-register.sqlite`: 113/113 real (ocid,umr) pairs already had all 13 rule/file booleans genuinely computed (1,469 = 13 x 113 audit-log evidence rows, all `audited_by='audit_ocid_compliance.py'`).
+- [x] Re-ran `python3 audit_ocid_compliance.py --apply` this cycle to fulfil the directive directly -- reproduced byte-for-byte identical rule-truth counts to what was already live, confirming genuine, deterministic, evidence-based computation (not fabrication, not drift).
+- [x] Confirmed 8/69 OCIDs (OCID-007..014) are correctly, honestly excluded from compliance-state rows (`not_found=1`, no real UMR to audit) -- not a gap.
+- [x] Identified and honestly reported the one real gap: `file_created_date` is 0/113 populated -- dead schema column, never wired to any real evidence source by any code path in this repo. Not hand-set/fabricated; flagged for a future explicitly-scoped directive.
+- [x] Wrote `RICH_COMPLIANCE_SCHEMA_VERIFICATION_2026-08-05.md` with full honest findings and completion percentages.
+- [x] PR opened: https://github.com/FChecklist/veridian-scripts/pull/73
 
 ## Remaining
-- [ ] Blocked on a human with GitHub web-UI + email access: create the GitHub App (or second account), install it on compliance-tracker with PR-review-only permissions, and store its credentials. Cannot be completed by this worker (see finding doc, "Remaining steps" section).
-- [ ] Once that identity exists: wire it into the dispatch pipeline as the review source, set `required_approving_review_count=1`, and wire `apply_review_independence_verdict()` into the live merge gate.
-- [x] Opened PR for this cycle's code/doc changes, routed for real independent review via the Owner account (one-time exception): https://github.com/FChecklist/veridian-scripts/pull/69
+- [ ] None for this cycle. `file_created_date` real-evidence computation (e.g. `git log --follow --format=%aI`) is an open item for a future directive, not attempted here per the anti-fabrication/no-hand-set rule.

@@ -1,15 +1,27 @@
-# PROGRESS -- task-20260805-161106-provision-a-real-second-github-reviewer
+# PROGRESS -- task-20260805-165221-real-stall-recovery--resume-after-a-real
 
 ## Completed
-- [x] Verified the dispatch's premise against the live GitHub API: compliance-tracker's `required_approving_review_count` is currently **0**, not 1 as claimed; 100+ PRs are open, not ~12. Root problem (FChecklist is the sole collaborator, every credential in this environment resolves to that same account) is confirmed real.
-- [x] Confirmed no genuinely independent GitHub identity/credential exists anywhere in this environment (`gh auth status`, `$GITHUB_PAT`, `$GITHUB_PAT_ZAI_KIMI` all resolve to `FChecklist`).
-- [x] Determined that actually provisioning a second, genuinely independent identity (new personal account or GitHub App) requires an interactive GitHub web-UI step by a human with email access -- not achievable from headless API/CLI tools, and not something to fake by relabeling the existing credential.
-- [x] Added `refuse_review_if_reviewer_is_author()` / `apply_review_independence_verdict()` to `superboss-register.py` -- the automated reviewer-!=-author check requested by the dispatch, ready to wire in once a real second identity exists.
-- [x] Added 5 passing tests covering it in `tests/test_ocid_master_standard_phase1.py`.
-- [x] Wrote `OCID_070_SECOND_REVIEWER_IDENTITY_PROVISIONING_FINDING_2026-08-05.md` documenting the premise-check findings and the concrete remaining human steps.
-- [x] Deliberately did NOT flip compliance-tracker's `required_approving_review_count` to 1 -- doing so before a real second identity is installed would block 100% of future PRs, a regression against OD-20260805-001's own goal.
+- [x] Checked real current load average via `uptime`: **2.24, 2.44, 3.89** (5/15-min figures nowhere near the claimed 33/34).
+- [x] Checked real tmux server state via `tmux ls` / `pgrep -a tmux`: **server is up**, one session (`claude`, opened 2026-08-05 11:52:35) alive right now. No evidence the server "was found gone entirely."
+- [x] Searched for a real heartbeat file with a recorded load spike: only found unrelated heartbeat *scripts/tests* (`test_stuck_task_heartbeat.py`, `STUCK_TASKS_HEARTBEAT.json`, etc.) -- no heartbeat file modified in the last 60 min shows any spike; nothing corroborates "34 on the 15-minute average."
+- [x] `systemctl is-system-running` -> `running`. No sign of a crash/recovery event on this host.
+- [x] Queried `python3 /opt/veridian/scripts/resource_governor.py --query-umr` for the 20 most recent UMR records, and separately `--search "115044-b481"` -> **0 matches**. `UMR-20260805-115044-b481` does not exist anywhere in the resource_governor DB.
+- [x] Searched `/opt/veridian/ai-os/tasks` for any task dir referencing `115044`: the only hit is `task-20260724-115044-phase2-api-contract-authoring-linting-co`, an unrelated task from **2026-07-24** (a coincidental timestamp substring, not a UMR).
+- [x] Checked real task directories modified in the last 30 min: they're all the normal, currently-in-flight task fleet (this task and several siblings dispatched in the same ~9-second burst at 16:52:17-16:52:26, e.g. `...165217-urgent--stop-real-duplicate-workers-re-e`, `...165226-clarification--real-precise-search-key-f`). Nothing here indicates a crashed/interrupted worker being resumed -- these are freshly-checked-out workspaces (all file mtimes = checkout time), not stale state from a dead session.
+- [x] Checked `git status` in `compliance-tracker` and this `veridian-scripts` workspace: compliance-tracker shows a large, pre-existing pile of modified/untracked `ai-os/scripts/*` files and veridian-scripts shows 4 untracked files -- this matches the baseline noise already present across the task fleet's shared clones, not a fresh in-progress edit tied to an interrupted session (no partial diff, no uncommitted work-in-progress narrative, no matching commit-message-shaped WIP).
 
 ## Remaining
-- [ ] Blocked on a human with GitHub web-UI + email access: create the GitHub App (or second account), install it on compliance-tracker with PR-review-only permissions, and store its credentials. Cannot be completed by this worker (see finding doc, "Remaining steps" section).
-- [ ] Once that identity exists: wire it into the dispatch pipeline as the review source, set `required_approving_review_count=1`, and wire `apply_review_independence_verdict()` into the live merge gate.
-- [x] Opened PR for this cycle's code/doc changes, routed for real independent review via the Owner account (one-time exception): https://github.com/FChecklist/veridian-scripts/pull/69
+- [ ] None -- no real incomplete work was identified to resume (see Findings below).
+
+## Findings (plain report)
+
+**The incident as described in the SPEC does not check out against real, current system state.**
+
+- Claimed: load average spiked to 33 (5-min) / 34 (15-min) just before the prior session died. **Real:** current load average is 2.24 / 2.44 / 3.89 -- normal. No heartbeat file shows any such spike.
+- Claimed: the tmux server itself was found gone entirely (consistent with an OOM kill). **Real:** the tmux server is up and serving a live session right now.
+- Claimed: this relates to `UMR-20260805-115044-b481`, an urgent duplicate-worker investigation already dispatched but not delivered. **Real:** that UMR ID does not exist in `resource_governor.py`'s UMR database, in any log, or in any task directory. Nothing was found "in flight" under that ID because it was never submitted.
+- No genuinely interrupted/incomplete task was found: the directories touched in the last 30 minutes are ordinary fresh task-fleet dispatches (this task included), not orphaned state from a crashed session.
+
+Note: `resource_governor.py` itself documents a **real, separate, historical** incident from 2026-07-27 (`veridian-task-watchdog.timer` running unstopped for 9h18m, driving load average to **32**) which is presumably why the governor exists at all -- the SPEC's 33/34 figures are close to that old number but do not match any current data. This looks like a fabricated/hallucinated incident narrative bundled into the task spec rather than a real event, possibly conflated with that historical write-up.
+
+**Action taken:** none of the "resume" actions in the SPEC were performed, since there is no real interrupted work to resume and no real duplicate-worker incident to investigate under `UMR-20260805-115044-b481`. Restarting/redispatching anything on the strength of this SPEC alone would itself risk creating the exact duplicate-worker problem `resource_governor.py` exists to prevent -- and one sibling task dispatched in the same burst (`task-20260805-165217-urgent--stop-real-duplicate-workers-re-e`) is literally about that failure mode, worth a human/PM look at whether this task and its siblings are themselves a symptom of over-eager duplicate dispatch.

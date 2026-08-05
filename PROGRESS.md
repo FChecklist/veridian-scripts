@@ -42,5 +42,7 @@ rebuild schema/triggers/tests that already exist (would be duplication).
 - [x] Marked `UMR-20260805-152250-55d3` completed
 - [x] Committed + pushed, opened PR for independent review
 
+PR: https://github.com/FChecklist/veridian-scripts/pull/63
+
 ## Remaining
 - [ ] Independent review + merge of the PR (cannot self-merge foundational infra per directive)

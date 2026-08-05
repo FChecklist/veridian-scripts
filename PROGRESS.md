@@ -40,17 +40,30 @@ UMR-20260805-032326-becc.
 - [x] Full suite green: 113 passed.
 - [x] Committed + pushed the schema/gate change.
 
-## Remaining
-- [ ] Write backfill_evidence_json_schema.py: for each of the 69 real
-      existing rows, real `gh pr view` fetch against its own cited
-      pr_number/pr_repo to recover commit_sha/merge_status/file_path;
-      honest null wherever genuinely unrecoverable (no pr_number, gh
-      failure, or an ambiguous multi-file PR with no unambiguous single
-      primary artifact); build the new structured evidence_json (9
-      required keys + preserved legacy free-text evidence nested
-      alongside); dry-run review before --apply.
-- [ ] Apply the backfill to the live DB; verify all 69 rows carry the full
-      evidence_json schema and the gated "completed" rows pass the gate.
-- [ ] Commit + push the backfill.
+- [x] Wrote backfill_evidence_json_schema.py. Discovered mid-task, live: a
+      separate, already-real, concurrently-running backfill
+      (backfill_ocid_registry_phase2_columns.py, OCID-068 Phase 2, PR #57)
+      had just actually executed against the same live production DB and
+      genuinely populated the dedicated commit_sha/file_name/file_path/
+      merge_status/evidence_summary columns for all 69 rows (49/69
+      commit_sha, 23/69 file_path, 57/69 merge_status, 69/69
+      evidence_summary, honest nulls elsewhere). Rather than duplicate
+      that real `gh pr view` recovery a second time, this script reads
+      those now-real dedicated columns directly and folds them into the
+      new standardized evidence_json shape (9 required keys + this row's
+      own pre-existing evidence_json preserved verbatim under
+      "legacy_evidence") -- zero duplicate implementation, per this
+      codebase's own convention.
+- [x] Took a real pre-write DB backup
+      (superboss-register.sqlite.bak-pre-evidence-json-schema-backfill-20260805T152822Z).
+- [x] Dry-run reviewed the full 69-row plan; every row validated clean
+      against the new schema; 0 "never fetched by Phase 2 backfill"
+      warnings.
+- [x] Applied the backfill to the live DB (--apply). Verified after:
+      all 69 rows schema-compliant; the 11 rows whose status genuinely
+      claims completed/verified (OCID-002, 003, 038, 047-052, 068, 069)
+      all pass the enforced gate.
+- [x] Full suite green: 113 passed, after the live backfill.
+- [ ] Commit + push the backfill script + PROGRESS.md.
 - [ ] Open the real PR citing UMR-20260804-170055-a069, get independent
       review, merge.

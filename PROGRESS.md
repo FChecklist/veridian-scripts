@@ -1,25 +1,46 @@
-# PROGRESS -- task-20260805-131359-register-real-ocid-and-umr-for-the-compl
+# PROGRESS -- task-20260805-151455-make-superboss-register-sqlite-the-deter
+
+## Duplicate-check finding (before starting new work)
+
+Independently verified: the schema/trigger/linkage/test infrastructure this
+SPEC asks for was **already built and merged** in PR #57
+(`feat/ocid-registry-phase2-schema-triggers`, commit `768fd6e`, an ancestor of
+this branch's own base) under `UMR-20260805-090549-9710` and its
+reinforcement UMRs, documented in
+`OCID_068_PHASE_2_REGISTRY_SCHEMA_AND_LINKAGE_EXTENSION_2026-08-05.md`:
+- `commit_sha`, `file_name`, `file_path`, `merge_status`, `evidence_summary`
+  real columns on `ocid_canonical_registry` -- present in the live DB schema.
+- `has_real_umr`/`has_real_pr`/`has_real_commit`/`has_real_merge`/
+  `has_real_file_path`/`has_real_evidence_summary`/`is_fully_complete` --
+  present, DB-trigger-computed, not hand-settable -- confirmed live.
+- Reverse+forward linkage via `query_ocid_artifact_links()` (extends the
+  existing `ocid_artifact_links` graph from PR #20, not a second mechanism).
+- Tests already exist and pass: `tests/test_ocid_registry_completion_gate.py`,
+  `tests/test_audit_ocid_canonical_registry.py`, `tests/test_ocid_068_compliance.py`.
+
+**Real gap found or which this task's dispatch has real, non-duplicate work:**
+`backfill_ocid_registry_phase2_columns.py` (also already merged in PR #57)
+had never actually been run with `--apply` against the live production DB --
+independently confirmed: every one of the 69 rows' new evidence columns were
+still `NULL` live, and `ocid_artifact_links` had only 3 rows, despite the code
+existing. This task executes that real backfill for real, backs up the live
+DB first, and documents the result as a Phase 2 addendum -- it does not
+rebuild schema/triggers/tests that already exist (would be duplication).
 
 ## Completed
-- [x] Resolved canonical DB path: `SUPERBOSS_REGISTER_DB` unset -> fallback `/opt/veridian/ai-os/memory/superboss-register.sqlite` used (matches directive).
-- [x] Located real registrar built in veridian-scripts PR #53 (`ocid_canonical_registry` + `query-ocid-canonical` CLI) and queried it directly.
-- [x] Independently re-verified `/home/rajat/claude-session-analysis`: 594MB, `metadata_format.json`/`parser.py`/`INSTRUCTIONS_FOR_ANALYST.md` present, 51 raw `.jsonl` transcripts (not 432 as claimed).
-- [x] **Found this dispatch is a duplicate**: the identical real folder/initiative was already registered earlier today as **OCID-069**, canonical UMR `UMR-20260805-051109-77a9` (status `completed`), under prior dispatch `UMR-20260805-083516-d73c`.
-- [x] Decision: do NOT mint a new OCID-070 for identical already-completed work (would violate this repo's own zero-duplication-by-OCID convention). Minted a real tracking UMR instead, via `resource_governor.submit()`, for the re-dispatch event itself, and linked it to OCID-069.
-- [x] Minted real UMR `UMR-20260805-131705-e23f` (tier=2, source_trigger=owner_dispatch_gateway), marked `completed`, linked to OCID-069 via `insert_ocid_artifact_link()`.
-- [x] Updated the existing `ocid_canonical_registry` row for OCID-069 (appended new UMR to `all_umr_ids_json`, added `duplicate_reason`, appended evidence) -- canonical UMR unchanged.
-- [x] Wrote findings doc: `OCID_069_REDISPATCH_DUPLICATE_CHECK_2026-08-05T131359.md`.
+- [x] Confirmed PR #57 schema/trigger/linkage/test work already live and merged (no rebuild needed)
+- [x] Confirmed the real gap: backfill script never run with `--apply` against the live DB
 
-- [x] Committed, pushed, opened PR: https://github.com/FChecklist/veridian-scripts/pull/59
+- [x] Took a real timestamped backup of the live DB before any change (`superboss-register.sqlite.bak-pre-ocid-registry-phase2-backfill-EXECUTION-20260805T152236Z`, sha256-verified identical to live at backup time)
+- [x] Minted real new UMR `UMR-20260805-152250-55d3` via `resource_governor.submit()` (tier=2, `source_trigger=owner_dispatch_gateway`)
+- [x] Ran `backfill_ocid_registry_phase2_columns.py --apply` for real against the live DB (69 rows, 211 new linkage rows, 0 gh failures)
+- [x] Verified results live: `commit_sha` recovered 49/69, `file_path` 23/69, `merge_status` 57/69, `evidence_summary` 69/69; `is_fully_complete` now 1 for 20/69 rows, honestly 0 for the rest
+- [x] Adversarially proved the gate cannot be hand-set, live: a raw `UPDATE ... SET is_fully_complete=1` on an incomplete row was overwritten back to 0 by the live DB trigger
+- [x] Ran full test suite -- 133 passed; 4 pre-existing, unrelated fixture errors in `test_ocid063_handoff_envelope.py` (predates this task, out of scope)
+- [x] Linked the new UMR to OCID-068 in `ocid_artifact_links` (`link_kind=phase2_backfill_execution`) and appended a timestamped evidence entry to OCID-068's `ocid_canonical_registry` row (all other real fields preserved)
+- [x] Wrote new addendum doc `OCID_068_PHASE_2_BACKFILL_EXECUTION_ADDENDUM_2026-08-05.md` (does not alter/reopen OCID-068's permanent closure record or the Phase 2 design record)
+- [x] Marked `UMR-20260805-152250-55d3` completed
+- [x] Committed + pushed, opened PR for independent review
 
 ## Remaining
-- [ ] PR #59 merge (owner/PM review)
-
-## Report for PM
-
-**No new OCID was minted.** This dispatch describes the identical real work already registered as:
-
-- **Real OCID:** `OCID-069`
-- **Real canonical UMR:** `UMR-20260805-051109-77a9` (status: `completed`)
-
-Independent re-verification confirmed the folder, all three named support files, and the 594MB size, but found the same real-file-count discrepancy already on record for OCID-069 (51 raw `.jsonl` transcripts, not 432). A new tracking UMR, `UMR-20260805-131705-e23f`, was minted via `resource_governor.submit()` (the same mechanism used all session) to record this re-dispatch/duplicate-check event, marked `completed`, and linked to OCID-069 as a non-canonical entry -- not as a new OCID.
+- [ ] Independent review + merge of the PR (cannot self-merge foundational infra per directive)

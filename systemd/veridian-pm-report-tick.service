@@ -1,0 +1,34 @@
+# =============================================================================
+# NOT YET AUTHORIZED / NOT YET INSTALLED. See ~/.config/systemd/user/README.md
+# on the live server: the 18 veridian-cron-* units there are an explicitly
+# CLOSED SET ("STANDING RULE -- this is a CLOSED SET"). This service+timer
+# pair would be unit #19. Per that README's own rule, adding a genuinely new
+# cadence/purpose requires an explicit Owner decision -- never a default/
+# automatic action by any script, worker, or session. This pair is committed
+# here as a version-controlled reference copy ONLY (same convention as
+# systemd/veridian-worker@.service in this same directory -- see
+# systemd/README.md: "There is no automated deploy step for this directory").
+# It has deliberately NOT been copied into ~/.config/systemd/user/ and has
+# NOT been enabled/started. That copy + `systemctl --user daemon-reload` +
+# `systemctl --user enable --now veridian-pm-report-tick.timer` is an
+# explicit, disclosed next step requiring Owner sign-off -- same precedent
+# already used for the backup-generator unit earlier this session.
+#
+# UMR-20260805-181636-32f2 (parent UMR-20260802-165606-4413, OCID-020).
+# Modeled exactly on veridian-cron-dispatch-tick.service's real pattern:
+# same jittered OnCalendar shape (see the paired .timer), same shared
+# EMERGENCY_STOP ConditionPathExists gate, same run-logged.sh wrapper, same
+# oneshot Type. generate_pm_report_v3.py is itself pure/deterministic
+# (zero AI/LLM calls) and only reads real local sources + does its own
+# read-only-except-for-its-own-tables DB access, so this unit needs nothing
+# beyond that shared safety gate.
+# =============================================================================
+[Unit]
+Description=VERIDIAN PM report v3: real, pure, deterministic PM report generator (UMR-20260805-181636-32f2) -- replaces the AI-reasoned-every-10-minutes generator that contributed to hitting the Owner's weekly Claude Code usage limit
+ConditionPathExists=!/opt/veridian/ai-os/locks/resource-governor-EMERGENCY_STOP
+
+[Service]
+Type=oneshot
+ExecStart=/opt/veridian/scripts/run-logged.sh "pm-report-tick" /usr/bin/python3 /opt/veridian/scripts/generate_pm_report_v3.py
+StandardOutput=append:/opt/veridian/ai-os/logs/pm-report-tick-cron.log
+StandardError=append:/opt/veridian/ai-os/logs/pm-report-tick-cron.log

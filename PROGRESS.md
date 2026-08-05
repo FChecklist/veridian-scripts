@@ -30,3 +30,44 @@
 
 ## Remaining
 - [ ] Get PR #77 through independent review and merged.
+
+---
+
+# PROGRESS -- UMR-20260805-165906-0923 (child-umr-ocid020-gtm-remaining-8-category-scripts, OCID-020 GTM certification)
+
+Executes the 8-category continuation task queued at UMR-20260805-165906-0923 (parent
+UMR-20260802-165606-4413 / OCID-020), per PM instruction UMR-20260805-171657-01de. Categories
+5, 6, 7, 9, 15, 16, 24, 25 -- 25 total categories, 13 already had real scripts before this task
+(see the OCID-020 GTM certification checkpoint section above). Before any DB write this session,
+independently confirmed (own grep, not assumed): `gtm_write_category_result.py` and
+`superboss-register.py`'s `_connect()`/`_write_lock()` contain zero references to
+`file_inventory` -- the one real, confirmed-corrupted table held under Hard Rule 8 -- and no
+`PRAGMA integrity_check` was run against the whole database this session, only a scoped,
+read-only probe confirming `file_inventory` alone still fails (`database disk image is
+malformed`), matching the standing hold exactly. `file_inventory` was not touched by any step
+below. This task is being executed across several small branches/PRs (one per natural category
+grouping, same pattern as the prior 13-category PRs #62/#65/#66/#67/#70); each branch's own commit
+appends its own Completed entry here rather than one combined entry, so partial progress is
+durable even if a later branch in the set is not reached this session. Remaining/global notes are
+consolidated on the final (category 25 synthesis) branch, since it is built last and depends on
+all others.
+
+## Completed
+- [x] category_index=5 (UI testing): **pass**, real -- new minimal Playwright probe
+      (`gtm_check_ui_testing.py`, no dedicated UI spec existed in compliance-tracker's e2e/) against
+      the real, live, public https://projexa-ai.com/login and /signup: both HTTP 200, every
+      expected form control (#email, #password, #fullName, #org, submit button) present, visible,
+      and enabled, zero page/console errors. Per the standing no-credential-entry rule, no field
+      was ever filled and no submit button was ever clicked.
+- [x] category_index=6 (end to end testing): **pass**, real -- reused the existing real
+      e2e/browser-execution-tiers.spec.ts via `npx playwright test e2e/ --reporter=json`
+      (`gtm_check_e2e_testing.py`): expected=1, unexpected=0, skipped=0, flaky=0, exit 0.
+- [x] Both results independently re-verified this session by reading the
+      `gtm_certification_categories` rows (category_index 5 and 6) back directly from
+      `/opt/veridian/ai-os/memory/superboss-register.sqlite` via a fresh read-only sqlite3
+      connection -- never trusted from script stdout alone.
+- [x] Branch: feat/gtm-checks-ui-e2e-testing.
+
+## Remaining (this branch)
+- [ ] Get this PR through `supervisor-sweep.sh` pickup and a real independent audit verdict before
+      merge, same standing discipline as every other open PR in this repo.

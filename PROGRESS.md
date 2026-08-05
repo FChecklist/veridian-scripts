@@ -25,10 +25,12 @@
 - [x] `OCID_MASTER_STANDARD_V6_PHASE2_2026-08-05.md` -- honest scope/phasing writeup, same
       convention as the Phase 1 doc.
 - [x] Committed and pushed.
-- [x] Opened PR citing both parent UMRs.
+- [x] Opened PR citing both parent UMRs: https://github.com/FChecklist/veridian-scripts/pull/61
 
 ## Remaining
-- [ ] Independent review + merge.
+- [ ] Independent review + merge (this repo's own convention: review/merge happens via a
+      separate downstream PM-decision dispatch, same pattern as PR #57/#58's own history --
+      not self-merged by this task).
 - [ ] Report back exact file paths/names once merged (per SPEC).
 - [ ] Not implemented in this PR, explicitly deferred to a future phase (see
       OCID_MASTER_STANDARD_V6_PHASE2_2026-08-05.md "Deliberately still deferred"): ownership-chain

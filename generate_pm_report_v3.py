@@ -1456,7 +1456,7 @@ def render_report_text(report):
         lines.append(f"rows_used: {trend['rows_used']} (window requested: {trend['window_size_requested']}, "
                       f"stable tolerance: +/-{trend['stable_tolerance_pct']}%)")
         for metric, m in trend["metrics"].items():
-            if m.get("trend") is None:
+            if m.get("trend") == "insufficient_data":
                 lines.append(f"  {metric:<18s} insufficient_data (rows_used={m.get('rows_used')})")
             else:
                 lines.append(f"  {metric:<18s} trend={m['trend']:<10s} "

@@ -537,6 +537,68 @@ def test_get_trend_analysis_honest_row_count_under_window(tmp_path):
     assert result["metrics"]["swap_free_pct"]["trend"] == "degrading"  # 50 -> 30, dropping
 
 
+def test_render_report_text_survives_per_metric_insufficient_data(monkeypatch):
+    """Regression test for a real bug caught by independent supervisor
+    review (task-20260806-042916, PR #115): render_report_text checked
+    `m.get("trend") is None` to detect the insufficient-data case, but
+    compute_trend_for_series's insufficient-data dict shape carries
+    `"trend": "insufficient_data"` (a string, never None) and omits
+    first_half_avg/second_half_avg/pct_change -- so the old check fell into
+    the else branch and raised KeyError whenever any one of the 3 tracked
+    metrics had fewer than 2 non-null values in its window. A realistic
+    near-term production scenario (e.g. shortly after this section first
+    ships, or a metric column that is briefly NULL), not a contrived edge
+    case.
+
+    Calls the REAL render_report_text() end-to-end (not just the backend
+    helpers) against a minimal-but-real report dict shaped exactly like one
+    metric hitting insufficient_data, proving the fixed check
+    (`m.get("trend") == "insufficient_data"`) never dereferences the
+    missing keys."""
+    report = {
+        "generated_at": "t", "umr": "UMR-x", "parent_umr": "UMR-y", "ocid": "OCID-020",
+        "script_version": pm.SCRIPT_VERSION,
+        "header_status": {
+            "ram_swap": {}, "load_average": {}, "dispatch_tick": {}, "parallel_workers": {},
+            "stuck_tasks": {}, "tmux": {}, "emergency_stop": {}, "db_integrity": {},
+        },
+        "ocid_020_gtm_section": {"categories": []},
+        "ocid_canonical_registry_section": {},
+        "umr_tasks_section": {},
+        "gtm_readiness": {"bucket": "x", "reason": "x", "is_placeholder": True},
+        "implementation_summary": {"prior_snapshot_found": False, "deltas": {}},
+        "open_issues": [],
+        "pm_decisions_pending": [],
+        "owner_proposals_pending": [],
+        "ocid_compliance_audit_section": {"error": "not exercised in this test"},
+        "trend_analysis_section": {
+            "error": None,
+            "rows_used": 1,
+            "window_size_requested": 10,
+            "stable_tolerance_pct": 5.0,
+            "metrics": {
+                # Exactly the real shape compute_trend_for_series() produces
+                # for <2 non-null values -- no first_half_avg/second_half_avg/
+                # pct_change keys present.
+                "swap_free_pct": {"trend": "insufficient_data", "rows_used": 1},
+                "load_1min": {"trend": "insufficient_data", "rows_used": 1},
+                "gtm_pass_count": {"trend": "insufficient_data", "rows_used": 1},
+            },
+        },
+        "stall_detection_section": {"error": None, "stuck_task_threshold_minutes": 30.0, "tasks": []},
+        "collision_detection_section": {
+            "collision_detected": False, "tracked_repos": [], "checked_unit_globs": [],
+            "all_pr_collision_pairs": [], "all_worker_collision_pairs": [],
+            "pr_file_collisions": {"by_repo": {}, "errors": []},
+            "worker_umr_collisions": {"errors": []},
+        },
+        "instruction_quality_section": {"error": None, "total_checked": 0, "pass_count": 0, "failing": []},
+    }
+    text = pm.render_report_text(report)  # must not raise
+    assert "insufficient_data" in text
+    assert "10. 10-REPORT TREND ANALYSIS" in text
+
+
 def test_get_trend_analysis_zero_rows(tmp_path):
     db_path = str(tmp_path / "empty_snap.sqlite")
     conn = sqlite3.connect(db_path)

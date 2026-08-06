@@ -74,13 +74,49 @@ infrastructure only, never recreating it.
       matching; `lookup-capability --intent-text "..."`: only an unrelated
       `capability_registry_dedup` FTS near-hit, not a real match).
 
-## Remaining
-- [ ] Live-wire `assemble-briefing` into the actual dispatch chokepoint
+- [x] Live-wired `assemble-briefing` into the actual dispatch chokepoint
       (`worker-entrypoint.sh`, the script that starts every real `claude -p` AI agent
-      invocation) so the briefing is generated automatically before an agent starts,
-      and add a `record-completion` instruction to the agent's own prompt/protocol
-      (mirroring how `PROGRESS.md` maintenance is already instructed there) so
-      write-back actually happens at the end of real work -- additive, best-effort,
-      never blocking real dispatch on a failure, matching this codebase's own
-      established convention for purely-additive traceability writes
-      (`insert_ocid_artifact_link`'s own docstring). Next step.
+      invocation): on a genuine first start (never a resume -- the agent already has
+      this from its own PROGRESS.md/checkpoint history by then), resolves this exact
+      worker unit's CURRENT real `umr_id` fresh via `umr_tasks.unit_name` (discovered
+      live: the SAME systemd unit can be reused across a resumed/corrected
+      re-dispatch with a genuinely DIFFERENT `umr_id` each time -- confirmed against
+      this task's own row, `unit_name='veridian-worker@task-...-165903....service'`
+      resolves to `UMR-20260806-121829-509e`, a prior UMR this same unit ran under
+      before being reused for this task -- so it is never cached/assumed), then calls
+      `agent_work_briefing.py assemble-briefing` and injects only its compact
+      `close_ended_facts` (not the full JSON) into the agent's own prompt. Added a
+      matching `record-completion` instruction, mirroring how the existing
+      `PROGRESS_INSTRUCTION` already tells the agent to maintain `PROGRESS.md`.
+      Additive/best-effort throughout (no `set -e` in this file; every DB/subprocess
+      call degrades to an empty `BRIEFING_INSTRUCTION` on any failure, never blocks
+      real dispatch) -- same posture `insert_ocid_artifact_link`'s own docstring
+      documents for every other purely-additive traceability write in this codebase.
+      - Real finding while wiring this: `lookup_capability()`'s own OR-of-terms FTS
+        stage, given a full multi-sentence `intent_text`, honestly returned 12 of 13
+        live `capability_registry` rows as "matches" on incidental vocabulary alone --
+        not a bug in that existing function, but passing it verbatim would have made
+        `agent_work_briefing.py`'s own output the vague, overclaiming guidance the
+        SPEC explicitly rules out. Fixed at the call site (worker-entrypoint.sh passes
+        the task's own concise `task.yaml` title, not the full `prompt.txt`) AND in
+        `assemble_briefing()` itself (>5 keyword-only matches are now reported as
+        "broad OR-keyword overlap, not a confirmed single-purpose fit" rather than
+        implied as N confirmed reuse targets) -- verified live: dropped from 12/30KB
+        to 6-7/compact with an honest qualifier.
+      - Verified end-to-end against this task's own real live `umr_id` (dry run,
+        `set -uo pipefail`, matching the real file's own shell options): resolves,
+        calls the real live DB, produces a compact multi-line `BRIEFING_INSTRUCTION`;
+        also verified the graceful all-empty degradation path for a `TASK_ID` with no
+        matching `umr_tasks` row. `bash -n worker-entrypoint.sh` syntax-checks clean;
+        existing `PREFLIGHT-GUARD-BLOCK-*`/`NOOP-COMPLETION-BLOCK-*` extraction
+        markers (used by tests not present in this checkout) left untouched.
+
+## Remaining
+- [ ] None known. Both SPEC halves (pre-work briefing, post-work write-back) are
+      built, tested, and live-wired into the real dispatch chokepoint. Out of this
+      task's own scope, left for whoever picks it up: PR #194
+      (`worker/task-20260806-163355-...`, the `ai_agent_registry.py` this task
+      cherry-picked from) is still open/`CONFLICTING` against `main` -- once it
+      merges, this branch's own cherry-picked copy should merge as a clean no-op
+      (byte-identical commit), but worth a real check at that time rather than
+      assuming it.

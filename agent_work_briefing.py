@@ -189,11 +189,28 @@ def assemble_briefing(umr_id, scope_terms, intent_text):
             "entity found; a genuinely new one may be justified if real work creates it"
         )
     if capability_found:
-        names = sorted({m["capability_name"] for m in capability_result.get("matches", [])})
-        facts.append(
-            f"capability_registry: {len(capability_result.get('matches', []))} existing script(s) "
-            f"already do this ({names!r}) -- reuse directly, do not rebuild"
-        )
+        cap_matches = capability_result.get("matches", [])
+        names = sorted({m["capability_name"] for m in cap_matches})
+        # lookup_capability()'s own keyword stage is a plain OR-of-terms FTS
+        # match (see its own docstring in superboss-register.py) -- against a
+        # multi-word intent_text this can honestly return many rows that only
+        # share incidental vocabulary, not a real single-purpose fit. Past a
+        # handful of hits this module reports that plainly (a real, bounded
+        # fact -- "N rows, broad overlap") rather than implying every one of
+        # them is a confirmed duplicate to reuse, which is itself a form of
+        # vague guidance the SPEC's own "never vague guidance" rules out.
+        if len(names) > 5:
+            facts.append(
+                f"capability_registry: {len(cap_matches)} rows share keyword overlap with this intent_text "
+                f"(top 5 of {len(names)}: {names[:5]!r}) -- broad OR-keyword match, not a confirmed "
+                "single-purpose fit; run `lookup-capability --capability-name <exact name>` or narrow "
+                "intent_text before assuming any one of these already does this"
+            )
+        else:
+            facts.append(
+                f"capability_registry: {len(cap_matches)} existing script(s) already do this ({names!r}) "
+                "-- reuse directly, do not rebuild"
+            )
     else:
         facts.append("capability_registry: no existing script found for this intent_text")
     if agent_found:

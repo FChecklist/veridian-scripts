@@ -1,0 +1,52 @@
+# =============================================================================
+# CADENCE FIX -- UMR-20260806-134738-eec3 (governing UMR-20260806-071025-1d28).
+#
+# PROBLEM: this timer's original cadence (OnCalendar=*-*-* 04:47:00, i.e.
+# once/day) could not keep up with the real observed same-day backup
+# creation rate. Real evidence measured directly on 2026-08-06: two
+# superboss-register.sqlite backup copies (~2.1GB and ~2.1GB,
+# superboss-register.sqlite.pre-wiring-backup-20260806T133015Z and
+# superboss-register.sqlite.pre-systemd-backup-20260806T133738Z) were
+# created only 7 minutes apart (13:30:19Z, 13:37:42Z, real file mtimes) --
+# i.e. a real observed rate that can exceed 4GB/10min. At that rate, a
+# once-daily prune leaves up to ~23 hours of unbounded accumulation between
+# runs; on a filesystem already at 88-89% used (301GB total, ~33-35GB real
+# free at the time of this fix) that is not survivable.
+#
+# FIX (two parts, per UMR-20260806-134738-eec3 Step 3):
+#   1. Real condition-based trigger: a new companion .path unit in this same
+#      directory (veridian-cron-prune-memory-backups.path) fires this
+#      service IMMEDIATELY whenever a new file is written into
+#      /opt/veridian/ai-os/memory or its backups/ subdirectory -- i.e. right
+#      after the backup that caused the growth, not up to a full interval
+#      later. This is the primary trigger now and, by construction, cannot
+#      be outrun by creation rate the way a clock-only trigger can.
+#   2. This .timer is the clock-based BACKSTOP for the case the path unit's
+#      inotify watch is ever missed (e.g. a watch re-arm race, or the
+#      service unit temporarily masked). OnCalendar is raised from once/day
+#      to every 5 minutes (*:0/5) -- chosen so that even in the worst case
+#      of the path trigger missing one whole file-creation event, the
+#      backstop still catches it within one real backup's worth of size
+#      (~2.1GB observed) rather than a full day's worth (which, at the
+#      observed >4GB/10min peak rate, could exceed 500GB -- more than the
+#      entire 301GB disk). 5 minutes leaves comfortable margin against the
+#      real ~33-35GB free headroom at time of writing while still being
+#      "well above daily" as required.
+#
+# This is a trigger-mechanism change to the ALREADY Owner-authorized unit
+# #19 (UMR-20260806-084306-f599 Step 6) -- not a new unit-#20 / new
+# periodic purpose under the ~/.config/systemd/user/README.md closed-set
+# STANDING RULE. The service being triggered (prune_memory_backups.py) and
+# its purpose are unchanged; only how often/promptly it is invoked changed.
+# =============================================================================
+[Unit]
+Description=Run veridian-cron-prune-memory-backups on a frequent clock-based backstop cadence (real fix for UMR-20260806-134738-eec3); primary trigger is the paired .path unit
+
+[Timer]
+OnCalendar=*:0/5
+RandomizedDelaySec=20
+AccuracySec=10s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

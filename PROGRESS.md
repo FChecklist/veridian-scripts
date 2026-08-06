@@ -96,9 +96,30 @@ capability_registry            11
   ```
   Checksums match -- clean copy confirmed.
 
+- [x] Step 2 (separate working copy) -- 2026-08-06T04:39Z
+  Working copy placed at `/tmp/veridian-recovery-work/` (outside the live
+  path, outside the backups dir, and outside the git workspace itself to
+  avoid ever accidentally committing a 1.6GB binary artifact).
+  ```
+  $ cp /opt/veridian/backups/sqlite-daily/superboss-register.sqlite.20260806T043818Z-pre-file_inventory-recover-fresh.bak \
+       /tmp/veridian-recovery-work/superboss-register.sqlite.working-copy-fresh.sqlite
+
+  $ ls -l /opt/veridian/backups/sqlite-daily/superboss-register.sqlite.20260806T043818Z-pre-file_inventory-recover-fresh.bak
+  -rw-r--r-- 1 rajat rajat 1638092800 Aug  6 04:38 ...pre-file_inventory-recover-fresh.bak
+
+  $ ls -l /tmp/veridian-recovery-work/superboss-register.sqlite.working-copy-fresh.sqlite
+  -rw-r--r-- 1 rajat rajat 1638092800 Aug  6 04:39 .../superboss-register.sqlite.working-copy-fresh.sqlite
+
+  $ sha256sum /opt/veridian/backups/sqlite-daily/superboss-register.sqlite.20260806T043818Z-pre-file_inventory-recover-fresh.bak
+  2b5cb2824682eb1136bb0fe926ee71e6d925b493d33ed6483833d260c1688f5c  ...pre-file_inventory-recover-fresh.bak
+
+  $ sha256sum /tmp/veridian-recovery-work/superboss-register.sqlite.working-copy-fresh.sqlite
+  2b5cb2824682eb1136bb0fe926ee71e6d925b493d33ed6483833d260c1688f5c  .../working-copy-fresh.sqlite
+  ```
+  Checksums match Step 1's backup exactly.
+
 ## Remaining
 
-- [ ] Step 2 (separate working copy)
 - [ ] Step 3 (.recover to new file)
 - [ ] Step 4 (verification -- integrity_check + row counts; STOP here if
       unexplained mismatch)

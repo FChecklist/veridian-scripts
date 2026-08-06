@@ -1,100 +1,34 @@
-# PROGRESS -- task-20260805-172727-correction--no-real-data-corruption-exis
+# PROGRESS -- task-20260806-151747-root-cause-fix--dispatch-owner-task-sh-n
 
 ## Completed
-- [x] Did not trust the SPEC's "already independently verified" framing on assertion --
-      independently re-checked every claim against live state before any write.
-- [x] Data corruption claim: diffed all 69 rows of live `ocid_canonical_registry` against the
-      known-correct `/tmp/full_roster.json` snapshot -- zero mismatches, corroborating the
-      correction. Also independently confirmed the mechanism explanation (dry-run default,
-      `--apply`-gated writes) by reading `audit_ocid_canonical_registry.py` directly.
-- [x] "Confirmed duplicate task `task-20260805-114214`" claim: found it does NOT hold up --
-      `systemctl --user list-units --all` shows no unit for it at all, and a prior task
-      (merged via PR #77, commit `a901898`, *before* this SPEC was even dispatched) already
-      independently verified it reached a terminal `blocked` state hours earlier with zero
-      commits and nothing live. Did **not** run `systemctl --user stop` -- nothing to stop.
-- [x] Found the one part of the SPEC that *was* accurate and actionable: UMR
-      `UMR-20260805-032243-185e` (tied to `task-20260805-114214`, PR 933/934) was genuinely
-      stuck at `status=running` with no live process. Reconciled it via the real
-      `reconcile_umr_status_against_pr()` / `reconcile-umr-status` mechanism (not raw SQL),
-      using independently `gh`-fetched, grep-verified merged-PR evidence for PR #933 and #934
-      (compliance-tracker) -- now `status=completed`.
-- [x] Deliberately did NOT close `UMR-20260805-121654-4b77` / `UMR-20260805-122042-8dbc` --
-      they belong to two sibling tasks' own dispatch records (`task-20260805-172718`,
-      `task-20260805-172722`), neither of which has landed a merged PR yet
-      (veridian-scripts#83 is open, not merged; the lock-contention finding isn't even pushed
-      yet). Marking them `completed` here would require fabricating "merged" evidence into the
-      canonical mechanism -- exactly the premature-closure failure mode this process exists to
-      prevent.
-- [x] Full findings written up:
-      `PM_CORRECTION_VERIFICATION_2026-08-05T173727Z.md`.
-
-- [x] Committed, pushed, opened for independent review:
-      https://github.com/FChecklist/veridian-scripts/pull/87
-      (left open rather than self-merged -- same standing OCID-070 gap, no independently
-      provisioned reviewer identity exists in this environment).
+- [x] Step one: read `/opt/veridian/scripts/dispatch-owner-task.sh` in full and independently verified the SPEC's "real evidence" against live state.
+- [x] Verified the SPEC's premise is **false** (see Findings below) -- stopped per "stop if any step fails" rather than proceeding to steps two-seven.
+- [x] Logged the false-premise finding into the register via the canonical `superboss-register.py insert-pm-decision-pending` (pm_decisions_pending row id 103, related-umr UMR-20260806-071025-1d28) so the sentinel/PM does not re-dispatch this identical ask blind to the fact it's already resolved.
+- [x] No code change made, no PR opened (nothing to fix -- see Findings).
 
 ## Remaining
-- [ ] None from this task's side. `UMR-20260805-121654-4b77` / `UMR-20260805-122042-8dbc`
-      should be closed by their own owning tasks once veridian-scripts#83 merges (structural
-      gap: no independently-provisioned reviewer identity currently exists, per OCID-070 --
-      same standing gap, not re-solved here) and once the lock-contention finding is
-      pushed/reviewed.
+- [ ] None for this task. If a maintainer disagrees with the false-premise finding, re-open with fresh evidence against `origin/main` (not the stale `/opt/veridian/scripts` deploy copy) and a specific claim about what `origin/main`'s current design (PR #166) still gets wrong.
 
----
+## Findings (why this task stops here)
 
-# PROGRESS -- task-20260805-172731-build-a-real-deterministic-deposit-and-r
+**SPEC claim:** `/opt/veridian/scripts/dispatch-owner-task.sh` is 99 lines and never writes `ts_dispatched`, `ts_completed`, or an updated `status` onto the `umr_tasks` row it mints.
 
----
+**Verified reality:**
+1. The live deployed file is **196 lines** (not 99), at repo commit `60cbae1` (deployed copy is well behind origin/main -- see deploy-sync gap noted below). It already writes back:
+   - `mark-umr-dispatched` on successful tmux relay (line 184 of the live copy) -- added by **UMR-20260806-085144-9c63 / PR #150**.
+   - `mark-umr-terminal --status failed` on relay failure (lines 192-193 of the live copy) -- same PR.
+   - A mandatory completion instruction embedded in the relayed prompt text itself naming the exact `mark-umr-terminal` command -- added by **UMR-20260806-112013-088f** because the doc-comment-only version of this instruction was found insufficient.
+2. `origin/main` of `veridian-scripts` (already merged, commit `3498d8a`, **237 lines**) has gone further still: **PR #166 / UMR-20260806-115423-500d** ("dispatch-owner-task relay non-authoritative") deliberately *removed* the `mark-umr-dispatched`/`mark-umr-terminal` writes from the relay branches, because:
+   - A successful `tmux send-keys` only proves keystrokes were written into a pane, never that a live process read/acted on them -- it is not proof of delivery.
+   - Writing `status='dispatched'` or `status='failed'` from this script independently pulled the row out of `resource_governor.py`'s `next_queued_task()` query (`WHERE status='queued'`), the **real mechanical dispatch-tick.py pickup path** that spawns a `veridian-worker@*.service` regardless of tmux/interactive-session state -- so a relay that landed in a dead/wrong/busy pane got the row **permanently excluded** from the one channel that could still have picked it up. A real dead zone, confirmed by reading `next_queued_task()`/`_perform_spawn()` directly.
+   - The corrected, already-shipped design instead calls a new `mark-umr-relay-attempted` subcommand that writes **only** `ts_relay_attempted`/`relay_outcome`/`relay_detail`, and never touches `status`/`ts_dispatched`/`ts_completed`. Rows stay at `status='queued'`, fully eligible for the real mechanical pickup, no matter what the tmux relay achieved.
 
-# PROGRESS -- task-20260806-032941-pm-decision--close-pr-98--defer-to-pr-10
+**Conclusion:** implementing this SPEC's steps two/three/four as written -- making the wrapper write `status='dispatched'`/`status='failed'` straight onto the row after the tmux relay -- would **revert an already-merged, deliberate regression fix** and reintroduce the exact dead-zone bug UMR-20260806-115423-500d fixed. This is not a case of "root cause not yet found and fixed" -- it is a case of the root cause having already been found, fixed, found-flawed, and re-fixed with a materially different (and correct) design, upstream of this SPEC's evidence.
 
-Real PM decision, relates to UMR-20260806-030048-5d7a and UMR-20260806-031211-64de.
-SPEC: close PR #98 (credit-preserving, citing #100), stop "my own" duplicate item-2
-agent, let the #100 thread finish items 1-5, independently verify #100's fleet-wide
-and secondary-bug claims before treating either as complete, keep watching for
-further duplication across items 2-5.
+**Separately noted, not fixed here (out of scope / needs its own owner):** the live `/opt/veridian/scripts` deployed copy is far behind `origin/main` (`60cbae1` vs `3498d8a`, dozens of merged PRs behind, including #166 itself). This deploy-sync gap is plausibly *why* the sentinel's "real evidence" query saw stale `queued`/`null` rows this cycle even though the real fix has already merged -- worth a real UMR of its own, but is a deploy/ops concern, not a `dispatch-owner-task.sh` code defect, and was not touched here.
 
----
+**Scope boundary respected:** did not touch `reconcile_owner_dispatch_status.py`, `apply_owner_dispatch_status_corrections.py`, PR #147, or branch `reconcile/owner-dispatch-status-UMR-20260806-075726-babc`.
 
-# PROGRESS -- UMR-20260806-122546-78d6-test-script-build-real
+**Hard limits respected:** no credential rotated, no repository deleted or archived, reconciliation script/branch owned by UMR-20260806-082646-3aba untouched.
 
-## Completed
-- [x] Real, independent zero-dup precheck re-run (`resource_governor.py --query-umr
-      --search "TEST_SCRIPT_BUILD"` and `--search "gtm_checks"`, both 0 matches) before
-      starting -- confirmed undispatched, consistent with the PM's own precheck.
-- [x] Built `gtm_test_script_build_check.py`: the one real, deterministic, zero-AI-call
-      implementation of "does gtm_certification_categories row N's evidence_json cite a
-      real, existing, py_compile-valid script_path". Ran it cold against live state: 17/25
-      passed, 8 failed (categories 4, 5, 6, 7, 9, 12, 14, 24 -- each had real substantive
-      evidence_json but cited a script_path confirmed absent from both this repo and the
-      live deployed scripts/ dir).
-- [x] Built one real, committed, re-runnable `gtm_check_*.py` per failing category,
-      reproducing each category's own already-recorded real methodology. Ran every one of
-      the 8 in `--no-write` (evaluate-only) mode first; every fresh result matched the
-      already-recorded `passed` verdict exactly (all 8 were and remain `passed=1`) -- no
-      certification verdict changed by this task, per its own Hard Rule. Only then
-      registered each via the shared `gtm_write_category_result.py` (never raw SQL).
-- [x] Live re-check after registration: 25/25, `TEST_SCRIPT_BUILD_COMPLETE=YES`.
-      Categories 17 (browser compatibility) and 21 (deployment testing) already had real,
-      existing, re-runnable scripts from parallel same-cycle work (UMR-20260806-122604-346d
-      for 17; 21 separately escalated to the Owner for a Vercel credential decision) --
-      counted from live DB state, not rebuilt. No child UMR proposals were needed: no
-      category's fresh re-run disagreed with its recorded verdict.
-- [x] Wired `gtm_test_script_build_check.py` into `generate_pm_report_v3.py` Section 2 --
-      the standing 10-minute PM report now emits real `TEST_SCRIPT_BUILD: X out of 25` and
-      `TEST_SCRIPT_BUILD_COMPLETE: YES/NO` instead of `UNKNOWN`.
-- [x] Discovered mid-task: this repo checkout is a **shared** working directory -- another
-      concurrent process force-switched it to branch `pr166` (with its own unrelated
-      uncommitted edits to `quality-gate.sh`/`superboss-register.py`/`worker-entrypoint.sh`)
-      while this task's files were sitting in the working tree. Did not touch, stash, or
-      discard that other work. Recovered by copying only this task's own files into a
-      separate `git worktree` on this task's own branch, verified clean `git status` there
-      (only this task's intended diff), and continued from there.
-- [x] Rebased onto latest `origin/main` immediately before opening the PR (still `ccc5346`,
-      no new commits landed on `main` in the interim -- fast-forward, no PROGRESS.md
-      conflict to resolve).
-
-## Remaining
-- [ ] None from this task's side. Verdict-change decisions for any category (if a future
-      re-run of these scripts ever disagrees with a recorded `passed` value) are explicitly
-      out of this task's scope -- a separate real decision, per its own Hard Rule.
+**Pattern match:** this is another instance of the recurring "urgent PM SPEC with confident claims that don't match live state" pattern (11+ prior instances per standing memory) -- verified independently before any write, exactly as that memory prescribes. No write/restore/kill was performed against production state; the only write made was the canonical, non-destructive `insert-pm-decision-pending` finding record.

@@ -208,9 +208,127 @@ def test_gather_evidence_extracts_pushed_merge_commit_and_confirms_ancestor():
             ancestor_checker=fake_ancestor,
             pr_viewer=lambda repo, num: None,
             superseding_finder=lambda c, r: None,
+            branch_pr_finder=lambda repo, tid: None,
         )
         assert evidence["merge_commit_sha"] == "cc5dea73"
         assert evidence["merge_commit_is_ancestor_of_main"] is True
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_gather_evidence_finds_pr_by_branch_when_no_pr_number_recorded():
+    """New real evidence source (2026-08-06 hardening): the spec requires
+    real PR state for EVERY failed/killed row, not only ones that already
+    happen to have a PR number recorded in their own text. Proves a row
+    whose task.yaml names a real repo but whose own reason/metadata never
+    mentions a PR number still gets a real `worker/<task_id>` branch lookup,
+    and that a real merged result from it can drive already_done."""
+    triage = _load("triage_gather1c", TRIAGE_PATH)
+    sbr, conn, path = _scratch_conn()
+    try:
+        row = {
+            "umr_id": "UMR-1c", "task_identity": "t1c", "status": "failed",
+            "ts_submitted": "2026-08-05T00:00:00+00:00",
+            "unit_name": "veridian-worker@task-z.service",
+            "logs_ref": None, "reason": "queued", "metadata_json": "{}",
+        }
+        branch_calls = []
+
+        def fake_branch_pr_finder(repo, task_id):
+            branch_calls.append((repo, task_id))
+            return {"number": 999, "state": "MERGED", "mergedAt": "2026-08-06T00:00:00Z",
+                    "mergeCommit": {"oid": "cafef00d"}}
+
+        evidence = triage.gather_evidence(
+            conn, row, task_yaml_reader=lambda tid: {"repo": "veridian-scripts"},
+            ancestor_checker=lambda repo, sha: True,
+            pr_viewer=lambda repo, num: None,
+            superseding_finder=lambda c, r: None,
+            branch_pr_finder=fake_branch_pr_finder,
+        )
+        assert branch_calls == [("veridian-scripts", "task-z")]
+        assert evidence["pr_number"] == 999
+        assert evidence["merge_commit_sha"] == "cafef00d"
+        bucket, _ = triage.classify(evidence)
+        assert bucket == "already_done"
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_gather_evidence_branch_pr_finder_never_called_without_a_known_repo():
+    """The branch-PR lookup must never fire on a guessed repo -- only when
+    task.yaml or the row's own text already names one."""
+    triage = _load("triage_gather1d", TRIAGE_PATH)
+    sbr, conn, path = _scratch_conn()
+    try:
+        row = {
+            "umr_id": "UMR-1d", "task_identity": "t1d", "status": "failed",
+            "ts_submitted": "2026-08-05T00:00:00+00:00",
+            "unit_name": "veridian-worker@task-w.service",
+            "logs_ref": None, "reason": "queued", "metadata_json": "{}",
+        }
+        branch_calls = []
+        evidence = triage.gather_evidence(
+            conn, row, task_yaml_reader=lambda tid: None,
+            ancestor_checker=lambda repo, sha: None,
+            pr_viewer=lambda repo, num: None,
+            superseding_finder=lambda c, r: None,
+            branch_pr_finder=lambda repo, tid: branch_calls.append((repo, tid)),
+        )
+        assert branch_calls == []
+        assert evidence["repo"] is None
+        assert evidence["pr_number"] is None
+    finally:
+        conn.close()
+        os.unlink(path)
+
+
+def test_gather_evidence_ignores_pr_numbers_buried_in_reuse_check_result():
+    """Real bug found + fixed 2026-08-06: reuse_check_result is a background
+    'similar prior work?' search dump the dispatch pipeline attaches to
+    virtually every row, confirmed live to run 1-4MB and reference dozens of
+    real but UNRELATED PRs from across the codebase. A PR number/repo hint
+    buried in there must never be treated as evidence about THIS row's own
+    outcome, even if that PR later genuinely merges -- reproduces the exact
+    shape found live (UMR-20260805-002929-5560: an OCID-047/OCID-050 stall
+    recovery row misclassified already_done via an unrelated compliance-
+    tracker PR #562 mention deep inside reuse_check_result)."""
+    triage = _load("triage_gather1b", TRIAGE_PATH)
+    sbr, conn, path = _scratch_conn()
+    try:
+        row = {
+            "umr_id": "UMR-1b", "task_identity": "t1b", "status": "failed",
+            "ts_submitted": "2026-08-05T00:00:00+00:00",
+            "unit_name": "veridian-worker@task-y.service",
+            "logs_ref": None,
+            "reason": "queued",
+            "metadata_json": json.dumps({
+                "reuse_check_result": {
+                    "intent_text": "unrelated prior search",
+                    "findings": "compliance-tracker PR #562 (phase 4) confirmed still open",
+                },
+            }),
+        }
+        pr_viewer_calls = []
+
+        def fake_pr_viewer(repo, num):
+            pr_viewer_calls.append((repo, num))
+            return {"number": num, "state": "MERGED", "mergedAt": "2026-08-06T00:00:00Z",
+                    "mergeCommit": {"oid": "deadbeef"}}
+
+        evidence = triage.gather_evidence(
+            conn, row, task_yaml_reader=lambda tid: None,
+            ancestor_checker=lambda repo, sha: True,
+            pr_viewer=fake_pr_viewer,
+            superseding_finder=lambda c, r: None,
+        )
+        assert evidence["pr_number"] is None
+        assert evidence["repo"] is None
+        assert pr_viewer_calls == []
+        bucket, _ = triage.classify(evidence)
+        assert bucket != "already_done"
     finally:
         conn.close()
         os.unlink(path)

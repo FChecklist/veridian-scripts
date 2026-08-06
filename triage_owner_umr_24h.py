@@ -12,12 +12,20 @@ script is the ground truth, live, every time it runs).
 For every row with status IN ('failed', 'killed'), cross-references real
 evidence -- task.yaml under /opt/veridian/ai-os/tasks/<task_id>/ (derived
 from unit_name, never hand-typed), real git/GitHub PR state for any repo
-cited, and the row's own real `reason`/`metadata_json` columns (which this
-project's own prior reconciliation passes already populated with real,
-structured evidence strings -- see the `reason` column's own
-"one-time backfill reconciliation" and `metadata_json`'s
-"reconciliation_<umr>_evidence"/"reuse_check_result" keys) -- and buckets
-each row into EXACTLY one of:
+cited (including an unconditional real `gh pr list --head worker/<task_id>`
+branch lookup whenever a repo is known but no PR number was already
+recorded anywhere in the row's own text -- see find_pr_by_branch()), and the
+row's own real `reason`/`metadata_json` columns (which this project's own
+prior reconciliation passes already populated with real, structured
+evidence strings -- see the `reason` column's own "one-time backfill
+reconciliation" text). NOTE: `metadata_json`'s `reuse_check_result` key is
+deliberately EXCLUDED from all evidence-signal scanning (see
+EXCLUDED_METADATA_EVIDENCE_KEYS) -- confirmed live to be a 1-4MB
+"similar prior work?" search dump attached to virtually every row,
+referencing dozens of real but unrelated PRs from across the whole
+codebase; treating it as evidence about the row's OWN outcome produced real,
+verified false positives in every bucket (fixed 2026-08-06 before this
+script was ever run with --apply). Buckets each row into EXACTLY one of:
 
   1. already_done   - real work landed under a different task/PR; row
                        status is merely stale. Evidence MUST be a real
@@ -123,6 +131,26 @@ PR_NUMBER_RE = re.compile(r"PR\s*#(\d+)", re.I)
 RELATED_UMR_RE = re.compile(r"UMR-\d{8}-\d{6}-[0-9a-f]{4}")
 REPO_HINT_RE = re.compile(r"\b(compliance-tracker|veridian-scripts)\b")
 
+# Real bug found + fixed 2026-08-06 while verifying this already-merged script
+# before trusting its output enough to --apply: `reuse_check_result` is a
+# background "is this similar to prior work?" search dump the dispatch
+# pipeline attaches to virtually every row's metadata_json -- confirmed live
+# to be 1-4MB per row and to contain dozens of real but UNRELATED PR/commit
+# references from across the whole codebase (it's a search result about
+# OTHER tasks the dispatcher found similar, never evidence about THIS row's
+# own outcome). Concretely reproduced: UMR-20260805-002929-5560, a "continue
+# OCID-047/OCID-050 stall recovery" row with nothing to do with
+# compliance-tracker's Prompt Compiler Engine, was misclassified already_done
+# because reuse_check_result happened to mention "PR #562" from an unrelated
+# prior search, and PR #562 later happened to merge for real -- 18-23 of 24
+# already_done rows in one real dry run shared this exact false-positive
+# shape (identical PR/commit cited across unrelated rows spanning a full
+# day). Excluded from all evidence-signal regex scanning below; the row's
+# own real `reason` column and any other metadata_json key (e.g. the
+# `reconciled_by`/`reconciliation_umr` keys real reconciliation passes write)
+# are untouched and remain in scope.
+EXCLUDED_METADATA_EVIDENCE_KEYS = frozenset({"reuse_check_result"})
+
 
 def run(cmd, timeout=30, cwd=None):
     try:
@@ -215,6 +243,33 @@ def gh_pr_view(repo, number, gh_runner=run):
         return None
 
 
+def find_pr_by_branch(repo, task_id, gh_runner=run):
+    """Real, unconditional PR-by-branch lookup -- the spec's own explicit
+    requirement is "real open and merged pull request state for the cited
+    repo" for EVERY failed/killed row, not only rows that already happen to
+    have a PR number recorded in their own reason/metadata text. Uses this
+    project's own real branch-naming convention (`worker/<task_id>`, the
+    same convention every worker's own task.yaml `branch:` field uses) via
+    `gh pr list --head`, an exact-match filter (never a fuzzy text search).
+    Only called when a real repo is already known (see gather_evidence's own
+    gating comment) -- never guesses a repo to search."""
+    if repo not in ("veridian-scripts", "compliance-tracker") or not task_id:
+        return None
+    rc, out, err = gh_runner(
+        ["gh", "pr", "list", "--repo", f"FChecklist/{repo}", "--state", "all",
+         "--head", f"worker/{task_id}",
+         "--json", "number,state,mergedAt,mergeCommit,baseRefName"],
+        timeout=30,
+    )
+    if rc != 0 or not out.strip():
+        return None
+    try:
+        items = json.loads(out)
+    except Exception:
+        return None
+    return items[0] if items else None
+
+
 def lookup_umr_row(conn, umr_id):
     row = conn.execute(
         "SELECT umr_id, task_identity, status, ts_submitted FROM umr_tasks WHERE umr_id=?",
@@ -269,11 +324,12 @@ def load_24h_owner_dispatch_total(conn):
 
 def gather_evidence(conn, row, *, task_yaml_reader=read_task_yaml,
                      ancestor_checker=is_commit_on_main, pr_viewer=gh_pr_view,
-                     superseding_finder=find_superseding_row):
+                     superseding_finder=find_superseding_row,
+                     branch_pr_finder=find_pr_by_branch):
     """Builds the full real evidence dict for one row. Pure with respect to
     its injected collaborators -- callers can substitute mocks for
-    task_yaml_reader/ancestor_checker/pr_viewer/superseding_finder to make
-    this deterministic and offline for tests."""
+    task_yaml_reader/ancestor_checker/pr_viewer/superseding_finder/
+    branch_pr_finder to make this deterministic and offline for tests."""
     umr_id = row["umr_id"]
     unit_name = row["unit_name"]
     reason = row.get("reason") or ""
@@ -281,7 +337,14 @@ def gather_evidence(conn, row, *, task_yaml_reader=read_task_yaml,
         metadata = json.loads(row["metadata_json"]) if row.get("metadata_json") else {}
     except Exception:
         metadata = {}
-    metadata_text = json.dumps(metadata)
+    # Evidence-signal regexes below scan `combined_text` only -- deliberately
+    # excludes EXCLUDED_METADATA_EVIDENCE_KEYS (see that constant's docstring)
+    # so an unrelated PR/commit mentioned deep in a bloated background search
+    # dump can never be mistaken for evidence about this row's own outcome.
+    # `metadata` itself (unfiltered) is still what apply_classification()
+    # reads/merges/writes back -- only the evidence-scanning text is filtered.
+    metadata_for_evidence = {k: v for k, v in metadata.items() if k not in EXCLUDED_METADATA_EVIDENCE_KEYS}
+    metadata_text = json.dumps(metadata_for_evidence)
     combined_text = f"{reason}\n{metadata_text}"
 
     task_id = task_dir_from_unit(unit_name)
@@ -315,12 +378,22 @@ def gather_evidence(conn, row, *, task_yaml_reader=read_task_yaml,
     if pr_number is None:
         m = PR_NUMBER_RE.search(combined_text)
         pr_number = int(m.group(1)) if m else None
-    evidence["repo"] = repo
-    evidence["pr_number"] = pr_number
-
     pr_state = None
     if repo and pr_number:
         pr_state = pr_viewer(repo, pr_number)
+    elif repo and task_id:
+        # No PR number recorded anywhere in this row's own real evidence
+        # text -- real, unconditional branch-name lookup (this repo's own
+        # `worker/<task_id>` convention) so a genuinely open/merged PR is
+        # never missed just because nothing ever wrote its number back onto
+        # the row. Gated on `repo` already being known (never guessed) so
+        # this never fires for a row with zero real repo signal.
+        branch_pr = branch_pr_finder(repo, task_id)
+        if branch_pr:
+            pr_number = branch_pr.get("number")
+            pr_state = branch_pr
+    evidence["repo"] = repo
+    evidence["pr_number"] = pr_number
     evidence["pr_state"] = pr_state
 
     # --- bucket 1 signal: a real pushed-merge-commit sha, confirmed on main. ---

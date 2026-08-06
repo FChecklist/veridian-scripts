@@ -1881,6 +1881,27 @@ def register_knowledge(args):
     }, indent=2, default=str))
 
 
+# Real fix (UMR-20260806-141250-1ceb): shared row-count cap for the two FTS
+# queries named in proposal 86 / UMR-20260806-135902-cf13's root-cause
+# evidence (this function's own knowledge_engine_fts query below, and
+# lookup_entity()'s wiring_registry_fts query further down this file) --
+# both previously had no LIMIT and returned every matching row, unbounded,
+# straight into a caller (plan_generator.check_reuse_before_dispatch(), via
+# resource_governor.submit()) that embeds the full result verbatim into
+# umr_tasks.metadata_json on every dispatch. 50 is a deliberate choice, not
+# an arbitrary one: FTS5's `ORDER BY rank` already sorts most-relevant-first,
+# so the top 50 keeps far more candidates than a human/agent reviewer could
+# usefully scan as "possible duplicates to check" (that job realistically
+# tops out around 5-10 before it stops being a useful signal) while still
+# being generous enough that a real near-duplicate is essentially never
+# pushed out of a top-50 rank-ordered slice by noise. No existing internal
+# LIMIT precedent to match: lookup_capability()'s own analogous
+# capability_registry_fts query was checked and found equally unbounded as
+# of this fix (out of this UMR's approved scope to also change).
+WIRING_LOOKUP_MATCH_LIMIT = 50
+KNOWLEDGE_QUERY_MATCH_LIMIT = 50
+
+
 def query_knowledge(args):
     """FTS5 search over knowledge_engine (purpose/tags/entity_relationships),
     same MATCH-via-_fts_query + rowid-join pattern as search()'s other trees.
@@ -1892,10 +1913,17 @@ def query_knowledge(args):
     _ensure_knowledge_engine_table(conn)
     q = _fts_query(args.query)
     try:
+        # Real fix (UMR-20260806-141250-1ceb, proposal 86): same unbounded-
+        # FTS-result issue as lookup_entity()'s wiring_registry_fts query
+        # above (root-caused live in UMR-20260806-135902-cf13 -- this
+        # query's own result feeds check_reuse_before_dispatch()'s
+        # result["knowledge"], embedded into metadata_json.reuse_check_result
+        # on every dispatch same as the wiring match list was). Same bound,
+        # same reasoning -- see WIRING_LOOKUP_MATCH_LIMIT's own comment.
         rows = conn.execute(
             "SELECT t.* FROM knowledge_engine_fts f JOIN knowledge_engine t ON t.rowid = f.rowid "
-            "WHERE knowledge_engine_fts MATCH ? ORDER BY rank",
-            (q,),
+            "WHERE knowledge_engine_fts MATCH ? ORDER BY rank LIMIT ?",
+            (q, KNOWLEDGE_QUERY_MATCH_LIMIT),
         ).fetchall()
         result = [dict(r) for r in rows]
     except sqlite3.OperationalError as e:
@@ -2849,10 +2877,27 @@ def lookup_entity(args):
     if not matches and args.query:
         q = _fts_query(args.query)
         try:
+            # Real fix (UMR-20260806-141250-1ceb, proposal 86 / governing
+            # UMR-20260806-071025-1d28): this query used to have NO LIMIT --
+            # confirmed live root cause of a 2034MB->4067MB (~11 min) DB
+            # blowup (UMR-20260806-135902-cf13's own dbstat + row-level
+            # evidence): a single sampled row's embedded
+            # reuse_check_result.wiring.matches held all 8441 unranked-cutoff
+            # matches for one query (~5.97MB just for that one field). Bound
+            # chosen as WIRING_LOOKUP_MATCH_LIMIT (see module-level constant
+            # below) -- FTS5's own `ORDER BY rank` already puts the most
+            # relevant hits first, so this keeps the reuse-check's real
+            # signal (top-ranked likely duplicates) while making the
+            # per-query result size structurally bounded regardless of how
+            # large wiring_registry grows. No internal LIMIT precedent
+            # existed to match here: lookup_capability()'s own analogous FTS
+            # query (capability_registry_fts, same file) was checked and, as
+            # of this fix, was equally unbounded -- out of this UMR's
+            # approved scope to change, noted for a future follow-up.
             rows = conn.execute(
                 "SELECT t.* FROM wiring_registry_fts f JOIN wiring_registry t ON t.rowid = f.rowid "
-                "WHERE wiring_registry_fts MATCH ? ORDER BY rank",
-                (q,),
+                "WHERE wiring_registry_fts MATCH ? ORDER BY rank LIMIT ?",
+                (q, WIRING_LOOKUP_MATCH_LIMIT),
             ).fetchall()
         except sqlite3.OperationalError:
             rows = []
@@ -5871,7 +5916,8 @@ def _migrate_pm_decisions_pending_owner_proposal_columns(conn):
 
 
 def insert_pm_decision_pending(conn, title, detail, *, options=None,
-                                recommended_option=None, related_umr=None):
+                                recommended_option=None, related_umr=None,
+                                decision_type="pm_decision"):
     """Opens one real PM decision row -- the one real write path into
     pm_decisions_pending (see _ensure_pm_decisions_pending_table's own
     docstring). `options` is a real Python list, typically of dicts shaped
@@ -5886,14 +5932,26 @@ def insert_pm_decision_pending(conn, title, detail, *, options=None,
     ever moves it out of that state. Caller owns conn/transaction/commit,
     same convention as insert_ocid_artifact_link()/update_umr_task() above
     -- this function itself never commits. Returns the new row's real
-    integer id."""
+    integer id.
+
+    `decision_type` (UMR-20260806-115605-854d, dead-zone auto-remediation
+    audit log): defaults to 'pm_decision' -- byte-identical behavior to
+    every real caller before this parameter existed (cmd_insert_pm_decision_pending
+    never passes it). A caller may pass a different real, already-established
+    decision_type (e.g. 'dead_zone_auto_remediation', reconcile_dispatched_dead_zone.py's
+    own real audit-log write) so the row is structurally excluded from
+    get_pm_decisions_pending()'s/get_owner_proposals_pending()'s own
+    decision_type-scoped WHERE clauses (Section 7/8 of generate_pm_report_v3.py)
+    without requiring a second parallel insert function -- 'owner_proposal'
+    rows still go through insert_owner_proposal()'s own separate, unchanged
+    INSERT, never through here."""
     cur = conn.execute(
         "INSERT INTO pm_decisions_pending "
-        "(opened_ts, title, detail, options_json, recommended_option, related_umr, status) "
-        "VALUES (?, ?, ?, ?, ?, ?, 'open')",
+        "(opened_ts, title, detail, options_json, recommended_option, related_umr, status, decision_type) "
+        "VALUES (?, ?, ?, ?, ?, ?, 'open', ?)",
         (_now_iso(), title, detail,
          json.dumps(options) if options is not None else None,
-         recommended_option, related_umr),
+         recommended_option, related_umr, decision_type),
     )
     return cur.lastrowid
 
@@ -6358,6 +6416,64 @@ def cmd_mark_umr_terminal(args):
     conn.close()
     print(json.dumps({"umr_id": args.umr_id, "status": args.status,
                        "ts_completed": ts_completed}, indent=2, default=str))
+
+
+def reset_umr_task_to_queued(conn, umr_id, *, reason):
+    """UMR-20260806-115605-854d (dead-zone auto-remediation, real correction
+    to UMR-20260806-115538-1e55's original "just report" framing -- the
+    real ask is that mechanical, safe, reversible fixes happen
+    automatically, never sit waiting for an AI to read a report). The one
+    real, canonical write path that resets a real umr_tasks row from
+    status='dispatched' back to 'queued' -- through update_umr_task() only,
+    same convention as every other real status-transition wrapper in this
+    file (cmd_mark_umr_dispatched/cmd_mark_umr_terminal above,
+    reconcile_stale_heartbeats() in resource_governor.py). Never a raw SQL
+    UPDATE.
+
+    ts_dispatched is explicitly cleared back to NULL (not left stale) so a
+    genuinely fresh dispatch attempt, whenever it next happens, is recorded
+    honestly rather than inheriting a timestamp from the abandoned attempt
+    this call is correcting -- the same "a queued row's own ts_dispatched is
+    NULL until a real dispatch happens" invariant every other real writer of
+    this column already relies on (next_queued_task()/dispatch_one() in
+    resource_governor.py, cmd_mark_umr_dispatched above).
+
+    Deliberately does not touch unit_name or metadata_json: the one real
+    caller (reconcile_dispatched_dead_zone.py) only ever calls this for a
+    row it has already confirmed carries unit_name IS NULL (no real systemd
+    unit was ever spawned for it -- see that script's own dead-zone
+    condition), so there is nothing there to clear, and this is a pure
+    status/timestamp transition with no other real field to merge (unlike
+    reconcile_owner_dispatch_status.py's apply_correction(), which DOES
+    read-merge-write metadata_json because it also records structured
+    per-row evidence there -- this function has no such payload).
+
+    Caller owns conn/transaction/commit, same convention as every other
+    write function in this file -- this function itself never commits."""
+    update_umr_task(conn, umr_id, status="queued", ts_dispatched=None, reason=reason)
+
+
+def cmd_reset_umr_to_queued(args):
+    """CLI entry point over reset_umr_task_to_queued() -- see that
+    function's own docstring. The one real, canonical, script-only surface
+    for this transition (UMR-20260806-115605-854d): reconcile_dispatched_dead_zone.py
+    calls reset_umr_task_to_queued() directly (it already imports this
+    module), so this CLI wrapper exists for operator/manual re-runs and
+    testability, matching the same "function + thin CLI wrapper" shape as
+    mark-umr-dispatched/mark-umr-terminal above.
+
+    Usage:
+      python3 superboss-register.py reset-umr-to-queued --umr-id UMR-... --reason "why"
+    """
+    init_db_silent()
+    conn = _connect()
+    _ensure_umr_table(conn)
+    with _write_lock():
+        reset_umr_task_to_queued(conn, args.umr_id, reason=args.reason)
+        conn.commit()
+    conn.close()
+    print(json.dumps({"umr_id": args.umr_id, "status": "queued", "reason": args.reason},
+                      indent=2, default=str))
 
 
 EXTERNAL_AGENT_ALLOWED_TASK_TYPES = (
@@ -7592,6 +7708,14 @@ if __name__ == "__main__":
     p_gtmupd.add_argument("--fix-file-path", dest="fix_file_path", default=None)
     p_gtmupd.add_argument("--fix-pr-number", dest="fix_pr_number", type=int, default=None)
 
+    p_resetq = sub.add_parser("reset-umr-to-queued",
+                               help="UMR-20260806-115605-854d: reset a real umr_tasks row from "
+                                    "status='dispatched' back to 'queued' (clears ts_dispatched) -- "
+                                    "the one real, canonical write path reconcile_dispatched_dead_zone.py's "
+                                    "own auto-remediation uses, never a raw SQL UPDATE")
+    p_resetq.add_argument("--umr-id", dest="umr_id", required=True)
+    p_resetq.add_argument("--reason", required=True)
+
     # Real Owner directive UMR-20260806-095416-b6f0: fourth real worker
     # channel, a fully manual human-paste bridge to chat.z.ai. NEVER any
     # browser automation against chat.z.ai (hard ToS constraint).
@@ -7753,6 +7877,8 @@ if __name__ == "__main__":
         cmd_mark_umr_terminal(args)
     elif args.cmd == "update-gtm-category":
         cmd_update_gtm_category(args)
+    elif args.cmd == "reset-umr-to-queued":
+        cmd_reset_umr_to_queued(args)
     elif args.cmd == "mark-external-agent-eligible":
         cmd_mark_external_agent_eligible(args)
     elif args.cmd == "get-next-external-agent-task":

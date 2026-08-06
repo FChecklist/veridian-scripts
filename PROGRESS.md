@@ -1,82 +1,69 @@
-# PROGRESS -- task-20260806-155334-independently-review-then-merge-pr-150
-
-_(Note: the immediately preceding merge, PR from task-20260806-155338, independently reached
-the same conclusion for a sibling batch of PR numbers 152-155 dispatched in the same
-owner_dispatch_gateway fan-out -- see that PR's history for its own full PROGRESS.md content,
-superseded here per this repo's convention of each task branch owning this file's content
-wholesale rather than accumulating.)_
-
-## Verdict: SPEC is false-premise. No merge/write action taken. Documented below.
-
-This is another instance of the recurring veridian-scripts dispatch false-premise pattern
-(see prior cases 1-18 in this box's memory). The SPEC's headline claims were checked
-independently against live GitHub/git/systemd/sqlite state before any action, per this
-project's standing rule, and every load-bearing claim was found false.
+# PROGRESS -- task-20260806-163350-owner-explicit-go-ahead--build-the-real
 
 ## Completed
-- [x] Independently verified PR 150 real state via `gh pr view 150` (bypassing this repo's
-      stale local cache): **already MERGED** at `2026-08-06T09:19:54Z`, merge commit
-      `736c8f4f9dc6dfac966ecf2b11c022e432c51987`. Confirmed a real ancestor of `origin/main`
-      via `git merge-base --is-ancestor`. SPEC's framing ("merge ready... blocked only by the
-      fact that nobody has merged it") is false -- it was merged ~6.5h before this task's own
-      dispatch.
-- [x] Independently verified PR 147: **already MERGED** at `2026-08-06T09:28:10Z`, merge commit
-      `32c8dbcdac0bea8a9b875185ae5b2951160f3dbb`, confirmed ancestor of `origin/main`. SPEC's
-      claim it has "mergeable UNKNOWN" and needs a rebase is false/moot -- it's merged, and its
-      own `umr_tasks` row (`UMR-20260806-082646-3aba`, child of the SPEC's cited directive UMR
-      `UMR-20260806-075726-babc`) already carries `status='completed'` with a full before/after
-      reconciliation record (30 running / 4 real / 26 false-labeled -> 1 running / 0 false,
-      captured 09:29Z) -- step 4 of the SPEC was already done, in more depth than the SPEC asks.
-- [x] Independently verified PR 151: **already MERGED** at `2026-08-06T09:15:18Z`, merge commit
-      `14d9511d6d5e80a5dee1b7d5119a3c06b84dc77f`, confirmed ancestor of `origin/main`.
-- [x] Checked the SPEC's cited "governing UMR" `UMR-20260806-071025-1d28` directly in
-      `umr_tasks`: status is **`failed`**, terminal since `2026-08-06T08:29:37Z` (its backing
-      systemd unit was found inactive with no `task.yaml`, defaulted to failed on backfill
-      reconciliation). It is not a live "standing 24 hour closure mandate" driving this cycle.
-- [x] Checked PR 151's cited UMR `UMR-20260806-084306-f599` directly: status is **`killed`**,
-      reason field states verbatim: *"Terminated on a false premise per
-      UMR-20260806-151638-48cc... blindly re-dispatched 7 hours later by
-      dispatch-tick.py:228 resume_interrupted_workers_tick()..."* -- i.e. the system itself
-      already flagged this exact UMR citation as a false premise before this SPEC was even
-      dispatched (matches memory cases #15/#17, same underlying disk-retention UMR chain).
-- [x] Checked PR 150's cited UMR `UMR-20260806-085144-9c63` directly: it has been **recycled**.
-      `task_identity` is still the original `owner-task-20260806-085141-2500364` (matches PR
-      150's real 08:51 mint time) but `ts_dispatched` was overwritten to `15:17:51Z` and
-      `unit_name` now points at `veridian-worker@task-20260806-151747-root-cause-fix--dispatch-
-      owner-task-sh-n.service` -- i.e. this row currently tracks the *unrelated, already-merged*
-      PR #181 (docs-only false-premise finding, memory case #16), not PR 150. Recording "PR 150
-      completed" onto this row now would misattribute a stale fact onto live-recycled state per
-      case #10's lesson. No write made to this row.
-- [x] Checked the SPEC's live-wrapper mtime claim: real `stat` of
-      `/opt/veridian/scripts/dispatch-owner-task.sh` shows mtime `2026-08-06 12:11:56`, not the
-      claimed `2026-08-01T11:36` -- false. The deployed file *is* recently modified (196 lines,
-      already carries the PR #150 writeback logic). Separately noted (not requested by the SPEC,
-      not actioned): it lags `origin/main` HEAD (237 lines) by one already-merged commit
-      (`8df34d5`, UMR-20260806-115423-500d) that *deliberately replaced* PR 150's authoritative
-      `mark-umr-dispatched`/`mark-umr-terminal` writeback with a non-authoritative
-      `mark-umr-relay-attempted` courtesy signal, because the original design (exactly what PR
-      150 shipped, and exactly what this SPEC asked me to re-review/merge as if new) pulled rows
-      out of `resource_governor.py`'s `next_queued_task()` queue-pickup query -- a regression,
-      already root-caused and fixed. This reconfirms memory case #16 from scratch. Re-merging PR
-      150's design now would not even be possible (already merged) let alone desirable (already
-      superseded).
-- [x] Checked `PERCENT_COMPLETE_24H_OWNER_UMR_SET` directly against live `umr_tasks`: real value
-      is 114/272 = **41.9%** completed in the trailing 24h (owner_dispatch_gateway rows), not the
-      claimed declining 26.3% -> 25.0% -> 24.8%. Contradicts the SPEC's "backlog reconciliation
-      urgency" framing.
-- [x] Checked the real systemd timer `veridian-cron-prune-memory-backups`: it exists as a
-      **user**-scope unit (`systemctl --user`), `enabled`, last fired `2026-08-06 15:55:09 UTC`,
-      next run `2026-08-06 16:00:12 UTC`. (System-scope query in the SPEC's own framing returns
-      not-found because it's a user unit -- a real distinction, not evidence it's disabled.) Not
-      actioned further since PR 151 (which owns this timer) is already merged.
-- [x] Logged this finding via `superboss-register.py log-action` (never raw SQL) with the full
-      evidence trail above (`ACT-20260806-155911-3c6f`).
-- [x] Recorded case #19 in the standing false-premise-pattern memory file for future dispatches.
+- [x] Independently verified item 1 (UMR-20260806-065104-c69a status) instead of applying the
+      SPEC's claim on narration. Finding: **the SPEC's premise is false, current status.**
+      - `task.yaml` reachable via this row's own `unit_name` (task-20260806-070019-register-real-umr-for-pm-self-audit-and)
+        does say `status: blocked`, but that checkpoint is from 2026-08-06T07:19Z, citing PR #132 as
+        "Superboss-approved... but the merge itself FAILED... needs manual attention".
+      - Live `gh pr view 132` right now shows `state=CLOSED`, `mergedAt=null`. It was closed at
+        2026-08-06T12:49:44Z (hours after that stale task.yaml snapshot) with an explicit human/AI
+        comment: this PR was one of 4 near-identical duplicate dispatches
+        (UMR-20260806-065104-c69a/-844e/-4432/-598e) for the same PM self-audit citation, which had
+        already landed on `main` via commit `11fa45e`. Closed as a genuine duplicate, not merged.
+      - Ran the canonical `reconcile_owner_dispatch_status.py --umr-id UMR-20260806-065104-c69a`
+        (report mode) against the live DB just now: real systemd inactive + real PR #132 state=CLOSED
+        (closed without merging) -> bucket `STALE_LABEL_TERMINAL`, `new_status='failed'` -- i.e. the
+        canonical script's own live, evidence-based classification **already equals** the current
+        `umr_tasks.status='failed'`. There is no false status to correct, and `'blocked'` is not even
+        a legal value in `umr_tasks.status`'s CHECK constraint.
+      - Conclusion: the SPEC's "this is the same reconciliation mislabeling bug" claim was based on a
+        stale task.yaml snapshot that predates PR #132's closure. **No DB write applied** -- writing
+        anything here now would either be a factually wrong relabel or a no-op; the canonical script
+        was run in report-only mode only, exactly to establish this, never with `--apply`.
+- [x] Independently investigated item 2 (AI agent ID registry) before writing any code, per this
+      session's own standing false-premise-verification practice. Finding: **already built, by a
+      concurrent sibling task, under a real Owner correction to this exact same directive.**
+      - Began implementing the SPEC's literal design (agent scoped by a human-readable "class of
+        work" role_label) directly in `superboss-register.py`: new `ai_agent_registry` table,
+        `get_or_create_ai_agent()`/`record_ai_agent_learning()`, CLI subcommands.
+      - Before committing, ran a smoke test against what was intended to be an isolated scratch DB.
+        `resolve_superboss_db_path()` falls back to the **live** DB when `SUPERBOSS_REGISTER_DB` names
+        a not-yet-existing file, so the test connected to the real, live
+        `/opt/veridian/ai-os/memory/superboss-register.sqlite` -- and failed with
+        `IntegrityError: NOT NULL constraint failed: ai_agent_registry.umr_id`.
+      - That error revealed the live DB **already has** an `ai_agent_registry` table -- with a
+        different, real schema (`agent_id PK, umr_id UNIQUE NOT NULL, role_label, memory_file_path,
+        created_at, last_used_at, total_tasks_handled, metadata_json`). Verified zero rows were
+        actually written (the failed INSERT never committed) -- confirmed via direct query, no live
+        data was touched.
+      - Traced it to commit `5f36209` on branch `worker/task-20260806-163355-correction--ai-agent-id-scoped-one-per-u`
+        (PR #194 on FChecklist/veridian-scripts, currently OPEN/pending_review, not yet merged to
+        `main`, but its DDL already applied live): `ai_agent_registry.py`, built by the sibling task
+        for **UMR-20260806-121332-6ba4**, "Direct correction ... to UMR-20260806-121252-3207's own
+        original build spec, per real Owner clarification received after that UMR dispatched" --
+        the Owner replaced the SPEC's fuzzy "class of work" scoping with a deterministic one:
+        `agent_id` is a pure zero-judgment transform of `umr_id` ("UMR-" -> "AGENT-"), `umr_id`
+        UNIQUE-constrained, so one real UMR maps to exactly one real agent_id, never a fuzzy
+        task-class match. That module already implements `ensure-agent`, `record-work`,
+        `lookup-agent`, `list-agents`, and `check-before-dispatch` (capability_registry first, then
+        this UMR's own agent_id), has its own passing standalone test suite, and is already
+        registered in `capability_registry` (CAP-20260806-164355-6f47).
+      - This task's own SPEC (UMR-20260806-121252-3207) is confirmed to be the **pre-correction**
+        version -- both worker tasks were dispatched from the same PM cycle roughly simultaneously
+        (task dirs created 5 seconds apart), and the correction landed on the live DB/sibling branch
+        while this task was already running.
+      - **Reverted** my own `superboss-register.py` edits (`git checkout -- superboss-register.py`)
+        rather than land a second, competing, role_label-scoped implementation against a table whose
+        real, live schema is already the corrected umr_id-scoped one -- building it anyway would be
+        exactly the duplicate-work failure mode this codebase's Hard Rule 2 (zero duplication) and
+        this session's own false-premise-verification practice both exist to prevent.
 
 ## Remaining
-- [ ] None. Per the SPEC's own hard limits ("if step one finds a genuine defect, do not merge" /
-      implicitly: do not act on a false premise), no merge, no credential rotation, no repo
-      deletion/visibility/branch-protection change, and no misattributed completion write was
-      performed. All three PRs were already merged hours before this task was dispatched; the
-      governing and cited UMRs are already terminal, killed-as-false-premise, or recycled to
-      unrelated already-merged work. Nothing genuinely actionable remains from this SPEC.
+- [ ] Not this task's to pick up right now: PR #194 (the real, corrected `ai_agent_registry.py`) is
+      still open/pending_review -- once it merges, its own commit message notes one real gap still
+      unaddressed: "live wiring of check-before-dispatch into the actual dispatch chokepoint" (i.e.
+      an actual call site inside the real dispatch path, not just a standalone CLI). Left for a
+      future task once PR #194 lands, to avoid racing/duplicating against code still under review.
+- [ ] No further action on UMR-20260806-065104-c69a -- its current `status='failed'` is correct per
+      live evidence; nothing to fix.

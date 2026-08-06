@@ -1,0 +1,32 @@
+{
+  "capability_name": "pruned_code_search",
+  "inputs": [
+    {"key": "pattern", "label": "Extended-regex pattern to search for (grep -lE)", "type": "text"},
+    {"key": "scope_dir", "label": "Search root (default /opt/veridian/scripts; explicit broader-scope override honored, same prune list always applied)", "type": "text", "optional": true}
+  ],
+  "business_rules": [
+    {"leaf_key": "pruned_code_search", "phase": "process", "mechanism_path": "scripts/find_code.sh", "registered": false}
+  ],
+  "workflow": null,
+  "automation": null,
+  "documents": [
+    "ai-os/MASTER_INDEX.yaml#exclusion_rules"
+  ],
+  "reports": null,
+  "apis": [
+    "/opt/veridian/scripts/find_code.sh"
+  ],
+  "ui_screens": null,
+  "permissions": "server-local shell execution only, no tenant/org scoping applicable (filesystem search helper, not an application data API)",
+  "ai_required": false,
+  "confidence": 1.0,
+  "version": "1.0",
+  "owner": "VERIDIAN platform ops tooling (/opt/veridian/scripts)",
+  "metadata": {
+    "registered_by_phase": "UMR-20260806-100604-4591",
+    "incident_ref": "PID 2769369, unfiltered `grep -rl PHASE-4-BUILD-WORKFLOW /opt/veridian/scripts /opt/veridian/ai-os`, 17+ min real D-state disk saturation",
+    "prune_list": ["node_modules", ".git", ".venv", "__pycache__", "dist", "build", "ai-os/tasks/*/workspace", "workspace/claude-cli-work", "workspace/main-e2e-check"],
+    "default_scope": "/opt/veridian/scripts",
+    "checked_for_duplicate": "confirmed via lookup_capability-shaped query for search/grep/find capability names before building (zero matches); reconfirmed via list-capabilities before registration"
+  }
+}

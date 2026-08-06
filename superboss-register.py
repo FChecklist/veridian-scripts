@@ -697,6 +697,7 @@ def _migrate_schema(conn):
     _seed_registry_taxonomy_notes(conn)
     _migrate_instructions_content_hash(conn)
     _migrate_capability_registry_utm(conn)
+    _migrate_wiring_registry_umr_and_version(conn)
 
 
 def _migrate_wiring_registry_content_hash(conn):
@@ -720,6 +721,27 @@ def _migrate_wiring_registry_content_hash(conn):
         conn.commit()
 
 
+def _migrate_wiring_registry_umr_and_version(conn):
+    """2026-08-06 (task-20260806-035541, Owner directive "real PM cycle script
+    registry"): additive ALTER TABLE ADD COLUMN for wiring_registry.originating_umr
+    and .script_version, same no-CHECK-constraint-involved pattern as
+    _migrate_wiring_registry_content_hash above -- never needs the full-table
+    rebuild _migrate_wiring_registry_entity_types needs. No-op once migrated,
+    safe to call on every startup."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='wiring_registry'"
+    ).fetchone()
+    if row is None:
+        return  # table doesn't exist yet; the next CREATE TABLE IF NOT EXISTS covers it
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(wiring_registry)").fetchall()}
+    if "originating_umr" not in cols:
+        conn.execute("ALTER TABLE wiring_registry ADD COLUMN originating_umr TEXT")
+        conn.commit()
+    if "script_version" not in cols:
+        conn.execute("ALTER TABLE wiring_registry ADD COLUMN script_version TEXT")
+        conn.commit()
+
+
 def _migrate_wiring_registry_entity_types(conn):
     """2026-07-27, dispatch-script consolidation: widens wiring_registry's entity_type
     CHECK constraint to allow 'dispatch_event' (see WIRING_ENTITY_TYPES above), extended
@@ -735,8 +757,13 @@ def _migrate_wiring_registry_entity_types(conn):
     (not one hardcoded literal) so the next entity_type addition after this one only needs to
     append to that tuple -- this function re-runs its (idempotent) rebuild exactly once more
     to pick up the new member, the same way this run picks up 'governance_doc' on a DB that
-    already has 'dispatch_event' from the prior migration."""
+    already has 'dispatch_event' from the prior migration. Also runs
+    _migrate_wiring_registry_umr_and_version() first, same reason as content_hash below --
+    the rebuild's own SELECT/CREATE TABLE must carry originating_umr/script_version across
+    too, or a future rebuild triggered by a new entity_type addition would silently drop
+    them despite both being additive, no-CHECK-constraint columns themselves."""
     _migrate_wiring_registry_content_hash(conn)
+    _migrate_wiring_registry_umr_and_version(conn)
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='wiring_registry'"
     ).fetchone()
@@ -761,13 +788,17 @@ def _migrate_wiring_registry_entity_types(conn):
             CHECK(verification_status IN ('VERIFIED_MATCH','HASH_DRIFTED','PATH_MISSING','UNVERIFIED')),
         source_ref TEXT NOT NULL DEFAULT '[]',
         metadata_json TEXT NOT NULL DEFAULT '{{}}',
-        content_hash TEXT
+        content_hash TEXT,
+        originating_umr TEXT,
+        script_version TEXT
     )""")
     conn.execute(
         "INSERT INTO wiring_registry__migrate (entity_id, ts, entity_type, source_system, path, "
-        "relationships, last_verified_ts, verification_status, source_ref, metadata_json, content_hash) "
+        "relationships, last_verified_ts, verification_status, source_ref, metadata_json, content_hash, "
+        "originating_umr, script_version) "
         "SELECT entity_id, ts, entity_type, source_system, path, relationships, last_verified_ts, "
-        "verification_status, source_ref, metadata_json, content_hash FROM wiring_registry"
+        "verification_status, source_ref, metadata_json, content_hash, originating_umr, script_version "
+        "FROM wiring_registry"
     )
     conn.execute("DROP TABLE wiring_registry")
     conn.execute("ALTER TABLE wiring_registry__migrate RENAME TO wiring_registry")
@@ -2691,7 +2722,22 @@ def _ensure_wiring_registry_table(conn):
             CHECK(verification_status IN ('VERIFIED_MATCH','HASH_DRIFTED','PATH_MISSING','UNVERIFIED')),
         source_ref TEXT NOT NULL DEFAULT '[]',
         metadata_json TEXT NOT NULL DEFAULT '{{}}',
-        content_hash TEXT
+        content_hash TEXT,
+        -- 2026-08-06 (task-20260806-035541, Owner directive "real PM cycle
+        -- script registry"): additive script-bookkeeping fields, same
+        -- nullable-ADD-COLUMN convention as content_hash above. originating_umr
+        -- is the real UMR-YYYYMMDD-HHMMSS-hash (or, for pre-UMR-convention
+        -- scripts, the real task-YYYYMMDD-HHMMSS id) mechanically recovered
+        -- from the entity's own real source file, NEVER invented -- NULL means
+        -- a real search found none, not that none was attempted. script_version
+        -- is the real version token (e.g. 'v2', 'v3') mechanically parsed from
+        -- the script's own filename when present, else NULL -- entity_type
+        -- values other than 'script' leave both NULL. See
+        -- _migrate_wiring_registry_umr_and_version() for the pre-existing-DB
+        -- migration and generate_software_catalog.py/generate_wiring_registry.py
+        -- for how these are actually derived, not guessed here.
+        originating_umr TEXT,
+        script_version TEXT
     )""")
     conn.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS wiring_registry_fts USING fts5(
         path, entity_type, source_ref,
@@ -2722,7 +2768,11 @@ def register_entity_row(conn, entity):
     relationships/last_verified_ts/verification_status/source_ref/metadata), plus the
     optional content_hash field added 2026-07-27 (task-20260727-025248) -- NOT in
     REQUIRED_WIRING_ENTITY_FIELDS since entity types with no single real file
-    (ai_role/vercel_project/dispatch_event/...) never have one. Does
+    (ai_role/vercel_project/dispatch_event/...) never have one. Also accepts the
+    optional originating_umr/script_version fields added 2026-08-06
+    (task-20260806-035541, Owner directive "real PM cycle script registry") -- same
+    NOT-required convention, since only entity_type='script' rows carry them (see
+    wiring_registry's own CREATE TABLE docstring). Does
     NOT commit or ensure the table -- callers doing a bulk run (generate_wiring_registry.py)
     own one _ensure_wiring_registry_table() + one commit() around many calls to this;
     the register-entity CLI (a single ad hoc row) owns both itself, see register_entity()."""
@@ -2732,18 +2782,20 @@ def register_entity_row(conn, entity):
     now = _now_iso()
     conn.execute(
         "INSERT INTO wiring_registry (entity_id, ts, entity_type, source_system, path, relationships, "
-        "last_verified_ts, verification_status, source_ref, metadata_json, content_hash) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+        "last_verified_ts, verification_status, source_ref, metadata_json, content_hash, "
+        "originating_umr, script_version) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(entity_id) DO UPDATE SET ts=excluded.ts, entity_type=excluded.entity_type, "
         "source_system=excluded.source_system, path=excluded.path, relationships=excluded.relationships, "
         "last_verified_ts=excluded.last_verified_ts, verification_status=excluded.verification_status, "
         "source_ref=excluded.source_ref, metadata_json=excluded.metadata_json, "
-        "content_hash=excluded.content_hash",
+        "content_hash=excluded.content_hash, originating_umr=excluded.originating_umr, "
+        "script_version=excluded.script_version",
         (
             entity["entity_id"], now, entity["entity_type"], entity["source_system"], entity.get("path"),
             json.dumps(entity["relationships"]), entity["last_verified_ts"], entity["verification_status"],
             json.dumps(entity["source_ref"]), json.dumps(entity.get("metadata") or {}),
-            entity.get("content_hash"),
+            entity.get("content_hash"), entity.get("originating_umr"), entity.get("script_version"),
         ),
     )
 

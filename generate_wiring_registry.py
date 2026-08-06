@@ -91,7 +91,20 @@ FUNCTION_CATALOG = f"{VERIDIAN_ROOT}/ai-os/FUNCTION_CATALOG.json"
 AI_ROSTER_CATALOG = f"{VERIDIAN_ROOT}/ai-os/AI_ROSTER_CATALOG.json"
 ENGINES_GATEWAYS_PLAN = resolve_doc_path("20_ENGINES_10_GATEWAYS_PHASE_PLAN_2026-07-24.yaml")
 ROUTE_REGISTRY_SCHEMA = resolve_doc_path("ROUTE_REGISTRY_SCHEMA_2026-07-24.yaml")
-SOFTWARE_CATALOG = resolve_doc_path("SOFTWARE_CATALOG.yaml")
+# 2026-08-06 (task-20260806-035541, real bug found and fixed this task):
+# SOFTWARE_CATALOG.yaml was wrongly grouped with the hand-maintained planning
+# docs above (resolve_doc_path(), which prefers the git mirror when this
+# script isn't run from inside veridian-scripts' own checkout) even though
+# it belongs with the 3 machine-generated catalogs in the comment above --
+# generate_software_catalog.py ALWAYS writes it straight to the real
+# {VERIDIAN_ROOT}/ai-os/SOFTWARE_CATALOG.yaml path (hardcoded OUT_PATH),
+# never to the git mirror, so the mirror copy is never refreshed and was
+# independently confirmed this task to be 40 scripts/33KB/dated 2026-07-24 --
+# over 2 weeks stale against the real, live 101+-script catalog. Every real
+# script-entity backfill before this fix (including this task's own
+# generate_wiring_registry.py runs on a non-veridian-scripts-checkout host,
+# which is the live server's own normal case) silently used that stale copy.
+SOFTWARE_CATALOG = f"{VERIDIAN_ROOT}/ai-os/SOFTWARE_CATALOG.yaml"
 # vercel_project/github_repo source (task-20260726-162252-extend-wiring-engine-to-full-system--ser,
 # full-system extension) -- the real, fresh `vercel`/`gh` CLI census is an inline registries[]
 # entry in MASTER_INDEX.yaml itself (no separate tracking file, per that census's own path note),
@@ -543,6 +556,12 @@ def build_scripts_and_cron(reg):
             "verification_status": "VERIFIED_MATCH" if os.path.exists(s["path"]) else "PATH_MISSING",
             "source_ref": ["software_catalog"],
             "metadata": {"purpose": s.get("purpose"), "cron_scheduled": s.get("cron_scheduled")},
+            # 2026-08-06 (task-20260806-035541, Owner directive "real PM cycle
+            # script registry"): pass through SOFTWARE_CATALOG.yaml's own real,
+            # mechanically recovered originating_umr/script_version -- computed
+            # once in generate_software_catalog.py, not re-derived here.
+            "originating_umr": s.get("originating_umr"),
+            "script_version": s.get("script_version"),
         })
         script_ids_by_path[s["path"]] = eid
         script_count += 1

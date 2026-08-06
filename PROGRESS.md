@@ -1,52 +1,46 @@
-# PROGRESS -- task-20260806-230655-reopen-umr-20260806-100604-4591--it-is-f
+# PROGRESS -- task-20260806-234542-pm-approval-of-proposal-62--implement-th
 
-Governing UMR: UMR-20260806-071025-1d28. Target: UMR-20260806-100604-4591.
+Governing UMR: UMR-20260806-071025-1d28. Subject: PM approval of proposal 62.
 
-## Finding: SPEC premise is stale -- the described false completion was real
-## at ts_completed (10:31:26Z) but was already honestly corrected ~12.5h before
-## this task was dispatched, by an earlier task under UMR-20260806-103641-2a1f.
-## Verified independently, live, before touching anything.
+## Finding: SPEC premise is stale. Proposal 62 (pm_decisions_pending row 62), its
+## investigation UMR-20260806-120603-217b, its implementation UMR-20260806-123316-cf9f
+## (child UMR-20260806-121247-a93a), and the prerequisite incident fix UMR-20260806-121640-bee5
+## were all already implemented, tested, reviewed, merged (PR #168, PR #172) and recorded
+## terminal ~11h before this task was dispatched. The SPEC's "PID 3340115 currently hung,
+## 10 waiters" claim is directly contradicted by UMR-20260806-121640-bee5's own real
+## completion record ("nothing was actually hung/killed at verification time"). Full evidence
+## in SPEC_VERIFICATION_2026-08-06T234542Z.md.
 
 ## Completed
-
-- [x] Verified real DB path (`/opt/veridian/ai-os/memory/superboss-register.sqlite`, not the
-      0-byte decoy at `scripts/superboss-register.sqlite`) and queried the target row directly.
-- [x] Proof 1 (find_code.sh doesn't exist): **false now**. `/opt/veridian/scripts/find_code.sh`
-      exists, `-rwxr-xr-x`, mtime `Aug 6 11:18`. Ran it live myself:
-      `find_code.sh "def resolve_superboss_db_path" /opt/veridian/scripts` returned the correct
-      real match. `tests/test_find_code.py` and `pruned_code_search_capability_record.json`
-      also exist.
-- [x] Proof 2 (outputs_json empty): **false now**. Real JSON with 3 existence-checked file
-      paths, `capability_registry_id`, `pr_numbers: [159, 160]`, both real merge-commit SHAs
-      (`f5c83ed`, `9f40437` -- confirmed in `git log` and via `gh pr view --json state,mergedAt`
-      as real MERGED PRs).
-- [x] Proof 3 (unpruned D-state scans running now): **false now**. `ps` scan for stat `D` right
-      now: 0 processes (down from SPEC's own cited baseline of 5 at 10:34 UTC).
-- [x] Step 1 (reopen via `superboss-register.py`, correct in place): **already done**, not by
-      this task. `status='completed'` but `reason` was corrected in place citing
-      `UMR-20260806-103641-2a1f` and all 3 re-verified proofs -- the honest outcome the SPEC
-      wants, already applied.
-- [x] Step 2 (create+prove find_code.sh): already real; independently re-ran it myself this
-      task with a fresh pattern and got a correct result.
-- [x] Step 3 (close the 2 guidance gaps): both already live in
-      `/opt/veridian/ai-os/MASTER_INDEX.yaml` (`never_find_over_root_filesystem`,
-      `never_grep_for_a_umr_id`) AND technically enforced by the live
-      `hooks/find_root_walk_guard.py` PreToolUse hook, which I confirmed blocks a real
-      `find /` command with a real rejection message. One flagged loose end: the git-tracked
-      guidance PR (`veridian-ai-os#4`) is still open/unmerged and its diff is large and
-      apparently out-of-scope (14k+ additions, 14 files) -- not merged blind under this task.
-- [x] Step 4 (register + prove lookup-capability finds it): already done; independently
-      re-ran `lookup-capability --capability-name pruned_code_search` myself, real output
-      `found: true`, `capability_id: CAP-20260806-101956-bce6`, `confidence: 1.0`.
-- [x] Step 5 (recount D-state scans): before=5 (SPEC's own 10:34 UTC baseline), after=0,
-      measured independently by me at ~23:1x UTC. The number did fall and stayed fallen.
-- [x] Step 6 (record real completion evidence): already done by the prior task; every cited
-      artifact independently existence-checked by me before accepting it as true.
-- [x] Wrote `SPEC_VERIFICATION_2026-08-06T230655Z.md` with the full claim-vs-real-state table.
-- [x] No `umr_tasks` write made -- the row is already accurate; reopening it now would itself
-      be a false status write against a currently-true `completed` record.
+- [x] Verified real DB path (`/opt/veridian/ai-os/memory/superboss-register.sqlite`) and
+      queried all 4 cited UMR rows + pm_decisions_pending row 62 directly: all `completed`.
+- [x] Confirmed PR #168 (bee5, liveness guard) and PR #172 (cf9f, requeue) both real `MERGED`
+      (`gh pr view --json state,mergedAt`) and real ancestors of `origin/main`.
+- [x] Read live `quality-gate.sh`: confirmed the 20s hardcoded short wait, the
+      `requeue-build-lock-contended` CLI call + exit 75 on contention, and the 4th-consecutive-
+      loss 700s starvation-guard fallback are all already live exactly as this SPEC requests.
+- [x] Live-checked PID 3340115: does not exist (`ps -p 3340115` exit 1). Live `/proc/*/wchan`
+      sweep for real kernel flock-wait state: 0 processes blocked on the build lock right now.
+- [x] Identified the one genuinely new, not-yet-covered piece of this SPEC: a dedicated test
+      proving the requeue path is bounded (cannot spin indefinitely).
+- [x] Added `tests/test_build_lock_spin_bound.py` -- extracts and runs the REAL
+      `acquire_build_lock_fd()` from `quality-gate.sh` against a real held flock (own scratch
+      lock file, never the production one). Proves: 4 consecutive real losses -> rc sequence
+      `[1,1,1,2]`, real loss-count file `['1','2','3','4']`, 4th attempt genuinely escalates to
+      the long-wait fallback and terminates as a real gate failure (rc=2) -- never a 5th
+      requeue. Second test proves recovery: once contention clears, the next attempt succeeds
+      (rc=0) and the counter resets.
+- [x] Ran the new test directly (`2/2 passed`) and via `pytest` alongside the pre-existing
+      `tests/test_build_lock_contended_requeue.py` (`4 passed in 3.50s`, no regression).
+- [x] Did **not** re-implement `quality-gate.sh`/`superboss-register.py` (already live,
+      identical to what's approved) and did **not** touch/kill anything on the real production
+      lock (nothing real to kill; doing so against a fabricated premise would itself have been
+      the unsafe action).
+- [x] Did **not** call `mark-umr-terminal` against the already-terminal UMR-20260806-121247-a93a
+      / UMR-20260806-120603-217b rows -- would have falsely overwritten their real, ~11h-old
+      `ts_completed` timestamps (see SPEC_VERIFICATION doc for the full reasoning).
+- [x] Documented full evidence in `SPEC_VERIFICATION_2026-08-06T234542Z.md`.
 
 ## Remaining
-
-- [ ] Commit, push, open PR recording this verification (matching established convention for
-      verified-stale-premise findings, e.g. PR #227).
+- [ ] Commit + push this branch, open PR for the one real, additive change
+      (`tests/test_build_lock_spin_bound.py`) plus this documentation.

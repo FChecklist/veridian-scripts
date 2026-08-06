@@ -188,6 +188,43 @@ def _unit_active_state(unit):
     return state or "unknown"
 
 
+def _existing_active_umr(task_id, sbr_module=None):
+    """Real, read-only pre-check (UMR-20260806-103711-bf00): does
+    task_identity=task_id already have an active (queued/dispatched/running)
+    umr_tasks row, via the exact same find_active_umr_by_identity() that
+    resource_governor.submit() itself runs inside its write-lock below? This
+    call sits outside that lock -- nothing is written here, so there is
+    nothing to serialize -- which makes it advisory, not authoritative: a
+    genuine race against a concurrent submit() is still caught for real by
+    submit()'s own lock-protected check, unchanged. This pre-check exists
+    purely to avoid paying the cost this function used to pay every tick for
+    every still-queued task -- a fresh rejected_duplicate row recorded by
+    submit() -- when a cheap read already knows the answer (confirmed via
+    real umr_tasks evidence: 6238 rejected_duplicate rows from this exact
+    source_trigger by 2026-08-06, e.g. 6 in the single second
+    2026-08-06T10:33:19-20Z, against only 16 queued/6 running/85 failed/7
+    killed -- see OCID/UMR audit trail for this fix).
+
+    Same fail-open philosophy as every other real _safe_superboss_register()
+    caller in this module (see _real_umr_heartbeat_age_minutes()'s own
+    docstring above): an unavailable Superboss Register returns None here,
+    treated as 'cannot confirm' -- resume_interrupted_workers_tick() below
+    then falls back to its pre-fix behavior (call submit(), let its own
+    lock-protected check be the real authority) rather than silently
+    skipping a real resume just because this read-only optimization
+    couldn't run.
+    """
+    sbr_module = sbr_module or resource_governor
+    sbr, error = sbr_module._safe_superboss_register("resume_interrupted_workers_tick")
+    if error:
+        return None
+    conn = sbr._connect()
+    try:
+        return sbr.find_active_umr_by_identity(conn, task_id)
+    finally:
+        conn.close()
+
+
 def resume_interrupted_workers_tick(tasks):
     """Finds every task.yaml left in a non-terminal status (RESUMABLE_STATUSES)
     whose veridian-worker@ unit is NOT currently active -- the real signature
@@ -203,6 +240,20 @@ def resume_interrupted_workers_tick(tasks):
     (e.g. a previous tick already resubmitted it, or it's mid-run right now)
     is rejected as a duplicate rather than double-queued -- this function is
     safe to call every tick, not just once after a reboot.
+
+    UMR-20260806-103711-bf00 fix: "safe to call every tick" was true (no
+    real double-dispatch ever happened -- submit()'s own gate is not, and
+    was never, the defect) but this function used to rely on that gate as
+    its ONLY check, so every tick that found the same still-queued/still-
+    capped task_id (unit legitimately not yet started -- e.g. resource cap,
+    not actually interrupted) called submit() anyway and got a real
+    rejected_duplicate row written back, forever, once per tick, per such
+    task. _existing_active_umr() above now checks first (read-only) and
+    skips the submit() call entirely when a live row already covers this
+    identity -- same real outcome (task stays exactly where it already was
+    in the queue, nothing double-dispatched), zero new duplicate rows. The
+    gate inside submit() is untouched and still the real authority for any
+    genuine race.
     """
     resumed, skipped_running, skipped_duplicate = [], [], []
     for task_id, doc in tasks.items():
@@ -215,6 +266,13 @@ def resume_interrupted_workers_tick(tasks):
         state = _unit_active_state(service)
         if state in ("active", "activating", "reloading"):
             skipped_running.append(task_id)
+            continue
+
+        existing = _existing_active_umr(task_id)
+        if existing:
+            skipped_duplicate.append(task_id)
+            print(f"SKIP resume (already {existing['status']} as umr_id={existing['umr_id']}, "
+                  f"no duplicate row written): {task_id}")
             continue
 
         action = "reset_failed_and_start" if state == "failed" else "start"

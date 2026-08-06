@@ -20,6 +20,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 
 import pytest
 
@@ -61,7 +62,8 @@ def _row(path, umr_id):
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     row = conn.execute(
-        "SELECT umr_id, status, ts_dispatched, ts_completed, unit_name, reason "
+        "SELECT umr_id, status, ts_dispatched, ts_completed, unit_name, reason, "
+        "ts_relay_attempted, relay_outcome, relay_detail "
         "FROM umr_tasks WHERE umr_id=?", (umr_id,),
     ).fetchone()
     conn.close()
@@ -121,6 +123,87 @@ def test_mark_umr_dispatched_writes_ts_dispatched_and_status(scratch_db):
     assert after["ts_dispatched"] is not None
     assert after["unit_name"] == "veridian-worker@test.service"
     assert after["ts_completed"] is None
+
+
+@pytest.mark.parametrize("outcome", ["sent", "session_not_found"])
+def test_mark_umr_relay_attempted_never_touches_status(scratch_db, outcome):
+    """UMR-20260806-115423-500d: the whole point of this command is that it
+    records a real courtesy signal WITHOUT moving the row out of the real
+    'queued' pool, for either relay outcome."""
+    umr_id = f"UMR-TEST-500d-relay-{outcome}"
+    _insert_queued_row(scratch_db, umr_id)
+    before = _row(scratch_db, umr_id)
+    assert before["status"] == "queued"
+    assert before["ts_relay_attempted"] is None
+
+    out = _run_sbr(["mark-umr-relay-attempted", "--umr-id", umr_id,
+                     "--outcome", outcome, "--detail", "unit-test detail"], scratch_db)
+    assert out.returncode == 0, out.stderr
+    payload = json.loads(out.stdout)
+    assert payload["relay_outcome"] == outcome
+    assert payload["ts_relay_attempted"]
+
+    after = _row(scratch_db, umr_id)
+    assert after["status"] == "queued", "mark-umr-relay-attempted must never touch status"
+    assert after["ts_dispatched"] is None, "mark-umr-relay-attempted must never touch ts_dispatched"
+    assert after["ts_completed"] is None, "mark-umr-relay-attempted must never touch ts_completed"
+    assert after["ts_relay_attempted"] is not None
+    assert after["relay_outcome"] == outcome
+    assert after["relay_detail"] == "unit-test detail"
+
+
+def test_mark_umr_relay_attempted_then_mechanical_pickup_still_selects_row(scratch_db):
+    """UMR-20260806-115423-500d, the real proof of the whole fix: a row that
+    went through a "successful" relay attempt must still be the row
+    resource_governor.py's own next_queued_task() -- the real mechanical
+    pickup dispatch-tick.py drives -- selects on the very next check. Uses
+    the real function directly (not a mock), against the same scratch DB."""
+    umr_id = "UMR-TEST-500d-mechanical-pickup"
+    # Real, timezone-aware ISO ts_submitted (same shape resource_governor.py's
+    # own submit()/_now_iso() actually write) -- next_queued_task()'s own
+    # effective_priority() requires this; _insert_queued_row()'s plain
+    # datetime('now') is naive and is only exercised by the other tests in
+    # this file that never call next_queued_task().
+    conn = sqlite3.connect(scratch_db)
+    conn.execute(
+        "INSERT INTO umr_tasks (umr_id, task_identity, ts_submitted, tier, status, "
+        "source_trigger, task_kind, inputs_json, outputs_json, metadata_json) "
+        "VALUES (?,?,?,2,'queued','owner_dispatch_gateway','veridian_task_create',"
+        "'{}','{}','{}')",
+        (umr_id, umr_id + "-identity", datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+    out = _run_sbr(["mark-umr-relay-attempted", "--umr-id", umr_id,
+                     "--outcome", "sent", "--detail", "tmux session 'claude'"], scratch_db)
+    assert out.returncode == 0, out.stderr
+    assert _row(scratch_db, umr_id)["status"] == "queued"
+
+    spec = importlib.util.spec_from_file_location(
+        "rg_mechanical_pickup_test", os.path.join(SCRIPTS_DIR, "resource_governor.py"))
+    rg = importlib.util.module_from_spec(spec)
+    old_db_env = os.environ.get("SUPERBOSS_REGISTER_DB")
+    os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
+    try:
+        spec.loader.exec_module(rg)
+        sbr = rg._safe_superboss_register("test")[0]
+        conn = sbr._connect()
+        sbr._ensure_umr_table(conn)
+        picked = rg.next_queued_task(conn)
+        conn.close()
+    finally:
+        if old_db_env is None:
+            os.environ.pop("SUPERBOSS_REGISTER_DB", None)
+        else:
+            os.environ["SUPERBOSS_REGISTER_DB"] = old_db_env
+
+    assert picked is not None, (
+        "next_queued_task() found nothing -- a row that received a "
+        "'successful' relay courtesy signal must still be real, mechanically "
+        "pollable/queued work, not silently excluded"
+    )
+    assert picked["umr_id"] == umr_id
 
 
 @pytest.mark.parametrize("status", ["completed", "failed", "killed"])
@@ -196,14 +279,21 @@ def _run_wrapper(scratch_db, fake_tmux_path, tmux_session, live_sessions, tmp_pa
     return result, tmux_log
 
 
-def test_wrapper_relay_succeeds_marks_dispatched(scratch_db, fake_tmux_path, tmp_path):
+def test_wrapper_relay_succeeds_stays_queued_records_courtesy_signal(scratch_db, fake_tmux_path, tmp_path):
+    """UMR-20260806-115423-500d: a "successful" tmux send-keys must NEVER be
+    treated as authoritative delivery. The row must stay status='queued'
+    (real mechanical pickup must still be able to select it), while a real,
+    honest courtesy signal (ts_relay_attempted/relay_outcome='sent') is
+    still recorded for diagnosability."""
     result, tmux_log = _run_wrapper(
         scratch_db, fake_tmux_path, "fake-claude-session",
         live_sessions=["fake-claude-session"], tmp_path=tmp_path,
     )
     assert result.returncode == 0, result.stderr
     assert "RELAYED into tmux session 'fake-claude-session'" in result.stdout
-    assert "MARKED DISPATCHED" in result.stdout
+    assert "best-effort courtesy notification ONLY" in result.stdout
+    assert "RELAY ATTEMPTED (courtesy only, NOT authoritative)" in result.stdout
+    assert "MARKED DISPATCHED" not in result.stdout
     assert "send-keys -t fake-claude-session" in tmux_log
 
     umr_id = None
@@ -212,18 +302,28 @@ def test_wrapper_relay_succeeds_marks_dispatched(scratch_db, fake_tmux_path, tmp
             umr_id = line.split("umr_id=")[1].split()[0]
     assert umr_id
     row = _row(scratch_db, umr_id)
-    assert row["status"] == "dispatched"
-    assert row["ts_dispatched"] is not None
+    assert row["status"] == "queued", "a successful relay must never move the row out of the real queued pool"
+    assert row["ts_dispatched"] is None
     assert row["ts_completed"] is None
+    assert row["ts_relay_attempted"] is not None
+    assert row["relay_outcome"] == "sent"
+    assert "fake-claude-session" in row["relay_detail"]
 
 
-def test_wrapper_relay_fails_marks_failed_with_reason(scratch_db, fake_tmux_path, tmp_path):
+def test_wrapper_relay_session_absent_stays_queued_records_courtesy_signal(scratch_db, fake_tmux_path, tmp_path):
+    """Symmetric with the success case: an absent tmux session is a real,
+    honest fact about the courtesy channel only -- it says nothing about
+    whether the real, independent mechanical pickup path can still do this
+    work, so it must not be recorded as a terminal 'failed' status either."""
     result, tmux_log = _run_wrapper(
         scratch_db, fake_tmux_path, "fake-session-that-does-not-exist",
         live_sessions=[], tmp_path=tmp_path,
     )
+    assert result.returncode == 0, result.stderr
     assert "WARNING: tmux session 'fake-session-that-does-not-exist' not found" in result.stderr
-    assert "MARKED FAILED" in result.stderr
+    assert "remains status='queued'" in result.stderr
+    assert "RELAY ATTEMPTED, session absent (courtesy only, NOT authoritative)" in result.stderr
+    assert "MARKED FAILED" not in result.stderr
 
     umr_id = None
     for line in result.stdout.splitlines():
@@ -231,10 +331,12 @@ def test_wrapper_relay_fails_marks_failed_with_reason(scratch_db, fake_tmux_path
             umr_id = line.split("umr_id=")[1].split()[0]
     assert umr_id
     row = _row(scratch_db, umr_id)
-    assert row["status"] == "failed"
-    assert row["ts_completed"] is not None
-    assert "fake-session-that-does-not-exist" in row["reason"]
+    assert row["status"] == "queued", "an absent tmux session must never move the row out of the real queued pool"
     assert row["ts_dispatched"] is None
+    assert row["ts_completed"] is None
+    assert row["ts_relay_attempted"] is not None
+    assert row["relay_outcome"] == "session_not_found"
+    assert "fake-session-that-does-not-exist" in row["relay_detail"]
 
 
 def test_wrapper_relay_includes_mandatory_completion_instruction(scratch_db, fake_tmux_path, tmp_path):

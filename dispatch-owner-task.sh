@@ -19,16 +19,41 @@
 #                pure background-worker dispatch with no interactive session
 #                involvement). Omit this and relay happens by default.
 #
-# UMR-20260806-085144-9c63 (prevention side of the owner_dispatch_gateway
-# stuck-at-'queued' finding; reconciliation side of already-stale rows is
-# PR #147 / UMR-20260806-082646-3aba, out of scope here): once the real tmux
-# relay below either succeeds or is confirmed absent, this script now writes
-# a real terminal-or-dispatched status back onto the umr_id it just minted,
-# via superboss-register.py's mark-umr-dispatched / mark-umr-terminal CLI
-# subcommands (never a raw SQL write) -- so a row that really was delivered
-# stops sitting at status='queued'/ts_dispatched=NULL forever, and a row
-# whose relay genuinely failed is marked status='failed' with a real reason
-# instead of being left to silently look identical to "not yet delivered."
+# UMR-20260806-115423-500d (real narrowing of UMR-20260806-085144-9c63 /
+# PR #150, read this before touching the relay block below): a successful
+# `tmux send-keys` proves only that keystrokes were written into a pane --
+# NEVER that a live process actually read and acted on them. This script's
+# own "RELAYED into tmux session..." line is therefore a best-effort
+# courtesy notification, not proof of delivery, full stop. It used to also
+# write status='dispatched' (relay succeeded) or a real terminal
+# status='failed' (tmux session absent) straight onto the umr_id it just
+# minted -- but BOTH of those writes independently remove the row from
+# resource_governor.py's `next_queued_task()` query (`SELECT * FROM
+# umr_tasks WHERE status='queued'`), which is the ONLY function that
+# mechanically dispatches a queued veridian_task_create row to a real,
+# independent `veridian-worker@*.service` via `_perform_spawn()` --
+# confirmed live by reading next_queued_task()/_perform_spawn() directly:
+# this mechanical path has zero tmux involvement and works whether or not
+# any interactive session exists. So a row whose relay keystrokes landed in
+# a dead/wrong/busy pane was silently and PERMANENTLY excluded from the one
+# channel that could still have picked it up -- a real dead zone.
+#
+# The fix: a successful (or absent-session) tmux relay now records a real,
+# honest courtesy signal via superboss-register.py's mark-umr-relay-attempted
+# CLI subcommand (never a raw SQL write) -- which writes ONLY
+# ts_relay_attempted/relay_outcome/relay_detail, and NEVER touches `status`,
+# `ts_dispatched`, or `ts_completed`. A row stays exactly status='queued'
+# after either branch below, fully eligible for dispatch-tick.py's own real
+# mechanical pickup on the very next tick, no matter what the tmux relay
+# did or didn't achieve. The ONLY legitimate queued -> other status
+# transition is that real mechanical pickup (or a genuine mark-umr-terminal
+# call recording real completed work -- see below); a printed RELAYED
+# message is never, by itself, that transition.
+#
+# mark-umr-dispatched (status='dispatched') still exists as its own real
+# CLI command for a genuinely different, future use -- a non-interactive
+# channel that can positively confirm delivery -- it is simply no longer
+# called from this script's own relay branches.
 #
 # To record real completion once work against a dispatched UMR genuinely
 # finishes (worker or interactive session, run this by hand or from your own
@@ -148,12 +173,19 @@ echo "DISPATCHED: umr_id=$UMR_ID instruction_id=$INSTRUCTION_ID work_item_id=$WO
 #
 # UMR-20260806-112013-088f (structural fix for "nothing ever calls
 # mark-umr-terminal", second half of UMR-20260806-085144-9c63 / PR #150):
-# every real dispatch through this script is task_kind='veridian_task_create'
-# -- it is relayed straight into a live interactive tmux session and never
-# gets a backing systemd unit (only task_kind='systemctl_action' rows in
-# resource_governor.py do, an unrelated code path), so there is no real
-# ExecStopPost= hook available to attach completion-recording to. The one
-# real structural seam that exists is the relayed text itself: appending a
+# every real dispatch through this script is task_kind='veridian_task_create',
+# relayed straight into a live interactive tmux session -- but (correction,
+# UMR-20260806-115423-500d: the claim this comment used to make here, that
+# these rows "never get a backing systemd unit," is false -- confirmed by
+# reading resource_governor.py's _perform_spawn() directly, which DOES spawn
+# a real `veridian-worker@*.service` for task_kind='veridian_task_create'
+# rows exactly as it does for 'systemctl_action' rows) that systemd unit, if
+# and when it gets spawned, belongs to resource_governor.py's own mechanical
+# pickup, is created by *that* code path, not by this script, and this
+# script has already returned long before it would exist -- so there is
+# still no real ExecStopPost= hook available for *this script* to attach
+# completion-recording to at relay time. The one real structural seam that
+# exists here is the relayed text itself: appending a
 # mandatory, UMR-id-specific final instruction to every relayed prompt puts
 # the exact real command in front of whoever/whatever is doing the work, in
 # the same message that carries the task -- not in a header comment several
@@ -178,19 +210,28 @@ if [ "$RELAY" -eq 1 ]; then
     tmux send-keys -t "$TMUX_SESSION" Enter
     flock -u 9
     exec 9>&-
-    echo "RELAYED into tmux session '$TMUX_SESSION'"
-    # 6. Real relay genuinely succeeded -- record it on the umr_tasks row this
-    #    same call minted, so it stops sitting at status='queued' forever.
-    python3 superboss-register.py mark-umr-dispatched --umr-id "$UMR_ID" >/dev/null
-    echo "MARKED DISPATCHED: umr_id=$UMR_ID (ts_dispatched written)"
+    echo "RELAYED into tmux session '$TMUX_SESSION' (best-effort courtesy notification ONLY -- send-keys returning 0 proves the keystrokes were written into the pane, NOT that any live process read or acted on them; this is never proof of delivery)"
+    # 6. Real relay attempt recorded as a courtesy signal (UMR-20260806-115423-500d)
+    #    -- ts_relay_attempted/relay_outcome/relay_detail ONLY, status/
+    #    ts_dispatched/ts_completed are NEVER touched here. The row stays
+    #    exactly status='queued', fully eligible for dispatch-tick.py's own
+    #    real mechanical pickup (resource_governor.py's next_queued_task())
+    #    on the very next tick, regardless of what the tmux relay achieved.
+    python3 superboss-register.py mark-umr-relay-attempted --umr-id "$UMR_ID" \
+      --outcome sent --detail "tmux session '$TMUX_SESSION'" >/dev/null
+    echo "RELAY ATTEMPTED (courtesy only, NOT authoritative): umr_id=$UMR_ID -- row remains status='queued', pollable by dispatch-tick.py's own real mechanical pickup"
   else
     flock -u 9
     exec 9>&-
-    echo "WARNING: tmux session '$TMUX_SESSION' not found -- task is registered (umr_id=$UMR_ID) but NOT yet delivered. Recreate the session and relay manually, or re-run once it exists." >&2
-    # 6. Real relay genuinely failed -- record a real 'failed' status with a
-    #    real reason instead of silently leaving the row at 'queued' forever.
-    python3 superboss-register.py mark-umr-terminal --umr-id "$UMR_ID" --status failed \
-      --reason "tmux session '$TMUX_SESSION' not found at relay time" >/dev/null
-    echo "MARKED FAILED: umr_id=$UMR_ID (relay could not be delivered)" >&2
+    echo "WARNING: tmux session '$TMUX_SESSION' not found -- task is registered (umr_id=$UMR_ID) and remains status='queued', pollable by dispatch-tick.py's own real mechanical pickup regardless of this tmux relay's outcome. Recreate the session and relay manually, or re-run once it exists, if you also want the interactive channel to see it." >&2
+    # 6. Real relay attempt (absent-session outcome) recorded as the same
+    #    non-authoritative courtesy signal as the success branch above --
+    #    NEVER a terminal status. Absence of an interactive tmux session
+    #    says nothing about whether the real mechanical pickup path can
+    #    still do this work; marking the row terminal here would wrongly
+    #    exclude it from that entirely independent channel too.
+    python3 superboss-register.py mark-umr-relay-attempted --umr-id "$UMR_ID" \
+      --outcome session_not_found --detail "tmux session '$TMUX_SESSION' not found at relay time" >/dev/null
+    echo "RELAY ATTEMPTED, session absent (courtesy only, NOT authoritative): umr_id=$UMR_ID -- row remains status='queued', pollable by dispatch-tick.py's own real mechanical pickup" >&2
   fi
 fi

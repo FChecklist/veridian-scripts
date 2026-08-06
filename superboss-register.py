@@ -5287,6 +5287,111 @@ def query_ocid_artifact_links(conn, ocid_number=None, umr_id=None, repo=None, pr
     return [dict(r) for r in rows]
 
 
+def _ensure_pm_decisions_pending_table(conn):
+    """Defensive CREATE TABLE IF NOT EXISTS for pm_decisions_pending, same
+    idempotent, standalone-callable convention as
+    _ensure_ocid_artifact_links_table above -- safe to call on every
+    read/write path, works even against a DB whose copy of this table
+    predates this module knowing about it. Schema matches the real,
+    already-live table exactly (created by
+    migrate_2026-08-05_pm_report_tables.py, branch
+    feat/pm-report-v3-schema-umr20260805181636, merged live 2026-08-05 --
+    see generate_pm_report_v3.py's own get_pm_decisions_pending() for the
+    read side this table already serves, section 7 'PM DECISION REQUIRED').
+
+    Until now nothing in this module could WRITE this table --
+    generate_pm_report_v3.py only ever SELECTs from it by design ('script-
+    read-only... the report script only ever lists open rows, never decides
+    what belongs in it', per that migration's own commit message), so
+    opening/closing a real PM decision required hand-typed SQL against the
+    live DB (see the real id=1 row's own backfill for the precedent this
+    closes off). Owner standing SOP (UMR-20260806-031558-4dbd): exactly one
+    deterministic script -- this one -- is the canonical read/write surface
+    for superboss-register.sqlite; insert_pm_decision_pending() and
+    resolve_pm_decision_pending() below are the two real write paths that
+    were missing."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS pm_decisions_pending (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        opened_ts TEXT NOT NULL,
+        title TEXT NOT NULL,
+        detail TEXT NOT NULL,
+        options_json TEXT,
+        recommended_option TEXT,
+        related_umr TEXT,
+        status TEXT NOT NULL DEFAULT 'open',
+        closed_ts TEXT,
+        closed_by TEXT,
+        closed_note TEXT
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pm_decisions_pending_status ON pm_decisions_pending(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pm_decisions_pending_related_umr ON pm_decisions_pending(related_umr)")
+    conn.commit()
+
+
+def insert_pm_decision_pending(conn, title, detail, options=None, recommended_option=None, related_umr=None):
+    """Real, additive INSERT into pm_decisions_pending -- the write half of
+    the read-only lookup generate_pm_report_v3.py's get_pm_decisions_pending()
+    already relies on (section 7, 'PM DECISION REQUIRED'). Per that table's
+    own real design (migrate_2026-08-05_pm_report_tables.py commit message):
+    'Only a real PM dispatch (human or AI) ever inserts/clears a row -- the
+    report script only ever lists open rows, never decides what belongs in
+    it' -- this function is that one real insert path, now that the Owner's
+    standing SOP (UMR-20260806-031558-4dbd) requires it live here rather
+    than as hand-typed SQL against the live DB.
+
+    `options` is a real Python list (typically of {"option": ..., "detail":
+    ..., "recommended": bool} dicts, same shape as the real id=1 row already
+    live) -- JSON-encoded here so callers never hand-serialize, same
+    convention as record_ocid_master_standard_audit_event()'s `detail` param
+    above. Always opens with status='open' -- resolve_pm_decision_pending()
+    below is the only real path that ever changes it. Does NOT commit by
+    default, same convention as update_umr_task()/insert_ocid_artifact_link()
+    above -- callers under _write_lock() own their own transaction/commit.
+    Returns the new row's real integer id."""
+    cur = conn.execute(
+        "INSERT INTO pm_decisions_pending "
+        "(opened_ts, title, detail, options_json, recommended_option, related_umr, status) "
+        "VALUES (?, ?, ?, ?, ?, ?, 'open')",
+        (
+            _now_iso(), title, detail,
+            json.dumps(options) if options is not None else None,
+            recommended_option, related_umr,
+        ),
+    )
+    return cur.lastrowid
+
+
+def resolve_pm_decision_pending(conn, decision_id, closed_by, closed_note=None, status="resolved"):
+    """Real, additive UPDATE closing one pm_decisions_pending row -- the
+    other real write path this table needed (see insert_pm_decision_pending()
+    above for the full real design context, UMR-20260806-031558-4dbd).
+    Partial-UPDATE-by-id, same convention as update_umr_task() above, but
+    scoped to exactly the 4 real closing columns (status/closed_ts/
+    closed_by/closed_note) plus a real existence check first -- silently
+    updating 0 rows for a bad decision_id would be a real, hard-to-notice
+    caller bug, so this raises ValueError instead (update_umr_task() does
+    not do this today since umr_id typos there are already caught upstream
+    by resource_governor.py's own real umr_id round-trip; no equivalent
+    upstream guarantee exists yet for decision_id).
+
+    `status` defaults to 'resolved' -- generate_pm_report_v3.py's
+    get_pm_decisions_pending() only ever filters WHERE status = 'open', so
+    any non-'open' value here correctly removes the row from that report's
+    'PM DECISION REQUIRED' section; pass e.g. status='declined' or
+    status='superseded' for a real, more specific closing reason while
+    keeping that same effect. Does NOT commit by default, same convention as
+    insert_pm_decision_pending() above."""
+    existing = conn.execute(
+        "SELECT id FROM pm_decisions_pending WHERE id=?", (decision_id,)
+    ).fetchone()
+    if existing is None:
+        raise ValueError(f"no pm_decisions_pending row with id={decision_id!r}")
+    conn.execute(
+        "UPDATE pm_decisions_pending SET status=?, closed_ts=?, closed_by=?, closed_note=? WHERE id=?",
+        (status, _now_iso(), closed_by, closed_note, decision_id),
+    )
+
+
 def _umr_row_to_dict(row):
     d = dict(row)
     for key in ("inputs_json", "outputs_json", "metric_snapshot_json", "metadata_json"):
@@ -5361,6 +5466,54 @@ def touch_umr_heartbeat(args):
     conn.commit()
     conn.close()
     print(json.dumps({"ok": True, "updated": True, "umr_id": row["umr_id"]}))
+
+
+def cmd_insert_pm_decision_pending(args):
+    """Owner standing SOP (UMR-20260806-031558-4dbd) CLI entry point over
+    insert_pm_decision_pending() -- the one real write path for opening a
+    pm_decisions_pending row, so no caller ever needs hand-typed SQL against
+    the live DB for this. --options-json is a path to a real JSON file
+    holding a real list of option dicts (same shape as the real id=1 row
+    already live); omit for a decision with no enumerated options."""
+    options = None
+    if args.options_json:
+        with open(args.options_json) as f:
+            options = json.load(f)
+    init_db_silent()
+    conn = _connect()
+    _ensure_pm_decisions_pending_table(conn)
+    with _write_lock():
+        decision_id = insert_pm_decision_pending(
+            conn, args.title, args.detail, options=options,
+            recommended_option=args.recommended_option, related_umr=args.related_umr,
+        )
+        conn.commit()
+    conn.close()
+    print(json.dumps({"id": decision_id, "status": "open"}, indent=2))
+
+
+def cmd_resolve_pm_decision_pending(args):
+    """Owner standing SOP (UMR-20260806-031558-4dbd) CLI entry point over
+    resolve_pm_decision_pending(). Exits non-zero with a clear message on a
+    bad --id (real ValueError from the underlying function), rather than a
+    raw traceback -- same failure-reporting convention as
+    cmd_certify_pr_merge above."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_pm_decisions_pending_table(conn)
+    try:
+        with _write_lock():
+            resolve_pm_decision_pending(
+                conn, args.id, args.closed_by, closed_note=args.closed_note, status=args.status,
+            )
+            conn.commit()
+    except ValueError as e:
+        conn.close()
+        print(f"ERROR: {e}")
+        sys.exit(1)
+    row = conn.execute("SELECT * FROM pm_decisions_pending WHERE id=?", (args.id,)).fetchone()
+    conn.close()
+    print(json.dumps(dict(row), indent=2, default=str))
 
 
 def init_db_silent():
@@ -5616,6 +5769,28 @@ if __name__ == "__main__":
                                      "verdict against an explicit pr_merge_record JSON file")
     p_certify.add_argument("--pr-record-json", dest="pr_record_json", required=True)
 
+    p_insdec = sub.add_parser("insert-pm-decision-pending",
+                               help="Owner standing SOP (UMR-20260806-031558-4dbd): open a real "
+                                    "pm_decisions_pending row -- the one real write path a PM "
+                                    "dispatch (human or AI) should ever use for this table")
+    p_insdec.add_argument("--title", required=True)
+    p_insdec.add_argument("--detail", required=True)
+    p_insdec.add_argument("--options-json", dest="options_json", default=None,
+                           help="path to a JSON file holding a real list of option dicts")
+    p_insdec.add_argument("--recommended-option", dest="recommended_option", default=None)
+    p_insdec.add_argument("--related-umr", dest="related_umr", default=None)
+
+    p_resdec = sub.add_parser("resolve-pm-decision-pending",
+                               help="Owner standing SOP (UMR-20260806-031558-4dbd): close a real "
+                                    "pm_decisions_pending row by --id")
+    p_resdec.add_argument("--id", required=True, type=int)
+    p_resdec.add_argument("--closed-by", dest="closed_by", required=True)
+    p_resdec.add_argument("--closed-note", dest="closed_note", default=None)
+    p_resdec.add_argument("--status", default="resolved",
+                           help="closed status to record (default: resolved) -- anything other "
+                                "than 'open' removes the row from generate_pm_report_v3.py's "
+                                "PM DECISION REQUIRED section")
+
     args = p.parse_args()
     if args.cmd == "init":
         with _write_lock():
@@ -5711,3 +5886,7 @@ if __name__ == "__main__":
         cmd_reconcile_umr_status(args)
     elif args.cmd == "certify-pr-merge":
         cmd_certify_pr_merge(args)
+    elif args.cmd == "insert-pm-decision-pending":
+        cmd_insert_pm_decision_pending(args)
+    elif args.cmd == "resolve-pm-decision-pending":
+        cmd_resolve_pm_decision_pending(args)

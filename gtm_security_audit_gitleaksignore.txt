@@ -1,0 +1,41 @@
+# .gitleaksignore for gtm_check_security_audit.py -- NOT compliance-tracker's
+# own repo config (this file lives in veridian-scripts, scoped to this one
+# check script's own gitleaks invocation via --gitleaks-ignore-path).
+#
+# Investigated individually, UMR-20260805-155908-b101 (child of
+# UMR-20260802-165606-4413 / OCID-020), per PM instruction
+# UMR-20260805-155838-6270. All 16 fingerprints below were confirmed, by
+# reading real file/line context (never the full secret value logged
+# anywhere), as real false positives -- none is a live production
+# credential. Classification:
+#
+# Group A (14 fingerprints, src/lib/composio-connectors.ts lines 85-102):
+# Composio OAuth "authConfigId" values in CONNECTOR_TOOLKITS -- these are
+# public configuration-lookup identifiers Composio's own API uses to select
+# which auth flow to run for each third-party connector (Gmail, Slack,
+# GitHub, etc.), not secret keys/tokens. Naming ("authConfigId", not
+# "apiKey"/"secret"/"token") and structure (short "ac_"-prefixed lookup
+# IDs) confirm this is gitleaks' generic-api-key heuristic pattern-matching
+# on prefix+entropy without semantic context -- a known false-positive
+# class for ID-shaped (not secret-shaped) strings.
+#
+# Group B (2 fingerprints, test files): explicit test-fixture placeholder
+# secrets (variable literally named with "test" context, file is *.test.ts,
+# used only to exercise HMAC signature-verification code paths against
+# synthetic input) -- never a real webhook/API secret.
+src/lib/composio-connectors.ts:generic-api-key:85
+src/lib/composio-connectors.ts:generic-api-key:86
+src/lib/composio-connectors.ts:generic-api-key:87
+src/lib/composio-connectors.ts:generic-api-key:89
+src/lib/composio-connectors.ts:generic-api-key:90
+src/lib/composio-connectors.ts:generic-api-key:92
+src/lib/composio-connectors.ts:generic-api-key:94
+src/lib/composio-connectors.ts:generic-api-key:95
+src/lib/composio-connectors.ts:generic-api-key:96
+src/lib/composio-connectors.ts:generic-api-key:98
+src/lib/composio-connectors.ts:generic-api-key:99
+src/lib/composio-connectors.ts:generic-api-key:100
+src/lib/composio-connectors.ts:generic-api-key:101
+src/lib/composio-connectors.ts:generic-api-key:102
+src/app/api/webhooks/vercel-deployment/route.test.ts:generic-api-key:16
+src/lib/webhooks/vercel-signature.test.ts:generic-api-key:6

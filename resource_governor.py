@@ -77,6 +77,24 @@ AGING_PROMOTION_INTERVAL_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_AGING_I
 
 # Stuck-task protocol: timeout -> SIGTERM -> grace period -> SIGKILL.
 STUCK_TASK_TIMEOUT_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_STUCK_TIMEOUT_S", str(60 * 60)))
+
+# Real max-queued-age safeguard (dispatch-queue-starvation investigation,
+# UMR-20260806-090229-f2a7, parent UMR-20260806-071025-1d28): confirmed live
+# that a real queued row can silently starve far longer than any legitimate
+# transient backpressure delay -- 30 real tier-1 umr_tasks rows sat
+# status='queued' for ~2 real days because a single, unrelated, chronically-
+# resubmitted task_identity permanently occupied next_queued_task()'s #1 rank
+# (real root cause fixed separately in directive_engine.py's process_one(),
+# see that function's own comment) and dispatch_one()/run_tick() only ever
+# evaluate that one top-ranked row per tick. Real legitimate concurrency/
+# resource-headroom backoff, by contrast, was directly observed clearing
+# within tens of minutes in every real log sample checked during this
+# investigation (dispatch_one()'s own OCID comment documents 27-74 real
+# minutes as an expected, working-as-designed delay). 4 hours is chosen to
+# sit comfortably above every legitimate delay actually observed on this box,
+# while still surfacing a real stall the same real day it starts rather than
+# after multiple days of silence.
+MAX_QUEUED_AGE_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_MAX_QUEUED_AGE_S", str(4 * 60 * 60)))
 SIGTERM_TO_SIGKILL_GRACE_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_SIGKILL_GRACE_S", "60"))
 
 # Stage 3 reconciliation sweep (2026-07-29, "task exits cleanly but umr_tasks
@@ -1374,11 +1392,89 @@ def _dispatch_one_inner(dry_run=False, now=None):
     return {"action": "dispatched", "umr_id": row["umr_id"], "result": result, "metrics": metrics}
 
 
+def flag_stale_queued_tasks(now=None):
+    """Real max-queued-age safeguard -- see the MAX_QUEUED_AGE_SECONDS module
+    comment above for the full real incident this closes.
+
+    Deliberately generic and deterministic, zero AI judgment: does not try to
+    diagnose WHY a row is stale, only measures real age against a real,
+    documented, bounded threshold. Any row that has been status='queued' for
+    at least MAX_QUEUED_AGE_SECONDS gets exactly one real, idempotent
+    pm_decisions_pending row opened via superboss-register.py's own
+    insert_pm_decision_pending() -- never a raw UPDATE/DELETE against
+    umr_tasks, and this function never itself resolves/closes a flagged row or
+    changes umr_tasks in any way; only a real PM decision
+    (resolve_pm_decision_pending()) ever closes what this opens. Idempotent by
+    a real pre-check against pm_decisions_pending itself (skips a umr_id that
+    already has an open 'STALE-QUEUED:' row) -- safe to call every real tick,
+    same as scan_stuck_tasks() below.
+
+    Returns the list of umr_id values newly flagged this call (empty if
+    nothing newly stale). Fails open/silent (empty list) if Superboss
+    Register is unavailable -- a broken check here must never crash the real
+    dispatch tick that calls this, same philosophy as scan_stuck_tasks()."""
+    now = now or _utcnow()
+    sbr, error = _safe_superboss_register("flag_stale_queued_tasks")
+    if error:
+        return []
+    conn = sbr._connect()
+    sbr._ensure_umr_table(conn)
+    sbr._ensure_pm_decisions_pending_table(conn)
+
+    stale = []
+    for row in conn.execute("SELECT * FROM umr_tasks WHERE status='queued'").fetchall():
+        row = dict(row)
+        ts_submitted = row["ts_submitted"]
+        if isinstance(ts_submitted, str):
+            ts_submitted = datetime.fromisoformat(ts_submitted)
+        age_seconds = max(0.0, (now - ts_submitted).total_seconds())
+        if age_seconds >= MAX_QUEUED_AGE_SECONDS:
+            stale.append((row, age_seconds))
+
+    flagged = []
+    for row, age_seconds in stale:
+        umr_id = row["umr_id"]
+        already_open = conn.execute(
+            "SELECT id FROM pm_decisions_pending WHERE related_umr=? AND status='open' "
+            "AND title LIKE 'STALE-QUEUED:%'",
+            (umr_id,),
+        ).fetchone()
+        if already_open:
+            continue
+        age_hours = age_seconds / 3600.0
+        threshold_hours = MAX_QUEUED_AGE_SECONDS / 3600.0
+        title = f"STALE-QUEUED: {umr_id} queued {age_hours:.1f}h (exceeds {threshold_hours:.1f}h safeguard)"
+        detail = (
+            f"task_identity={row['task_identity']!r} tier={row['tier']} "
+            f"source_trigger={row['source_trigger']!r} ts_submitted={row['ts_submitted']!r} "
+            f"reason={row.get('reason')!r} unit_name={row.get('unit_name')!r} -- real, "
+            f"deterministic max-queued-age safeguard (resource_governor.py "
+            f"flag_stale_queued_tasks(), UMR-20260806-090229-f2a7): this row has never "
+            f"reached a real terminal status (completed/failed/killed/rejected_duplicate) "
+            f"within {threshold_hours:.1f}h of its real ts_submitted. Zero AI judgment "
+            f"applied here -- a real PM decision is needed on whether to hold, investigate, "
+            f"or manually intervene."
+        )
+        with sbr._write_lock():
+            sbr.insert_pm_decision_pending(
+                conn, title, detail, related_umr=umr_id,
+                recommended_option="investigate real dispatch history for this umr_id",
+            )
+            conn.commit()
+        flagged.append(umr_id)
+    conn.close()
+    return flagged
+
+
 def run_tick(max_dispatches=None, now=None):
-    """One full governor pass: stuck-task scan, then priority-ordered
-    dispatch until the queue is empty, a slot/metric limit stops it, or
-    max_dispatches is reached."""
-    results = {"stuck_task_actions": scan_stuck_tasks(now=now), "dispatches": []}
+    """One full governor pass: stuck-task scan, stale-queued-age safeguard,
+    then priority-ordered dispatch until the queue is empty, a slot/metric
+    limit stops it, or max_dispatches is reached."""
+    results = {
+        "stuck_task_actions": scan_stuck_tasks(now=now),
+        "stale_queued_flagged": flag_stale_queued_tasks(now=now),
+        "dispatches": [],
+    }
     while max_dispatches is None or len(results["dispatches"]) < max_dispatches:
         r = dispatch_one(now=now)
         results["dispatches"].append(r)

@@ -480,12 +480,61 @@ def resolve_unregistered_mentions(conn, cur, apply):
     return resolved, still_flagged
 
 
+def sweep_wiring_registry_coverage(cur):
+    """Real, read-only unregistered-mentions sweep AGAINST wiring_registry
+    (owner absolute stop-work order, task-20260806-165921): resolve_unregistered_mentions()
+    above only ever cross-checks/registers into system_index -- a real path
+    can be fully resolved there (RESOLVED_AUTO_REGISTERED:<system_index_id>)
+    while still having no real row in wiring_registry at all, invisible to
+    that separate registry's own consumers (generate_wiring_registry.py's
+    entity_type='file'/'script' rows, wiring_query.py's lookups). This sweeps
+    every real, already-disk-resolved unregistered_mentions path (both
+    already-RESOLVED_AUTO_REGISTERED rows and any still-NEEDS_REGISTRATION
+    row that resolves on disk right now) against wiring_registry.path,
+    honestly reporting real coverage gaps. Read-only -- never writes/
+    auto-registers into wiring_registry itself (that would be a second,
+    competing writer to a table generate_wiring_registry.py already owns
+    end-to-end; this sweep's job is visibility, not a second implementation)."""
+    cur.execute("SELECT DISTINCT mentioned_path, status FROM unregistered_mentions")
+    rows = cur.fetchall()
+
+    covered, not_covered = [], []
+    seen_input_paths = set()
+    checked_resolved_paths = set()
+    for path, status in rows:
+        if path in seen_input_paths:
+            continue
+        seen_input_paths.add(path)
+        resolved_full = _resolve_on_disk(path)
+        if not resolved_full:
+            continue  # not resolvable on disk -- resolve_unregistered_mentions() already flags this
+        if resolved_full in checked_resolved_paths:
+            continue  # two different mentioned_path spellings resolving to the same real file
+        checked_resolved_paths.add(resolved_full)
+        cur.execute("SELECT entity_id FROM wiring_registry WHERE path = ? OR path LIKE ?",
+                     (resolved_full, f"%{path}"))
+        hit = cur.fetchone()
+        entry = {"path": resolved_full, "mentioned_as": path, "status": status}
+        if hit:
+            entry["wiring_registry_entity_id"] = hit[0]
+            covered.append(entry)
+        else:
+            not_covered.append(entry)
+
+    return {
+        "total_resolvable_mentions_checked": len(checked_resolved_paths),
+        "covered_in_wiring_registry": len(covered),
+        "not_covered_in_wiring_registry": len(not_covered),
+        "not_covered": not_covered,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 4. Model assembly + wholesale rewrite
 # ---------------------------------------------------------------------------
 
 def build_regenerated_model(base_model, source_counts, status_corrections, checked_count,
-                             resolved_mentions, still_flagged_mentions, run_id, only_scope):
+                             resolved_mentions, still_flagged_mentions, wiring_coverage, run_id, only_scope):
     model = base_model  # mutated in place -- this IS the "regeneration": the whole
     # document is re-derived from (live content + fresh DB/gh evidence) every run,
     # then re-serialized wholesale below, never sed/patched on disk.
@@ -519,6 +568,16 @@ def build_regenerated_model(base_model, source_counts, status_corrections, check
                     "task --content but missing from the registries into this backlog. This "
                     "field exists so the backlog is visible every run, never silent, even for "
                     "rows this script could not safely auto-resolve.",
+        },
+        "unregistered_mentions_wiring_registry_sweep": {
+            **wiring_coverage,
+            "note": "Read-only coverage sweep (owner absolute stop-work order, "
+                    "task-20260806-165921): resolve_unregistered_mentions() above only "
+                    "cross-checks/registers into system_index -- this separately checks "
+                    "whether each real, disk-resolved unregistered_mentions path ALSO has "
+                    "a real row in wiring_registry (a different, separately-owned "
+                    "registry -- see generate_wiring_registry.py). Never writes to "
+                    "wiring_registry itself.",
         },
         "not_wired_into_cron": "Manual tool only for now -- cron is disabled server-wide "
                                 "pending separate remediation; schedule this once that lands.",
@@ -571,9 +630,10 @@ def main():
     source_counts = query_source_counts(cur)
     status_corrections, checked_count = apply_status_corrections(base_model, cur, only_scope)
     resolved_mentions, still_flagged_mentions = resolve_unregistered_mentions(conn, cur, apply=args.apply)
+    wiring_coverage = sweep_wiring_registry_coverage(cur)
 
     model = build_regenerated_model(base_model, source_counts, status_corrections, checked_count,
-                                     resolved_mentions, still_flagged_mentions, run_id, only_scope)
+                                     resolved_mentions, still_flagged_mentions, wiring_coverage, run_id, only_scope)
     new_text = dump_yaml(model)
 
     # round-trip validation before touching anything
@@ -587,6 +647,7 @@ def main():
         "initiative_status_corrections": status_corrections,
         "unregistered_mentions_resolved": len(resolved_mentions),
         "unregistered_mentions_still_flagged": len(still_flagged_mentions),
+        "unregistered_mentions_wiring_registry_coverage": wiring_coverage,
     }
 
     if args.apply:

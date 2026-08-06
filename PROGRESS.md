@@ -85,3 +85,14 @@ deposit into the UMR row.
       PM review of findings + explicit build authorization before any
       implementation work (and before parts 5,6,9, which are PM-level
       conceptual framing handled directly by the PM).
+
+## Post-delivery checkpoint (invocation 2/20)
+- [x] PR #125 was open but `mergeable: CONFLICTING` against `main`
+      (another task's PR, #126, had merged in between and also touched the
+      repo-root `PROGRESS.md` scratch file -- expected per-task scratch
+      collision, not a real content conflict). Merged `origin/main` into
+      this branch with `-X ours` on `PROGRESS.md` (kept this task's own
+      progress notes; the findings doc had no conflict) and pushed
+      (`7f140fc`). PR #125 is now `state: OPEN`, `mergeable: MERGEABLE`.
+- [ ] Nothing further for this worker to do -- PR ready to merge, still
+      pending PM review/authorization per the analysis-only constraint.

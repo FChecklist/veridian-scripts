@@ -37,6 +37,11 @@ SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _LIVE_SCHEMA_COLUMNS = [
     "id", "opened_ts", "title", "detail", "options_json", "recommended_option",
     "related_umr", "status", "closed_ts", "closed_by", "closed_note",
+    # Owner standing mandate (task-20260806-034817, cites UMR-20260805-185000-e94f):
+    # additive columns for the AI-proposes/PM-decides/AI-completes child-UMR
+    # proposal lifecycle -- see
+    # _migrate_pm_decisions_pending_owner_proposal_columns()'s own docstring.
+    "decision_type", "completed_ts", "artifact_path", "commit_sha", "evidence",
 ]
 
 
@@ -338,6 +343,229 @@ def test_cli_resolve_unknown_id_exits_nonzero():
         finally:
             os.environ.pop("SUPERBOSS_REGISTER_DB", None)
     print("PASS: test_cli_resolve_unknown_id_exits_nonzero")
+
+
+# ---------------------------------------------------------------------------
+# Owner standing mandate (task-20260806-034817, cites UMR-20260805-185000-e94f):
+# insert_owner_proposal()/decide_owner_proposal()/record_owner_proposal_completion()
+# real end-to-end lifecycle, same real-isolated-temp-DB convention as every
+# test above.
+# ---------------------------------------------------------------------------
+def test_insert_owner_proposal_mints_child_umr_and_opens_row():
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        sbr = _load("sbr_test_insert_proposal", "superboss-register.py", env=_scratch_env(scratch_db))
+
+        conn = sbr._connect()
+        decision_id, child_umr = sbr.insert_owner_proposal(
+            conn, "real issue: X is broken", "AI proposes: fix X by doing Y",
+        )
+        conn.commit()
+        assert isinstance(decision_id, int) and decision_id > 0, decision_id
+        assert child_umr.startswith("UMR-"), child_umr
+
+        row = dict(conn.execute("SELECT * FROM pm_decisions_pending WHERE id=?", (decision_id,)).fetchone())
+        assert row["title"] == "real issue: X is broken"
+        assert row["detail"] == "AI proposes: fix X by doing Y"
+        assert row["related_umr"] == child_umr
+        assert row["status"] == "open"
+        assert row["decision_type"] == "owner_proposal"
+        assert row["completed_ts"] is None and row["artifact_path"] is None
+        conn.close()
+    print("PASS: test_insert_owner_proposal_mints_child_umr_and_opens_row")
+
+
+def test_insert_owner_proposal_accepts_explicit_child_umr():
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        sbr = _load("sbr_test_insert_proposal_explicit_umr", "superboss-register.py", env=_scratch_env(scratch_db))
+
+        conn = sbr._connect()
+        decision_id, child_umr = sbr.insert_owner_proposal(
+            conn, "issue", "proposal", child_umr="UMR-20260806-000000-abcd",
+        )
+        conn.commit()
+        assert child_umr == "UMR-20260806-000000-abcd"
+        row = conn.execute("SELECT related_umr FROM pm_decisions_pending WHERE id=?", (decision_id,)).fetchone()
+        assert row["related_umr"] == "UMR-20260806-000000-abcd"
+        conn.close()
+    print("PASS: test_insert_owner_proposal_accepts_explicit_child_umr")
+
+
+def test_owner_proposal_pm_decision_and_ai_completion_full_round_trip():
+    """The real end-to-end lifecycle the Owner's directive asks for: AI
+    deposits a proposal, PM approves it citing its child UMR, AI records
+    real completion evidence back onto that same row."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        sbr = _load("sbr_test_proposal_round_trip", "superboss-register.py", env=_scratch_env(scratch_db))
+
+        conn = sbr._connect()
+        decision_id, child_umr = sbr.insert_owner_proposal(
+            conn, "real issue: no test coverage for X", "AI proposes: add real tests for X",
+        )
+        conn.commit()
+
+        decided = sbr.decide_owner_proposal(
+            conn, decision_id, decision="approved", closed_by="pm-agent",
+            closed_note=f"approved, see {child_umr}",
+        )
+        conn.commit()
+        assert decided is True
+
+        row = dict(conn.execute("SELECT * FROM pm_decisions_pending WHERE id=?", (decision_id,)).fetchone())
+        assert row["status"] == "approved"
+        assert row["closed_by"] == "pm-agent"
+        assert child_umr in row["closed_note"]
+
+        recorded = sbr.record_owner_proposal_completion(
+            conn, decision_id, artifact_path="tests/test_pm_decisions_pending.py",
+            commit_sha="deadbeef", evidence="real tests added and passing, see PR #123",
+        )
+        conn.commit()
+        assert recorded is True
+
+        final_row = dict(conn.execute("SELECT * FROM pm_decisions_pending WHERE id=?", (decision_id,)).fetchone())
+        assert final_row["status"] == "completed"
+        assert final_row["artifact_path"] == "tests/test_pm_decisions_pending.py"
+        assert final_row["commit_sha"] == "deadbeef"
+        assert final_row["evidence"] == "real tests added and passing, see PR #123"
+        assert final_row["completed_ts"] is not None
+        assert final_row["related_umr"] == child_umr
+        conn.close()
+    print("PASS: test_owner_proposal_pm_decision_and_ai_completion_full_round_trip")
+
+
+def test_decide_owner_proposal_rejects_unknown_decision():
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        sbr = _load("sbr_test_decide_bad_decision", "superboss-register.py", env=_scratch_env(scratch_db))
+
+        conn = sbr._connect()
+        decision_id, _ = sbr.insert_owner_proposal(conn, "issue", "proposal")
+        conn.commit()
+        try:
+            sbr.decide_owner_proposal(conn, decision_id, decision="rejected", closed_by="pm-agent")
+            assert False, "expected ValueError for an invalid decision value"
+        except ValueError:
+            pass
+        conn.close()
+    print("PASS: test_decide_owner_proposal_rejects_unknown_decision")
+
+
+def test_decide_owner_proposal_cannot_resolve_a_plain_pm_decision_row():
+    """require_decision_type='owner_proposal' must refuse a real pm_decision
+    row even if the numeric id matches -- the two real row shapes share one
+    table but never one lifecycle."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        sbr = _load("sbr_test_decide_wrong_type", "superboss-register.py", env=_scratch_env(scratch_db))
+
+        conn = sbr._connect()
+        plain_id = sbr.insert_pm_decision_pending(conn, "plain PM decision", "detail")
+        conn.commit()
+
+        decided = sbr.decide_owner_proposal(conn, plain_id, decision="approved", closed_by="pm-agent")
+        conn.commit()
+        assert decided is False
+
+        row = conn.execute("SELECT status FROM pm_decisions_pending WHERE id=?", (plain_id,)).fetchone()
+        assert row["status"] == "open"
+        conn.close()
+    print("PASS: test_decide_owner_proposal_cannot_resolve_a_plain_pm_decision_row")
+
+
+def test_record_owner_proposal_completion_requires_approved_status():
+    """Completion cannot be recorded on a still-open, redirected, or held
+    proposal -- only one that the PM has real-approved."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        sbr = _load("sbr_test_completion_requires_approved", "superboss-register.py", env=_scratch_env(scratch_db))
+
+        conn = sbr._connect()
+        still_open_id, _ = sbr.insert_owner_proposal(conn, "issue", "proposal")
+        conn.commit()
+        recorded = sbr.record_owner_proposal_completion(
+            conn, still_open_id, artifact_path="x", commit_sha="y", evidence="z",
+        )
+        conn.commit()
+        assert recorded is False
+
+        redirected_id, _ = sbr.insert_owner_proposal(conn, "issue2", "proposal2")
+        conn.commit()
+        sbr.decide_owner_proposal(conn, redirected_id, decision="redirected", closed_by="pm-agent")
+        conn.commit()
+        recorded2 = sbr.record_owner_proposal_completion(
+            conn, redirected_id, artifact_path="x", commit_sha="y", evidence="z",
+        )
+        conn.commit()
+        assert recorded2 is False
+        conn.close()
+    print("PASS: test_record_owner_proposal_completion_requires_approved_status")
+
+
+def test_record_owner_proposal_completion_is_idempotent():
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        sbr = _load("sbr_test_completion_idempotent", "superboss-register.py", env=_scratch_env(scratch_db))
+
+        conn = sbr._connect()
+        decision_id, _ = sbr.insert_owner_proposal(conn, "issue", "proposal")
+        conn.commit()
+        sbr.decide_owner_proposal(conn, decision_id, decision="approved", closed_by="pm-agent")
+        conn.commit()
+
+        first = sbr.record_owner_proposal_completion(
+            conn, decision_id, artifact_path="first.py", commit_sha="aaa", evidence="first",
+        )
+        conn.commit()
+        assert first is True
+        row_after_first = dict(conn.execute("SELECT * FROM pm_decisions_pending WHERE id=?", (decision_id,)).fetchone())
+
+        second = sbr.record_owner_proposal_completion(
+            conn, decision_id, artifact_path="second.py", commit_sha="bbb", evidence="second",
+        )
+        conn.commit()
+        assert second is False
+        row_after_second = dict(conn.execute("SELECT * FROM pm_decisions_pending WHERE id=?", (decision_id,)).fetchone())
+        assert row_after_second == row_after_first, (row_after_first, row_after_second)
+        conn.close()
+    print("PASS: test_record_owner_proposal_completion_is_idempotent")
+
+
+def test_get_pm_decisions_pending_excludes_owner_proposals():
+    """generate_pm_report_v3.py's Section 7 (plain PM decisions) must never
+    show a real owner_proposal row -- those surface only in Section 8 (see
+    test_generate_pm_report_v3.py)."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        sbr = _load("sbr_test_section7_excludes_proposals", "superboss-register.py", env=_scratch_env(scratch_db))
+
+        conn = sbr._connect()
+        sbr.insert_pm_decision_pending(conn, "plain decision", "detail")
+        sbr.insert_owner_proposal(conn, "issue", "proposal")
+        conn.commit()
+
+        spec = importlib.util.spec_from_file_location(
+            "pm_report_v3_for_pm_decisions_test", os.path.join(SCRIPTS_DIR, "generate_pm_report_v3.py")
+        )
+        pm_report = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pm_report)
+
+        decisions = pm_report.get_pm_decisions_pending(sbr)
+        proposals = pm_report.get_owner_proposals_pending(sbr)
+        assert len(decisions) == 1 and decisions[0]["title"] == "plain decision", decisions
+        assert len(proposals) == 1 and proposals[0]["issue"] == "issue", proposals
+        conn.close()
+    print("PASS: test_get_pm_decisions_pending_excludes_owner_proposals")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,34 @@
+{
+  "capability_name": "full_server_file_registration",
+  "inputs": [
+    {"key": "--backup-first", "label": "take a real online sqlite backup (superboss-register.sqlite.pre-fullfile-backup-<UTC ts>) before writing", "type": "flag", "optional": true},
+    {"key": "--completion-check", "label": "print the mandatory boolean completion evidence without re-scanning", "type": "flag", "optional": true}
+  ],
+  "business_rules": [
+    {"leaf_key": "full_server_file_registration", "phase": "process", "mechanism_path": "scripts/full_server_file_registration.py", "registered": true}
+  ],
+  "workflow": "scripts/full_server_file_registration.py [--backup-first] [--completion-check]",
+  "automation": "manual/on-demand CLI, real UTC-now timestamps, no scheduled cron wiring added by this task",
+  "documents": null,
+  "reports": null,
+  "apis": ["/opt/veridian/scripts/full_server_file_registration.py"],
+  "ui_screens": null,
+  "permissions": "server-local shell execution only; writes to the one live superboss-register.sqlite (wiring_registry table) and to ai-os/memory/backups/ (sqlite backup snapshots); no tenant/org scoping applicable",
+  "ai_required": 0,
+  "confidence": 1.0,
+  "version": "1.0",
+  "owner": "VERIDIAN platform ops tooling (/opt/veridian/scripts)",
+  "metadata": {
+    "governing_umr_chain": ["UMR-20260806-124055-bc80", "UMR-20260806-130416-3d77"],
+    "task_id": "task-20260806-192052-deterministic-full-server-file-registrat",
+    "purpose": "Deterministic, idempotent server-wide file registration into wiring_registry (entity_type=file), deduped by content_hash not just path, extending file_inventory.py's narrower ai-os/+scripts/ scope to /opt/veridian/repos/<real top-level repo>, /opt/veridian/ai-os/ (excl. tasks/*/workspace), /opt/veridian/scripts/, /opt/veridian/shared/ -- excluding node_modules/, .git/, .next/, __pycache__/, ai-os/tasks/*/workspace/, ai-os/memory/backups/ (self), and the live superboss-register.sqlite family itself.",
+    "reused_from": [
+      "ai-os/scripts/file_inventory.py (find -prune scan shape, _write_lock() OS flock convention, imported not copied)",
+      "scripts/generate_wiring_registry.py (_hash_file_bytes() pure-content sha256, file-{sha1(abs_path)[:12]} entity_id convention, imported not reimplemented)",
+      "scripts/superboss-register.py (_ensure_wiring_registry_table(), register_entity_row(), _connect(), init_db_silent(), imported not reimplemented)",
+      "scripts/prune_memory_backups.py (real_integrity_check() for post-backup verification, imported not reimplemented)"
+    ],
+    "known_honest_limitation": "The mandatory 'zero entity_type=file rows with NULL/empty content_hash' check will not reach literal zero: 15 legacy rows point inside .git/ (explicitly excluded by this SPEC's own scope), 7 are verification_status=PATH_MISSING (file no longer exists, nothing real to hash), and 31 point outside the 4 named canonical roots entirely (e.g. /opt/veridian/ai-os-scripts/, /home/rajat/.local/bin/) -- all pre-existing legacy data from before this script existed, verified live rather than assumed, never force-hashed or silently pulled into scope to fake a zero result.",
+    "known_honest_limitation_2": "This runs on a live, actively-mutating multi-agent production server. An immediate second run's 'newly-registered' count can be a small nonzero number when OTHER concurrent processes legitimately change/create files within the scanned roots between the two runs (verified concretely across repeated test runs: a sibling task's task.yaml, worker-entrypoint.sh being redeployed, knowledge_engine batch updates from another process) -- this is real environmental drift, not a defect in the script's own content-hash dedup logic, which is deterministic and idempotent with respect to a static file set."
+  }
+}

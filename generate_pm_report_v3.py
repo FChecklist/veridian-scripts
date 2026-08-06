@@ -185,10 +185,26 @@ pure function of those reads -- no new AI/LLM call anywhere.
       -- the two repos this task's own directive named explicitly, both real,
       both env-overridable like every other path/constant in this file.
   13. DETERMINISTIC INSTRUCTION QUALITY CHECK -- queries the real last 20
-      umr_tasks rows (ORDER BY ts_submitted DESC) and applies one fixed rule
-      to each row's real inputs_json.prompt text (rows with no string
-      "prompt" key fail outright, real and documented, not silently
-      skipped):
+      umr_tasks rows WHERE task_kind = 'veridian_task_create' (ORDER BY
+      ts_submitted DESC) and applies one fixed rule to each row's real
+      inputs_json.prompt text (rows with no string "prompt" key fail
+      outright, real and documented, not silently skipped).
+      task_kind filter (real fix, UMR-20260806-041307-0bfd, post-merge
+      correction -- see PROGRESS.md): the original version of this section
+      queried the raw, unfiltered last 20 umr_tasks rows. Confirmed live
+      against this real database: at any given moment the umr_tasks table
+      is dominated by a continuous stream of task_kind='systemctl_action'
+      rows (dispatch-tick.py's own resume_interrupted_workers bookkeeping),
+      which carry no 'prompt' field at all and are, by construction, always
+      the most recent rows by ts_submitted. Left unfiltered, this section
+      produced DETERMINISTIC_INSTRUCTION_COUNT=0/20 on every real run,
+      permanently, regardless of actual dispatch-instruction quality --
+      the opposite of a useful ten-minute PM signal. task_kind is a real,
+      already-established umr_tasks column (see _ensure_umr_table() in
+      superboss-register.py); 'veridian_task_create' is the real row type
+      real Owner/PM dispatch prompts are written under (confirmed live
+      against this database before this fix was written -- see
+      submit()/veridian-task.py's own real write path).
         (a) a real UMR-YYYYMMDD-HHMMSS-xxxx citation is present anywhere
             (regex).
         (b) none of the fixed vague-verb substrings "look into", "improve",
@@ -257,7 +273,10 @@ REPORT_FORMAT_VERSION = "pm-report-v3-placeholder-gtm-score"
 # UMR-20260806-041307-0bfd: this script's own version constant. Bumped on
 # every real functional change; see the module docstring's SCRIPT_VERSION
 # block for what changed at each bump.
-SCRIPT_VERSION = "3.1.0"
+# 3.1.1: real fix, Section 13 (get_last_n_umr_tasks) -- added the missing
+# task_kind='veridian_task_create' filter; see that function's own
+# docstring for the real, confirmed-live bug this closes.
+SCRIPT_VERSION = "3.1.1"
 
 # ---------------------------------------------------------------------------
 # Section 9-13 constants (UMR-20260806-041307-0bfd) -- see module docstring
@@ -1117,10 +1136,20 @@ def get_collision_detection_section():
 # exact fixed rule (a)/(b)/(c) definitions.
 # ---------------------------------------------------------------------------
 def get_last_n_umr_tasks(sbr, n=20):
+    """Real fix (UMR-20260806-041307-0bfd, post-merge correction -- see
+    module docstring Section 13 and PROGRESS.md): scoped to
+    task_kind = 'veridian_task_create', NOT the raw unfiltered last N
+    umr_tasks rows. Confirmed live against this real database before this
+    fix was written: the raw unfiltered query returns 100% task_kind=
+    'systemctl_action' bookkeeping rows (no 'prompt' field at all) during
+    normal dispatch-tick operation, which silently defeated
+    DETERMINISTIC_INSTRUCTION_COUNT (permanently 0/20) rather than
+    reflecting real dispatch-instruction quality."""
     try:
         conn = sbr._connect()
         rows = conn.execute(
             "SELECT umr_id, ts_submitted, inputs_json FROM umr_tasks "
+            "WHERE task_kind = 'veridian_task_create' "
             "ORDER BY ts_submitted DESC LIMIT ?", (n,)
         ).fetchall()
         conn.close()

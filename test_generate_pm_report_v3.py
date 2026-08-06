@@ -830,11 +830,14 @@ def test_check_instruction_quality_pr_reference_satisfies_rule_c_without_file_pa
 def test_get_instruction_quality_section_counts_and_lists_failures(tmp_path):
     db_path = str(tmp_path / "umr.sqlite")
     conn = sqlite3.connect(db_path)
-    conn.execute("CREATE TABLE umr_tasks (umr_id TEXT PRIMARY KEY, ts_submitted TEXT, inputs_json TEXT)")
+    conn.execute("CREATE TABLE umr_tasks (umr_id TEXT PRIMARY KEY, ts_submitted TEXT, "
+                 "inputs_json TEXT, task_kind TEXT)")
     good_prompt = json.dumps({"prompt": "UMR-20260805-181636-32f2: extend generate_pm_report_v3.py, cite PR #110."})
     bad_prompt = json.dumps({"prompt": "please look into the general situation"})
-    conn.execute("INSERT INTO umr_tasks VALUES ('UMR-good', '2026-08-06T00:00:02', ?)", (good_prompt,))
-    conn.execute("INSERT INTO umr_tasks VALUES ('UMR-bad', '2026-08-06T00:00:01', ?)", (bad_prompt,))
+    conn.execute("INSERT INTO umr_tasks VALUES ('UMR-good', '2026-08-06T00:00:02', ?, 'veridian_task_create')",
+                 (good_prompt,))
+    conn.execute("INSERT INTO umr_tasks VALUES ('UMR-bad', '2026-08-06T00:00:01', ?, 'veridian_task_create')",
+                 (bad_prompt,))
     conn.commit()
     conn.close()
     fake_sbr = _make_fake_sbr_module(db_path)
@@ -849,16 +852,55 @@ def test_get_instruction_quality_section_honest_denominator_under_20(tmp_path):
     """Only 3 real rows exist -- denominator must honestly be 3, not 20."""
     db_path = str(tmp_path / "umr_small.sqlite")
     conn = sqlite3.connect(db_path)
-    conn.execute("CREATE TABLE umr_tasks (umr_id TEXT PRIMARY KEY, ts_submitted TEXT, inputs_json TEXT)")
+    conn.execute("CREATE TABLE umr_tasks (umr_id TEXT PRIMARY KEY, ts_submitted TEXT, "
+                 "inputs_json TEXT, task_kind TEXT)")
     for i in range(3):
         p = json.dumps({"prompt": f"UMR-20260805-181636-32f2: task {i}, see PR #{i}."})
-        conn.execute("INSERT INTO umr_tasks VALUES (?, ?, ?)", (f"UMR-{i}", f"t{i}", p))
+        conn.execute("INSERT INTO umr_tasks VALUES (?, ?, ?, 'veridian_task_create')", (f"UMR-{i}", f"t{i}", p))
     conn.commit()
     conn.close()
     fake_sbr = _make_fake_sbr_module(db_path)
     result = pm.get_instruction_quality_section(fake_sbr)
     assert result["total_checked"] == 3
     assert result["pass_count"] == 3
+
+
+def test_get_last_n_umr_tasks_excludes_systemctl_action_bookkeeping_noise(tmp_path):
+    """Real regression test (UMR-20260806-041307-0bfd, post-merge fix): on
+    a live box, task_kind='systemctl_action' rows (dispatch-tick.py's own
+    resume_interrupted_workers bookkeeping) are the most recent rows by
+    ts_submitted essentially always, and carry no 'prompt' field. Before
+    this fix, get_last_n_umr_tasks() had no task_kind filter, so this exact
+    shape made DETERMINISTIC_INSTRUCTION_COUNT permanently read 0/20
+    regardless of real dispatch-instruction quality. This test reproduces
+    that exact real shape and asserts the fix: the systemctl_action noise
+    is excluded, and the real dispatch rows are found and checked."""
+    db_path = str(tmp_path / "umr_noise.sqlite")
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE umr_tasks (umr_id TEXT PRIMARY KEY, ts_submitted TEXT, "
+                 "inputs_json TEXT, task_kind TEXT)")
+    # 5 real systemctl_action bookkeeping rows, all more recent than the
+    # one real dispatch prompt below -- exactly the live shape that broke
+    # the original, unfiltered query.
+    for i in range(5):
+        conn.execute(
+            "INSERT INTO umr_tasks VALUES (?, ?, ?, 'systemctl_action')",
+            (f"UMR-noise-{i}", f"2026-08-06T05:00:{i:02d}", json.dumps({"action": "start"})),
+        )
+    good_prompt = json.dumps({"prompt": "UMR-20260805-181636-32f2: real dispatch, see PR #115."})
+    conn.execute("INSERT INTO umr_tasks VALUES ('UMR-real', '2026-08-06T04:00:00', ?, 'veridian_task_create')",
+                 (good_prompt,))
+    conn.commit()
+    conn.close()
+    fake_sbr = _make_fake_sbr_module(db_path)
+
+    rows, err = pm.get_last_n_umr_tasks(fake_sbr, 20)
+    assert err is None
+    assert [r["umr_id"] for r in rows] == ["UMR-real"]
+
+    result = pm.get_instruction_quality_section(fake_sbr)
+    assert result["total_checked"] == 1
+    assert result["pass_count"] == 1
 
 
 if __name__ == "__main__":

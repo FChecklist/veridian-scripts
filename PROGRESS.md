@@ -117,3 +117,56 @@ round.
 
 ## Remaining
 - [ ] Confirm second independent review round passes and real merge lands.
+
+## Post-merge fix (task-20260806-042801, UMR-20260806-041307-0bfd re-confirmed)
+
+**Independent verification before writing anything** (per the standing lesson
+that urgent PM SPECs in this codebase have twice not matched live state):
+this task was dispatched with the same SPEC/UMR as the section above. Before
+writing any code, confirmed the real live state: PR #115 (this same section)
+was already merged into `main` at `2026-08-06T04:34:57Z` -- a genuine
+concurrent-dispatch duplicate (two workers, `task-20260806-041307-...` and
+`task-20260806-042801-...`, both dispatched against UMR-20260806-041307-0bfd).
+Discarded a full redundant reimplementation once this was confirmed via
+`git fetch origin main` + `gh pr view 115` + `git cat-file -p
+origin/main:generate_pm_report_v3.py` (SCRIPT_VERSION 3.1.0, all 5 sections
+present, identical UMR citation).
+
+While independently re-verifying the merged code against the real live
+database (rather than trusting the merge as automatically correct), found a
+real, live, currently-active bug in Section 13:
+`get_last_n_umr_tasks()` queried the raw last 20 `umr_tasks` rows by
+`ts_submitted DESC` with **no `task_kind` filter**. Confirmed live: at any
+given moment the table is dominated by a continuous stream of
+`task_kind='systemctl_action'` bookkeeping rows (dispatch-tick.py's own
+`resume_interrupted_workers`), which carry no `'prompt'` field and are, by
+construction, always the most recent rows. Ran the merged script for real
+against the live server: `DETERMINISTIC_INSTRUCTION_COUNT=0/20`, every real
+row failing with `"no string 'prompt' field found"` -- permanently 0/20
+regardless of actual dispatch-instruction quality, defeating the section's
+entire purpose.
+
+### Fix
+- `get_last_n_umr_tasks()`: added `WHERE task_kind = 'veridian_task_create'`
+  (the real, already-established row type real Owner/PM dispatch prompts are
+  written under -- confirmed live before writing the fix, documented in the
+  function's own docstring and the module docstring's Section 13 block).
+- `SCRIPT_VERSION` bumped `3.1.0` -> `3.1.1`.
+- 3 tests fixed/added: the 2 existing Section-13 unit tests needed a
+  `task_kind` column added to their synthetic schema (they predated the
+  fix and had no such column, so they'd have silently exercised a
+  `sqlite3.Error` fallback path rather than the real logic); 1 new
+  regression test (`test_get_last_n_umr_tasks_excludes_systemctl_action_bookkeeping_noise`)
+  reproduces the exact real live shape (5 systemctl_action noise rows more
+  recent than 1 real dispatch prompt) and asserts the fix holds.
+- Full suite: 230/230 passing (`test_generate_pm_report_v3.py`: 56/56).
+- Ran the fixed script for real against the live server
+  (`--no-db-write --json-out`): `DETERMINISTIC_INSTRUCTION_COUNT=16/20`
+  (real signal, up from the broken permanent 0/20), all 13 sections render
+  with zero errors, ~100s wall-clock.
+
+### Remaining
+- [ ] Independent review + merge of this fix PR.
+- [ ] Report back to Owner/PM: SPEC already fulfilled by PR #115 (merged);
+      this fix PR closes a real live defect found during independent
+      re-verification of that merge.

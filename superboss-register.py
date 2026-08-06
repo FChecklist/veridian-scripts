@@ -46,6 +46,21 @@ utm_medium (channel: ssh_session|claude_code_cli|chat_ui|api|cron),
 utm_campaign (initiative/project grouping, freeform slug),
 utm_content (short structured label of what, not a sentence),
 utm_term (comma-separated search keywords).
+
+CANONICAL SCRIPT (Owner directive, UMR-20260806-031211-64de / UMR-20260806-033108-9839
+/ UMR-20260806-033709-82d7): this is the one real canonical script for every real read
+and every real write against superboss-register.sqlite -- umr_tasks, ocid_canonical_registry,
+ocid_master_standard_audit_log, gtm_certification_categories, pm_decisions_pending,
+pm_report_snapshots, and every other table in this file. Real raw SQL against this file
+from outside this script (a one-off sqlite3.connect() in another script, an ad hoc
+migration, a bare INSERT/UPDATE) is NOT the standard procedure -- extend the function
+library here instead (see insert_pm_decision_pending()/resolve_pm_decision_pending()/
+record_ocid_master_standard_audit_event()/insert_ocid_artifact_link()/update_umr_task()
+for the established convention: module-level _connect()/_write_lock(), caller-owned
+commit, an idempotent _ensure_<table>_table() at the top of anything that creates
+schema) and wire in a CLI subcommand if one's needed, rather than writing a second
+parallel script. This statement exists so the rule is discoverable at the source, not
+only in a report.
 """
 import argparse
 import contextlib

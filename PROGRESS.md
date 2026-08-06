@@ -1,98 +1,13 @@
-# PROGRESS -- task-20260806-050102-owner-standing-directive--register-umr-f
-
-SPEC: Real Owner standing directive. This dispatch itself mints the real
-permanent UMR ID for the whole nine-part directive covering UMR/UTR global
-registry consolidation and the Mini VERIDIAN browser-first local execution
-architecture. Hard constraint: **analysis only** -- investigation and
-written notes only, nothing built, nothing implemented, until PM reviews
-findings and gives explicit build authorization.
-
-In scope for this task (parts 1,2,3,4,7,8 only -- parts 5,6,9 are PM-level
-conceptual framing, PM handling those directly):
-1/2. Confirm whether UTR=umr_tasks / UMR=broader metadata taxonomy
-     (UMR-20260805-093630-29d1) already covers what the Owner described --
-     check `registry_taxonomy_notes` table content directly, don't assume.
-3. Confirm superboss-register.py is genuinely the one script AI agents use;
-   measure real search time + memory use on a representative query.
-4. Full inventory: every table in superboss-register.sqlite, every script
-   in live /opt/veridian/scripts, one line each.
-7. Two lists: global server-side tables/functions/scripts, and honest
-   client-side inventory for PROJEXA + veridian-compliance-ai frontends
-   (localStorage/IndexedDB/PWA manifest/offline support) -- report what's
-   real, invent nothing.
-8. Honest yes/no on whether a server<->browser sync mechanism exists today,
-   with evidence.
-
-## Standing practice applied (per memory: prior urgent PM SPECs in this
-## repo have not always matched live state -- verify independently first)
-All of the above is independent verification against live system state
-before any conclusion is written up. No file writes to live systems, no DB
-writes, no code changes -- this task only produces a findings document to
-deposit into the UMR row.
+# PROGRESS -- task-20260806-070026-register-real-umr-for-pm-self-audit-and
 
 ## Completed
-- [x] Located live system paths: DB = /opt/veridian/ai-os/memory/superboss-register.sqlite
-      (has WAL); canonical script = /opt/veridian/scripts/superboss-register.py;
-      candidate frontends = /opt/veridian/repos/projexa,
-      /opt/veridian/repos/compliance-tracker.
-
-- [x] Confirmed "this UMR row" = `UMR-20260806-050055-d145`
-      (`task_identity owner-task-20260806-050053-1500765`, status
-      `running`) via direct read-only query -- matched its `inputs_json`
-      verbatim against the Owner's SPEC text rather than assuming.
-- [x] Part 1/2: read `registry_taxonomy_notes` table content directly +
-      UMR-20260805-093630-29d1 record verbatim -- verdict PARTIAL. Taxonomy
-      naming (UTR=umr_tasks, UMR=broader layer) is real and merged; zero
-      evidence anywhere of "consolidation" work or "Mini VERIDIAN
-      browser-first" architecture under that or any related UMR.
-- [x] Part 3: confirmed superboss-register.py is the real one script via
-      independent wiring grep (worker-entrypoint.sh, task-gateway.py,
-      prompt_gateway/gateway.py, etc, not just its own docstring). Measured
-      real numbers on a representative `search` query (mirroring the real
-      gateway_persistence.py call site) via read-only-connection harness:
-      ~0.04-0.05s wall clock, ~19.7MB peak RSS, both runs, against a live
-      1.6GB DB.
-- [x] Part 4: full inventory -- 36 real DB tables (+ FTS shadows) and all
-      124 live top-level scripts in /opt/veridian/scripts, one line each,
-      170 backup/dead files excluded and counted separately, 7-item
-      possible-duplication callout list (incl. 3 scripts still live
-      despite being marked superseded-by-consolidation).
-- [x] Part 7: server-side list (36 tables + 124 scripts) + honest
-      client-side inventory for PROJEXA and compliance-tracker (confirmed
-      as the real veridian-compliance-ai repo by its own docs, not
-      assumed). PROJEXA has a real working service worker + IndexedDB
-      offline queue. compliance-tracker has a real PWA manifest + real
-      IndexedDB (incl. an existing browser-execution ML model-cache tier
-      directly relevant to "Mini VERIDIAN") but zero service
-      worker/offline support.
-- [x] Part 8: verdict PARTIAL/leaning-NO -- only plain HTTP polling exists
-      client<->each app's own server; zero server-push; no frontend calls
-      /opt/veridian/scripts or ai-os at all; one real delta-sync module
-      (compliance-tracker's sync-engine.ts) exists but is unwired,
-      imported only by its own test file. Corroborated against (not just
-      trusted) an existing internal doc reaching the same conclusion.
-- [x] Compiled structured findings into
-      `UMR-20260806-050055-d145_MINI_VERIDIAN_UMR_UTR_ANALYSIS_2026-08-06.md`
-      and deposited it in this task's branch, citing the real UMR row.
-- [x] Explicitly stated in that document: nothing was built or changed --
-      all five investigation threads were read-only (DB opened
-      `-readonly` throughout, mtime confirmed unchanged; no source files
-      modified in scripts or either frontend repo; no
-      install/build/deploy commands run).
+- [x] Independently verified the dispatch premise against live state (not narrated): the "database lock incident" is real (file_inventory corruption, repaired via `/tmp/repair_file_inventory.py`'s rename-swap at 2026-08-06T04:43:01Z, well before this dispatch); residual `PRAGMA integrity_check` failures are fully confined to the deliberately-retained forensic table `file_inventory_corrupted_orig_20260806T044301Z`, not any live table. Premise confirmed true.
+- [x] Found and disclosed a real concurrent-dispatch collision: the identical Owner directive was independently dispatched to 4 worker sessions (task-070019, 070026 [this task], 070143, 070148) within the same minute. No sibling PR existed yet at write time; documented the collision and this repo's own "first-to-merge wins, others cite it" convention in the record itself.
+- [x] Minted the real permanent citation UMR: `UMR-20260806-070805-e9ca` (`resource_governor.submit()`, tier=2, source_trigger=owner_dispatch_gateway), marked `completed` (registration/analysis record, not a dispatched build).
+- [x] Part 1 (PM self-audit): recorded as a permanent citation only, no new content -- pointed at the real existing artifacts (OCID-068 seven-rule guardrail addendum `UMR-20260804-170055-a069`, OCID Master Standard v6 Phase 1 `UMR-20260805-042152-e559`, `plan_generator.check_reuse_before_dispatch()` Phase 7 reuse-check gate, `pm_decisions_pending` lifecycle). No further action taken, per the directive.
+- [x] Part 2 (PROJECT MANAGER IN SERVER): investigated existing architecture first (resource_governor/dispatch-tick systemd loop, `check_reuse_before_dispatch()`, `capability_registry`/`wiring_registry`/`conversation_memory` tables, `dispatch-owner-task.sh`'s tmux relay) to avoid duplication, then deposited findings + a proposed phased design + open questions into the same UMR record for PM review. **No build was started.**
+- [x] Full findings/design doc written: `UMR_20260806_070805_e9ca_PM_SELF_AUDIT_CITATION_AND_PM_IN_SERVER_ANALYSIS_2026-08-06.md`
 
 ## Remaining
-- [ ] None -- analysis-only scope (parts 1,2,3,4,7,8) delivered. Awaiting
-      PM review of findings + explicit build authorization before any
-      implementation work (and before parts 5,6,9, which are PM-level
-      conceptual framing handled directly by the PM).
-
-## Post-delivery checkpoint (invocation 2/20)
-- [x] PR #125 was open but `mergeable: CONFLICTING` against `main`
-      (another task's PR, #126, had merged in between and also touched the
-      repo-root `PROGRESS.md` scratch file -- expected per-task scratch
-      collision, not a real content conflict). Merged `origin/main` into
-      this branch with `-X ours` on `PROGRESS.md` (kept this task's own
-      progress notes; the findings doc had no conflict) and pushed
-      (`7f140fc`). PR #125 is now `state: OPEN`, `mergeable: MERGEABLE`.
-- [ ] Nothing further for this worker to do -- PR ready to merge, still
-      pending PM review/authorization per the analysis-only constraint.
+- [ ] Commit + push this doc, open PR (checking one more time for a sibling PR race immediately before push)
+- [ ] If a sibling task's PR merges first with equivalent content, close this one as docs-only "already resolved by concurrent dispatch" rather than duplicate-merge

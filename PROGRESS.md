@@ -1,34 +1,61 @@
-# PROGRESS -- task-20260806-151747-root-cause-fix--dispatch-owner-task-sh-n
+# PROGRESS -- task-20260806-155323-deterministic-triage-of-the-trailing-24h
+
+Governing parent: UMR-20260806-071025-1d28 (standing 24h owner-dispatch closure mandate).
+
+## Independent verification of the SPEC before acting (per project's own
+recurring false-premise pattern -- see memory)
+
+- SPEC's exact 100/closed25/failed27/killed21/queued14/rejected_duplicate11/running2
+  breakdown for the trailing-24h owner_dispatch_gateway set was checked directly
+  against the live `umr_tasks` table (same query `generate_pm_report_v3.py`'s
+  `get_owner_dispatch_umr_status_counts()` uses). Using the exact
+  2026-08-05T08:56Z-2026-08-06T08:56Z window the SPEC cites, the real total (100)
+  and `failed`/`rejected_duplicate` (27/11) match, but `killed` (real 25, not 21),
+  `running` (real 8, not 2), and `closed`/`completed` (real 29, not 25) do not, and
+  `queued` (claimed 14) has **zero** real rows in that exact window. Not fatal --
+  the SPEC's own step 1 explicitly requires recomputing fresh from `umr_tasks`
+  every run rather than trusting any hardcoded count, which is what got built/run.
+- **The triage script this task was dispatched to build already exists, merged,
+  and deployed**: `/opt/veridian/scripts/triage_owner_umr_24h.py`, PR #154
+  (`feat/triage-owner-umr-24h-backlog-umr20260806091345-d90c`), merged
+  2026-08-06T09:56:32Z, ~6h before this task's own dispatch, plus two follow-up
+  hardening commits (`dc3521a` cooldown fix, `75b25c2` ARG_MAX-bound fix). 26/26
+  of its own tests pass. It was, however, **never actually run with `--apply`**
+  against the live DB (zero `umr_tasks` rows carry a
+  `metadata_json.triage_UMR-20260806-091345-d90c` key; zero `owner_proposal` rows
+  cite it) -- so the real remaining work was running it for real, not rebuilding it.
+- Real bug found while verifying the existing script before trusting its output
+  enough to `--apply`: `gather_evidence()`'s already_done detection
+  (`PR_NUMBER_RE`/`REPO_HINT_RE`) scans the *entire* `metadata_json` blob
+  including the `reuse_check_result` key -- confirmed live to be a 1-4MB
+  "similar prior work" search dump attached to virtually every dispatched row,
+  containing dozens of real but **unrelated** PR references from across the
+  whole codebase (verified concretely: `UMR-20260805-002929-5560`, a "continue
+  OCID-047/OCID-050" stall-recovery row with nothing to do with
+  compliance-tracker's Prompt Compiler Engine, was classified `already_done`
+  purely because `reuse_check_result` happened to mention "PR #562" from an
+  unrelated prior search, and PR #562 has since genuinely merged). Real,
+  reproducible false positive -- confirmed present in 18-23 of the 24
+  `already_done` rows from an unpatched dry run (all citing the identical
+  `PR #562` / commit `ee541a6a...`). Fixed by excluding `reuse_check_result`
+  from the evidence-scanning text (still available in the row's own `reason`
+  column and any other metadata key); added a regression test reproducing this
+  exact shape. Full diff + before/after dry-run counts in the PR.
 
 ## Completed
-- [x] Step one: read `/opt/veridian/scripts/dispatch-owner-task.sh` in full and independently verified the SPEC's "real evidence" against live state.
-- [x] Verified the SPEC's premise is **false** (see Findings below) -- stopped per "stop if any step fails" rather than proceeding to steps two-seven.
-- [x] Logged the false-premise finding into the register via the canonical `superboss-register.py insert-pm-decision-pending` (pm_decisions_pending row id 103, related-umr UMR-20260806-071025-1d28) so the sentinel/PM does not re-dispatch this identical ask blind to the fact it's already resolved.
-- [x] No code change made, no PR opened (nothing to fix -- see Findings).
+- [x] Verified SPEC numbers independently against live `umr_tasks` (see above).
+- [x] Found the already-merged `triage_owner_umr_24h.py` (PR #154) and confirmed
+      it had never been run with `--apply`/`--file-proposals`.
+- [x] Ran its own test suite (26/26 pass) and two independent dry runs against
+      live data -- confirmed per-row bucket assignments are byte-identical
+      across runs (deterministic/reproducible as designed).
+- [x] Found and fixed the `reuse_check_result` false-positive bug in
+      `already_done` detection (see above); added a regression test.
 
 ## Remaining
-- [ ] None for this task. If a maintainer disagrees with the false-premise finding, re-open with fresh evidence against `origin/main` (not the stale `/opt/veridian/scripts` deploy copy) and a specific claim about what `origin/main`'s current design (PR #166) still gets wrong.
-
-## Findings (why this task stops here)
-
-**SPEC claim:** `/opt/veridian/scripts/dispatch-owner-task.sh` is 99 lines and never writes `ts_dispatched`, `ts_completed`, or an updated `status` onto the `umr_tasks` row it mints.
-
-**Verified reality:**
-1. The live deployed file is **196 lines** (not 99), at repo commit `60cbae1` (deployed copy is well behind origin/main -- see deploy-sync gap noted below). It already writes back:
-   - `mark-umr-dispatched` on successful tmux relay (line 184 of the live copy) -- added by **UMR-20260806-085144-9c63 / PR #150**.
-   - `mark-umr-terminal --status failed` on relay failure (lines 192-193 of the live copy) -- same PR.
-   - A mandatory completion instruction embedded in the relayed prompt text itself naming the exact `mark-umr-terminal` command -- added by **UMR-20260806-112013-088f** because the doc-comment-only version of this instruction was found insufficient.
-2. `origin/main` of `veridian-scripts` (already merged, commit `3498d8a`, **237 lines**) has gone further still: **PR #166 / UMR-20260806-115423-500d** ("dispatch-owner-task relay non-authoritative") deliberately *removed* the `mark-umr-dispatched`/`mark-umr-terminal` writes from the relay branches, because:
-   - A successful `tmux send-keys` only proves keystrokes were written into a pane, never that a live process read/acted on them -- it is not proof of delivery.
-   - Writing `status='dispatched'` or `status='failed'` from this script independently pulled the row out of `resource_governor.py`'s `next_queued_task()` query (`WHERE status='queued'`), the **real mechanical dispatch-tick.py pickup path** that spawns a `veridian-worker@*.service` regardless of tmux/interactive-session state -- so a relay that landed in a dead/wrong/busy pane got the row **permanently excluded** from the one channel that could still have picked it up. A real dead zone, confirmed by reading `next_queued_task()`/`_perform_spawn()` directly.
-   - The corrected, already-shipped design instead calls a new `mark-umr-relay-attempted` subcommand that writes **only** `ts_relay_attempted`/`relay_outcome`/`relay_detail`, and never touches `status`/`ts_dispatched`/`ts_completed`. Rows stay at `status='queued'`, fully eligible for the real mechanical pickup, no matter what the tmux relay achieved.
-
-**Conclusion:** implementing this SPEC's steps two/three/four as written -- making the wrapper write `status='dispatched'`/`status='failed'` straight onto the row after the tmux relay -- would **revert an already-merged, deliberate regression fix** and reintroduce the exact dead-zone bug UMR-20260806-115423-500d fixed. This is not a case of "root cause not yet found and fixed" -- it is a case of the root cause having already been found, fixed, found-flawed, and re-fixed with a materially different (and correct) design, upstream of this SPEC's evidence.
-
-**Separately noted, not fixed here (out of scope / needs its own owner):** the live `/opt/veridian/scripts` deployed copy is far behind `origin/main` (`60cbae1` vs `3498d8a`, dozens of merged PRs behind, including #166 itself). This deploy-sync gap is plausibly *why* the sentinel's "real evidence" query saw stale `queued`/`null` rows this cycle even though the real fix has already merged -- worth a real UMR of its own, but is a deploy/ops concern, not a `dispatch-owner-task.sh` code defect, and was not touched here.
-
-**Scope boundary respected:** did not touch `reconcile_owner_dispatch_status.py`, `apply_owner_dispatch_status_corrections.py`, PR #147, or branch `reconcile/owner-dispatch-status-UMR-20260806-075726-babc`.
-
-**Hard limits respected:** no credential rotated, no repository deleted or archived, reconciliation script/branch owned by UMR-20260806-082646-3aba untouched.
-
-**Pattern match:** this is another instance of the recurring "urgent PM SPEC with confident claims that don't match live state" pattern (11+ prior instances per standing memory) -- verified independently before any write, exactly as that memory prescribes. No write/restore/kill was performed against production state; the only write made was the canonical, non-destructive `insert-pm-decision-pending` finding record.
+- [ ] Re-run dry run with the fix, confirm the false already_done rows fall
+      through to a real, evidence-backed bucket.
+- [ ] Run for real: `--apply --file-proposals` against the live trailing-24h set.
+- [ ] Print/report final real bucket counts, confirm they sum to the script's
+      own computed failed+killed total.
+- [ ] Rebase onto latest origin/main, commit, push, open PR with the fix.

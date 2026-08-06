@@ -1,72 +1,83 @@
-# PROGRESS -- task-20260806-025647-owner-authorization--execute-sqlite3-dot
+# PROGRESS -- task-20260806-031857-extend-superboss-register-py-with-pm-dec
 
-Real Owner authorization to run `sqlite3 .recover` on
-`/opt/veridian/ai-os/memory/superboss-register.sqlite`, relates to
-UMR-20260805-163026-14f1 / pm_decisions_pending row id=1.
+Re-dispatch of UMR-20260805-190440-ebe8 (prior worker crashed 3x on a real
+Anthropic weekly usage-limit 429, unrelated to this task's own scope).
+Owner's corrected, narrowed design: add `insert_pm_decision_pending()` and
+`resolve_pm_decision_pending()` directly to `superboss-register.py` (repo:
+veridian-scripts) -- no separate standalone script, per the Owner's standing
+SOP that this one script is the canonical read/write surface for
+`superboss-register.sqlite`.
 
-## Pre-flight independent verification (done before touching anything)
+## Independent verification (done before writing any code)
 
-- [x] Confirmed UMR-20260805-163026-14f1 is a real row in `umr_tasks`
-      (task_identity `owner-task-20260805-163025-2908944`, tier 1, status `killed`).
-- [x] Confirmed `pm_decisions_pending` id=1 is real, `status=open`,
-      `related_umr=UMR-20260805-163026-14f1`, recommends `sqlite3 .recover`.
-- [x] Independently confirmed corruption scope via a direct per-table
-      `SELECT count(*)` sweep across all tables (not just trusting the SPEC
-      text or `PRAGMA integrity_check`'s tree numbers) -- **only
-      `file_inventory` fails**; all other tables read fine.
-- [x] Confirmed row-count baselines on the live file:
-      `ocid_canonical_registry`=69 ✓, `gtm_certification_categories`=25 ✓,
-      `umr_tasks`=6832 (baseline the recovered file must meet/exceed).
-- [x] Confirmed live DB is actively receiving writes (WAL mode, 2 active
-      python3 PIDs with open FDs) -- confirms the "never run .recover
-      against the live path" caution is real, not hypothetical.
-- [x] Noted discrepancy: SPEC/PM-decision text says "eighty eight tables";
-      actual count is 90 (or 50 excluding FTS5 shadow tables). Immaterial --
-      verified the single-table-corruption claim directly rather than
-      relying on that count.
+- [x] Confirmed the live database
+      (`/opt/veridian/ai-os/memory/superboss-register.sqlite`) really does
+      have `pm_decisions_pending` (and `pm_report_snapshots`) already, with
+      exactly the columns the SPEC named, and the one real backfilled row
+      (id=1, UMR-20260805-163026-14f1).
+- [x] **Found a real SPEC/live-state mismatch** (matching this repo's known
+      false-premise pattern): the SPEC says the schema is "already merged,
+      `migrate_2026-08-05_pm_report_tables.py`" -- but that migration script
+      and its commit (4797b71) only exist on an **unmerged** remote branch
+      (`feat/pm-report-v3-schema-umr20260805181636`), never landed on `main`.
+      Current `main`/HEAD has zero references to `pm_decisions_pending`
+      anywhere in `superboss-register.py`. The schema was applied to the
+      live DB directly at some point, outside of any merged PR. This does
+      not block this task (the table already exists and is usable), but the
+      repo's own git history does not yet reflect that schema -- documented
+      in `_ensure_pm_decisions_pending_table()`'s own docstring so this
+      doesn't get silently re-assumed "merged" again later.
+- [x] Confirmed that unmerged branch's other, unrelated change to
+      `superboss-register.py` (`query_ocid_compliance_state`) does not
+      conflict with anything added here.
+- [x] Read `record_ocid_master_standard_audit_event()`, `insert_ocid_artifact_link()`,
+      `update_umr_task()`, their paired `_ensure_*_table()` helpers, and the
+      `cmd_*`/argparse subcommand wiring (`reconcile-umr-status`,
+      `certify-pr-merge`) to match this repo's real established convention
+      exactly, rather than inventing a new shape.
 
 ## Completed
 
-- [x] Step 1: Fresh timestamped backup of the live file, taken via
-      `sqlite3 <live> ".backup <dest>"` (not raw `cp`, since the live DB is
-      in WAL mode with active writers -- a filesystem-level copy could miss
-      committed-but-not-checkpointed pages). Confirmed non-zero size
-      (1,574,633,472 bytes, matches live).
-      -> `superboss-register.sqlite.bak-pre-file_inventory-recover-20260806T025938Z`
-- [x] Step 2: Separate working copy made the same way, live path never
-      opened for write. Confirmed non-zero size (1,574,633,472 bytes).
-      -> `superboss-register.sqlite.working-copy-20260806T025938Z`
-      Sanity check: working copy reproduces the same `file_inventory`
-      corruption as live (proves it's a faithful replica).
+- [x] Added `_ensure_pm_decisions_pending_table(conn)` (idempotent
+      `CREATE TABLE IF NOT EXISTS`, matches the live schema exactly) and
+      wired it into `_migrate_schema()`.
+- [x] Added `insert_pm_decision_pending(conn, title, detail, *, options=None,
+      recommended_option=None, related_umr=None)` -- caller owns
+      conn/commit, same convention as `insert_ocid_artifact_link()`/
+      `update_umr_task()`.
+- [x] Added `resolve_pm_decision_pending(conn, decision_id, *, closed_by,
+      closed_note=None, status="resolved")` -- idempotent
+      (`WHERE status='open'` guard), returns `True`/`False`, never
+      overwrites an already-closed row.
+- [x] Wired two CLI subcommands, matching the existing `cmd_*`/argparse
+      pattern: `insert-pm-decision-pending` (`--title --detail
+      --options-json --recommended-option --related-umr`) and
+      `resolve-pm-decision-pending` (`--id --closed-by --closed-note
+      --status`), both under `_write_lock()`.
+- [x] Real tests: `tests/test_pm_decisions_pending.py`, 8/8 passing --
+      direct library-function round trips, idempotent-resolve, unknown-id
+      handling, a schema-column pin test (guards against drift from what's
+      already live in production / what `generate_pm_report_v3.py` reads),
+      and two CLI-level (`cmd_*`) end-to-end tests.
+- [x] Ran the full existing test suite (`tests/test_*.py`, 17 files) after
+      the change -- all still pass.
+- [x] **Self-caught and fixed a real mistake**: an early ad-hoc manual test
+      (outside the committed test file) connected to the live production DB
+      instead of a scratch DB, because setting a module attribute before
+      `exec_module()` doesn't override the module-level `DB_PATH =
+      resolve_superboss_db_path()` line that runs during `exec_module`.
+      This inserted and then resolved one test row (id=3) in the live
+      `pm_decisions_pending` table. Caught immediately, deleted that row
+      and its `sqlite_sequence` entry, and re-verified the live table is
+      back to exactly its original single real row (id=1, untouched). The
+      committed test file uses the repo's own safe isolation convention
+      (pre-seed a real scratch file, `SUPERBOSS_REGISTER_DB` env override
+      set *before* `exec_module()`) throughout, same as
+      `tests/test_ocid_artifact_links.py`.
+- [x] `python3 -m py_compile superboss-register.py` clean.
 
-## STOPPED -- Step 3 failed, live file untouched
+## Remaining
 
-- [ ] Step 3: `sqlite3 <working-copy> ".recover"` **failed**:
-      `sql error: no such table: sqlite_dbpage (1)` -- the installed sqlite3
-      CLI (`~/.local/bin/sqlite3`, v3.45.1, alt1 build) was compiled without
-      the `sqlite_dbpage` virtual table, which `.recover` depends on
-      internally. Confirmed root cause: even `CREATE TABLE t(x); SELECT *
-      FROM sqlite_dbpage` fails the same way in a fresh in-memory DB, and
-      there is no alternate `sqlite3` binary on the host (`/usr/bin/sqlite3`
-      does not exist) to fall back to.
-- [ ] Steps 4-6: not started (blocked on step 3).
-
-Per the SPEC's explicit instruction ("If any real check at any real step
-fails, stop immediately, do not proceed further, leave the real live file
-completely untouched, and report the real specific failure back to me
-instead of improvising further") and the standing circuit-breaker rule,
-stopped here rather than attempting a workaround (e.g. building/installing
-a different sqlite3 with dbpage-vtab support). **Live file
-`/opt/veridian/ai-os/memory/superboss-register.sqlite` is confirmed
-untouched** -- only read from throughout steps 1-2.
-
-`pm_decisions_pending` id=1 left as `status=open` (not marked resolved --
-recovery did not complete).
-
-## Remaining (needs Owner decision before any retry)
-
-- [ ] Owner to decide: install/build a `sqlite3` with `sqlite_dbpage`
-      support (e.g. from source, or a different packaged binary), or use
-      Python's own `sqlite3` module's backup/recover-adjacent tooling
-      instead of the CLI's `.recover`, or pursue a different recovery path
-      entirely -- then resume at Step 3.
+- [ ] Commit + push, open real PR against `FChecklist/veridian-scripts`
+      `main`.
+- [ ] Independent review before merge.

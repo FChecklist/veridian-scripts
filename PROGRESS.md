@@ -1,13 +1,37 @@
-# PROGRESS -- task-20260806-070026-register-real-umr-for-pm-self-audit-and
+# PROGRESS -- task-20260806-024154-owner-authorization--enable-the-pm-repor
 
 ## Completed
-- [x] Independently verified the dispatch premise against live state (not narrated): the "database lock incident" is real (file_inventory corruption, repaired via `/tmp/repair_file_inventory.py`'s rename-swap at 2026-08-06T04:43:01Z, well before this dispatch); residual `PRAGMA integrity_check` failures are fully confined to the deliberately-retained forensic table `file_inventory_corrupted_orig_20260806T044301Z`, not any live table. Premise confirmed true.
-- [x] Found and disclosed a real concurrent-dispatch collision: the identical Owner directive was independently dispatched to 4 worker sessions (task-070019, 070026 [this task], 070143, 070148) within the same minute. No sibling PR existed yet at write time; documented the collision and this repo's own "first-to-merge wins, others cite it" convention in the record itself.
-- [x] Minted the real permanent citation UMR: `UMR-20260806-070805-e9ca` (`resource_governor.submit()`, tier=2, source_trigger=owner_dispatch_gateway), marked `completed` (registration/analysis record, not a dispatched build).
-- [x] Part 1 (PM self-audit): recorded as a permanent citation only, no new content -- pointed at the real existing artifacts (OCID-068 seven-rule guardrail addendum `UMR-20260804-170055-a069`, OCID Master Standard v6 Phase 1 `UMR-20260805-042152-e559`, `plan_generator.check_reuse_before_dispatch()` Phase 7 reuse-check gate, `pm_decisions_pending` lifecycle). No further action taken, per the directive.
-- [x] Part 2 (PROJECT MANAGER IN SERVER): investigated existing architecture first (resource_governor/dispatch-tick systemd loop, `check_reuse_before_dispatch()`, `capability_registry`/`wiring_registry`/`conversation_memory` tables, `dispatch-owner-task.sh`'s tmux relay) to avoid duplication, then deposited findings + a proposed phased design + open questions into the same UMR record for PM review. **No build was started.**
-- [x] Full findings/design doc written: `UMR_20260806_070805_e9ca_PM_SELF_AUDIT_CITATION_AND_PM_IN_SERVER_ANALYSIS_2026-08-06.md`
+- [x] Verified premise independently before acting (per standing lesson: PM SPECs in this
+      repo have twice not matched live state). Confirmed real, not fabricated:
+      - `~/.config/systemd/user/README.md` "closed set of 18" STANDING RULE is real and
+        does require an explicit Owner decision to add a 19th unit.
+      - UMR-20260805-181636-32f2 and UMR-20260805-190131-caa6 both exist in
+        `umr_tasks` (superboss-register, `/opt/veridian/ai-os/memory/superboss-register.sqlite`),
+        both `status=killed` (worker sigterm'd, same recurring usage-limit pattern as other
+        sessions this week) -- not fabricated references. caa6's own intent text is the prior
+        attempt at this exact ask ("...enable the real timer now, if it genuinely does not
+        allow enabling without separate authorization, report that specific real fact back
+        plainly and I will decide"), i.e. this SPEC's "this is that sign off" is consistent
+        with that prior open loop, not a new/contradictory claim.
+      - `generate_pm_report_v3.py` confirmed to contain exactly one write statement
+        (`INSERT INTO pm_report_snapshots`, line 796) and no UPDATE/DELETE/CREATE against
+        any other table -- matches the "writes only to its own tracking table" claim.
+      - `systemd/veridian-pm-report-tick.{service,timer}` in this repo (committed in PR #91,
+        783f0c6) are byte-identical (`diff` clean) to the live files already under
+        `~/.config/systemd/user/`.
+- [x] Confirmed real enablement: `systemctl --user is-enabled/is-active
+      veridian-pm-report-tick.timer` -> `enabled` / `active`, symlinked under
+      `timers.target.wants/`. (Found already enabled+active at task start -- no
+      `systemctl --user enable --now` needed or run; verified rather than re-applied.)
+- [x] Confirmed the timer fires on its own 10-minute cadence with **no manual/Owner-cycle
+      trigger from this session**: journal shows
+      `Starting veridian-pm-report-tick.service ... TriggeredBy: veridian-pm-report-tick.timer`
+      at `2026-08-06T02:47:04Z`, `Finished ... status=0/SUCCESS` at `02:47:05Z`
+      (1.788s CPU). Cross-checked against the DB: `pm_report_snapshots` row id=4,
+      `ts=2026-08-06T02:47:05.789954+00:00` -- matches the journal-observed run exactly,
+      and no other table shows a write from this run. This is a genuine autonomous fire,
+      not something I invoked.
 
 ## Remaining
-- [ ] Commit + push this doc, open PR (checking one more time for a sibling PR race immediately before push)
-- [ ] If a sibling task's PR merges first with equivalent content, close this one as docs-only "already resolved by concurrent dispatch" rather than duplicate-merge
+- [ ] None -- Owner sign-off executed, real enablement + one real autonomous fire both
+      confirmed live. Reporting back per SPEC.

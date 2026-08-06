@@ -213,7 +213,9 @@ def _build_fake_db(path):
         CREATE TABLE pm_decisions_pending (
             id INTEGER PRIMARY KEY AUTOINCREMENT, opened_ts TEXT NOT NULL, title TEXT NOT NULL,
             detail TEXT NOT NULL, options_json TEXT, recommended_option TEXT, related_umr TEXT,
-            status TEXT NOT NULL DEFAULT 'open', closed_ts TEXT, closed_by TEXT, closed_note TEXT
+            status TEXT NOT NULL DEFAULT 'open', closed_ts TEXT, closed_by TEXT, closed_note TEXT,
+            decision_type TEXT NOT NULL DEFAULT 'pm_decision', completed_ts TEXT,
+            artifact_path TEXT, commit_sha TEXT, evidence TEXT
         );
         """
     )
@@ -233,8 +235,13 @@ def _build_fake_db(path):
     )
     conn.execute("INSERT INTO umr_tasks (umr_id, status) VALUES ('UMR-x', 'completed')")
     conn.execute(
-        "INSERT INTO pm_decisions_pending (opened_ts, title, detail, related_umr, status) VALUES "
-        "('2026-08-05T00:00:00+00:00', 'synthetic open decision', 'synthetic detail', 'UMR-x', 'open')"
+        "INSERT INTO pm_decisions_pending (opened_ts, title, detail, related_umr, status, decision_type) VALUES "
+        "('2026-08-05T00:00:00+00:00', 'synthetic open decision', 'synthetic detail', 'UMR-x', 'open', 'pm_decision')"
+    )
+    conn.execute(
+        "INSERT INTO pm_decisions_pending (opened_ts, title, detail, related_umr, status, decision_type) VALUES "
+        "('2026-08-06T00:00:00+00:00', 'synthetic real issue', 'synthetic AI proposal', "
+        "'UMR-20260806-000000-abcd', 'open', 'owner_proposal')"
     )
     conn.commit()
     conn.close()
@@ -323,9 +330,13 @@ def test_end_to_end_smoke_run(tmp_path, monkeypatch):
         "5. IMPLEMENTATION SUMMARY",
         "6. OPEN ISSUES",
         "7. PM DECISION REQUIRED",
+        "8. AI PROPOSALS AWAITING PM DECISION",
         "PLACEHOLDER",
         "synthetic failing evidence",
         "synthetic open decision",
+        "synthetic real issue",
+        "synthetic AI proposal",
+        "UMR-20260806-000000-abcd",
     ]:
         assert expected in text, f"missing expected section/content: {expected!r}"
 
@@ -333,6 +344,15 @@ def test_end_to_end_smoke_run(tmp_path, monkeypatch):
     assert report["ocid_020_gtm_section"]["gtm_pass_count"] == 1
     assert report["gtm_readiness"]["is_placeholder"] is True
     assert report["header_status"]["stuck_tasks"]["stuck_task_count"] == 2
+
+    # Section 7 must show only the plain pm_decision row; Section 8 only the
+    # owner_proposal row -- never mixed (Owner standing mandate,
+    # task-20260806-034817).
+    assert len(report["pm_decisions_pending"]) == 1
+    assert report["pm_decisions_pending"][0]["title"] == "synthetic open decision"
+    assert len(report["owner_proposals_pending"]) == 1
+    assert report["owner_proposals_pending"][0]["issue"] == "synthetic real issue"
+    assert report["owner_proposals_pending"][0]["child_umr"] == "UMR-20260806-000000-abcd"
 
     pm.write_report_files(text)
     pm.write_snapshot_row(fake_sbr, report)
@@ -342,6 +362,40 @@ def test_end_to_end_smoke_run(tmp_path, monkeypatch):
     conn.close()
     assert row_count == 1
     assert os.path.exists(str(tmp_path / "pm-report-latest.txt"))
+
+
+def test_pm_decisions_pending_degrades_gracefully_without_decision_type_column(tmp_path):
+    """Owner standing mandate (task-20260806-034817): a DB that predates the
+    decision_type migration (superboss-register.py's
+    _migrate_pm_decisions_pending_owner_proposal_columns()) must never crash
+    this read-only script -- get_pm_decisions_pending() falls back to its
+    original unfiltered query, and get_owner_proposals_pending() correctly
+    reports zero real proposals rather than raising 'no such column'."""
+    db_path = str(tmp_path / "legacy.sqlite")
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE pm_decisions_pending (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, opened_ts TEXT NOT NULL, title TEXT NOT NULL,
+            detail TEXT NOT NULL, options_json TEXT, recommended_option TEXT, related_umr TEXT,
+            status TEXT NOT NULL DEFAULT 'open', closed_ts TEXT, closed_by TEXT, closed_note TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO pm_decisions_pending (opened_ts, title, detail, status) VALUES "
+        "('2026-08-05T00:00:00+00:00', 'legacy decision', 'legacy detail', 'open')"
+    )
+    conn.commit()
+    conn.close()
+
+    fake_sbr = _make_fake_sbr_module(db_path)
+    decisions = pm.get_pm_decisions_pending(fake_sbr)
+    proposals = pm.get_owner_proposals_pending(fake_sbr)
+
+    assert not (isinstance(decisions, dict) and "error" in decisions), decisions
+    assert len(decisions) == 1 and decisions[0]["title"] == "legacy decision", decisions
+    assert proposals == []
 
 
 if __name__ == "__main__":

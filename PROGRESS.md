@@ -1,105 +1,29 @@
-# PROGRESS -- task-20260806-212450-stop-the-phase-3-and-phase-4-duplicate-s
-
-Governing UMR: UMR-20260806-071025-1d28. This task's own UMR: UMR-20260806-092722-e526.
-
-## Finding: SPEC premise is stale -- both loops it describes were already fixed
-## ~11 hours before this task started. No zombie rows to close, no new code fix
-## needed. Verified independently per Step 1 before touching anything.
+# PROGRESS -- task-20260806-222550-resolve-the-two-stale-queued-rows-blocki
 
 ## Completed
-
-- [x] Step 1 -- independently re-verified the two "zombie" rows. **Both claims
-      are false as of now.** Real DB query (`/opt/veridian/ai-os/memory/superboss-register.sqlite`,
-      the canonical DB resolved by `superboss-register.py`'s `resolve_superboss_db_path()`
-      -- not the 0-byte decoy `umr_tasks.db` files):
-      - `UMR-20260730-041943-093a` (PHASE-3-BUILD-CALC): status = **killed** (not
-        "running"). `ts_dispatched = 2026-08-06T10:42:22Z`. `reason`: "resubmitted
-        (reused umr_id, prior status was 'killed')".
-      - `UMR-20260729-112414-3269` (PHASE-4-BUILD-WORKFLOW): status = **completed**
-        (not "queued"). `ts_dispatched = 2026-08-06T10:42:18Z`. `reason`: "reconciled
-        by heartbeat sweep: unit veridian-worker@task-20260806-104213-...
-        inactive, last_heartbeat stale (>900s), real exit status=completed".
-      - `ps aux` scan for either identity: no live process (confirms SPEC's own claim).
-      - `systemctl --user list-units --all` scan for either identity: no matching
-        unit (confirms SPEC's own claim).
-      - Both rows are already terminal -- **there is nothing to close.** They were
-        genuinely dead at the moment the SPEC's evidence was gathered (~09:26 UTC
-        today), exactly as claimed, but got dispatched and resolved by the
-        governor at 10:42:18-22 UTC today (11+ hours before this task started at
-        21:24:50 UTC), as a direct side effect of the root-cause fix below.
-
-- [x] Step 2 -- N/A. Nothing genuinely dead in running/queued state remains; no
-      `mark-umr-terminal` call was made (would be a false/duplicate write against
-      an already-terminal row).
-
-- [x] Step 3 -- root cause was **already found and fixed**, under this same
-      governing UMR chain, before this task cycle:
-      - `/opt/veridian/scripts/directive_engine.py` lines 274-297
-        (`_already_flagged_for_review`/`note_needs_review`) and lines 319-375
-        (`process_one`'s terminal-state branch) plus lines 47-48
-        (`DIRECTIVE_RETRY_STATE_FILE`) -- fixed under UMR-20260806-090229-f2a7
-        (child of the same UMR-20260806-071025-1d28 cited as this SPEC's
-        governing UMR). Replaces the old "retry every tick forever" behavior
-        with: retry exactly once, durably record that in
-        `/opt/veridian/ai-os/tasks/DIRECTIVE_RETRY_STATE.json` (owned exclusively
-        by this module, immune to other modules' row mutations), then surface a
-        real blocker via `note_needs_review()` -> `/opt/veridian/ai-os/PENDING_OWNER_REVIEW.md`
-        instead of resubmitting again. Verified live: the state file already
-        contains `{"PHASE-3-BUILD-CALC": {"umr_id": "UMR-20260806-095410-713b",
-        "ts": "2026-08-06T10:17:50Z"}, "PHASE-4-BUILD-WORKFLOW": {"umr_id":
-        "UMR-20260806-095411-dab2", "ts": "2026-08-06T10:17:51Z"}}` -- the exact
-        two identities named in this SPEC, marked exactly when the flood for
-        them stopped.
-      - `/opt/veridian/scripts/dispatch-tick.py` lines 196-296
-        (`_existing_active_umr()` read-only pre-check added to
-        `resume_interrupted_workers_tick()`) -- fixed under UMR-20260806-103711-bf00
-        (same governing chain). This is a **second, separate** resubmission
-        source (`source_trigger='dispatch-tick:resume_interrupted_workers'`)
-        that was blind-retrying ~22 different `task-2026080[2-6]-*` identities
-        since as far back as 2026-08-02, now gated the same way (read-only
-        liveness check before ever calling `submit()`, so a still-legitimately-
-        queued/capped task no longer writes a fresh `rejected_duplicate` row
-        every tick).
-      - I made **no code changes** -- both fixes are already deployed and live.
-        Confirmed no new rejected_duplicate rows from either source since
-        2026-08-06T10:42:33Z (11+ hours as of this writing).
-
-- [x] Step 4 -- checked for other identities stuck in the same pattern: **yes,
-      many, and they were already covered by the dispatch-tick.py fix above** (not
-      by directive_engine.py, which only manages DIRECTIVE.yaml's own queue).
-      Real counts, `source_trigger='dispatch-tick:resume_interrupted_workers'`,
-      all-time as of this query:
-      | task_identity | rejected_duplicate rows | last one |
-      |---|---|---|
-      | task-20260803-214944-pm-final-decision--ocid-020-independentl | 313 | 2026-08-06T09:02:40Z |
-      | task-20260804-063409-pm-decision--get-a-genuinely-independent | 301 | 2026-08-06T10:42:28Z |
-      | task-20260804-063253-pm-decision--authorize-the-small-ocid-06 | 301 | 2026-08-06T10:42:28Z |
-      | task-20260804-063103-register-ocid-063--mechanical-handoff-pr | 301 | 2026-08-06T10:42:28Z |
-      | task-20260804-063059-pm-decision--continue-monitoring--start | 301 | 2026-08-06T10:42:27Z |
-      | task-20260804-062840-pm-decision--confirm-the-corrected-ocid | 301 | 2026-08-06T10:42:27Z |
-      | ...16 more identities, 7-300 rows each | | |
-      | **total: 30 distinct identities, 5,855 rows** | | all stopped by 2026-08-06T10:42:33Z |
-      Query: `SELECT task_identity, count(*) FROM umr_tasks WHERE source_trigger='dispatch-tick:resume_interrupted_workers' AND status='rejected_duplicate' GROUP BY task_identity ORDER BY count(*) DESC;`
-      Every one of these last-fired at 2026-08-06T10:42:2x-33Z -- the same moment
-      as the directive_engine.py fix and the same moment the two SPEC-named rows
-      got dispatched -- confirming a single real remediation event already closed
-      all of these, not just the two named in this SPEC.
-
-- [x] Step 5 -- proved the fix is holding. Before (peak, today, hour 09 UTC):
-      195 rejected_duplicate rows/hour combined across both loops (matches
-      SPEC's claimed ~126-195/hr order of magnitude). After 2026-08-06T10:42:33Z:
-      **0** rejected_duplicate rows from either source, sustained for 11+ hours
-      up to task start, **plus** a real live 10-minute window checked directly by
-      this task: 0 rejected_duplicate rows in [2026-08-06T21:25:03Z,
-      2026-08-06T21:35:03Z) (checked with correct ISO-8601 string comparison;
-      note an initial query attempt using SQLite `datetime()` produced a false
-      1196 due to a 'T' vs space separator lexical-compare bug in that throwaway
-      query -- caught and discarded, not used as evidence).
-
-- [x] Step 6 (partial) -- PR opened: https://github.com/FChecklist/veridian-scripts/pull/227
+- [x] Verified real DB path (`/opt/veridian/ai-os/memory/superboss-register.sqlite`, not the
+      stale decoy at `scripts/superboss-register.sqlite`) and queried both cited rows directly.
+- [x] Confirmed SPEC premise is **stale, not current**: `UMR-20260729-112414-3269` is
+      `status='completed'` (dispatched 10:42:18Z, completed 11:17:18Z) and
+      `UMR-20260804-064310-f247` is `status='killed'` (dispatched 10:42:22Z, reconciled
+      14:30:55Z) -- both reconciled hours before this task was dispatched, via the canonical
+      heartbeat-sweep path, each with reason+evidence recorded on the row.
+- [x] Confirmed `pm_decisions_pending` rows 22/23 were real at 09:13:44Z but already
+      `status='superseded'` by 16:51:21Z (folded into aggregate row 185, migration landed in
+      already-merged PR #196 / commit e7fea42).
+- [x] Confirmed the SPEC's Step 4 ask (auto-detect stale-queued rows) already exists and is
+      live: `flag_stale_queued_tasks()` in `resource_governor.py`, threshold
+      `MAX_QUEUED_AGE_SECONDS`=4.0h, wired into every `run_tick()`, using the canonical
+      `insert_pm_decision_pending()` -- last ran 21:16:32Z today, 8 currently-stale rows
+      flagged.
+- [x] Confirmed no current resource starvation: 5 `veridian-worker@*` units active/running
+      right now, load average 3.78 (not the claimed 11.21), 23 queued rows with the oldest
+      only 12.0h old (not 189.8h).
+- [x] Wrote `SPEC_VERIFICATION_2026-08-06T222550Z.md` with full claim-vs-real-state table.
+- [x] No `umr_tasks` or `pm_decisions_pending` write made -- both requested terminal-status
+      outcomes were already true; re-touching already-terminal rows would be redundant, and
+      building a second stale-queue detector would duplicate the one already in production.
 
 ## Remaining
-- [ ] Step 6 (final) -- record completion evidence via `superboss-register.py`
-      (not raw SQL) and `agent_work_briefing.py record-completion`, once the
-      live 10-minute after-window (started 2026-08-06T21:25:03Z) finishes
-      confirming 0 rejected_duplicate rows.
+- [ ] Rebase onto latest origin/main, commit, push, open PR recording this verification
+      (matching this repo's established convention for stale-premise findings, e.g. PR #227).

@@ -1,6 +1,33 @@
-# PROGRESS -- task-20260806-074708-resume-backlog
+# PROGRESS -- task-20260806-075210-resume-real-queued-backlog-after-lock-in
 
-## SPEC items and evidence
+## Note on this task (task-20260806-075210)
+
+This task's dispatched SPEC is a near-verbatim repeat of task-20260806-074708's SPEC (same 5
+items, same fabricated PR numbers 954/959/962, same "lock incident resolved" framing). Before
+writing anything, I independently re-verified live state rather than trusting either SPEC:
+
+- `ps aux | grep -iE "file_inventory|generate_pm_report"` -> no matching process running or
+  stuck. `find / -iname file_inventory.py` -> no such file anywhere on this host (it was never
+  a real script; the real hung units were the systemd services described below).
+- `gh pr view 954/959/962` -> all three "Could not resolve to a PullRequest" (still true).
+  `gh pr list --state all` -> highest real PR is #140, which is task-20260806-074708's own
+  merge of this exact resolution.
+- `git merge-base --is-ancestor 2345084 origin/main` -> YES; that commit (PR #140) was **not**
+  yet an ancestor of this branch's start point (`79cdf86`), so this branch fast-forward-merged
+  `origin/main` (`79cdf86..2345084`) to pick it up rather than silently diverging or redoing
+  the work.
+- Re-read `generate_pm_report_v3.py` lines ~332-397 directly (not trusted from the prior task's
+  own commit message): `COLLISION_GH_MAX_WORKERS` (concurrent `ThreadPoolExecutor` fetch) and
+  `COLLISION_SECTION_TIME_BUDGET_SECONDS` (120s wall-clock deadline) are both present on
+  `main` now, confirming PR #133's fix is real and live, not just claimed.
+
+**Conclusion: no further action required.** All five of this task's SPEC items are already
+fully resolved on `main` by PR #140 (which itself merged PR #133). Duplicating that work would
+produce a zero-value diff against already-settled history. This is the same disposition the
+prior task reached; the detailed per-item evidence below is that task's own record, verified
+still accurate as of this task's independent check.
+
+## SPEC items and evidence (from task-20260806-074708, verified still accurate)
 
 ### 1. "Root cause why file_inventory.py and generate_pm_report_v3.py ran over one hour. Fix collision detection bug at its root, PR 120 did not fix the underlying loop."
 
@@ -86,20 +113,29 @@ and merged (`gh pr merge 133 --merge`, merged 2026-08-06T07:51:58Z).
 and merged instead).**
 
 ## Completed
-- [x] Independently verified every concrete SPEC claim against live GitHub/repo state before
-      acting (PR numbers, PR #120's actual scope, precheck script existence, systemd
-      closed-set rule) -- per this repo's standing false-premise lesson.
-- [x] Item 1 (root cause of 1h+ hangs + fix): real root cause identified (sequential
+- [x] (task-20260806-074708, prior task) Independently verified every concrete SPEC claim
+      against live GitHub/repo state before acting (PR numbers, PR #120's actual scope,
+      precheck script existence, systemd closed-set rule) -- per this repo's standing
+      false-premise lesson.
+- [x] (074708) Item 1 (root cause of 1h+ hangs + fix): real root cause identified (sequential
       unbounded `gh pr diff` calls, not a collision-detection loop bug); fix already existed
       in open PR #133 (concurrency + wall-clock time budget); verified and merged.
-- [x] Item 2 (precheck script): confirmed already delivered (PR #114/#134); explained why it
-      is deliberately not on a systemd timer (closed-set-of-18 rule + on-demand tool design).
-- [x] Item 3 (UMR closure tracking): confirmed real Section 14 already in PR #133; merged.
-- [x] Item 4 (PRs 954/959/962): confirmed none exist; merged the one real, ready PR (#133)
-      that actually covers items 1+3 instead.
-- [x] PR #133 merged into `main` (commit 99073fd); local `main` fast-forwarded to include it
-      plus the independently-converging PR #138 (commit 79cdf86).
+- [x] (074708) Item 2 (precheck script): confirmed already delivered (PR #114/#134); explained
+      why it is deliberately not on a systemd timer (closed-set-of-18 rule + on-demand tool
+      design).
+- [x] (074708) Item 3 (UMR closure tracking): confirmed real Section 14 already in PR #133;
+      merged.
+- [x] (074708) Item 4 (PRs 954/959/962): confirmed none exist; merged the one real, ready PR
+      (#133) that actually covers items 1+3 instead.
+- [x] (074708) PR #133 merged into `main` (commit 99073fd); fast-forwarded to include it plus
+      the independently-converging PR #138 (commit 79cdf86). Both landed on `main` as PR #140.
+- [x] **(this task, 075210)** Independently re-verified all five SPEC items (including the
+      "lock incident"/"stuck processes" framing and PR #954/#959/#962 numbers) against current
+      live state -- confirmed nothing changed since PR #140 landed and nothing new is missing.
+      Fast-forward-merged `origin/main` (`79cdf86..2345084`) into this branch so it reflects
+      the already-resolved state instead of diverging from it.
 
 ## Remaining
-- [ ] None. All four SPEC items independently verified and addressed above; no destructive
-      or fabricated action taken on the false-premise items (2 and 4).
+- [ ] None. All five SPEC items independently verified as already resolved on `main` (PR #140);
+      no destructive, redundant, or fabricated action taken on the false-premise items (the
+      "stuck processes"/lock framing and PRs 954/959/962).

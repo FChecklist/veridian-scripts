@@ -90,13 +90,45 @@ to UMR-20260806-042004-e22f / `pm_decisions_pending` row id=5.
       baseline, not a moving live target; rehearsed the live repair
       end-to-end on a disposable copy first (see above).
 
+- [x] Step 5: applied the rehearsed rename-swap repair to the real live
+      file (`/tmp/repair_file_inventory.py`, run once, under the script's
+      own `_write_lock()` flock convention -- same `fcntl.flock` on
+      `superboss-register.sqlite.writelock` `_write_lock()` itself uses,
+      30s busy_timeout). Immediately preceded by one more fresh timestamped
+      live backup (taken *before* any write, current-state safety net):
+      -> `superboss-register.sqlite.bak-pre-file_inventory-live-repair-20260806T044301Z`
+      (1,661,845,504 bytes)
+      Repair itself: `CREATE TABLE file_inventory_new` (identical schema)
+      + `INSERT ... SELECT` all 27,249 rows from the recovered artifact
+      (attached read-only) + `ALTER TABLE file_inventory RENAME TO
+      file_inventory_corrupted_orig_20260806T044301Z` (quarantines the old
+      corrupted tree by catalog rename only -- never touches its data
+      pages, so it can't hit the same `database disk image is malformed`
+      error `DROP TABLE` hit in rehearsal) + `ALTER TABLE file_inventory_new
+      RENAME TO file_inventory` + commit. In-script guard: row count from
+      the recovered source vs. rows actually inserted checked before the
+      renames/commit; would have rolled back untouched on any mismatch
+      (none occurred). Total transaction time: 0.686s.
+- [x] Step 6: post-repair verification, all real, all on the live file:
+      - `file_inventory` now reads real data, **27,249 rows** (was
+        `database disk image is malformed`, 0 readable rows, before).
+      - `file_inventory` is now a fresh B-tree (rootpage 405938, fresh
+        autoindex rootpage 405939) -- confirmed via `PRAGMA quick_check`
+        that this new tree reports **zero** errors.
+      - The old corrupted tree (rootpages 38/39) still exists, but now
+        harmlessly quarantined under
+        `file_inventory_corrupted_orig_20260806T044301Z` / its autoindex --
+        `quick_check` still (expectedly, harmlessly) flags *that* renamed
+        table's tree, not live `file_inventory`.
+      - Every other table verified untouched and reflecting continued live
+        growth, not a rollback: `umr_tasks`=7,078 (was 7,056 pre-repair,
+        6,832 at the original snapshot -- growth preserved throughout),
+        `ocid_canonical_registry`=69, `gtm_certification_categories`=25
+        (both match known baselines). `sqlite_master` table count = 91
+        (90 original + 1 quarantined corrupted-orig table, expected).
+      - Live file size after repair: 1,673,711,616 bytes.
+
 ## Remaining
 
-- [ ] Step 5: apply the rehearsed rename-swap repair to the real live file,
-      under the script's own `_write_lock()` flock convention, immediately
-      preceded by one more fresh timestamped live backup.
-- [ ] Step 6: post-repair verification (row counts/byte sizes on live,
-      `quick_check` clean for `file_inventory`'s tree, spot-check other
-      tables unchanged) + final checkpoint.
 - [ ] `record-owner-proposal-completion` on `pm_decisions_pending` id=5
       citing real artifact path(s), commit, and evidence.

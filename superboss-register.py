@@ -2949,7 +2949,8 @@ def _ensure_umr_table(conn):
         # real, live, already-migrated production DB -- confirmed via a
         # direct PRAGMA table_info() readback showing the new columns
         # missing even though _ensure_umr_table() had just run).
-        if {"last_heartbeat", "tenant_id", "utm_source", "external_agent_eligible"} <= cols:
+        if {"last_heartbeat", "tenant_id", "utm_source", "external_agent_eligible",
+                "ts_relay_attempted"} <= cols:
             return
     status_sql = ",".join("'" + s + "'" for s in UMR_STATUSES)
     conn.execute(f"""CREATE TABLE IF NOT EXISTS umr_tasks (
@@ -2997,6 +2998,7 @@ def _ensure_umr_table(conn):
     _migrate_umr_tenant_id(conn)
     _migrate_umr_utm(conn)
     _migrate_umr_tasks_external_agent_columns(conn)
+    _migrate_umr_relay_courtesy(conn)
 
 
 def _ensure_ocid_artifact_links_table(conn):
@@ -4305,6 +4307,61 @@ def _migrate_umr_tenant_id(conn):
         "CREATE INDEX IF NOT EXISTS idx_umr_tasks_tenant_id ON umr_tasks(tenant_id) "
         "WHERE tenant_id IS NOT NULL"
     )
+    conn.commit()
+
+
+def _migrate_umr_relay_courtesy(conn):
+    """UMR-20260806-115423-500d (real narrowing of the owner_dispatch_gateway
+    relay-vs-mechanical-pickup tension): additive ALTER TABLE ADD COLUMN for
+    three new nullable umr_tasks columns -- ts_relay_attempted, relay_outcome,
+    relay_detail -- same PRAGMA-table_info-then-ALTER pattern as
+    _migrate_umr_last_heartbeat/_migrate_umr_tenant_id above.
+
+    Real root cause this closes: dispatch-owner-task.sh's `tmux send-keys`
+    call proves only that keystrokes were written into a pane -- never that a
+    live process actually read and acted on them. The pre-existing design
+    (PR #150 / UMR-20260806-085144-9c63) nonetheless treated a successful
+    send-keys as authoritative delivery, writing status='dispatched' (relay
+    succeeded) or a real terminal status='failed' (tmux session absent)
+    straight onto the umr_tasks row. Both writes independently remove the row
+    from `next_queued_task()`'s own real query -- `SELECT * FROM umr_tasks
+    WHERE status='queued'` (resource_governor.py) -- which is the ONLY
+    function that mechanically dispatches a queued veridian_task_create row
+    to a real, independent, non-interactive `veridian-worker@*.service` via
+    `_perform_spawn()`. So a row whose tmux keystrokes landed in a dead pane
+    (or whose target session was briefly absent) was silently and
+    permanently excluded from the one channel that could still have picked
+    it up mechanically -- a real dead zone, confirmed by reading
+    next_queued_task()/_perform_spawn() directly, not assumed.
+
+    These three columns exist so dispatch-owner-task.sh can keep recording a
+    real, honest "we attempted a relay" signal -- genuinely useful for
+    diagnosing a stuck row -- WITHOUT that signal ever again being read as
+    proof of delivery or used to move the row out of the real 'queued' pool.
+    mark_umr_relay_attempted() (below) is the only writer; it never touches
+    `status`, `ts_dispatched`, or `ts_completed`.
+
+      ts_relay_attempted  TEXT, nullable, ISO-8601 -- when a relay attempt
+        (success OR tmux-session-absent) was recorded. NULL means no relay
+        was ever attempted for this row (e.g. --no-relay, or a pure
+        systemctl_action row that never goes through dispatch-owner-task.sh
+        at all).
+      relay_outcome       TEXT, nullable -- 'sent' (send-keys returned 0
+        against a session tmux confirmed existed) or 'session_not_found'
+        (tmux had no session by that name at relay time). Deliberately NOT
+        'delivered'/'failed': neither value is proof of what happened
+        downstream of the keystrokes.
+      relay_detail        TEXT, nullable -- free-text diagnostic (e.g. which
+        tmux session name was targeted), same convention as `reason`.
+
+    Called from INSIDE _ensure_umr_table() itself, not only from
+    _migrate_schema(), for the same reason _migrate_umr_last_heartbeat() is:
+    resource_governor.py calls _ensure_umr_table() directly at several
+    read/write call sites, bypassing _migrate_schema()."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(umr_tasks)").fetchall()}
+    for col in ("ts_relay_attempted", "relay_outcome", "relay_detail"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE umr_tasks ADD COLUMN {col} TEXT")
     conn.commit()
 
 
@@ -6014,9 +6071,19 @@ def cmd_mark_umr_dispatched(args):
     umr_tasks row via the existing real update_umr_task(), under
     _write_lock() -- same convention as cmd_reconcile_umr_status above.
 
-    Called by dispatch-owner-task.sh immediately after its real tmux relay
-    into the live interactive session succeeds, so a row that really was
-    delivered stops sitting at status='queued'/ts_dispatched=NULL forever.
+    UMR-20260806-115423-500d (real narrowing, do not re-widen without
+    re-reading this): dispatch-owner-task.sh no longer calls this command
+    after a "successful" tmux relay -- a successful `tmux send-keys` proves
+    only that keystrokes were written into a pane, never that a live process
+    read and acted on them, so it is no longer treated as authoritative
+    delivery. The relay's own courtesy signal now goes through
+    mark-umr-relay-attempted (above), which never touches `status`. This
+    command remains available, unchanged, for a genuinely real future
+    mechanical-dispatch caller that actually confirms delivery (e.g. a
+    non-interactive worker channel that can positively ack receipt) --
+    it is not deleted, only no longer wired to the tmux relay's own
+    self-reported success.
+
     Never touches rows this script didn't just mint -- retroactive
     correction of pre-existing rows is PR #147's job, not this one's.
 
@@ -6036,6 +6103,59 @@ def cmd_mark_umr_dispatched(args):
     conn.close()
     print(json.dumps({"umr_id": args.umr_id, "status": "dispatched",
                        "ts_dispatched": ts_dispatched}, indent=2, default=str))
+
+
+def cmd_mark_umr_relay_attempted(args):
+    """UMR-20260806-115423-500d. CLI entry point that records a real,
+    honest "a tmux relay was attempted" courtesy signal onto an existing
+    umr_tasks row -- via the existing real update_umr_task(), under
+    _write_lock(), same convention as cmd_mark_umr_dispatched/
+    cmd_mark_umr_terminal above.
+
+    Deliberately writes ONLY ts_relay_attempted/relay_outcome/relay_detail
+    (see _migrate_umr_relay_courtesy()'s own docstring for why those three
+    columns exist and not status/ts_dispatched/ts_completed). This is the
+    real, structural fix for the finding that a successful `tmux send-keys`
+    is proof only that keystrokes were written into a pane, never that a
+    live process read and acted on them: the old mark-umr-dispatched call
+    (still available as its own CLI command, for real future mechanical-
+    dispatch use -- see its own docstring) used to be called from exactly
+    this spot in dispatch-owner-task.sh immediately after every "successful"
+    relay, writing status='dispatched' and thereby permanently removing the
+    row from next_queued_task()'s `WHERE status='queued'` query -- the ONLY
+    real mechanical pickup path independent of the interactive tmux session
+    (resource_governor.py's dispatch_one()/_perform_spawn(), confirmed live:
+    veridian_task_create rows DO get spawned to a real `veridian-worker@*`
+    systemd unit by that path, with zero tmux involvement). A row that
+    called this command instead stays exactly status='queued' -- fully
+    eligible for that real mechanical pickup on the very next dispatch-tick.py
+    tick -- no matter what this command records.
+
+    Called by dispatch-owner-task.sh from BOTH its relay-succeeds branch
+    (--outcome sent) and its relay-session-absent branch (--outcome
+    session_not_found) -- neither branch is authoritative for status
+    anymore; both are equally "we tried the courtesy channel, here is what
+    we honestly observed," never "this task's real destiny is decided."
+
+    Usage:
+      python3 superboss-register.py mark-umr-relay-attempted --umr-id UMR-... \\
+          --outcome {sent,session_not_found} [--detail "..."]
+    """
+    init_db_silent()
+    conn = _connect()
+    _ensure_umr_table(conn)
+    ts_relay_attempted = _now_iso()
+    fields = {"ts_relay_attempted": ts_relay_attempted, "relay_outcome": args.outcome}
+    if args.detail:
+        fields["relay_detail"] = args.detail
+    with _write_lock():
+        update_umr_task(conn, args.umr_id, **fields)
+        conn.commit()
+    conn.close()
+    print(json.dumps({"umr_id": args.umr_id, "relay_outcome": args.outcome,
+                       "ts_relay_attempted": ts_relay_attempted,
+                       "note": "courtesy signal only -- status/queued-pool membership untouched"},
+                      indent=2, default=str))
 
 
 def cmd_mark_umr_terminal(args):
@@ -7268,6 +7388,17 @@ if __name__ == "__main__":
     p_markdisp.add_argument("--umr-id", dest="umr_id", required=True)
     p_markdisp.add_argument("--unit-name", dest="unit_name", default=None)
 
+    p_markrelay = sub.add_parser("mark-umr-relay-attempted",
+                                  help="UMR-20260806-115423-500d: record a real, honest "
+                                       "'a tmux relay was attempted' courtesy signal onto a "
+                                       "umr_tasks row -- never touches status/ts_dispatched/"
+                                       "ts_completed, so the row stays fully eligible for "
+                                       "dispatch-tick.py's own real mechanical pickup regardless "
+                                       "of what this records")
+    p_markrelay.add_argument("--umr-id", dest="umr_id", required=True)
+    p_markrelay.add_argument("--outcome", required=True, choices=["sent", "session_not_found"])
+    p_markrelay.add_argument("--detail", default=None)
+
     p_markterm = sub.add_parser("mark-umr-terminal",
                                  help="UMR-20260806-085144-9c63: write a real ts_completed + "
                                       "terminal status onto a umr_tasks row -- used both by "
@@ -7431,6 +7562,8 @@ if __name__ == "__main__":
         cmd_record_owner_proposal_completion(args)
     elif args.cmd == "mark-umr-dispatched":
         cmd_mark_umr_dispatched(args)
+    elif args.cmd == "mark-umr-relay-attempted":
+        cmd_mark_umr_relay_attempted(args)
     elif args.cmd == "mark-umr-terminal":
         cmd_mark_umr_terminal(args)
     elif args.cmd == "mark-external-agent-eligible":

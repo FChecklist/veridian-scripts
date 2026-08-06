@@ -1,50 +1,63 @@
-# PROGRESS -- task-20260806-201936-urgent-structural-fix--next-queued-task
+# PROGRESS -- task-20260806-205156-phase-0--real-stale-backlog-reconciliati
 
 ## Completed
-- [x] Independently verified the SPEC's core factual claims against the real
-      superboss-register DB (`/opt/veridian/ai-os/memory/superboss-register.sqlite`
-      -- the paths under `/opt/veridian/scripts/`, `/opt/veridian/ai-os/`, and
-      `/opt/veridian/repos/veridian-scripts/` are all 0-byte stub files; the
-      resource_governor `--query-umr --search` CLI returned 0 matches even for
-      a known-real UMR pulled from git log, confirming it isn't reading the
-      live DB either) before touching scheduler code.
-- [x] Found the SPEC's premise is false. Direct query results:
-      - UMR-20260806-135632-329e: status=running, ts_dispatched=2026-08-06T19:20:55Z
-      - UMR-20260806-140841-46d1: status=completed, ts_dispatched=2026-08-06T19:20:59Z
-      - UMR-20260806-141055-1fec: status=running, ts_dispatched=2026-08-06T19:40:12Z
-      - UMR-20260806-162019-4b4f: status=running, ts_dispatched=2026-08-06T20:19:35Z
-      All four already have non-NULL ts_dispatched and are running/completed --
-      none are queued, none are starved. The SPEC claimed all four were
-      "queued", "ts_dispatched NULL", "ages 160-175+ minutes". That is not
-      what the live table shows.
-      Also: the SPEC's own "governing chain" UMR-20260806-124055-bc80 is
-      itself status=completed (dispatched 16:59), not an active stop-work
-      order over anything currently in flight.
-      Also: this task's own UMR-20260806-165509-4d7c was dispatched at
-      20:19:40Z -- in the same burst (20:19:29-20:19:44) as three of the
-      "stuck" IDs and UMR-20260806-171945-5767. That burst is exactly the
-      dispatcher doing its normal job, not evidence of a starvation bug.
-      The actual current `queued` rows (4 of them) are a completely
-      different set of IDs (UMR-20260806-173900-b504, -175442-1fed,
-      -180933-d3bb, -182453-702a), submitted 17:39-18:24 -- not the ones
-      named in the SPEC.
-      The `next_queued_task`/`run_tick` line numbers in the SPEC are also
-      off (next_queued_task is real at line 822 and does sort by
-      (effective_priority, ts_submitted) as claimed, but it's called from
-      `dispatch_one` at line 1263, not from `run_tick`, which is a separate
-      function at line 1504).
-- [x] Per standing memory (`veridian-task-prompt-false-premise-pattern`,
-      12th+ occurrence of this exact pattern), did NOT implement the
-      requested `owner_priority_override` table/file, scheduler preemption
-      logic, or capability_registry graduation -- there is no real
-      starvation bug evidenced by the live data to fix, and hardcoding a
-      permanent "sacred UMR" bypass into the scheduler on a fabricated
-      urgency claim would itself be the risky, hard-to-reverse action.
-- [x] Recorded completion via agent_work_briefing.py record-completion
-      with the real finding (premise false, no code change made).
+- [x] Ran `resource_governor.py --reconcile-stale` (real dry run) -> `{"actions": []}` (0 actions)
+- [x] Ran `resource_governor.py --reconcile-stale --execute` (real writes) -> `{"actions": []}` (0 actions, 0 writes)
+- [x] Regenerated STUCK_TASKS_HEARTBEAT.json for real via the actual production path
+      (`systemctl --user start veridian-cron-dispatch-tick.service`, exit 0/SUCCESS,
+      not a raw script invocation of the mutating full tick) -> new `generated_at`
+      2026-08-06T20:56:35Z, stuck count 775 (blocked_task_count 777)
+- [x] Investigated why `--reconcile-stale` does not reach these rows and confirmed the
+      real, specific, structural reason (see below) -- not a null result
+
+## Root-cause finding (real, code- and evidence-verified)
+
+SPEC's premise does not hold: `resource_governor.py --reconcile-stale --execute` cannot
+reduce STUCK_TASKS_HEARTBEAT.json's stuck-task count, by construction, and the real
+evidence confirms it made zero difference.
+
+1. **STUCK_TASKS_HEARTBEAT.json's `stuck_tasks` list is task.yaml-level, not
+   umr_tasks-level.** It's built by `dispatch-tick.py:find_stuck_tasks()`, which only
+   looks at task.yaml docs with `status == "blocked"` whose `last_checkpoint_at` is
+   stale (>30min). Per that function's own docstring: "Blocked is a
+   terminal-for-automation status ... nothing else on the box will touch it again
+   without a real PM decision."
+2. **`resource_governor.py:reconcile_stale_heartbeats()` (the `--reconcile-stale`
+   function) never reads task.yaml files at all.** Its entire scope is one SQL query:
+   `SELECT * FROM umr_tasks WHERE status IN ('running','dispatched') AND
+   last_heartbeat IS NOT NULL AND last_heartbeat < cutoff` (superboss-register.sqlite,
+   a completely different table/status vocabulary from task.yaml's `blocked`). There is
+   no code path connecting the two. This is confirmed live: the dry run and the execute
+   run both returned 0 rows examined -- not because writes were skipped, but because
+   zero rows in `umr_tasks` currently match that WHERE clause at all.
+3. **Live counts (2026-08-06T20:56:35Z umr_tasks GROUP BY status):** running=30,
+   queued=1, failed=452, rejected=6376, retrying=2, completed=453, killed=607,
+   total=7949. There is no `blocked` or `dispatched`-with-stale-heartbeat bucket
+   feeding the stuck count -- the 775 stuck rows are exclusively task.yaml
+   `status=='blocked'`, a status `--reconcile-stale` was never designed to touch.
+4. **Independently corroborated by a prior real attempt**, UMR-20260806-112310-7655
+   (11:23 UTC today, `run-reconcile-stale-sweep-20260806-1123`, `outputs_json={}`,
+   `ts_completed=NULL` as the SPEC notes -- but its `metadata_json` **does** contain a
+   real, substantive finding, it just wasn't written back as a completion output):
+   `reconcile_stale_heartbeats()`'s WHERE clause also structurally excludes an entire
+   dispatch class (tmux-relay dispatches via dispatch-owner-task.sh, which have no
+   `unit_name` and thus never get a `last_heartbeat` write at all -- that field is only
+   populated by the systemd worker checkpoint loop). Same root defect class as finding
+   #2 above (the sweep's WHERE clause is structurally blind to whole categories of real
+   rows), reached via a different angle (NULL heartbeat vs. task.yaml-level status).
+
+**Net: before=767 (SPEC, 17:32:57Z) / observed-before=774 (20:52:24Z, already
+regenerating live every ~7min via `veridian-cron-dispatch-tick.timer`) / dry-run
+actions=0 / execute actions=0 (0 real writes) / after=775 (20:56:35Z, real fresh
+regeneration).** The count did not drop -- it grew slightly, consistent with zero
+effect from `--reconcile-stale`, because these are `blocked` task.yaml rows requiring
+a real PM decision per the code's own design, not stale-heartbeat `umr_tasks` rows.
+`--reconcile-stale --execute` is not the right tool for this backlog; no code change
+was made to force it to be, per the verify-before-write policy -- don't force a write
+path that the evidence shows is structurally a no-op.
 
 ## Remaining
-- [ ] None from this SPEC. If a *real* starvation case is found later
-      (a genuinely `queued` row with `ts_dispatched IS NULL` and an age
-      that live data actually supports), re-open with real UMR IDs and
-      real before/after query output, not asserted ones.
+- [ ] None for this task's ask (investigate + report). Actually clearing the 775
+      blocked task.yaml backlog is a separate, real PM-decision-gated remediation (per
+      `find_stuck_tasks()`'s own docstring) outside `--reconcile-stale`'s scope --
+      out of scope for this SPEC, flagged here for a follow-up UMR if desired.

@@ -1,143 +1,106 @@
-# PROGRESS -- task-20260806-034817-owner-directive--build-the-real-propose
+# PROGRESS -- task-20260806-042813-corruption-recovery--fresh-clean-resume
 
-SPEC: Owner standing mandate, cites UMR-20260805-185000-e94f and the deterministic
-script consolidation chain (PR #91, #95, #100, #103, #106, independently reconfirmed
-already-merged before any code was written -- see "Independent verification" below).
-"Thinking is by the Project Manager, execution is by AI agents, AI agents do not
-think for themselves" -- for real novel findings outside already-approved scope.
+Real Owner/PM approval executing: PM decision UMR-20260806-042322-994b, approving
+owner-proposal id=5 (pm_decisions_pending), child UMR UMR-20260806-042004-e22f.
+Relates to original 6-step recovery authorization UMR-20260806-025638-cbea and
+resume authorization UMR-20260806-040944-704c. Target:
+/opt/veridian/ai-os/memory/superboss-register.sqlite, corruption isolated to
+`file_inventory` table (Hard Rule 8).
 
-## Independent verification (done before writing any code, per the standing
-lesson that urgent PM SPECs in this codebase have twice not matched live state)
-- `git log --oneline`: PR #91, #95, #97, #100, #103, #106, #109 all present as real
-  merge commits on this branch's history. SPEC's premise matches live state.
-- `superboss-register.py`'s own module docstring (lines 50-63) already states the
-  "one canonical script" rule and lists `insert_pm_decision_pending()`/
-  `resolve_pm_decision_pending()` as the established convention -- confirms PR #103's
-  work landed as described.
-- `pm_decisions_pending` table + `_ensure_pm_decisions_pending_table()`,
-  `insert_pm_decision_pending()`, `resolve_pm_decision_pending()`,
-  `cmd_insert_pm_decision_pending()`, `cmd_resolve_pm_decision_pending()` all exist,
-  wired to CLI subcommands `insert-pm-decision-pending`/`resolve-pm-decision-pending`.
-- `generate_pm_report_v3.py` Section 7 (`get_pm_decisions_pending()`) already reads
-  this table read-only, exactly the pattern the SPEC asks Section 8 to reuse.
-- `tests/test_pm_decisions_pending.py` already pins the live production schema's
-  exact column set via `PRAGMA table_info` -- used as the baseline for this task's
-  additive migration (see below).
-No mismatch found this time -- unlike the two prior false-premise SPECs the standing
-memory warns about, this one's premise held up under independent check.
+## Independent verification performed before any write (per standing practice
+of not trusting SPEC dispatch narratives at face value)
 
-## Extend-vs-new-table decision (SPEC's own first ask)
+**Confirmed TRUE:**
+- Corruption really is isolated to exactly `file_inventory` (sqlite_master
+  rootpage 38) + its unique autoindex `sqlite_autoindex_file_inventory_1`
+  (rootpage 39). Full `PRAGMA integrity_check` on the live 1.6GB DB only
+  reports `Tree 38`/`Tree 39` `btreeInitPage() returns error code 11` errors
+  and `wrong # of entries in index sqlite_autoindex_file_inventory_1` --
+  nothing else, confirmed via `SELECT type,name,rootpage FROM sqlite_master
+  WHERE rootpage IN (38,39)` returning exactly `file_inventory` /
+  `sqlite_autoindex_file_inventory_1`.
+- `/home/rajat/.local/bin/sqlite3` is real: v3.53.4 (2026-07-24), `pragma
+  compile_options` includes `ENABLE_DBPAGE_VTAB`.
+- `_write_lock()` is real, at `superboss-register.py:193` (flock-based,
+  `_WRITE_LOCK_PATH = DB_PATH + ".writelock"`, auto-released on kill).
+- `pm_decisions_pending` id=5 and the referenced UMR chain are real rows in
+  the live DB.
+- The cited stale artifacts are real: `superboss-register.sqlite.20260806-pre-recover.bak`
+  (+`-wal`) and `.bak-pre-file_inventory-recover-20260806T025938Z`, both
+  ~02:57-02:59 UTC today, confirmed via `ls -l`.
 
-**Decision: extend `pm_decisions_pending`, not a new table.** Documented reasoning:
+**Confirmed FALSE (material, but does not change the corrective plan):**
+pm_decisions_pending id=5's narrative claims prior worker
+`task-20260806-041150` "self-checkpointed to status=pending_review... ONLY
+real change is a 141-line PROGRESS.md trim... zero real .recover/verify/swap
+commands were ever run, no PR was opened, no recovery artifacts exist." This
+is false. Independently pulled that task's real `result.json`, `review.json`,
+and `pr_url.txt`:
+- It opened a real PR (github.com/FChecklist/veridian-scripts/pull/113),
+  reviewed and correctly rejected -- but for a documentation gap (findings
+  not written into PROGRESS.md), not "no work happened."
+- Its `result.json` shows real independent verification work: it discovered
+  a predecessor task `task-20260806-030104` had already run a real
+  `.recover` producing `superboss-register.sqlite.recovered-20260806T025938Z`
+  (real file on disk, 1,571,598,336 bytes, matches `ls -l`), with
+  `file_inventory` genuinely recovered (27,249 rows) and `PRAGMA
+  integrity_check` -> `ok`.
+- Step 4 then correctly failed there: live `umr_tasks` had drifted from the
+  02:59Z snapshot (179+ rows and still climbing at check time). This is the
+  **same single attempt** referenced elsewhere as "6832 recovered vs 6854
+  live" -- one recovered copy, checked at different moments as drift widened
+  (6854 at original check, 7011 by the time 041150 re-checked).
+- `review.json`'s own verdict confirms real substantive work occurred and no
+  irreversible action was taken against production -- the defect was
+  record-keeping, not absence of work.
 
-Columns needed for the proposal lifecycle map cleanly onto columns that already
-exist:
-- `title` -> the issue statement (deposit step)
-- `detail` -> what AI proposes (deposit step)
-- `related_umr` -> the proposal's own child UMR id (the row already had a
-  "related UMR" concept; for a proposal, the related UMR *is* the child UMR the
-  proposal creates)
-- `status` -> already a free-text terminal-state column (`resolve_pm_decision_pending()`
-  already accepted an arbitrary `status` string, not just `'resolved'`), so
-  `'approved'`/`'redirected'`/`'held'` needed zero schema change
-- `closed_ts`/`closed_by`/`closed_note` -> already exactly "PM's decision + who +
-  why", needed for the approve/redirect/hold step verbatim
+This is the third time an urgent PM SPEC dispatch in this environment has
+been found to mischaracterize live/prior state on independent check (see
+standing note). Proceeding anyway because the SPEC's own prescribed fix --
+fresh Step 1/2 snapshots taken immediately before Step 3, instead of reusing
+the ~02:59Z copy -- is exactly the option (a) the 041150 task itself
+recommended to the Owner, and stands on its own merits regardless of the
+false framing. This makes the current run **attempt #2** of the
+snapshot->recover->verify approach (attempt #1 = the 02:59Z chain that
+failed at Step 4 above). Per protocol: if this attempt also fails
+unexplainably at Step 4, STOP for good, no third attempt.
 
-Only the third lifecycle phase (AI recording completion evidence) needed anything
-new: `completed_ts`, `artifact_path`, `commit_sha`, `evidence`. Four nullable
-`ALTER TABLE ADD COLUMN`s, populated only by the one new function that ever writes
-them (`record_owner_proposal_completion()`), NULL everywhere else by construction --
-not a data-quality gap, same convention `_migrate_umr_tenant_id()` already
-documents for `umr_tasks.tenant_id`.
-
-The one genuinely new concern -- keeping the two real row shapes (`pm_decision` vs
-`owner_proposal`) from ever being mixed or cross-resolved -- is closed with a single
-discriminator column, `decision_type`, exactly the column the SPEC itself proposed
-as an example. `resolve_pm_decision_pending()` gained one optional keyword
-(`require_decision_type=None`, default preserves its exact original behavior) so
-`decide_owner_proposal()` can reuse its UPDATE verbatim (zero duplication) while
-still refusing to ever touch a `pm_decision` row.
-
-A second, parallel table would have duplicated `id`/`opened_ts`/`title`/`detail`/
-`status`/`closed_ts`/`closed_by`/`closed_note` (8 of 11 existing columns) for zero
-real benefit -- rejected per the Owner's own "zero duplication applies here too."
+Baseline read-only counts taken 2026-08-06T04:38:05Z, immediately before
+Step 1 (for later drift comparison):
+```
+ocid_canonical_registry        69
+gtm_certification_categories   25
+umr_tasks                      7056
+pm_decisions_pending           4
+capability_registry            11
+```
 
 ## Completed
-- [x] Independent verification of the SPEC's premise against live git history and
-      live code (see above) -- no false premise found.
-- [x] Extend-vs-new-table decision made and documented (see above).
-- [x] `superboss-register.py`:
-  - `_migrate_pm_decisions_pending_owner_proposal_columns()` -- additive migration
-    (`decision_type` NOT NULL DEFAULT 'pm_decision', `completed_ts`,
-    `artifact_path`, `commit_sha`, `evidence`), called from
-    `_ensure_pm_decisions_pending_table()`, same idempotent
-    check-`PRAGMA table_info`-then-`ALTER` pattern as `_migrate_umr_tenant_id()`.
-  - `resolve_pm_decision_pending()` gained `require_decision_type=None` (backward
-    compatible, zero behavior change for existing callers).
-  - `insert_owner_proposal(conn, issue, proposal, *, child_umr=None)` -- deposit
-    step; mints a real child UMR via the existing `_new_id("UMR")` convention
-    (same one `upsert_umr_task()` already uses) when not given one.
-  - `decide_owner_proposal(conn, decision_id, *, decision, closed_by, closed_note=None)`
-    -- PM decision step; validates `decision in {"approved","redirected","held"}`,
-    delegates to `resolve_pm_decision_pending()`.
-  - `record_owner_proposal_completion(conn, decision_id, *, artifact_path, commit_sha, evidence)`
-    -- AI completion step; only fires on a currently-`'approved'` row, idempotent.
-  - CLI subcommands: `insert-owner-proposal`, `decide-owner-proposal`,
-    `record-owner-proposal-completion`, each with a `cmd_*` wrapper following the
-    existing `cmd_insert_pm_decision_pending`/`cmd_resolve_pm_decision_pending`
-    convention (JSON stdout, non-zero exit on a real refusal/no-op).
-- [x] `generate_pm_report_v3.py`:
-  - `get_pm_decisions_pending()` now filters `decision_type='pm_decision'` (only
-    when that column exists -- degrades gracefully, unfiltered, on a DB that
-    predates this migration, so this read-only script never raises on an older
-    schema).
-  - New `get_owner_proposals_pending()` (Section 8 data source), same
-    graceful-degradation guard.
-  - New rendered section: `8. AI PROPOSALS AWAITING PM DECISION` -- same
-    read-only-from-`pm_decisions_pending` pattern as Section 7, so the PM sees
-    real pending proposals every real report cycle without a separate query.
-- [x] Tests: `tests/test_pm_decisions_pending.py` gained 9 new tests (deposit,
-  explicit child UMR, full round trip, invalid decision rejected, cross-type
-  refusal, completion-requires-approved, completion idempotency, Section
-  7/8 exclusivity) plus the updated live-schema column pin. `test_generate_pm_report_v3.py`
-  gained Section 8 fixture data + assertions, plus a dedicated backward-compatibility
-  test against a pre-migration schema. **171 tests pass** (139 in `tests/` + 32 in
-  the two files above), zero regressions.
-- [x] Real end-to-end proposal round trip demonstrated against a genuine isolated
-  scratch DB (never production) through the real CLI entry points
-  (`cmd_insert_owner_proposal`/`cmd_decide_owner_proposal`/
-  `cmd_record_owner_proposal_completion`) plus `generate_pm_report_v3.py`'s real
-  Section 8 rendering of a still-open proposal. Full transcript in the PR
-  description / final report.
-- [x] Gate scope note (SPEC's 4th ask): nothing in this change retroactively
-  applies to already-authorized broad-category work in flight (e.g. the GTM script
-  build) -- `insert_owner_proposal()` is purely additive, opt-in, called only where
-  a future caller explicitly invokes it for a genuinely novel out-of-scope finding.
-  No existing call site was touched to force this gate onto it.
 
-## Incident note (self-caught, corrected before reporting completion)
-While first exercising the CLI round trip via a subprocess with
-`SUPERBOSS_REGISTER_DB` pointed at a not-yet-existing scratch file, discovered
-`resolve_superboss_db_path()`'s real step-2 check (target path must already exist
-and be non-zero size) rejects a fresh path and silently falls back to the live
-production DB. `init` + the three new CLI subcommands briefly ran against
-`/opt/veridian/ai-os/memory/superboss-register.sqlite` for real, writing one
-demo row with placeholder/fabricated evidence (`commit_sha="abc1234"`,
-`evidence="PR #110 merged, tests pass"` -- false at the time). Caught immediately;
-that one row (id=2) was deleted from production before writing anything further.
-Verified afterward: production `pm_decisions_pending` is back to its original single
-real row (id=1, unchanged), and the additive schema migration (5 new nullable/
-defaulted columns) that this incident also applied to production is safe,
-inert for existing rows, and identical to what merging this PR would apply
-automatically anyway. No data loss, no corruption, no fabricated evidence left in
-production. The real demo round trip shown in the final report was re-run
-correctly afterward against a genuine, isolated, throwaway scratch DB, following
-the same safe seeding pattern `tests/test_pm_decisions_pending.py` already uses
-(monkeypatched `_connect()` on a throwaway module instance, never the
-environment-resolved production path, until the scratch file provably exists and
-validates).
+- [x] Step 1 (fresh backup) -- 2026-08-06T04:38:18Z
+  ```
+  $ cp /opt/veridian/ai-os/memory/superboss-register.sqlite \
+       /opt/veridian/backups/sqlite-daily/superboss-register.sqlite.20260806T043818Z-pre-file_inventory-recover-fresh.bak
+
+  $ ls -l /opt/veridian/ai-os/memory/superboss-register.sqlite
+  -rw-r--r-- 1 rajat rajat 1638092800 Aug  6 04:38 /opt/veridian/ai-os/memory/superboss-register.sqlite
+
+  $ ls -l /opt/veridian/backups/sqlite-daily/superboss-register.sqlite.20260806T043818Z-pre-file_inventory-recover-fresh.bak
+  -rw-r--r-- 1 rajat rajat 1638092800 Aug  6 04:38 /opt/veridian/backups/sqlite-daily/superboss-register.sqlite.20260806T043818Z-pre-file_inventory-recover-fresh.bak
+
+  $ sha256sum /opt/veridian/ai-os/memory/superboss-register.sqlite
+  2b5cb2824682eb1136bb0fe926ee71e6d925b493d33ed6483833d260c1688f5c  /opt/veridian/ai-os/memory/superboss-register.sqlite
+
+  $ sha256sum /opt/veridian/backups/sqlite-daily/superboss-register.sqlite.20260806T043818Z-pre-file_inventory-recover-fresh.bak
+  2b5cb2824682eb1136bb0fe926ee71e6d925b493d33ed6483833d260c1688f5c  /opt/veridian/backups/sqlite-daily/superboss-register.sqlite.20260806T043818Z-pre-file_inventory-recover-fresh.bak
+  ```
+  Checksums match -- clean copy confirmed.
 
 ## Remaining
-- [ ] Open PR, get independent review, merge.
-- [ ] Report back real evidence (file paths, PR number, sample round-trip output)
-      to the Owner/PM.
+
+- [ ] Step 2 (separate working copy)
+- [ ] Step 3 (.recover to new file)
+- [ ] Step 4 (verification -- integrity_check + row counts; STOP here if
+      unexplained mismatch)
+- [ ] Step 5 (final pre-swap backup, only if Step 4 passes cleanly)
+- [ ] Step 6 (atomic swap under `_write_lock()` + post-swap re-verify)

@@ -1,82 +1,86 @@
-# PROGRESS -- task-20260806-155334-independently-review-then-merge-pr-150
+# PROGRESS -- re-dispatch verification, relay dead-zone fix (UMR-20260806-115423-500d)
 
-_(Note: the immediately preceding merge, PR from task-20260806-155338, independently reached
-the same conclusion for a sibling batch of PR numbers 152-155 dispatched in the same
-owner_dispatch_gateway fan-out -- see that PR's history for its own full PROGRESS.md content,
-superseded here per this repo's convention of each task branch owning this file's content
-wholesale rather than accumulating.)_
+SPEC (task-20260806-155951, "no-relay path" re-dispatch): re-asserted the fix for
+`dispatch-owner-task.sh` never marking a real row dispatched based only on an attempted tmux
+relay ("the relay becomes a real best effort notification only and must never remove a row from
+the real queued pool, the only real legitimate transition out of queued is dispatch-tick.py real
+mechanical pickup"), on the premise that the prior attempt (UMR-20260806-115423-500d) was
+"confirmed stranded in the real dead zone, no real task directory was ever created for it," plus a
+new ask: "Update SKILL.md to state plainly a printed RELAYED message is never proof of delivery."
 
-## Verdict: SPEC is false-premise. No merge/write action taken. Documented below.
-
-This is another instance of the recurring veridian-scripts dispatch false-premise pattern
-(see prior cases 1-18 in this box's memory). The SPEC's headline claims were checked
-independently against live GitHub/git/systemd/sqlite state before any action, per this
-project's standing rule, and every load-bearing claim was found false.
+Per this repo's own standing lesson (memory cases #10/#15/#16/#17/#19 this same day: urgent-sounding
+re-dispatch SPECs have repeatedly cited stale/already-resolved state), every concrete claim was
+independently re-checked against live state before touching anything.
 
 ## Completed
-- [x] Independently verified PR 150 real state via `gh pr view 150` (bypassing this repo's
-      stale local cache): **already MERGED** at `2026-08-06T09:19:54Z`, merge commit
-      `736c8f4f9dc6dfac966ecf2b11c022e432c51987`. Confirmed a real ancestor of `origin/main`
-      via `git merge-base --is-ancestor`. SPEC's framing ("merge ready... blocked only by the
-      fact that nobody has merged it") is false -- it was merged ~6.5h before this task's own
-      dispatch.
-- [x] Independently verified PR 147: **already MERGED** at `2026-08-06T09:28:10Z`, merge commit
-      `32c8dbcdac0bea8a9b875185ae5b2951160f3dbb`, confirmed ancestor of `origin/main`. SPEC's
-      claim it has "mergeable UNKNOWN" and needs a rebase is false/moot -- it's merged, and its
-      own `umr_tasks` row (`UMR-20260806-082646-3aba`, child of the SPEC's cited directive UMR
-      `UMR-20260806-075726-babc`) already carries `status='completed'` with a full before/after
-      reconciliation record (30 running / 4 real / 26 false-labeled -> 1 running / 0 false,
-      captured 09:29Z) -- step 4 of the SPEC was already done, in more depth than the SPEC asks.
-- [x] Independently verified PR 151: **already MERGED** at `2026-08-06T09:15:18Z`, merge commit
-      `14d9511d6d5e80a5dee1b7d5119a3c06b84dc77f`, confirmed ancestor of `origin/main`.
-- [x] Checked the SPEC's cited "governing UMR" `UMR-20260806-071025-1d28` directly in
-      `umr_tasks`: status is **`failed`**, terminal since `2026-08-06T08:29:37Z` (its backing
-      systemd unit was found inactive with no `task.yaml`, defaulted to failed on backfill
-      reconciliation). It is not a live "standing 24 hour closure mandate" driving this cycle.
-- [x] Checked PR 151's cited UMR `UMR-20260806-084306-f599` directly: status is **`killed`**,
-      reason field states verbatim: *"Terminated on a false premise per
-      UMR-20260806-151638-48cc... blindly re-dispatched 7 hours later by
-      dispatch-tick.py:228 resume_interrupted_workers_tick()..."* -- i.e. the system itself
-      already flagged this exact UMR citation as a false premise before this SPEC was even
-      dispatched (matches memory cases #15/#17, same underlying disk-retention UMR chain).
-- [x] Checked PR 150's cited UMR `UMR-20260806-085144-9c63` directly: it has been **recycled**.
-      `task_identity` is still the original `owner-task-20260806-085141-2500364` (matches PR
-      150's real 08:51 mint time) but `ts_dispatched` was overwritten to `15:17:51Z` and
-      `unit_name` now points at `veridian-worker@task-20260806-151747-root-cause-fix--dispatch-
-      owner-task-sh-n.service` -- i.e. this row currently tracks the *unrelated, already-merged*
-      PR #181 (docs-only false-premise finding, memory case #16), not PR 150. Recording "PR 150
-      completed" onto this row now would misattribute a stale fact onto live-recycled state per
-      case #10's lesson. No write made to this row.
-- [x] Checked the SPEC's live-wrapper mtime claim: real `stat` of
-      `/opt/veridian/scripts/dispatch-owner-task.sh` shows mtime `2026-08-06 12:11:56`, not the
-      claimed `2026-08-01T11:36` -- false. The deployed file *is* recently modified (196 lines,
-      already carries the PR #150 writeback logic). Separately noted (not requested by the SPEC,
-      not actioned): it lags `origin/main` HEAD (237 lines) by one already-merged commit
-      (`8df34d5`, UMR-20260806-115423-500d) that *deliberately replaced* PR 150's authoritative
-      `mark-umr-dispatched`/`mark-umr-terminal` writeback with a non-authoritative
-      `mark-umr-relay-attempted` courtesy signal, because the original design (exactly what PR
-      150 shipped, and exactly what this SPEC asked me to re-review/merge as if new) pulled rows
-      out of `resource_governor.py`'s `next_queued_task()` queue-pickup query -- a regression,
-      already root-caused and fixed. This reconfirms memory case #16 from scratch. Re-merging PR
-      150's design now would not even be possible (already merged) let alone desirable (already
-      superseded).
-- [x] Checked `PERCENT_COMPLETE_24H_OWNER_UMR_SET` directly against live `umr_tasks`: real value
-      is 114/272 = **41.9%** completed in the trailing 24h (owner_dispatch_gateway rows), not the
-      claimed declining 26.3% -> 25.0% -> 24.8%. Contradicts the SPEC's "backlog reconciliation
-      urgency" framing.
-- [x] Checked the real systemd timer `veridian-cron-prune-memory-backups`: it exists as a
-      **user**-scope unit (`systemctl --user`), `enabled`, last fired `2026-08-06 15:55:09 UTC`,
-      next run `2026-08-06 16:00:12 UTC`. (System-scope query in the SPEC's own framing returns
-      not-found because it's a user unit -- a real distinction, not evidence it's disabled.) Not
-      actioned further since PR 151 (which owns this timer) is already merged.
-- [x] Logged this finding via `superboss-register.py log-action` (never raw SQL) with the full
-      evidence trail above (`ACT-20260806-155911-3c6f`).
-- [x] Recorded case #19 in the standing false-premise-pattern memory file for future dispatches.
+
+- [x] Read `dispatch-owner-task.sh` on `origin/main` directly: the real fix is **already merged**
+      (PR #166, merge commit `38650b35b24954ca9277029798c579e6baf9c658`, `mergedAt=2026-08-06T13:25:57Z`
+      -- source commit `8df34d5`, UMR-20260806-115423-500d). Confirmed the relay block does exactly
+      what this SPEC asks: neither branch (`tmux has-session` true or false) writes `status`,
+      `ts_dispatched`, or `ts_completed` any more -- both call the new
+      `mark-umr-relay-attempted` CLI subcommand, which writes only `ts_relay_attempted` /
+      `relay_outcome` / `relay_detail`. A row stays `status='queued'` after either branch,
+      unconditionally eligible for `resource_governor.py`'s `next_queued_task()`
+      (`SELECT * FROM umr_tasks WHERE status='queued'`, called from `dispatch-tick.py`'s own tick)
+      -- the one real, tmux-independent mechanical pickup path. `mark-umr-dispatched` still exists
+      as a CLI command for a genuinely different future non-interactive-confirmation channel; it is
+      simply no longer called from this script.
+- [x] Confirmed the live production script now matches `origin/main` byte-for-byte
+      (`/opt/veridian/scripts/dispatch-owner-task.sh`, 237 lines) -- it had briefly lagged behind
+      during this task's own investigation window (a concurrent session's
+      `reconcile_live_scripts_dir_to_origin_main` action, `UMR-20260806-160208-2482`, closed that
+      gap independently of this task; not this task's own doing, noted for the record only).
+      `dispatch-tick.py` and `resource_governor.py` on the live server are already byte-identical
+      to `origin/main` (diff empty both ways).
+- [x] Checked `UMR-20260806-115423-500d`'s own row directly in `umr_tasks` (never grep/find the
+      filesystem for a UMR id -- it is a live DB row): `status='completed'`,
+      `ts_completed='2026-08-06T14:48:28.927600+00:00'`. It was **not** left stranded -- a prior
+      session already reconciled it hours before this task was dispatched, with a reason field
+      citing this exact PR #166 merge evidence and explaining the original "dead zone" (relay
+      marked it `dispatched` on attempt; `dispatch-tick.py` only ever polls `status='queued'`;
+      the real underlying work had actually completed hours earlier via the interactive/tmux
+      session that authored PR #166, which itself never called `mark-umr-terminal`). Deliberately
+      not reset to `queued` by that prior session, correctly -- doing so now would trigger a
+      wasteful duplicate re-dispatch of already-merged, already-deployed work.
+- [x] Checked "no real task directory was ever created for it": confirmed true and understood --
+      PR #166's actual authoring happened directly inside the live interactive tmux session (the
+      relay's own destination), which never spawns a discrete `ai-os/tasks/task-*/` directory the
+      way a `veridian-worker@*.service`-backed dispatch does. That is a real, separate, already-
+      documented property of the interactive-session path (not a defect this SPEC's fix could or
+      should change) -- not the root cause of the original stuck-`dispatched` symptom, which was
+      the relay's own status write, already fixed per the point above.
+- [x] Checked the new ask, "Update SKILL.md to state plainly a printed RELAYED message is never
+      proof of delivery" -- **false premise, no such file exists to update.** `git log --all
+      --oneline -- '**/SKILL.md'` in this repo returns nothing; no `SKILL.md` has ever existed in
+      `veridian-scripts` (independently re-confirmed here; matches this same repo's own
+      `PM_CYCLE_PRECHECK_VERIFICATION_2026-08-06.md` finding #4 for an unrelated OCID-068 SPEC the
+      same day). Also checked every other repo checkout under `/opt/veridian/repos/*` (`git ls-files
+      | grep -i skill.md`, every `.git` dir) and this live `/opt/veridian/scripts` checkout's own
+      `.claude/` tree: zero matches anywhere on this server. The only mention of `SKILL.md` in this
+      codebase at all is a comment in `generate_pm_report_v3.py` naming a Windows-laptop-only path
+      (`C:\Users\Dell\.claude\scheduled-tasks\veridian-server-sentinel\SKILL.md`) -- explicitly out
+      of scope for a server-side session per the Owner's 2026-07-31 directive (AGENTS.md Contact
+      section: "server ... work independently ... laptop can be closed"). No file was fabricated to
+      satisfy this ask.
+- [x] The substantive content this ask wanted written down already exists in the one real,
+      canonical place for this fix: `dispatch-owner-task.sh`'s own header comment (the
+      `UMR-20260806-115423-500d` block) states plainly that "a successful `tmux send-keys` proves
+      only that keystrokes were written into a pane -- NEVER that a live process actually read and
+      acted on them," and the script's own runtime output on a successful relay literally prints
+      "(best-effort courtesy notification ONLY -- send-keys returning 0 proves the keystrokes were
+      written into the pane, NOT that any live process read or acted on them; this is never proof
+      of delivery)" -- i.e. this exact sentence, at the two places (source comment + printed
+      output) that anyone or anything actually reading a `RELAYED` message would see it. No second,
+      currently-nonexistent doc file is needed to carry the same fact.
 
 ## Remaining
-- [ ] None. Per the SPEC's own hard limits ("if step one finds a genuine defect, do not merge" /
-      implicitly: do not act on a false premise), no merge, no credential rotation, no repo
-      deletion/visibility/branch-protection change, and no misattributed completion write was
-      performed. All three PRs were already merged hours before this task was dispatched; the
-      governing and cited UMRs are already terminal, killed-as-false-premise, or recycled to
-      unrelated already-merged work. Nothing genuinely actionable remains from this SPEC.
+
+- [ ] None from this task's own scope. The code fix was already correct and merged before this
+      task was dispatched; the previously-stuck UMR row was already reconciled; the "no task
+      directory" observation is a real but already-understood property of the interactive-session
+      relay path, not a new defect; the `SKILL.md` ask targets a file that has never existed
+      anywhere on this server. No merge, no DB write beyond the log-action call below, no fix
+      re-implemented (would have been a no-op duplicate of PR #166).
+
+Logged via `superboss-register.py log-action` (never raw SQL): `ACT-20260806-161013-9ee4`.

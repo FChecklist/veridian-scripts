@@ -1,0 +1,31 @@
+{
+  "capability_name": "ai_agent_registry",
+  "inputs": [
+    {"key": "umr_id", "label": "Real UMR id this agent_id is scoped 1:1 to (UMR-YYYYMMDD-HHMMSS-xxxx)", "type": "text"},
+    {"key": "role_label", "label": "Short human-readable role label (mint-time only)", "type": "text", "optional": true},
+    {"key": "entry_text", "label": "Real work entry appended to this UMR's own agent memory file", "type": "text", "optional": true},
+    {"key": "intent_text", "label": "Free-text description of the work about to be dispatched, for the check-before-dispatch capability_registry lookup", "type": "text", "optional": true}
+  ],
+  "business_rules": [
+    {"leaf_key": "ai_agent_registry", "phase": "process", "mechanism_path": "scripts/ai_agent_registry.py", "registered": false}
+  ],
+  "workflow": null,
+  "automation": null,
+  "documents": [],
+  "reports": null,
+  "apis": [
+    "/opt/veridian/scripts/ai_agent_registry.py"
+  ],
+  "ui_screens": null,
+  "permissions": "server-local shell execution only, dispatch-mechanism-internal (mints/reads AI agent identity + persistent memory rows in the one existing superboss-register.sqlite), no tenant/org scoping applicable",
+  "ai_required": false,
+  "confidence": 1.0,
+  "version": "1.0",
+  "owner": "VERIDIAN platform ops tooling (/opt/veridian/scripts)",
+  "metadata": {
+    "registered_by_phase": "UMR-20260806-121332-6ba4",
+    "corrects": "UMR-20260806-121252-3207 (original spec scoped agent_id to a fuzzy similar-task-class match; Owner clarification received after that UMR dispatched replaces the scoping unit with one real UMR equals one real agent_id, enforced via a UNIQUE(umr_id) constraint)",
+    "table_added": "ai_agent_registry, inside the one existing live /opt/veridian/ai-os/memory/superboss-register.sqlite -- zero new files, zero new database",
+    "checked_for_duplicate": "lookup-capability --intent-text 'agent id scoped one per UMR' and list-capabilities (12 existing rows) both showed zero matches before building; find_code.sh \"agent_id\" and \"ai_agent_registry|agent_registry|AgentRegistry\" over /opt/veridian/scripts both returned zero hits; compliance-tracker's own worker_agent capability-registry entity type is a separate embedding-similarity index in a different repo, not this UMR-scoped persistent-memory mechanism"
+  }
+}

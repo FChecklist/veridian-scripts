@@ -644,6 +644,47 @@ def init_db():
     END;
     CREATE INDEX IF NOT EXISTS idx_wiring_registry_entity_type ON wiring_registry(entity_type);
     CREATE INDEX IF NOT EXISTS idx_wiring_registry_source_system ON wiring_registry(source_system);
+
+    -- 11th tree (2026-08-06, critical amendment to UMR-20260806-124327-6ffb /
+    -- UMR-20260806-124055-bc80, task-20260806-181146-critical-amendment--every-task-must-sear,
+    -- UMR-20260806-124654-a8d6). Step four of the required deterministic-first
+    -- task sequence (step one: exact capability_registry match, no AI; step two:
+    -- search past umr_tasks for reusable precedent; step three: only then does AI
+    -- work proceed, under a UMR-scoped agent_id): the moment real AI work
+    -- completes, this table records the mandatory graduation evaluation -- can
+    -- this exact piece of work become a permanent deterministic script. One row
+    -- per evaluation, insert-only (never UPDATEd -- a UMR that is re-evaluated
+    -- gets a second row, so the full history stays queryable, same convention as
+    -- route_replay above). decision='graduated' rows MUST carry a real
+    -- capability_id (the actual capability_registry row this graduated into,
+    -- registered via register-capability in the same breath -- never a claim
+    -- without a registered artifact backing it) and script_path; decision=
+    -- 'judgment_required' rows carry neither, only a plain reason -- this table
+    -- is where "no, this genuinely needs judgment every time" gets recorded
+    -- instead of silently narrated away.
+    CREATE TABLE IF NOT EXISTS capability_graduation_log (
+        graduation_id TEXT PRIMARY KEY,
+        ts TEXT NOT NULL,
+        umr_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        task_summary TEXT NOT NULL,
+        decision TEXT NOT NULL CHECK(decision IN ('graduated', 'judgment_required')),
+        reason TEXT NOT NULL,
+        capability_id TEXT,
+        script_path TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        FOREIGN KEY (capability_id) REFERENCES capability_registry(capability_id)
+    );
+    CREATE VIRTUAL TABLE IF NOT EXISTS capability_graduation_log_fts USING fts5(
+        umr_id, agent_id, task_summary, reason,
+        content='capability_graduation_log', content_rowid='rowid'
+    );
+    CREATE TRIGGER IF NOT EXISTS capability_graduation_log_ai AFTER INSERT ON capability_graduation_log BEGIN
+        INSERT INTO capability_graduation_log_fts(rowid, umr_id, agent_id, task_summary, reason)
+        VALUES (new.rowid, new.umr_id, new.agent_id, new.task_summary, new.reason);
+    END;
+    CREATE INDEX IF NOT EXISTS idx_capability_graduation_log_umr_id ON capability_graduation_log(umr_id);
+    CREATE INDEX IF NOT EXISTS idx_capability_graduation_log_decision ON capability_graduation_log(decision);
     """)
     conn.commit()
     _migrate_schema(conn)
@@ -2703,6 +2744,270 @@ def list_capabilities(args):
     conn.close()
     matches = [_capability_row_to_dict(r) for r in rows]
     print(json.dumps({"count": len(matches), "capabilities": matches}, indent=2, default=str))
+
+
+# ---------------------------------------------------------------------------
+# Critical amendment (2026-08-06, UMR-20260806-124654-a8d6, this task's own
+# scoped UMR -- amends UMR-20260806-124327-6ffb and stop work order
+# UMR-20260806-124055-bc80): the required deterministic-first task sequence.
+# Step one/two below (search_task_precedent/cmd_search_task_precedent) are the
+# read-only, side-effect-free "before any AI involvement" check: does an exact
+# capability_registry script already exist (step one), and if not, has any
+# similar kind of task already been done anywhere in past umr_tasks/
+# capability_graduation_log history (step two, real search across ALL past
+# work, not scoped to one UMR). Step three (AI proceeds under a UMR-scoped
+# agent_id) is already specified elsewhere (ai_agent_registry, UMR-20260806-
+# 121332-6ba4 and its corrections) -- not re-implemented here, this module
+# never touches that table, avoiding a second, competing implementation of
+# work already in flight on other branches at the time this was built
+# (worker/task-20260806-165903-correction--wire-the-new-ai-agent-id-tab,
+# worker/task-20260806-163355-correction--ai-agent-id-scoped-one-per-u, both
+# still open PRs #199/#194 -- confirmed by direct inspection, not assumed).
+# Step four (record_capability_graduation/cmd_record_capability_graduation) is
+# the real critical new requirement this amendment adds: the mandatory,
+# never-skippable post-work evaluation, recorded via capability_graduation_log.
+# ---------------------------------------------------------------------------
+
+def _ensure_capability_graduation_log_table(conn):
+    """Standalone idempotent create, same defensiveness convention as
+    _ensure_capability_registry_table/_ensure_route_replay_table -- works even
+    if init_db() was never run against this DB."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS capability_graduation_log (
+        graduation_id TEXT PRIMARY KEY,
+        ts TEXT NOT NULL,
+        umr_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        task_summary TEXT NOT NULL,
+        decision TEXT NOT NULL CHECK(decision IN ('graduated', 'judgment_required')),
+        reason TEXT NOT NULL,
+        capability_id TEXT,
+        script_path TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        FOREIGN KEY (capability_id) REFERENCES capability_registry(capability_id)
+    )""")
+    conn.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS capability_graduation_log_fts USING fts5(
+        umr_id, agent_id, task_summary, reason,
+        content='capability_graduation_log', content_rowid='rowid'
+    )""")
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS capability_graduation_log_ai AFTER INSERT ON capability_graduation_log BEGIN
+        INSERT INTO capability_graduation_log_fts(rowid, umr_id, agent_id, task_summary, reason)
+        VALUES (new.rowid, new.umr_id, new.agent_id, new.task_summary, new.reason);
+    END""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_capability_graduation_log_umr_id ON capability_graduation_log(umr_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_capability_graduation_log_decision ON capability_graduation_log(decision)")
+    conn.commit()
+
+
+def search_task_precedent(conn, task_text, limit=10):
+    """Steps one + two of the required sequence, read-only, no side effects.
+
+    Step one: exact-then-FTS match against capability_registry, same two-stage
+    resolution_order lookup_capability() already uses (exact capability_name
+    equality first, domain-scoped keyword FTS as fallback) -- deliberately
+    duplicated rather than refactored into a shared helper, since
+    lookup_capability() already has real callers/tests depending on its exact
+    current signature and print-and-exit shape; a real behavior change to it
+    is out of this amendment's scope. A step-one match means: run that
+    existing script, no AI, stop -- this function reports it, the caller is
+    the one that actually stops. resolution_stage_used tells a caller which
+    of the two it actually was; when it was the FTS fallback, matched >5
+    keyword-only rows are reported as broad_keyword_overlap=True (same real
+    imprecision agent_work_briefing.py's assemble_briefing() independently
+    found and fixed the same way: an OR-of-terms FTS query over a full
+    multi-sentence task_text can honestly match on incidental vocabulary, not
+    a real fit -- a caller must not treat that as a confident stop).
+
+    Step two (only reached if step one found nothing): a real search across
+    ALL past umr_tasks (task_identity/source_trigger/logs_ref, via
+    umr_tasks_fts) and ALL past capability_graduation_log rows
+    (umr_id/agent_id/task_summary/reason, via capability_graduation_log_fts)
+    for this same kind of task already done -- across the whole platform's
+    history, not scoped to any one caller's own UMR. Each umr_tasks hit is
+    left-joined against capability_graduation_log by umr_id so a caller gets
+    the real script_id/capability_id or agent_id that past similar work
+    actually used, if any was ever recorded.
+    """
+    _ensure_capability_registry_table(conn)
+    _ensure_capability_graduation_log_table(conn)
+
+    step1_matches = []
+    resolution_stage = "none"
+    rows = conn.execute(
+        "SELECT * FROM capability_registry WHERE capability_name = ?", (task_text,)
+    ).fetchall()
+    if rows:
+        step1_matches = [_capability_row_to_dict(r) for r in rows]
+        resolution_stage = "exact_capability_name_match"
+    else:
+        q = _fts_query(task_text)
+        try:
+            rows = conn.execute(
+                "SELECT t.* FROM capability_registry_fts f JOIN capability_registry t ON t.rowid = f.rowid "
+                "WHERE capability_registry_fts MATCH ? ORDER BY rank LIMIT ?",
+                (q, limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+        if rows:
+            step1_matches = [_capability_row_to_dict(r) for r in rows]
+            resolution_stage = "domain_scoped_keyword_match"
+
+    if step1_matches:
+        return {
+            "resolution_stage_used": resolution_stage,
+            "broad_keyword_overlap": resolution_stage == "domain_scoped_keyword_match" and len(step1_matches) > 5,
+            "step": 1,
+            "action": "exact_script_found_run_it_no_ai_stop",
+            "matches": step1_matches,
+        }
+
+    precedent = []
+    try:
+        umr_rows = conn.execute(
+            "SELECT u.* FROM umr_tasks_fts f JOIN umr_tasks u ON u.rowid = f.rowid "
+            "WHERE umr_tasks_fts MATCH ? ORDER BY u.ts_submitted DESC LIMIT ?",
+            (q, limit),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        umr_rows = []
+    for row in umr_rows:
+        grad = conn.execute(
+            "SELECT graduation_id, agent_id, decision, capability_id, script_path, reason, ts "
+            "FROM capability_graduation_log WHERE umr_id = ? ORDER BY ts DESC LIMIT 1",
+            (row["umr_id"],),
+        ).fetchone()
+        precedent.append({
+            "umr_id": row["umr_id"],
+            "task_identity": row["task_identity"],
+            "status": row["status"],
+            "ts_submitted": row["ts_submitted"],
+            "graduation": dict(grad) if grad else None,
+        })
+
+    try:
+        grad_rows = conn.execute(
+            "SELECT g.* FROM capability_graduation_log_fts f JOIN capability_graduation_log g ON g.rowid = f.rowid "
+            "WHERE capability_graduation_log_fts MATCH ? ORDER BY g.ts DESC LIMIT ?",
+            (q, limit),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        grad_rows = []
+    already_covered_umrs = {p["umr_id"] for p in precedent}
+    for row in grad_rows:
+        if row["umr_id"] in already_covered_umrs:
+            continue
+        precedent.append({
+            "umr_id": row["umr_id"],
+            "task_identity": None,
+            "status": None,
+            "ts_submitted": None,
+            "graduation": dict(row),
+        })
+
+    if precedent:
+        return {
+            "step": 2,
+            "action": "similar_past_work_found_report_script_or_agent_ids_used",
+            "matches": precedent,
+        }
+
+    return {
+        "step": 3,
+        "action": "no_script_and_no_usable_precedent_ai_work_proceeds_under_umr_scoped_agent_id",
+        "matches": [],
+    }
+
+
+def cmd_search_task_precedent(args):
+    init_db_silent()
+    conn = _connect()
+    result = search_task_precedent(conn, args.task_text, limit=args.limit)
+    conn.close()
+    print(json.dumps(result, indent=2, default=str))
+
+
+def record_capability_graduation(conn, umr_id, agent_id, task_summary, decision, reason,
+                                  capability_id=None, script_path=None, metadata=None):
+    """Step four, the real critical new requirement: the mandatory,
+    never-skippable evaluation that must run the moment real AI work
+    completes. Not a code-computed yes/no (whether a task genuinely requires
+    ongoing judgment is itself a judgment call, made by the caller) -- what is
+    deterministic here is that this record can never be skipped or narrated
+    away, and that a 'graduated' decision can never be recorded without a
+    real, already-registered capability_id + script_path backing it (raises
+    ValueError otherwise -- this is the one guard that IS deterministic: no
+    claiming a script was built without proof it was actually registered).
+    Insert-only, mirrors route_replay's convention -- a UMR re-evaluated later
+    gets a second row, so the full history stays queryable."""
+    if decision not in ("graduated", "judgment_required"):
+        raise ValueError(f"decision must be 'graduated' or 'judgment_required', got {decision!r}")
+    if not reason or not reason.strip():
+        raise ValueError("reason is required and must be non-empty for every graduation decision")
+    if decision == "graduated":
+        if not capability_id or not script_path:
+            raise ValueError(
+                "decision='graduated' requires a real capability_id (from register-capability) "
+                "and script_path -- never force a script claim without a registered artifact backing it"
+            )
+    else:
+        if capability_id or script_path:
+            raise ValueError(
+                "decision='judgment_required' must not carry a capability_id/script_path -- "
+                "no script was built, none should be implied"
+            )
+
+    _ensure_capability_graduation_log_table(conn)
+    gid = _new_id("GRAD")
+    now = _now_iso()
+    conn.execute(
+        "INSERT INTO capability_graduation_log (graduation_id, ts, umr_id, agent_id, task_summary, "
+        "decision, reason, capability_id, script_path, metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (gid, now, umr_id, agent_id, task_summary, decision, reason, capability_id, script_path,
+         json.dumps(metadata or {})),
+    )
+    return gid
+
+
+def cmd_record_capability_graduation(args):
+    init_db_silent()
+    conn = _connect()
+    try:
+        gid = record_capability_graduation(
+            conn, args.umr_id, args.agent_id, args.task_summary, args.decision, args.reason,
+            capability_id=args.capability_id, script_path=args.script_path,
+            metadata=json.loads(args.metadata) if args.metadata else None,
+        )
+        conn.commit()
+    except ValueError as e:
+        conn.close()
+        print(json.dumps({"error": str(e)}))
+        sys.exit(1)
+    conn.close()
+    print(json.dumps({"graduation_id": gid, "umr_id": args.umr_id, "decision": args.decision}))
+
+
+def _graduation_row_to_dict(row):
+    d = dict(row)
+    d["metadata_json"] = json.loads(d["metadata_json"]) if d.get("metadata_json") else {}
+    return d
+
+
+def list_capability_graduations(args):
+    """Lists capability_graduation_log rows, optionally filtered to one
+    --umr-id, newest first -- same evidence/row-count-verification role
+    list_capabilities/list_replays already play for their own tables."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_capability_graduation_log_table(conn)
+    if getattr(args, "umr_id", None):
+        rows = conn.execute(
+            "SELECT * FROM capability_graduation_log WHERE umr_id = ? ORDER BY ts DESC", (args.umr_id,)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM capability_graduation_log ORDER BY ts DESC").fetchall()
+    conn.close()
+    matches = [_graduation_row_to_dict(r) for r in rows]
+    print(json.dumps({"count": len(matches), "graduations": matches}, indent=2, default=str))
 
 
 WIRING_ENTITY_TYPES = (
@@ -7534,6 +7839,31 @@ if __name__ == "__main__":
 
     p_listc = sub.add_parser("list-capabilities")
 
+    p_precedent = sub.add_parser("search-task-precedent",
+                                  help="steps one+two of the required deterministic-first sequence: exact "
+                                       "capability_registry script match, then real cross-history precedent "
+                                       "search over umr_tasks/capability_graduation_log")
+    p_precedent.add_argument("--task-text", dest="task_text", required=True,
+                              help="task title/description to search for a matching script or past precedent")
+    p_precedent.add_argument("--limit", type=int, default=10)
+
+    p_regg = sub.add_parser("record-graduation",
+                             help="step four: mandatory post-AI-work evaluation, can this become a permanent "
+                                  "deterministic script -- recorded either way, never skipped")
+    p_regg.add_argument("--umr-id", dest="umr_id", required=True)
+    p_regg.add_argument("--agent-id", dest="agent_id", required=True)
+    p_regg.add_argument("--task-summary", dest="task_summary", required=True)
+    p_regg.add_argument("--decision", required=True, choices=["graduated", "judgment_required"])
+    p_regg.add_argument("--reason", required=True)
+    p_regg.add_argument("--capability-id", dest="capability_id", default=None,
+                         help="required when --decision=graduated; the capability_id register-capability just returned")
+    p_regg.add_argument("--script-path", dest="script_path", default=None,
+                         help="required when --decision=graduated; repo-relative path of the new deterministic script")
+    p_regg.add_argument("--metadata", default=None)
+
+    p_listg = sub.add_parser("list-graduations")
+    p_listg.add_argument("--umr-id", dest="umr_id", default=None)
+
     p_capr = sub.add_parser("capture-replay")
     p_capr.add_argument("--route-id", dest="route_id", required=True)
     p_capr.add_argument("--capability-name", dest="capability_name", required=True)
@@ -7829,6 +8159,13 @@ if __name__ == "__main__":
         lookup_capability(args)
     elif args.cmd == "list-capabilities":
         list_capabilities(args)
+    elif args.cmd == "search-task-precedent":
+        cmd_search_task_precedent(args)
+    elif args.cmd == "record-graduation":
+        with _write_lock():
+            cmd_record_capability_graduation(args)
+    elif args.cmd == "list-graduations":
+        list_capability_graduations(args)
     elif args.cmd == "capture-replay":
         with _write_lock():
             capture_replay(args)

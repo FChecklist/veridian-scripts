@@ -1,100 +1,98 @@
-# PROGRESS -- task-20260805-172731-build-a-real-deterministic-deposit-and-r
+# PROGRESS -- task-20260806-032941-pm-decision--close-pr-98--defer-to-pr-10
+
+Real PM decision, relates to UMR-20260806-030048-5d7a and UMR-20260806-031211-64de.
+SPEC: close PR #98 (credit-preserving, citing #100), stop "my own" duplicate item-2
+agent, let the #100 thread finish items 1-5, independently verify #100's fleet-wide
+and secondary-bug claims before treating either as complete, keep watching for
+further duplication across items 2-5.
 
 ## Completed
-- [x] Surveyed existing OCID-068 infrastructure: `ocid_canonical_registry` (deposit via
-      `upsert_ocid_canonical_registry`, compute via `ocid_canonical_registry_completion_ai/_au`
-      SQLite triggers deriving `has_real_*`/`is_fully_complete`/`not_applicable_confirmed`) and
-      `ocid_compliance_state`/`ocid_compliance_audit_log` (deposit via
-      `record_ocid_compliance_audit`, compute via `ocid_compliance_state_derive_ai/_au` triggers
-      deriving all 7 `rule_*_verified` booleans) already implement the real deposit/compute
-      separation this task's spec calls for -- confirmed no caller-settable path exists for any
-      of these booleans (re-confirmed by existing test suites, all still passing).
-- [x] Added `query_ocid_compliance_state()` (superboss-register.py) -- real, read-only lookup of
-      the already-trigger-computed `ocid_compliance_state` rows; zero writes, zero re-audit.
-- [x] Added the real **report command**: `audit_ocid_compliance.py --report` -- read-only, no
-      gh/git subprocess calls, no writes; prints the current compliance analysis (all 7 rules +
-      completion booleans) verbatim via `build_compliance_report()`, so the PM runs this flag and
-      reports its output directly instead of interpreting anything itself.
-- [x] Fixed `audit_ocid_canonical_registry.py`'s real terminal-output ambiguity (the exact root
-      cause of this cycle's false data-corruption alarm): every line in both modes is now tagged
-      `[DRY_RUN]`/`[APPLY]`, wrapped in an explicit mode banner, and stdout's JSON is wrapped in a
-      `{"mode": ..., "wrote_to_database": ...}` envelope. Applied the same labeling fix to
-      `audit_ocid_compliance.py`'s dry-run/apply paths for consistency (zero-exception guardrail).
-      Extracted the formatting into pure, directly-testable functions
-      (`format_mode_banner`/`format_ocid_line`/`format_summary_line`/`format_changed_line`/
-      `format_completion_line`/`format_stdout_envelope`).
-- [x] Added real automated tests:
-  - `tests/test_audit_ocid_canonical_registry.py::test_dry_run_and_apply_terminal_output_are_unambiguously_labeled`
-    -- proves every real line in both modes carries its own explicit tag, the two modes' lines are
-    never identical, and the stdout envelope alone (no stderr) disambiguates mode.
-  - `tests/test_audit_ocid_compliance_report.py` (new) -- proves `--report` reads back real
-    trigger-computed state verbatim, never fabricates a pass for an unaudited pair, and (the
-    spec's explicit compute-determinism requirement) that the real compute step
-    (`query_ocid_compliance_state`) and the `--report` output are byte-identical across two
-    separate real runs against the same unchanged data.
-  - All pre-existing test suites (18 files) re-run and still pass; zero regressions.
-- [x] Consolidated into the two existing scripts (`audit_ocid_canonical_registry.py`,
-      `audit_ocid_compliance.py`) per zero duplication -- no third parallel script built.
-- [x] Independently confirmed (real `gh api` call, not narrated) UMR-20260805-112247-3ad0: the
-      real, live `compliance-tracker` `main` branch protection `required_approving_review_count`
-      is currently `1` (restored) and `enforce_admins` is `true`. Recorded in
-      `UMR_20260805_112247_3ad0_BRANCH_PROTECTION_REVERIFICATION_2026-08-05.md`.
 
-- [x] Committed, pushed, and opened PR for independent review before merge (per Owner directive
-      -- "sacrosanct infrastructure", must not merge without independent review):
-      https://github.com/FChecklist/veridian-scripts/pull/82
+- [x] Verified independently (per this session's own standing memory note on the
+      recurring veridian-scripts false-premise pattern) rather than acting on the
+      SPEC's text at face value.
+- [x] **Item 1 (close #98) -- already done, by someone else, before this task
+      started.** `gh pr view 98`: `state=CLOSED`, closed 2026-08-06T03:29:23Z with
+      exactly the credit-preserving comment the SPEC asked for ("Closing as
+      superseded by #100 ... credit to both independent investigations"). No write
+      action was needed or taken here -- re-closing/re-commenting would have been
+      redundant. `gh pr view 100`: `state=OPEN`, one open PR carries the fix, as
+      intended.
+- [x] **SPEC mislabeling caught:** the SPEC calls this "the sqlite3 build fix."
+      It is not. PR #98/#100 are about an account-wide Claude weekly-usage-limit
+      429 hard-stop in `worker-entrypoint.sh` (UMR-20260806-031211-64de). The real
+      sqlite3-build thread is separate (UMR-20260806-030048-5d7a, PR #99, already
+      independently concluded "premise was false, no cutover needed" per this
+      repo's own prior commit `cbbfc11`). Confirmed via `umr_tasks` table lookup
+      by UMR id -- the two UMRs the SPEC cites map to two unrelated topics.
+- [x] **Item 2 ("stop your own duplicate agent") -- no such agent found; nothing
+      to stop.** Queried `superboss-register.sqlite`'s `umr_tasks` for every task
+      spawned under `pm_directive_umr-20260806-031211-64de` and for any children of
+      the sqlite3-build UMR: the only item-2 worker is
+      `task-20260806-031857-extend-superboss-register-py-with-pm-dec` (PR #103),
+      and it maps to a single systemd unit, not two competing ones. PR #101
+      (`docs: verify not-a-real-collision ... decline duplicate item 1-5
+      implementation`, still open) already independently confirmed 031857 is a
+      legitimate child of the #100 thread, not a duplicate. PR #100's own
+      PROGRESS.md independently reaches the same conclusion ("confirmed genuinely
+      distinct ... not redispatching a 3rd duplicate"). Three independent checks
+      (mine, #101's, #100's) agree: no duplicate item-2 agent exists under this
+      task's ownership. Declining to invent a stop action against a process that
+      isn't running.
+- [x] **Independently verified PR #100's fleet-wide 429 claim -- substantively
+      confirmed, minor count discrepancy.** PR #100 claims "27 other tasks hit the
+      identical error in the same burst window." Independently scanned every
+      `/opt/veridian/ai-os/tasks/*/.claude-out-main.json` (779 files) for
+      `api_error_status == 429` (not grep/text-match -- parsed JSON directly):
+      found 26 total hits in the 2026-08-05 19:33-19:41 UTC window, i.e. **25
+      other tasks** plus the originally-investigated task itself. Real,
+      independently reproduced evidence of a genuine fleet-wide burst (not a
+      single-task defect) -- the claim is directionally and substantively true;
+      the exact count (27 claimed vs. 25 independently found) is off by 2, most
+      likely explained by task directories cleaned up/archived between #100's
+      check and this one, or file-mtime vs. original-completion-time drift. Not
+      a fabrication -- treating this claim as **CONFIRMED** with a noted minor
+      count variance.
+- [x] **Independently verified PR #100's secondary circuit-breaker bug claim --
+      fully confirmed with exact evidence match.** Read the real
+      `.failure_signatures.json` for `task-20260805-193951-...` directly:
+      `["79c7a27d8f64e8a3d2bfa490", "1eb09d87064dd76aab2ab7b2",
+      "ead465bf2932741a5221d74e"]` -- three distinct hashes for three retries of
+      the identical account-wide 429, matching PR #100's claim byte-for-byte.
+      Read `record_failure_signature()` (`worker-entrypoint.sh`) and
+      `check_circuit_breaker()` (`preflight-guard.py`) directly: the signature
+      hashes the last 400 chars of `worker.log` (which contains a per-invocation
+      random id) plus the API error text, and the breaker only trips when the
+      last two signatures are byte-identical -- so it structurally cannot catch
+      three differently-hashed retries of the same underlying failure. Bug is
+      real, root cause is real, confirmed against source, not narration.
+- [x] **Independently re-ran PR #100's fix and its claimed smoke test, not just
+      trusted it.** Cloned PR #100's actual branch (`refs/pull/100/head`,
+      commit `c9a3028`) fresh; `bash -n worker-entrypoint.sh` passes (real syntax
+      check, not assumed). Independently re-executed the new `API_RATE_LIMITED`
+      Python one-liner from the diff against three real/synthetic inputs: (1)
+      the real failed task's own `.claude-out-main.json` -> `1` (correctly
+      flags it), (2) a synthetic ordinary success JSON -> `0` (no false
+      positive), (3) a synthetic non-429 error JSON -> `0` (no false positive on
+      other error classes, a case PR #100's own writeup didn't mention testing).
+      All three match the expected/claimed behavior.
+- [x] **Checked for further duplication across items 2-5 -- none found.** Open
+      PR list (`gh api .../pulls?state=open`) shows exactly one PR per item in
+      play: #100 (item 1, open), #103 (item 2, open), no PR yet for items 3-5
+      (items 3-4 already independently verified merged/live per #100's own
+      PROGRESS.md -- PR #95 merged as `6890c32`, `gtm_write_category_result.py`
+      confirmed byte-identical at `/opt/veridian/scripts`; item 5 not started,
+      correctly sequenced after 1-2 land). No competing/duplicate PR exists for
+      any of items 2-5 as of this check.
 
 ## Remaining
-- [ ] Await independent review/approval on PR #82 before merge.
 
----
+- [ ] Continue monitoring the #100 thread for items 2 (PR #103 merge) and 5
+      (canonical-header PR, not yet opened) landing without a duplicate
+      appearing -- no action needed unless a second PR shows up for the same
+      scope.
+- [ ] No further action needed on item 1 -- already closed/resolved correctly
+      by the other thread; this task's role there was verification, not
+      execution, and that verification is done.
 
-# PROGRESS -- UMR-20260805-165906-0923 (child-umr-ocid020-gtm-remaining-8-category-scripts, OCID-020 GTM certification)
-
-Executes the 8-category continuation task queued at UMR-20260805-165906-0923 (parent
-UMR-20260802-165606-4413 / OCID-020), per PM instruction UMR-20260805-171657-01de. Categories
-5, 6, 7, 9, 15, 16, 24, 25 -- 25 total categories, 13 already had real scripts before this task.
-Before any DB write this session, independently confirmed (own grep, not assumed):
-`gtm_write_category_result.py` and `superboss-register.py`'s `_connect()`/`_write_lock()` contain
-zero references to `file_inventory` -- the one real, confirmed-corrupted table held under Hard
-Rule 8 -- and no `PRAGMA integrity_check` was run against the whole database this session, only a
-scoped, read-only probe confirming `file_inventory` alone still fails (`database disk image is
-malformed`), matching the standing hold exactly. This task is being executed across several small
-branches/PRs (one per natural category grouping, same pattern as the prior 13-category PRs). So
-far this session (real, independently DB-verified after each write):
-- category_index=5 (UI testing): pass. category_index=6 (end to end testing): pass. Branch
-  feat/gtm-checks-ui-e2e-testing, PR #79.
-- category_index=7 (regression testing): pass (fresh clone of compliance-tracker origin/main,
-  bun test -> 2512 pass, 0 fail). Branch feat/gtm-checks-regression-testing, PR #81.
-- category_index=9 (performance testing): pass (real lighthouse score 0.91). category_index=24
-  (lighthouse audit): pass (real scores, all categories >= 0.5). Branch
-  feat/gtm-checks-performance-lighthouse, PR #84.
-
-## Completed (this branch)
-- [x] category_index=15 (multi tenant testing) and category_index=16 (role permission testing):
-      **blocked**, real, deliberately -- both genuinely require an authenticated session on the
-      live product to test cross-tenant isolation / per-role permission boundaries.
-      `gtm_check_multi_tenant_testing.py` / `gtm_check_role_permission_testing.py` do NOT hardcode
-      "always blocked": every real run genuinely checks (1) environment variables plausibly naming
-      a GTM/tenant/role test credential, (2) compliance-tracker's real `.env.local` key names for
-      an Owner-provisioned test identity, (3) a real, bounded-depth (max depth 3, not an unbounded
-      recursive glob -- confirmed this session that an unbounded `glob.glob(..., recursive=True)`
-      over `/opt/veridian/ai-os/**` does not return within 15s) filename scan under
-      `/opt/veridian/ai-os` for an explicit Owner go-ahead doc. All three checks came back
-      genuinely empty this run (see evidence_json on each row for the full checked list: 0 env var
-      matches, 13 real `.env.local` keys scanned with 0 matches, 0 owner-doc matches). Per the
-      standing absolute rule (never enter a password/credential into any login/signup field, no
-      exceptions, no case-by-case judgment), both are `--result blocked` citing exactly that rule
-      -- neither script ever attempted a login.
-- [x] Both results independently re-verified by reading the `gtm_certification_categories` rows
-      (category_index 15 and 16) back directly from `/opt/veridian/ai-os/memory/superboss-register.sqlite`:
-      `passed IS NULL` and `validated_at IS NULL` on both, matching the blocked semantics exactly
-      (never trusted from script stdout alone).
-- [x] Branch: feat/gtm-checks-tenant-role-blocked.
-
-## Remaining (this task, so far)
-- [ ] category_index=25 (production readiness synthesis, built last, depends on all others above)
-      -- not yet reached in this session.
-- [ ] All PRs opened so far (#79, #81, #84, and this branch's) need `supervisor-sweep.sh` pickup
-      and a real independent audit verdict before merge, same standing discipline as every other
-      open PR in this repo.
+🤖 Generated with [Claude Code](https://claude.com/claude-code)

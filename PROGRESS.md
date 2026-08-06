@@ -42,12 +42,55 @@ working-copy already made.
       (1.59GB). Imported into
       `superboss-register.sqlite.recovered-20260806T025938Z` -- non-destructive,
       working copy only.
-- [ ] Step 4: independent verification of the recovered file (integrity_check
-      ok, row-count baselines, `file_inventory` queryable) -- in progress.
-- [ ] Step 5: only if Step 4 passes fully -- final fresh live backup, then
-      atomic `mv` swap of the recovered file onto the live path.
-- [ ] Step 6: post-swap re-verification + resolver/write-through check,
-      then mark `pm_decisions_pending` id=1 resolved.
+- [x] Step 4: independent verification of the recovered file --
+      **FAILED, one specific check**:
+      - `PRAGMA integrity_check` -> `ok` ✓
+      - `ocid_canonical_registry` = 69 ✓ (exact match)
+      - `gtm_certification_categories` = 25 ✓ (exact match)
+      - `file_inventory` now queryable, 27,249 rows (was fully unreadable on
+        live) -- the actual corruption is genuinely fixed in this recovered
+        copy ✓
+      - `umr_tasks` = 6,832 in the recovered file **vs 6,876 on live right
+        now** -- **FAILS** the "at least as high as current live" check.
+        Root cause: the working copy was snapshotted at 02:59:38Z (by the
+        predecessor task); `.recover`+rebuild took ~14 min on this 1.6GB
+        DB; live is actively receiving writes throughout (WAL mode,
+        confirmed active writer PIDs). The gap was 23 rows when I first
+        compared it and had grown to 44 by the time I finished a full
+        per-table sweep -- it is still growing every second this stays
+        open. A broader 40-table sweep confirms the same pattern on 6 other
+        tables (`instructions`, `work_items`, `actions`,
+        `directive_compliance_runs`, `wiring_registry`,
+        `pm_report_snapshots` all show the recovered copy trailing live by
+        similarly small amounts) -- consistent live-write drift, not a
+        recovery defect.
+- [ ] Step 5/6: **not attempted** -- per the sequence's own explicit
+      instruction ("if any real check at any real step fails, stop
+      immediately, do not proceed further, leave the real live file
+      completely untouched, and report... instead of improvising
+      further"), stopped here rather than swapping in a working copy that
+      would silently roll back ~44+ rows of live `umr_tasks` writes (and
+      smaller amounts on 6 other tables). **Live file confirmed untouched**
+      -- read-only access only throughout Steps 3-4.
+
+**This is a real, specific, reportable blocker, not a false premise**: the
+recovery mechanism itself works correctly end-to-end (integrity check
+clean, `file_inventory` genuinely recovered, exact matches on the two
+static-reference tables) -- the remaining problem is purely that this
+sequence spans two separate task invocations with an Owner-decision pause
+in between (sourcing a working `sqlite3` build), during which the live DB
+kept accepting writes, so the existing working copy is now stale relative
+to live and getting staler. Did not improvise a fix (e.g. silently taking a
+fresh working copy and re-running Steps 1-3 solo, or hand-patching the
+row-count delta into the recovered file) since the current SPEC explicitly
+said resume "starting again at step three" using the existing artifacts,
+not restart from step one. Flagging the two real options for the Owner:
+(a) authorize a fresh Steps 1-3 cycle right now (working copy taken
+seconds before the Step 5 swap, minimizing the drift window to roughly the
+`.recover` runtime, ~14 min for this DB size), or (b) accept the small,
+enumerated live-write gap as a one-time loss for this non-critical-path
+recovery. `pm_decisions_pending` id=1 left as `status=open` (not resolved
+-- recovery did not complete).
 
 ## Item 2 -- Item F / projexa-ai.com architecture decision
 
@@ -98,7 +141,21 @@ item 12.
       `COMPLETED.yaml`, citing it explicitly, without claiming to have
       executed a cutover that was already live -- in progress.
 
+- [x] Opened **PR #970**: https://github.com/FChecklist/compliance-tracker/pull/970
+      -- adds the Owner architecture-decision citation + b12046eb citation to
+      `IMPLEMENTATION_MATRIX_2026-08-02.md` and `COMPLETED.yaml`, documents
+      the live-state re-verification, does not claim any cutover was
+      executed.
+
 ## Remaining
-- [ ] Item 1: finish Steps 4-6, report per-step outcome.
-- [ ] Item 2: land the architecture-decision citation, open PR, report
-      outcome.
+- [ ] Item 1: Steps 5-6 blocked pending Owner decision on the live-write
+      staleness gap (see above). Recovered artifacts left in place at
+      `/opt/veridian/ai-os/memory/superboss-register.sqlite.recovered-20260806T025938Z`
+      (and the intermediate `.recover-sql-*.sql`) for either a fresh
+      Steps 1-3 redo or direct reuse once the Owner decides. Live file
+      untouched throughout. `pm_decisions_pending` id=1 intentionally left
+      `status=open` -- not resolved, and the live corrupted DB itself was
+      not written to for any bookkeeping update (would touch the live path
+      unnecessarily while corruption/recovery is still in flight).
+- [ ] Item 2: PR #970 awaiting review/merge (compliance-tracker's own
+      audit/CI gate). No live routing/DNS action needed or taken.

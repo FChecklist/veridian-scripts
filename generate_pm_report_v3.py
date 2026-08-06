@@ -594,6 +594,33 @@ def get_pm_decisions_pending(sbr):
 
 
 # ---------------------------------------------------------------------------
+# Section 8: PM child-UMR proposals pending decision -- read-only, verbatim
+# ---------------------------------------------------------------------------
+def get_open_child_umr_proposals(sbr):
+    """Standing PM-decision-gate workflow (UMR-20260806-034750-05cf, parent
+    chain UMR-20260805-185000-e94f / UMR-20260802-165606-4413 / OCID-020):
+    "thinking is by the Project Manager, execution is by AI agents, AI
+    agents do not think for themselves." Applies to real novel findings
+    outside already-approved scope -- not retroactive to already-authorized
+    broad-category work already in flight (e.g. the GTM script build).
+
+    Read-only, verbatim read of superboss-register.py's own
+    get_open_child_umr_proposals() (status IN ('proposed', 'redirected') --
+    same "script only ever lists, never decides" convention
+    get_pm_decisions_pending() above already follows for pm_decisions_pending)
+    so the PM sees every real pending proposal every report cycle without a
+    separate query."""
+    try:
+        conn = sbr._connect()
+        sbr._ensure_pm_child_umr_proposals_table(conn)
+        proposals = sbr.get_open_child_umr_proposals(conn)
+        conn.close()
+    except sqlite3.Error as e:
+        return {"error": str(e)}
+    return proposals
+
+
+# ---------------------------------------------------------------------------
 # Assembly + rendering
 # ---------------------------------------------------------------------------
 def build_report(sbr):
@@ -644,6 +671,7 @@ def build_report(sbr):
 
     open_issues = build_open_issues(gtm_section, db_integrity, ram_swap, load_avg)
     decisions = get_pm_decisions_pending(sbr)
+    child_umr_proposals = get_open_child_umr_proposals(sbr)
 
     report = {
         "report_format_version": REPORT_FORMAT_VERSION,
@@ -673,6 +701,7 @@ def build_report(sbr):
         },
         "open_issues": open_issues,
         "pm_decisions_pending": decisions,
+        "pm_child_umr_proposals_pending": child_umr_proposals,
         "current_flat_fields": current_flat,
         "thresholds": {
             "SWAP_FREE_PCT_WARN_THRESHOLD": SWAP_FREE_PCT_WARN_THRESHOLD,
@@ -778,6 +807,24 @@ def render_report_text(report):
             lines.append(f"      detail: {d['detail']}")
             lines.append(f"      recommended_option: {d['recommended_option']}")
             lines.append(f"      related_umr: {d['related_umr']}")
+
+    h("8. PM CHILD-UMR PROPOSALS AWAITING DECISION (read-only from pm_child_umr_proposals)")
+    lines.append("Standing gate (UMR-20260806-034750-05cf): thinking is by the PM, execution is by "
+                  "AI agents -- AI agents do not think for themselves. Applies to real novel findings "
+                  "outside already-approved scope; not retroactive to already-authorized broad-category "
+                  "work already in flight.")
+    proposals = report["pm_child_umr_proposals_pending"]
+    if isinstance(proposals, dict) and "error" in proposals:
+        lines.append(f"ERROR reading pm_child_umr_proposals: {proposals['error']}")
+    elif not proposals:
+        lines.append("None open.")
+    else:
+        for p in proposals:
+            lines.append(f"  #{p['id']} [{p['proposed_ts']}] {p['title']}  (status={p['status']})")
+            lines.append(f"      issue: {p['issue']}")
+            lines.append(f"      proposed_action: {p['proposed_action']}")
+            lines.append(f"      proposed_by: {p['proposed_by']}")
+            lines.append(f"      child_umr_id: {p['child_umr_id']}  related_umr: {p['related_umr']}")
 
     lines.append("")
     lines.append("=" * 78)

@@ -51,11 +51,13 @@ CANONICAL SCRIPT (Owner directive, UMR-20260806-031211-64de / UMR-20260806-03310
 / UMR-20260806-033709-82d7): this is the one real canonical script for every real read
 and every real write against superboss-register.sqlite -- umr_tasks, ocid_canonical_registry,
 ocid_master_standard_audit_log, gtm_certification_categories, pm_decisions_pending,
-pm_report_snapshots, and every other table in this file. Real raw SQL against this file
-from outside this script (a one-off sqlite3.connect() in another script, an ad hoc
-migration, a bare INSERT/UPDATE) is NOT the standard procedure -- extend the function
-library here instead (see insert_pm_decision_pending()/resolve_pm_decision_pending()/
-record_ocid_master_standard_audit_event()/insert_ocid_artifact_link()/update_umr_task()
+pm_report_snapshots, pm_child_umr_proposals, and every other table in this file. Real
+raw SQL against this file from outside this script (a one-off sqlite3.connect() in
+another script, an ad hoc migration, a bare INSERT/UPDATE) is NOT the standard
+procedure -- extend the function library here instead (see insert_pm_decision_pending()/
+resolve_pm_decision_pending()/propose_child_umr_action()/pm_decide_on_proposal()/
+record_proposal_completion()/record_ocid_master_standard_audit_event()/
+insert_ocid_artifact_link()/update_umr_task()
 for the established convention: module-level _connect()/_write_lock(), caller-owned
 commit, an idempotent _ensure_<table>_table() at the top of anything that creates
 schema) and wire in a CLI subcommand if one's needed, rather than writing a second
@@ -692,6 +694,7 @@ def _migrate_schema(conn):
     _ensure_ocid_master_standard_audit_log_table(conn)
     _ensure_ocid_compliance_tables(conn)
     _ensure_pm_decisions_pending_table(conn)
+    _ensure_pm_child_umr_proposals_table(conn)
     _ensure_registry_taxonomy_notes_table(conn)
     _seed_registry_taxonomy_notes(conn)
     _migrate_instructions_content_hash(conn)
@@ -5517,6 +5520,302 @@ def cmd_resolve_pm_decision_pending(args):
         sys.exit(1)
 
 
+# ---------------------------------------------------------------------------
+# pm_child_umr_proposals -- "thinking is by the Project Manager, execution is
+# by AI agents, AI agents do not think for themselves" standing workflow gate
+# (UMR-20260806-034750-05cf, parent chain UMR-20260805-185000-e94f /
+# UMR-20260802-165606-4413 / OCID-020). Applies to real novel findings OUTSIDE
+# already-approved scope; it does NOT apply retroactively to already-
+# authorized broad-category work already in flight (e.g. the GTM script
+# build) -- that authorization already covers its own scope. No retroactive
+# enforcement of that distinction is built here, it is only noted (per this
+# task's own explicit instruction).
+#
+# REAL SCHEMA DECISION (extend pm_decisions_pending vs a new table), decided
+# and documented HERE rather than skipped:
+#
+# Read pm_decisions_pending's real, live schema and both of its real
+# functions in full first (see _ensure_pm_decisions_pending_table/
+# insert_pm_decision_pending/resolve_pm_decision_pending above) before
+# deciding. Chose a genuinely SEPARATE table (pm_child_umr_proposals), not an
+# extension of pm_decisions_pending, for three real reasons:
+#
+#  1. Different real-world object, different real lifecycle.
+#     pm_decisions_pending models an OPEN QUESTION a PM must answer (a
+#     multi-option menu -- options_json/recommended_option -- with one
+#     terminal close event: opened -> {resolved,...}, closed_ts/closed_by/
+#     closed_note). This new workflow models an AI-INITIATED PROPOSAL with a
+#     genuinely three-stage lifecycle (proposed -> approved/redirected/held
+#     -> completed) and a real completion event carrying structured
+#     implementation evidence (commit/file_path/evidence) that has no analog
+#     anywhere in pm_decisions_pending -- closed_note there is one freeform
+#     text field, not three distinct structured provenance columns.
+#  2. Extending pm_decisions_pending with the task's own suggested nullable
+#     columns (decision_level, proposed_by, verdict, completion_commit/
+#     completion_file_path/completion_evidence) would leave EVERY existing
+#     pm_decisions_pending row (e.g. the real backfilled file_inventory
+#     corruption-recovery decision) permanently NULL across all of them
+#     forever (they are not proposals and never will be), while every new
+#     proposal row would leave options_json/recommended_option permanently
+#     NULL (a proposal's real shape is issue + proposed_action, not a
+#     multi-option menu). Two genuinely different real objects sharing one
+#     wide table with disjoint, permanently-NULL column sets in both
+#     directions is exactly the anti-pattern the Owner's zero-duplication
+#     instruction argues against once read as "model each real thing once,
+#     correctly" rather than only "never write the same SQL twice" -- a
+#     single status/CHECK-constraint column would also have to serve two
+#     unrelated state machines ('open'/'resolved' vs 'proposed'/'approved'/
+#     'redirected'/'held'/'completed') at once, or need a second discriminator
+#     column anyway, which is a new table in substance if not in name.
+#  3. The two tables genuinely relate (both are "things a PM decides about"),
+#     and that relationship is real and worth surfacing -- but it is better
+#     expressed by generate_pm_report_v3.py reading and rendering each as its
+#     own clearly-labeled report section (matching the existing "7. PM
+#     DECISION REQUIRED" convention) than by forcing one shared table.
+#
+# REAL DESIGN DECISION #2 (why propose_child_umr_action() does NOT call
+# resource_governor.py's submit() to mint a live umr_tasks row at propose
+# time -- the "or document why it doesn't" branch this task's own SPEC
+# explicitly allows):
+#
+# submit()'s task_spec accepted here has exactly two task_kinds
+# ("systemctl_action", "veridian_task_create") and, for any accepted
+# submission, unconditionally writes the new umr_tasks row with
+# status='queued' (see submit()'s own real body in resource_governor.py).
+# 'queued' is resource_governor.py's live dispatch-pickup signal:
+# next_queued_task() selects any status='queued' row, and this server's real,
+# currently-active veridian-cron-dispatch-tick.timer ticks every 30 seconds
+# (confirmed live: _perform_spawn()'s own docstring cites this exact figure).
+# For task_kind='veridian_task_create' specifically, _perform_spawn() then
+# runs `veridian-task.py create --title ... --prompt ...` for real -- i.e. it
+# spawns a genuine new AI worker to actually go implement inputs["prompt"].
+# This is not hypothetical: independently confirmed live against
+# /opt/veridian/ai-os/memory/superboss-register.sqlite while building this
+# task that this very task's own parent UMR, UMR-20260806-034750-05cf, is
+# itself exactly such a row (task_kind='veridian_task_create',
+# status='running', source_trigger='owner_dispatch_gateway') -- the literal
+# mechanism that dispatched the AI agent doing this work.
+#
+# Calling submit() from propose_child_umr_action() would therefore, within
+# ~30 real seconds and with zero further gating, spawn a real AI worker to
+# actually start implementing the proposed action -- directly defeating the
+# one real thing this feature exists to guarantee ("explicitly NOTHING
+# implemented yet at this point", gated on a real PM decision that has not
+# happened yet). umr_tasks.status also has a fixed CHECK constraint
+# (UMR_STATUSES, see _ensure_umr_table above) with no "proposed, awaiting
+# decision" pre-queue state to fall back on, and widening that CHECK
+# constraint on a shared, actively-dispatched, ~7000-row live queue table is
+# real schema surgery this task's SPEC does not ask for and this change does
+# not attempt.
+#
+# Given that, propose_child_umr_action() mints child_umr_id using the exact
+# same real ID-generation convention upsert_umr_task() itself uses internally
+# when no id is supplied (_new_id("UMR") -- see upsert_umr_task() above) --
+# so the identifier is genuinely indistinguishable in format from any other
+# real UMR in this system -- but does NOT write a live umr_tasks row for it.
+# It is a real, uniquely-generated, durable tracking anchor referenced from
+# proposal through completion, not (yet) a dispatch-queue entry. The actual
+# decision to spend real dispatch/execution resources against it stays a
+# separate, deliberate action outside this feature's automatic control --
+# exactly the "AI agents do not think for themselves" property this whole
+# workflow exists to enforce; pm_decide_on_proposal() below follows the same
+# reasoning and does not auto-submit() on 'approve' either, for the identical
+# reason (the demo/verification round-trip this task itself requires would
+# otherwise leave a real, unwanted, spurious 'queued' row loose against the
+# live production database, picked up for real execution within 30 seconds
+# by this environment's real dispatch-tick timer).
+# ---------------------------------------------------------------------------
+PM_CHILD_UMR_PROPOSAL_STATUSES = ("proposed", "approved", "redirected", "held", "completed")
+PM_CHILD_UMR_PROPOSAL_DECISIONS = ("approve", "redirect", "hold")
+
+
+def _ensure_pm_child_umr_proposals_table(conn):
+    """Standalone idempotent create for pm_child_umr_proposals -- same
+    defensiveness convention as _ensure_pm_decisions_pending_table/
+    _ensure_umr_table above: works even on a DB that predates this table.
+    See the real schema-decision comment block immediately above this
+    function for why this is a separate table, not an extension of
+    pm_decisions_pending."""
+    status_sql = ",".join("'" + s + "'" for s in PM_CHILD_UMR_PROPOSAL_STATUSES)
+    decision_sql = ",".join("'" + s + "'" for s in PM_CHILD_UMR_PROPOSAL_DECISIONS)
+    conn.execute(f"""CREATE TABLE IF NOT EXISTS pm_child_umr_proposals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        proposed_ts TEXT NOT NULL,
+        title TEXT NOT NULL,
+        issue TEXT NOT NULL,
+        proposed_action TEXT NOT NULL,
+        proposed_by TEXT NOT NULL,
+        related_umr TEXT,
+        child_umr_id TEXT,
+        status TEXT NOT NULL DEFAULT 'proposed' CHECK(status IN ({status_sql})),
+        decided_ts TEXT,
+        decided_by TEXT,
+        decision TEXT CHECK(decision IN ({decision_sql})),
+        decision_note TEXT,
+        completed_ts TEXT,
+        completed_by TEXT,
+        completion_commit TEXT,
+        completion_file_path TEXT,
+        completion_evidence TEXT
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_pm_child_umr_proposals_status "
+                 "ON pm_child_umr_proposals(status)")
+    conn.commit()
+
+
+def propose_child_umr_action(conn, title, issue, proposed_action, *, proposed_by,
+                              related_umr=None):
+    """AI deposits a real proposal: what the issue is, what AI proposes to do
+    about it -- explicitly NOTHING implemented yet at this point (real
+    status='proposed'). Mints a real, uniquely-generated UMR-formatted
+    identifier (child_umr_id, via _new_id("UMR"), the same convention
+    upsert_umr_task() itself uses) as the durable tracking anchor this
+    proposal is about. Deliberately does NOT call resource_governor.py's
+    submit() to write a live, dispatch-eligible umr_tasks row here -- see the
+    real design-decision comment block above this function's table for the
+    full, verified reasoning (submit() would make this proposal eligible for
+    real, unauthorized execution within ~30 seconds, before any PM decision
+    exists). `related_umr` is an optional caller-supplied parent/context UMR
+    (e.g. the UMR chain that prompted this proposal) -- distinct from the
+    newly-minted child_umr_id. Caller owns conn/transaction/commit, same
+    convention as insert_pm_decision_pending() above -- this function itself
+    never commits. Returns (proposal_id, child_umr_id)."""
+    child_umr_id = _new_id("UMR")
+    cur = conn.execute(
+        "INSERT INTO pm_child_umr_proposals "
+        "(proposed_ts, title, issue, proposed_action, proposed_by, related_umr, "
+        "child_umr_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed')",
+        (_now_iso(), title, issue, proposed_action, proposed_by, related_umr, child_umr_id),
+    )
+    return cur.lastrowid, child_umr_id
+
+
+def pm_decide_on_proposal(conn, proposal_id, decision, decided_by, *, note=None):
+    """The real PM decision gate: approve (AI may now implement), redirect
+    (changes scope/approach -- `note` should cite what changed), or hold (no
+    action yet, waiting -- `note` optional). Only ever moves a row currently
+    in 'proposed', 'redirected', or 'held' (a held proposal is real-world
+    revisitable -- a PM may later approve/redirect/hold it again; a
+    'proposed'/'redirected' row is, by construction, always awaiting exactly
+    this decision). Idempotent-by-guard, same convention as
+    resolve_pm_decision_pending() above: a proposal already 'completed', or
+    an unknown id, is a real no-op (returns False), never a silent overwrite.
+    decision='approve' -> status='approved'; decision='redirect' ->
+    status='redirected'; decision='hold' -> status='held'. Deliberately does
+    NOT call resource_governor.py's submit() on approve -- see the real
+    design-decision comment block above this table for why (would spawn a
+    real, unauthorized worker within ~30 seconds, incl. during this feature's
+    own demo/verification round-trip against the live production database).
+    Caller owns conn/transaction/commit -- this function itself never
+    commits. Returns True if a real decidable row was found and updated,
+    False otherwise."""
+    if decision not in PM_CHILD_UMR_PROPOSAL_DECISIONS:
+        raise ValueError(f"decision must be one of {PM_CHILD_UMR_PROPOSAL_DECISIONS}, got {decision!r}")
+    new_status = {"approve": "approved", "redirect": "redirected", "hold": "held"}[decision]
+    cur = conn.execute(
+        "UPDATE pm_child_umr_proposals SET status=?, decision=?, decided_ts=?, decided_by=?, "
+        "decision_note=? WHERE id=? AND status IN ('proposed', 'redirected', 'held')",
+        (new_status, decision, _now_iso(), decided_by, note, proposal_id),
+    )
+    return cur.rowcount > 0
+
+
+def record_proposal_completion(conn, proposal_id, commit_sha, file_path, evidence, completed_by):
+    """AI records real completion once actually implemented, on the same row
+    the proposal/decision lifecycle already lives on: the real artifact
+    (`file_path`), the real commit (`commit_sha`), real evidence
+    (`evidence`), who completed it (`completed_by`). Only ever moves a row
+    currently in status='approved' -- a real requirement, not just a
+    convention: completion without a prior real PM approve is exactly the
+    "AI thinks for itself" failure this whole workflow exists to prevent.
+    Idempotent-by-guard, same convention as resolve_pm_decision_pending()/
+    pm_decide_on_proposal() above -- a proposal not currently 'approved'
+    (already completed, still proposed/redirected/held, or unknown id) is a
+    real no-op (returns False). Caller owns conn/transaction/commit -- this
+    function itself never commits. Returns True if a real approved row was
+    found and completed, False otherwise."""
+    cur = conn.execute(
+        "UPDATE pm_child_umr_proposals SET status='completed', completed_ts=?, completed_by=?, "
+        "completion_commit=?, completion_file_path=?, completion_evidence=? "
+        "WHERE id=? AND status='approved'",
+        (_now_iso(), completed_by, commit_sha, file_path, evidence, proposal_id),
+    )
+    return cur.rowcount > 0
+
+
+def get_open_child_umr_proposals(conn):
+    """Real, read-only list of every pm_child_umr_proposals row still
+    awaiting a first/renewed PM decision (status IN ('proposed',
+    'redirected') -- 'held' is deliberately excluded: a hold IS already a
+    real PM decision, not an open ask for a first one). Same "script-read-
+    only, report only ever lists, never decides" convention
+    _ensure_pm_decisions_pending_table's own docstring documents for
+    pm_decisions_pending -- used by generate_pm_report_v3.py's own new report
+    section below."""
+    rows = conn.execute(
+        "SELECT id, proposed_ts, title, issue, proposed_action, proposed_by, related_umr, "
+        "child_umr_id, status FROM pm_child_umr_proposals WHERE status IN ('proposed', 'redirected') "
+        "ORDER BY id"
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def cmd_propose_child_umr_action(args):
+    """CLI entry point over propose_child_umr_action() -- see that function's
+    own docstring."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_pm_child_umr_proposals_table(conn)
+    with _write_lock():
+        proposal_id, child_umr_id = propose_child_umr_action(
+            conn, args.title, args.issue, args.proposed_action,
+            proposed_by=args.proposed_by, related_umr=args.related_umr,
+        )
+        conn.commit()
+    conn.close()
+    print(json.dumps({"proposal_id": proposal_id, "child_umr_id": child_umr_id}, indent=2, default=str))
+
+
+def cmd_pm_decide_on_proposal(args):
+    """CLI entry point over pm_decide_on_proposal() -- see that function's
+    own docstring. Exits non-zero (after still printing the real JSON result)
+    when --proposal-id did not name a real, currently-decidable row, same
+    "print then sys.exit(1) on a real refusal/no-op" convention as
+    cmd_resolve_pm_decision_pending above."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_pm_child_umr_proposals_table(conn)
+    with _write_lock():
+        decided = pm_decide_on_proposal(
+            conn, args.proposal_id, args.decision, args.decided_by, note=args.note,
+        )
+        conn.commit()
+    conn.close()
+    print(json.dumps({"proposal_id": args.proposal_id, "decision": args.decision, "decided": decided},
+                      indent=2, default=str))
+    if not decided:
+        sys.exit(1)
+
+
+def cmd_record_proposal_completion(args):
+    """CLI entry point over record_proposal_completion() -- see that
+    function's own docstring. Exits non-zero (after still printing the real
+    JSON result) when --proposal-id was not a real, currently-approved row."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_pm_child_umr_proposals_table(conn)
+    with _write_lock():
+        completed = record_proposal_completion(
+            conn, args.proposal_id, args.commit_sha, args.file_path, args.evidence,
+            args.completed_by,
+        )
+        conn.commit()
+    conn.close()
+    print(json.dumps({"proposal_id": args.proposal_id, "completed": completed}, indent=2, default=str))
+    if not completed:
+        sys.exit(1)
+
+
 def init_db_silent():
     if not os.path.exists(DB_PATH):
         conn = _connect()
@@ -5790,6 +6089,36 @@ if __name__ == "__main__":
     p_respm.add_argument("--status", default="resolved",
                           help="terminal status to record (default: resolved)")
 
+    p_propcu = sub.add_parser("propose-child-umr-action",
+                               help="Standing PM-decision-gate workflow (UMR-20260806-034750-05cf): "
+                                    "AI deposits a real proposal -- nothing implemented yet")
+    p_propcu.add_argument("--title", required=True)
+    p_propcu.add_argument("--issue", required=True, help="what the real issue is")
+    p_propcu.add_argument("--proposed-action", dest="proposed_action", required=True,
+                           help="what AI proposes to do about it")
+    p_propcu.add_argument("--proposed-by", dest="proposed_by", required=True)
+    p_propcu.add_argument("--related-umr", dest="related_umr", default=None,
+                           help="optional parent/context UMR this proposal relates to")
+
+    p_pmdec = sub.add_parser("pm-decide-on-proposal",
+                              help="Standing PM-decision-gate workflow: PM approve/redirect/hold "
+                                   "a real pm_child_umr_proposals row")
+    p_pmdec.add_argument("--proposal-id", dest="proposal_id", type=int, required=True)
+    p_pmdec.add_argument("--decision", required=True, choices=list(PM_CHILD_UMR_PROPOSAL_DECISIONS))
+    p_pmdec.add_argument("--decided-by", dest="decided_by", required=True)
+    p_pmdec.add_argument("--note", default=None,
+                          help="required in spirit for --decision redirect (cite what changed); "
+                               "optional for approve/hold")
+
+    p_propcomp = sub.add_parser("record-proposal-completion",
+                                 help="Standing PM-decision-gate workflow: AI records real "
+                                      "completion of an approved proposal")
+    p_propcomp.add_argument("--proposal-id", dest="proposal_id", type=int, required=True)
+    p_propcomp.add_argument("--commit-sha", dest="commit_sha", required=True)
+    p_propcomp.add_argument("--file-path", dest="file_path", required=True)
+    p_propcomp.add_argument("--evidence", required=True)
+    p_propcomp.add_argument("--completed-by", dest="completed_by", required=True)
+
     args = p.parse_args()
     if args.cmd == "init":
         with _write_lock():
@@ -5889,3 +6218,9 @@ if __name__ == "__main__":
         cmd_insert_pm_decision_pending(args)
     elif args.cmd == "resolve-pm-decision-pending":
         cmd_resolve_pm_decision_pending(args)
+    elif args.cmd == "propose-child-umr-action":
+        cmd_propose_child_umr_action(args)
+    elif args.cmd == "pm-decide-on-proposal":
+        cmd_pm_decide_on_proposal(args)
+    elif args.cmd == "record-proposal-completion":
+        cmd_record_proposal_completion(args)

@@ -1,66 +1,137 @@
-# PROGRESS -- task-20260806-033717-pm-confirmation--push-pr-103-through-rev
+# PROGRESS -- feat/pm-child-umr-proposals-umr20260806034750
 
-SPEC: real PM confirmation (UMR-20260806-033108-9839). Claimed three of five
-items already independently verified done (item 1: PR #100 merged, item 3:
-PR #95 merged, item 4: `gtm_write_category_result.py` live). This task's
-assigned remaining work: get PR #103 (item 2 -- `insert_pm_decision_pending()`/
-`resolve_pm_decision_pending()` in `superboss-register.py`) through real
-review and merged, then immediately do item 5 (canonical SOP comment block
-on `superboss-register.py`, same UMR chain).
+SPEC: UMR-20260806-034750-05cf (parent chain UMR-20260805-185000-e94f /
+UMR-20260802-165606-4413, OCID-020). Build real support in
+`superboss-register.py` (+ its database) for a new standing workflow gate:
+"thinking is by the Project Manager, execution is by AI agents, AI agents do
+not think for themselves." Applies to real novel findings OUTSIDE
+already-approved scope; explicitly NOT retroactive to already-authorized
+broad-category work already in flight (e.g. the GTM script build) -- that
+authorization already covers its own scope. No retroactive enforcement of
+that distinction is built here (per the task's own explicit instruction),
+only noted, here and in code.
 
-## Independent verification (per this repo's known false-premise pattern)
+## Real schema decision (read first, decided honestly, not skipped)
 
-- [x] Confirmed items 1/3/4 really are merged/live as claimed (PR #100,
-      PR #95 both merged on `main`; `gtm_write_category_result.py` present).
-- [x] Confirmed PR #103 was real, open, and **not mergeable** against
-      current `main` -- one conflict, in `PROGRESS.md` only (each task
-      branch rewrites it from scratch as scratch-doc; `superboss-register.py`
-      itself merged clean, no code overlap). Reviewed the actual code diff
-      myself (163 lines): parameterized SQL, idempotent `WHERE status='open'`
-      guard on resolve, matches this repo's established `_ensure_*_table()`/
-      `cmd_*`/`_write_lock()` conventions exactly. Agreed with the prior
-      independent review already recorded in PR #103's own history.
-- [x] Ran the real test suite before touching anything: `tests/test_pm_decisions_pending.py`
-      8/8 passing, full suite 131/131 passing, `python3 -m py_compile` clean.
-      Confirmed live `superboss-register.sqlite`'s `pm_decisions_pending`
-      table untouched (still exactly its one original row, id=1).
-- [x] Resolved the `PROGRESS.md` conflict locally, pushed the merge to PR
-      #103's branch, then found via `gh pr merge 103`: **already merged**
-      (`a8665b47`, 2026-08-06T03:40:06Z) -- a concurrent/duplicate dispatch
-      had independently resolved the identical conflict (own branch
-      `pr103-fix`, functionally identical `superboss-register.py` result --
-      diffed byte-identical against my own resolution, only `PROGRESS.md`
-      differed) and merged it first. This is the same recurring
-      duplicate-dispatch pattern seen on PR #98/#100 (see `c9a3028`) and
-      PR #101 -- documented rather than silently re-attempted.
-- [x] Found item 5 **also already done**: PR #106 (`docs: state
-      superboss-register.py is the one canonical read/write script`),
-      merged 2026-08-06T03:42:36Z, additive-only (15 lines), adds the
-      canonical-script comment block citing this same UMR chain
-      (UMR-20260806-031211-64de / UMR-20260806-033108-9839 /
-      UMR-20260806-033709-82d7). Independently re-read the merged text on
-      `main` via `git cat-file -p` (not `git show <rev>:<path>`, which
-      intermittently truncated output in this session's shell -- a tool
-      artifact, not a repo issue; cross-checked via blob size/line count to
-      confirm) -- text is real, present, accurate.
-- [x] Re-ran the full test suite against final `main` (post both merges):
-      `python3 -m py_compile superboss-register.py` clean, `tests/` 131/131
-      passing.
+Read `pm_decisions_pending`'s real, live schema (`PRAGMA table_info`) and
+both of its real functions (`insert_pm_decision_pending()`/
+`resolve_pm_decision_pending()`, added under UMR-20260806-031558-4dbd, PR
+#103) in full before deciding.
 
-## Outcome
+**Decision: a genuinely separate table, `pm_child_umr_proposals`, not an
+extension of `pm_decisions_pending`.** Full reasoning is written as a code
+comment directly above `_ensure_pm_child_umr_proposals_table()` in
+`superboss-register.py` (not just here) -- summary:
 
-All 5 items of the original plan (UMR-20260806-031211-64de) are now
-genuinely merged on `main`: item 1 (PR #100), item 2 (PR #103), item 3
-(PR #95), item 4 (`gtm_write_category_result.py` live), item 5 (PR #106).
-This task's own contribution was verification + an unused redundant conflict
-resolution (pushed to PR #103's branch, harmless -- the PR was already
-merged by the time of my push, so it had no effect; that branch is now dead,
-merged-and-closed).
+1. Different real-world object, different real lifecycle.
+   `pm_decisions_pending` models an OPEN QUESTION a PM answers (a
+   multi-option menu, one terminal close event: opened -> resolved,
+   `closed_ts`/`closed_by`/`closed_note`). This workflow models an
+   AI-INITIATED PROPOSAL with a genuine three-stage lifecycle (proposed ->
+   approved/redirected/held -> completed) and a real completion event
+   carrying structured implementation evidence (commit/file_path/evidence)
+   with no analog in `pm_decisions_pending`.
+2. The task's own suggested extension columns (`decision_level`,
+   `proposed_by`, `verdict`, `completion_commit`/`completion_file_path`/
+   `completion_evidence`) would leave every existing `pm_decisions_pending`
+   row permanently NULL across all of them (not proposals, never will be),
+   and every new proposal row would leave `options_json`/
+   `recommended_option` permanently NULL (a proposal is issue +
+   proposed_action, not a multi-option menu) -- two different real objects
+   sharing one wide table with disjoint, permanently-NULL columns in both
+   directions, the schema-design reading of the Owner's zero-duplication
+   instruction ("model each real thing once, correctly"), not just
+   "never write the same SQL twice."
+3. The relationship between the two tables is real and worth surfacing --
+   expressed via `generate_pm_report_v3.py` rendering each as its own
+   clearly-labeled report section (matching the existing "7. PM DECISION
+   REQUIRED" convention), not by forcing one shared table.
 
-## Remaining
+## Real design decision #2: why `submit()` is NOT called at propose (or
+approve) time
 
-- [ ] None -- all 5 SPEC items confirmed genuinely merged/live. This PR
-      records that confirmation.
-- [ ] (Not this task's scope, FYI only, carried over from PR #103's own
-      notes) Owner may want to clean up the stale duplicate branch
-      `feat/pm-decisions-pending-writer-umr20260806-031558-4dbd`.
+The task's SPEC explicitly allowed "(or document why it doesn't)" for
+calling `resource_governor.py`'s `submit()` to mint the child UMR. Verified
+live, before deciding:
+
+- `submit()` unconditionally writes an accepted submission's `umr_tasks` row
+  with `status='queued'` -- the live dispatch-pickup signal.
+- `next_queued_task()` selects any `status='queued'` row, and this server's
+  real `veridian-cron-dispatch-tick.timer` ticks every 30 seconds (per
+  `_perform_spawn()`'s own docstring).
+- For `task_kind='veridian_task_create'`, `_perform_spawn()` then runs
+  `veridian-task.py create --title ... --prompt ...` for real -- spawning a
+  genuine new AI worker to actually implement the prompt.
+- Confirmed live against `/opt/veridian/ai-os/memory/superboss-register.sqlite`
+  while building this task: this very task's own parent UMR,
+  UMR-20260806-034750-05cf, IS exactly such a row (`task_kind=
+  'veridian_task_create'`, `status='running'`, `source_trigger=
+  'owner_dispatch_gateway'`) -- the literal mechanism that dispatched the
+  agent doing this work.
+
+Calling `submit()` from `propose_child_umr_action()` (or automatically
+inside `pm_decide_on_proposal()` on `approve`) would, within ~30 real
+seconds and with zero further gating, spawn a real AI worker to start
+implementing the proposed action -- defeating the one thing this feature
+exists to guarantee, and (concretely, for this very task's own required
+demo round-trip) would leave a real, unwanted, spurious `queued` row against
+the live production database. `umr_tasks.status` also has a fixed CHECK
+constraint with no "proposed, awaiting decision" pre-queue state, and
+widening it on a shared, actively-dispatched, ~7000-row live queue table is
+schema surgery this task does not ask for and this change does not attempt.
+
+`propose_child_umr_action()` therefore mints `child_umr_id` using the exact
+same real ID-generation convention `upsert_umr_task()` itself uses
+internally (`_new_id("UMR")`) -- genuinely indistinguishable in format from
+any other real UMR -- but never writes a live `umr_tasks` row for it. The
+actual decision to spend real dispatch/execution resources stays a separate,
+deliberate action outside this feature's automatic control.
+
+## What was built
+
+- `superboss-register.py`: `pm_child_umr_proposals` table (idempotent
+  `_ensure_pm_child_umr_proposals_table()`, wired into `_migrate_schema()`),
+  `propose_child_umr_action()`, `pm_decide_on_proposal()`,
+  `record_proposal_completion()`, `get_open_child_umr_proposals()`, three
+  `cmd_*` CLI wrappers + argparse subcommands (`propose-child-umr-action`,
+  `pm-decide-on-proposal`, `record-proposal-completion`) -- same
+  `_connect()`/`_write_lock()`/caller-owns-commit/idempotent-`_ensure_*`
+  convention as `insert_pm_decision_pending()`/`resolve_pm_decision_pending()`/
+  `record_ocid_master_standard_audit_event()`.
+- `generate_pm_report_v3.py`: new "8. PM CHILD-UMR PROPOSALS AWAITING
+  DECISION" section, read-only via `get_open_child_umr_proposals()`, same
+  pattern as the existing "7. PM DECISION REQUIRED" section
+  (`get_pm_decisions_pending()`).
+- `tests/test_pm_child_umr_proposals.py`: 15 real tests -- schema pin, full
+  propose/approve/complete round-trip, redirect-then-reapprove path, hold
+  path, idempotency guards, unknown-id guards, the open-proposals report
+  filter, CLI end-to-end, and an explicit regression test proving
+  `propose_child_umr_action()` never writes a live `umr_tasks` row.
+- `test_generate_pm_report_v3.py`: extended the existing synthetic fixture
+  (`_build_fake_db`/`_make_fake_sbr_module`) with `pm_child_umr_proposals`
+  support so the pre-existing end-to-end smoke test still passes with the
+  new section wired in.
+
+## Real test results
+
+- `python3 tests/test_pm_child_umr_proposals.py` -- 15/15 passed.
+- `python3 tests/test_pm_decisions_pending.py` -- 8/8 passed (unaffected).
+- `python3 -m pytest test_generate_pm_report_v3.py -q` -- 15 passed.
+- `python3 -m pytest test_*.py tests/ -q` -- 192 passed, 4 errors (all in
+  `test_ocid063_handoff_envelope.py`, a pre-existing missing-`vt`-fixture
+  issue in a file this branch never touches -- confirmed via `git diff
+  --stat main` showing only `generate_pm_report_v3.py`,
+  `superboss-register.py`, `test_generate_pm_report_v3.py` changed, plus the
+  new `tests/test_pm_child_umr_proposals.py`).
+- `python3 -m py_compile superboss-register.py generate_pm_report_v3.py` --
+  clean.
+
+## Real demo round-trip (after merge)
+
+Ran a genuine `propose_child_umr_action()` -> `pm_decide_on_proposal()`
+(approve) -> `record_proposal_completion()` cycle against the real
+production database, then ran `generate_pm_report_v3.py` for real and
+captured its output showing the new section 8 with this round-trip's data.
+Full detail (proposal content, whether it was a real finding or a clearly-
+labeled synthetic demo, and the captured report output) recorded in the
+task's own final report, not duplicated here.

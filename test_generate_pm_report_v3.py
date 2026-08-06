@@ -215,6 +215,14 @@ def _build_fake_db(path):
             detail TEXT NOT NULL, options_json TEXT, recommended_option TEXT, related_umr TEXT,
             status TEXT NOT NULL DEFAULT 'open', closed_ts TEXT, closed_by TEXT, closed_note TEXT
         );
+        CREATE TABLE pm_child_umr_proposals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, proposed_ts TEXT NOT NULL, title TEXT NOT NULL,
+            issue TEXT NOT NULL, proposed_action TEXT NOT NULL, proposed_by TEXT NOT NULL,
+            related_umr TEXT, child_umr_id TEXT, status TEXT NOT NULL DEFAULT 'proposed',
+            decided_ts TEXT, decided_by TEXT, decision TEXT, decision_note TEXT,
+            completed_ts TEXT, completed_by TEXT, completion_commit TEXT,
+            completion_file_path TEXT, completion_evidence TEXT
+        );
         """
     )
     conn.execute(
@@ -235,6 +243,12 @@ def _build_fake_db(path):
     conn.execute(
         "INSERT INTO pm_decisions_pending (opened_ts, title, detail, related_umr, status) VALUES "
         "('2026-08-05T00:00:00+00:00', 'synthetic open decision', 'synthetic detail', 'UMR-x', 'open')"
+    )
+    conn.execute(
+        "INSERT INTO pm_child_umr_proposals (proposed_ts, title, issue, proposed_action, proposed_by, "
+        "related_umr, child_umr_id, status) VALUES ('2026-08-06T00:00:00+00:00', "
+        "'synthetic open proposal', 'synthetic issue text', 'synthetic proposed action text', "
+        "'test-agent', 'UMR-x', 'UMR-20260806-000000-fake', 'proposed')"
     )
     conn.commit()
     conn.close()
@@ -263,8 +277,21 @@ def _make_fake_sbr_module(db_path):
         with lock:
             yield
 
+    def _ensure_pm_child_umr_proposals_table(conn):
+        pass  # real table already created by _build_fake_db above -- true no-op here
+
+    def get_open_child_umr_proposals(conn):
+        rows = conn.execute(
+            "SELECT id, proposed_ts, title, issue, proposed_action, proposed_by, related_umr, "
+            "child_umr_id, status FROM pm_child_umr_proposals WHERE status IN ('proposed', 'redirected') "
+            "ORDER BY id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     mod._connect = _connect
     mod._write_lock = _write_lock
+    mod._ensure_pm_child_umr_proposals_table = _ensure_pm_child_umr_proposals_table
+    mod.get_open_child_umr_proposals = get_open_child_umr_proposals
     return mod
 
 
@@ -323,9 +350,11 @@ def test_end_to_end_smoke_run(tmp_path, monkeypatch):
         "5. IMPLEMENTATION SUMMARY",
         "6. OPEN ISSUES",
         "7. PM DECISION REQUIRED",
+        "8. PM CHILD-UMR PROPOSALS AWAITING DECISION",
         "PLACEHOLDER",
         "synthetic failing evidence",
         "synthetic open decision",
+        "synthetic open proposal",
     ]:
         assert expected in text, f"missing expected section/content: {expected!r}"
 

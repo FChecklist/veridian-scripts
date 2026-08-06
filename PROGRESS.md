@@ -95,6 +95,25 @@ task's own instruction ("only proceed if no live collision is found").
       (`--no-db-write`) -- full sample output with all 5 new sections
       genuinely populated captured in the final report to the Owner/PM.
 
+## Independent review round 1 (task-20260806-042916, PR #115)
+
+Verdict: **reject**. Real bug found: `render_report_text`'s Section 10 block
+checked `m.get("trend") is None` to detect the insufficient-data case, but
+`compute_trend_for_series`'s real insufficient-data shape carries
+`trend="insufficient_data"` (a string, never `None`) and omits
+`first_half_avg`/`second_half_avg`/`pct_change` -- so the safe branch was
+never taken and the else branch raised `KeyError` whenever any one of the 3
+tracked metrics had fewer than 2 non-null values in its window (a realistic
+near-term scenario, e.g. right after this section first ships -- not
+contrived). None of the original 38 new tests exercised
+`render_report_text` itself with that shape (they tested the backend
+helpers and the zero-total-rows path only).
+
+Fixed: check `m.get("trend") == "insufficient_data"` instead of `is None`.
+Added a real end-to-end regression test that calls `render_report_text()`
+itself (not just the backend helpers) with that exact shape. 229/229 full
+suite passing after the fix. Re-adopted for a second independent review
+round.
+
 ## Remaining
-- [ ] Open PR, get independent review via `veridian-task.py adopt` +
-      supervisor review, confirm real merge lands.
+- [ ] Confirm second independent review round passes and real merge lands.

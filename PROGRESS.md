@@ -211,6 +211,84 @@ capability_registry            11
   1,661,845,504 bytes here (~23MB in ~5 min), consistent with the
   confirmed real ongoing write activity noted throughout.
 
-## Remaining
+## STOPPED before Step 6 -- do not proceed, do not self-report success
 
-- [ ] Step 6 (atomic swap under `_write_lock()` + post-swap re-verify)
+Immediately before attempting the atomic swap, `ls -la` on the live memory
+directory turned up a file I never created:
+`superboss-register.sqlite.bak-pre-file_inventory-live-repair-20260806T044301Z`
+(timestamp 2026-08-06T04:43:04Z). That is exactly the kind of "mismatch you
+cannot fully explain" this task's protocol requires stopping for, so Step 6
+was not attempted. Investigated instead of proceeding:
+
+- Found a second, concurrent task directory,
+  `task-20260806-042805-pm-approves-proposal-5--fresh-clean-corr`
+  (`created_at: 2026-08-06T04:28:06Z`, i.e. dispatched *before* this task),
+  independently working the exact same `pm_decisions_pending` id=5 /
+  UMR-20260806-042004-e22f approval.
+- Its `task.yaml`/`PROGRESS.md` show it completed all 6 real steps and
+  `record-owner-proposal-completion` at 2026-08-06T04:45:39Z, via
+  https://github.com/FChecklist/veridian-scripts/pull/118 (commit
+  `f80da2c7ee2b7e99954f2b46f2105ef5a9034584`) -- **using a materially
+  different, better repair strategy than this SPEC's Step 6**: an in-place,
+  single-table rename-swap (`CREATE file_inventory_new` + `INSERT ...
+  SELECT` from its own recovered artifact + `ALTER TABLE ... RENAME` to
+  quarantine the corrupted original + rename the new table into place),
+  rather than a full-file swap. It explicitly rejected the full-file-swap
+  approach this SPEC specifies, reasoning that live had kept accepting
+  real writes across all ~90 tables since the original snapshot and a full
+  swap would silently roll all of that back to fix one table.
+- Independently re-verified all of this directly against the live DB just
+  now, not just trusting that task's self-report:
+  ```
+  $ sqlite3 live "SELECT COUNT(*) FROM file_inventory;"
+  27249
+
+  $ sqlite3 live "SELECT type,name,rootpage FROM sqlite_master WHERE name LIKE 'file_inventory%';"
+  table|file_inventory_corrupted_orig_20260806T044301Z|38
+  table|file_inventory|405938
+
+  $ sqlite3 live "SELECT id,status,closed_by,closed_ts FROM pm_decisions_pending WHERE id=5;"
+  5|completed|PM|2026-08-06T04:24:11.871033+00:00
+
+  $ sqlite3 live "SELECT COUNT(*) FROM umr_tasks;"
+  7078
+
+  $ gh pr view 118 --repo FChecklist/veridian-scripts --json commits
+  -- real commit, authored 2026-08-06T04:42:49Z
+  ```
+  `file_inventory` really is readable and correct on live now; the old
+  corrupted tree really is quarantined (harmless, matches this repo's
+  existing `*.CORRUPTED-*` convention of preserving rather than deleting);
+  `pm_decisions_pending` id=5 really is `status=completed`; `umr_tasks`
+  really is at 7078, consistent with continued organic growth, not a
+  rollback. **The corruption recovery this task was dispatched to perform
+  is already done, correctly, by someone else.**
+
+**Why I did not proceed to Step 6 anyway:** this SPEC's Step 6 is a
+full-file `rename` of `recovered-fresh.sqlite` (a snapshot frozen at
+2026-08-06T04:38:18Z, Step 1 of *this* run) directly over the live path.
+Doing that now would silently destroy the already-completed, already
+independently-verified repair described above, and roll back every one of
+the ~90 tables in the live DB to the 04:38:18Z snapshot -- discarding all
+real writes made since, including the very
+`record-owner-proposal-completion` record that closed this same proposal at
+04:45:39Z. That is a real, severe, irreversible data-loss action against
+production. Not attempted.
+
+This task's own artifacts (Steps 1-5: fresh backup, working copy,
+`recovered-fresh.sqlite`, second pre-swap backup) never touched the live
+file -- everything through Step 5 was copies/reads only. The two backup
+files this task created under `/opt/veridian/backups/sqlite-daily/`
+(`*20260806T043818Z-pre-file_inventory-recover-fresh.bak`,
+`*20260806T044325Z-pre-swap-fresh.bak`) are left in place as harmless
+historical record, matching this project's existing backup-retention
+convention. Scratch working files under `/tmp/veridian-recovery-work/`
+(the working copy, recover SQL, and `recovered-fresh.sqlite`) have been
+deleted -- they were superseded the moment the concurrent task's repair
+landed, and disk on `/` was at 94-96% full.
+
+**Status: STOPPED, not pending_review.** Steps 1-5 were performed for
+real (see logs above) but are now moot -- the underlying corruption they
+were built to fix is already fixed, by a concurrent task, via a better
+approach. Not calling `record-owner-proposal-completion` (already called,
+correctly, by the other task). No further action taken by this task.

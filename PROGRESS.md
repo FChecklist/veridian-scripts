@@ -1,89 +1,95 @@
-# PROGRESS -- task-20260806-043900-collision-signal-narrow-umr-match
+# PROGRESS -- task-20260806-044951-real-bug--collision-detection-too-broad
 
-SPEC: UMR-20260806-043900-8c48 (real PM finding, confirmed live in
-umr_tasks), relates to UMR-20260806-041307-0bfd and real merged PR #115.
-Section 12 (deterministic collision detection) was too broad: raw file-path
-overlap across the FULL open-PR historical backlog, no exclude list, no
-recency scoping -- flooded the section with ~12,800 false-positive lines
-(unrelated PRs merely both touching a normal shared file like
-PROGRESS.md/package.json), pushing the whole report to 3.7MB/13,960 lines.
+SPEC: real PM finding, relates to UMR-20260806-041307-0bfd and real merged
+PR #115. Section 12 (deterministic collision detection) compares every open
+PR across the entire historical backlog and flags any two sharing a common
+file (`package.json`, `ai-os/boss/ACTIVE-CLAIMS.yaml`,
+`ai-os/CONSTITUTION.yaml`, `src/lib/db/schema.ts`) as a collision --
+false-positive flood that grew the report to 3.7MB/13,960 lines. Requested
+fix: narrow the collision definition to same-UMR/task-identity citation as
+the primary signal, demote file-overlap to a recency-scoped secondary
+signal with a fixed exclude list, and add a hard output cap.
 
-## Fix (PM's exact spec, all 4 items)
+## Independent verification done first (standing practice: verify before
+## acting -- prior urgent PM SPECs in this repo have not always matched
+## live state)
 
-1. **Primary signal redefined**: two open PRs (or two running
-   veridian-worker@*/veridian-supervisor@* units) citing the same real
-   UMR-YYYYMMDD-HHMMSS-xxxx id OR the same real task-YYYYMMDD-HHMMSS-<slug>
-   task-identity token, anywhere in title+body+branch-name (PRs) or
-   prompt.txt (workers) -- `extract_citation_tokens()`,
-   `detect_pr_citation_collisions()`. This is what every real collision
-   this session (PR #98/#100, #102/#103, #110/#111, #115/#116) actually
-   looked like.
-2. **File-overlap demoted to secondary, time-scoped**: `detect_pr_file_collisions()`
-   now only considers PRs with `createdAt` within the last
-   `COLLISION_FILE_OVERLAP_MAX_AGE_HOURS` (48) hours -- not the full
-   historical backlog. PRs with missing/unparseable `createdAt` are treated
-   as NOT recent (conservative default).
-3. **Fixed exclude list added**: `COLLISION_FILE_OVERLAP_EXCLUDE_FILES` --
-   `PROGRESS.md`, `package.json`, `package-lock.json`, `bun.lock`,
-   `yarn.lock`, `pnpm-lock.yaml`, `ai-os/boss/ACTIVE-CLAIMS.yaml`,
-   `ai-os/CONSTITUTION.yaml`, `src/lib/db/schema.ts`, `tsconfig.json` (the
-   PM's named list plus `yarn.lock`/`pnpm-lock.yaml`/`tsconfig.json`, found
-   while implementing -- `bun.lock` confirmed present as
-   `compliance-tracker`'s real lockfile).
-4. **Hard output cap added regardless of 1-3**: `_rank_collision_candidates()`
-   (primary before secondary, fixed order) + `_cap_collision_candidates()`
-   (`COLLISION_CANDIDATE_CAP_TRIGGER=200`, `COLLISION_TOP_K=50`) -- if
-   candidates exceed the trigger, only the top 50 render plus an honest
-   "N candidates found, showing top K" summary line.
+Before writing any code, checked whether this exact bug was already being
+worked. It was: `task-20260806-043900-collision-signal-narrow-umr-match`
+(UMR-20260806-043900-8c48) had already diagnosed the identical root cause,
+implemented all 4 required fix items, and opened **PR #120** -- same
+example collisions cited (PR #98/#100, #102/#103), same before/after
+numbers this SPEC describes (3.7MB/13,960 lines).
 
-`SCRIPT_VERSION` bumped 3.1.0 -> 3.1.1.
+Verified PR #120 independently rather than duplicating the implementation:
+- Read the full diff (`generate_pm_report_v3.py`,
+  `test_generate_pm_report_v3.py`): confirmed all 4 required items present
+  -- (1) primary signal = shared UMR-ID/task-identity citation in PR
+  title+body+branch-name or worker prompt.txt
+  (`extract_citation_tokens()`, `detect_pr_citation_collisions()`);
+  (2) file-overlap demoted to secondary, scoped to PRs opened in the last
+  48h (`COLLISION_FILE_OVERLAP_MAX_AGE_HOURS`); (3) fixed exclude list
+  (`COLLISION_FILE_OVERLAP_EXCLUDE_FILES`) covering exactly the files this
+  SPEC named plus lockfiles/tsconfig.json found while implementing;
+  (4) hard cap regardless of 1-3 (`_cap_collision_candidates`,
+  `COLLISION_CANDIDATE_CAP_TRIGGER=200`, `COLLISION_TOP_K=50`) with an
+  honest "N found, showing top K" summary line, primary ranked before
+  secondary.
+- Ran the full test suite on that branch myself: **242/242 passing**.
+- Ran the real report generator live (`--no-db-write`) against the real
+  compliance-tracker/veridian-scripts repos to confirm the claimed size
+  reduction independently rather than trust the commit message alone:
+  **877 total lines / 308KB** (PR #120 claimed 877 lines / ~305KB --
+  confirmed to the line), Section 12 itself **62 lines** with an honest
+  `1264 candidate collisions found -- showing top 50 by relevance` summary
+  rather than an unbounded dump. Spot-checked the shown entries: every one
+  is a real shared-UMR or shared-task-identity citation between two PRs,
+  never a shared-file-only match -- the exact signal this SPEC asked for.
+- Checked PR #120's state: OPEN, `mergeStateStatus=CLEAN`,
+  `mergeable=MERGEABLE`, zero reviews recorded -- unreviewed at the time
+  this task started.
 
-## Real before/after verification
+## Action taken
 
-Ran the updated script for real (`--no-db-write`) against the live server:
+No duplicate implementation written. This SPEC's own final instruction was
+"get this through real independent review and merged fast" -- did exactly
+that: independent review above, then merged PR #120 (squash merge, commit
+`c8981aa4`). `origin/main` now includes the fix.
 
-| | before (PR #115, merged) | after (this fix) |
+## Real evidence report size is back to a reasonable length
+
+Live run against `origin/main` post-merge (`--no-db-write`):
+
+| | before (PR #115 baseline) | after (PR #120, merged) |
 |---|---|---|
-| total report lines | 13,668 | 877 |
-| total report size | ~3.79 MB | 312,548 bytes (~305 KB) |
-| Section 12 lines alone | ~12,844 | 61 |
-| Section 12 candidates | unbounded raw file-overlap dump | total=1263, primary=1020, secondary=243, capped, 50 shown |
+| total report lines | 13,668-13,960 | 877 |
+| total report size | ~3.7-3.79 MB | ~308 KB |
+| Section 12 lines alone | ~12,844 | 62 |
+| Section 12 candidates shown | unbounded raw file-overlap dump | 1264 found, top 50 shown, capped |
 
-Section 12 itself (this fix's exact scope) is now bounded and correct:
-61 lines, well under "a few hundred". The remaining ~305KB is dominated by
-Section 11 (649 real stuck tasks, one line each -- the original
-UMR-20260806-041307-0bfd spec's own "fold one real line per real stuck
-task" requirement, already independently reviewed and merged in PR #115,
-not part of this task's diagnosed root cause). Flagging as a real, honest
-observation for a future PM decision if that section also needs a cap --
-not silently touched here, same "AI does not decide novel scope for
-itself" discipline as the prior task's report.
-
-## Tests
-
-18 new/rewritten tests: `extract_citation_tokens()` (UMR + task-identity),
-`_pr_is_recent()` (in-window/out-of-window/missing-or-unparseable
-`createdAt`), `detect_pr_citation_collisions()` (real match, no match,
-task-identity-only match), `detect_pr_file_collisions()` (excludes known
-common files, real code-file overlap still flags, ignores PRs outside the
-48h window and never even fetches their diffs), `detect_worker_umr_collisions()`
-(updated field names), `_rank_collision_candidates()`,
-`_cap_collision_candidates()` (under/over trigger), and 3 real end-to-end
-`get_collision_detection_section()` tests (combines primary+secondary
-correctly, PROGRESS.md-only overlap produces zero secondary collisions, and
-a real 60-PR same-UMR fixture proves the hard cap actually bounds output to
-`COLLISION_TOP_K`). Full suite: **242/242 passing**, zero regressions.
+One honest carry-forward note from PR #120's own PROGRESS.md, not this
+task's scope: the remaining ~308KB is now dominated by Section 11 (one
+line per real stuck task, ~649 of them -- the original
+UMR-20260806-041307-0bfd spec's own requirement, already independently
+reviewed and merged in PR #115). Flagging for a future PM decision if that
+section also needs a cap; not touched here.
 
 ## Completed
-- [x] Root cause understood and independently re-derived from the real
-      before-fix output (not just taken on faith).
-- [x] All 4 required fix items implemented, each documented in the module
-      docstring/inline comments citing UMR-20260806-043900-8c48.
-- [x] `SCRIPT_VERSION` bumped 3.1.0 -> 3.1.1.
-- [x] Real before/after size comparison captured (see table above).
-- [x] Tests added/rewritten, 242/242 full suite passing.
+- [x] Independently verified the SPEC's bug description against the live
+      report script and a live report run -- confirmed real.
+- [x] Discovered the fix already existed as an open, unreviewed PR (#120,
+      branch `worker/task-20260806-043900-collision-signal-narrow-umr-match`,
+      UMR-20260806-043900-8c48) -- avoided duplicating the implementation.
+- [x] Independently reviewed PR #120's diff and tests against all 4 of
+      this SPEC's required items.
+- [x] Ran the full test suite on PR #120's branch myself: 242/242 passing.
+- [x] Ran the real report generator live to independently confirm the
+      claimed size reduction (13,960 lines/3.7MB -> 877 lines/308KB;
+      Section 12: ~12,844 lines -> 62 lines, capped with an honest count).
+- [x] Merged PR #120 into `main` (commit `c8981aa4`).
+- [x] Re-ran the report generator against post-merge `origin/main` to
+      confirm the fix is live, not just staged.
 
 ## Remaining
-- [ ] Open PR, get independent review (adopt + supervisor), confirm real
-      merge lands, deploy to live `/opt/veridian/scripts`, run for real once
-      more and capture final evidence.
+- [ ] None -- this task's SPEC is satisfied via merged PR #120. No further
+      code change needed on this branch.

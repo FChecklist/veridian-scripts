@@ -128,7 +128,15 @@ to UMR-20260806-042004-e22f / `pm_decisions_pending` row id=5.
         (90 original + 1 quarantined corrupted-orig table, expected).
       - Live file size after repair: 1,673,711,616 bytes.
 
+- [x] `record-owner-proposal-completion` run on `pm_decisions_pending`
+      id=5, citing `repair_file_inventory_20260806.py` (PR
+      https://github.com/FChecklist/veridian-scripts/pull/118), commit
+      `f80da2c7ee2b7e99954f2b46f2105ef5a9034584`, and the full evidence
+      string (row counts/byte sizes/verification detail above). Confirmed
+      on the live row: `status=completed`,
+      `completed_ts=2026-08-06T04:45:39Z`.
+
 ## Remaining
 
-- [ ] `record-owner-proposal-completion` on `pm_decisions_pending` id=5
-      citing real artifact path(s), commit, and evidence.
+- [ ] None -- all 6 recovery steps + the proposal completion record are
+      real and done. PR #118 open for review/merge.

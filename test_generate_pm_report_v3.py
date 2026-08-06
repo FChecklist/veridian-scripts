@@ -60,6 +60,26 @@ def test_parse_loadavg():
     assert result["load_15min"] == 14.90
 
 
+def test_parse_df_output_basic():
+    # Real `df -B1 /` shape: header row + one data row.
+    text = (
+        "Filesystem     1B-blocks       Used   Available Use% Mounted on\n"
+        "/dev/sda1  323223174144 273989132288 32986181632  90% /\n"
+    )
+    result = pm.parse_df_output(text)
+    assert result["filesystem"] == "/dev/sda1"
+    assert result["mount_point"] == "/"
+    assert result["size_bytes"] == 323223174144
+    assert result["used_bytes"] == 273989132288
+    assert result["avail_bytes"] == 32986181632
+    assert result["avail_gb"] == pytest.approx(32986181632 / (1024 ** 3), abs=0.01)
+    assert result["avail_pct"] == pytest.approx((32986181632 / 323223174144) * 100, abs=0.01)
+
+
+def test_parse_df_output_malformed():
+    assert "error" in pm.parse_df_output("not df output at all")
+
+
 def test_parse_dispatch_tick_timer_active_true():
     stdout = (
         "NEXT ... LAST ... PASSED UNIT ACTIVATES\n"
@@ -393,6 +413,47 @@ def test_open_issues_thresholds():
 
 
 def test_open_issues_no_issues_when_all_healthy():
+    gtm_section = {"categories": []}
+    db_integrity = {"db_integrity_ok": True}
+    ram_swap = {"swap_free_pct": 99.0}
+    load_avg = {"load_1min": 0.5}
+    assert pm.build_open_issues(gtm_section, db_integrity, ram_swap, load_avg) == []
+
+
+def test_open_issues_disk_space_low_gb_floor():
+    gtm_section = {"categories": []}
+    db_integrity = {"db_integrity_ok": True}
+    ram_swap = {"swap_free_pct": 99.0}
+    load_avg = {"load_1min": 0.5}
+    # Below the GB floor but above the % floor (real incident shape: a huge
+    # disk with a small real absolute remainder).
+    disk_usage = {"avail_gb": pm.DISK_AVAIL_GB_WARN_THRESHOLD - 0.1, "avail_pct": 50.0, "mount_point": "/"}
+    issues = pm.build_open_issues(gtm_section, db_integrity, ram_swap, load_avg, disk_usage)
+    assert [i["kind"] for i in issues] == ["disk_space_low"]
+
+
+def test_open_issues_disk_space_low_pct_floor():
+    gtm_section = {"categories": []}
+    db_integrity = {"db_integrity_ok": True}
+    ram_swap = {"swap_free_pct": 99.0}
+    load_avg = {"load_1min": 0.5}
+    disk_usage = {"avail_gb": 999.0, "avail_pct": pm.DISK_AVAIL_PCT_WARN_THRESHOLD - 0.1, "mount_point": "/"}
+    issues = pm.build_open_issues(gtm_section, db_integrity, ram_swap, load_avg, disk_usage)
+    assert [i["kind"] for i in issues] == ["disk_space_low"]
+
+
+def test_open_issues_disk_space_healthy_no_issue():
+    gtm_section = {"categories": []}
+    db_integrity = {"db_integrity_ok": True}
+    ram_swap = {"swap_free_pct": 99.0}
+    load_avg = {"load_1min": 0.5}
+    disk_usage = {"avail_gb": 999.0, "avail_pct": 90.0, "mount_point": "/"}
+    assert pm.build_open_issues(gtm_section, db_integrity, ram_swap, load_avg, disk_usage) == []
+
+
+def test_open_issues_disk_usage_omitted_defaults_to_no_issue():
+    # Backward-compat: callers that don't pass disk_usage at all (the
+    # pre-3.5.0 call shape) must not raise or synthesize a false issue.
     gtm_section = {"categories": []}
     db_integrity = {"db_integrity_ok": True}
     ram_swap = {"swap_free_pct": 99.0}

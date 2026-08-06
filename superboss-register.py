@@ -676,6 +676,7 @@ def _migrate_schema(conn):
     _ensure_ocid_canonical_registry_table(conn)
     _ensure_ocid_master_standard_audit_log_table(conn)
     _ensure_ocid_compliance_tables(conn)
+    _ensure_pm_decisions_pending_table(conn)
     _ensure_registry_taxonomy_notes_table(conn)
     _seed_registry_taxonomy_notes(conn)
     _migrate_instructions_content_hash(conn)
@@ -5363,6 +5364,144 @@ def touch_umr_heartbeat(args):
     print(json.dumps({"ok": True, "updated": True, "umr_id": row["umr_id"]}))
 
 
+def _ensure_pm_decisions_pending_table(conn):
+    """Standalone idempotent create for pm_decisions_pending (Deterministic
+    PM Reporting Contract V3, UMR-20260805-181636-32f2, OCID-020) -- same
+    defensiveness convention as _ensure_ocid_artifact_links_table/
+    _ensure_umr_table above: works even on a DB that predates this table.
+
+    Note on provenance (found during independent verification for this
+    task, not assumed from the task's own SPEC): the standalone
+    migrate_2026-08-05_pm_report_tables.py script that first created this
+    table (commit 4797b71) only ever landed on an unmerged branch
+    (feat/pm-report-v3-schema-umr20260805181636), never on main -- but the
+    schema itself was already applied directly to the live
+    superboss-register.sqlite, which really does have this table today.
+    This CREATE TABLE IF NOT EXISTS is written to match that live schema
+    exactly, so it is a true no-op there, and a real bootstrap on any DB
+    that lacks the table (fresh init_db(), a restored backup, or a fresh
+    clone that never had the standalone migration script run against it).
+
+    generate_pm_report_v3.py (PR #91, already merged) already reads this
+    table directly (get_pm_decisions_pending()) for its report's "PM
+    decision required" section -- read-only, and out of scope to change
+    here. Per the Owner's standing SOP (exactly one canonical read/write
+    surface for superboss-register.sqlite), insert_pm_decision_pending()
+    and resolve_pm_decision_pending() below are the only real write path
+    into this table."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS pm_decisions_pending (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        opened_ts TEXT NOT NULL,
+        title TEXT NOT NULL,
+        detail TEXT NOT NULL,
+        options_json TEXT,
+        recommended_option TEXT,
+        related_umr TEXT,
+        status TEXT NOT NULL DEFAULT 'open',
+        closed_ts TEXT,
+        closed_by TEXT,
+        closed_note TEXT
+    )""")
+    conn.commit()
+
+
+def insert_pm_decision_pending(conn, title, detail, *, options=None,
+                                recommended_option=None, related_umr=None):
+    """Opens one real PM decision row -- the one real write path into
+    pm_decisions_pending (see _ensure_pm_decisions_pending_table's own
+    docstring). `options` is a real Python list, typically of dicts shaped
+    like {"option": ..., "detail": ..., "recommended": bool} (matching the
+    one real backfilled row from 2026-08-05), JSON-encoded here so callers
+    never hand-serialize, same convention as upsert_ocid_canonical_registry's
+    evidence/all_umr_ids handling above. `recommended_option` is a short,
+    real, plain-text label (e.g. "sqlite3 .recover"), not the JSON blob
+    itself, so a reader (or generate_pm_report_v3.py) never has to parse
+    options_json just to show which option is recommended. Every new row
+    opens as real status 'open' -- only resolve_pm_decision_pending() below
+    ever moves it out of that state. Caller owns conn/transaction/commit,
+    same convention as insert_ocid_artifact_link()/update_umr_task() above
+    -- this function itself never commits. Returns the new row's real
+    integer id."""
+    cur = conn.execute(
+        "INSERT INTO pm_decisions_pending "
+        "(opened_ts, title, detail, options_json, recommended_option, related_umr, status) "
+        "VALUES (?, ?, ?, ?, ?, ?, 'open')",
+        (_now_iso(), title, detail,
+         json.dumps(options) if options is not None else None,
+         recommended_option, related_umr),
+    )
+    return cur.lastrowid
+
+
+def resolve_pm_decision_pending(conn, decision_id, *, closed_by, closed_note=None,
+                                 status="resolved"):
+    """Closes one real, currently-open pm_decisions_pending row -- the real
+    counterpart to insert_pm_decision_pending() above, and (per the Owner's
+    standing SOP that this script is the one canonical read/write surface
+    for superboss-register.sqlite) the only real write path that ever
+    moves a row's status away from 'open'. Idempotent by explicit
+    pre-update `WHERE status='open'` guard (mirrors
+    reconcile_umr_status_against_pr()'s own is_stale gating): resolving an
+    already-closed row a second time is a real no-op, never a silent
+    overwrite of the first real closed_ts/closed_by/closed_note -- callers
+    learn that via this function's own return value (False) rather than
+    having to re-query the row themselves. Caller owns conn/transaction/
+    commit, same convention as insert_pm_decision_pending() above -- this
+    function itself never commits. Returns True if a real open row was
+    found and closed, False otherwise (already closed, or no such id)."""
+    cur = conn.execute(
+        "UPDATE pm_decisions_pending SET status=?, closed_ts=?, closed_by=?, closed_note=? "
+        "WHERE id=? AND status='open'",
+        (status, _now_iso(), closed_by, closed_note, decision_id),
+    )
+    return cur.rowcount > 0
+
+
+def cmd_insert_pm_decision_pending(args):
+    """CLI entry point over insert_pm_decision_pending() -- see that
+    function's own docstring. --options-json is a path to a real JSON file
+    holding the real options list (same "path to a JSON file" convention as
+    cmd_certify_pr_merge's --pr-record-json above), not an inline string,
+    since a real options list is typically multi-option prose too long for
+    a single shell argument."""
+    options = None
+    if args.options_json:
+        with open(args.options_json) as f:
+            options = json.load(f)
+    init_db_silent()
+    conn = _connect()
+    _ensure_pm_decisions_pending_table(conn)
+    with _write_lock():
+        decision_id = insert_pm_decision_pending(
+            conn, args.title, args.detail, options=options,
+            recommended_option=args.recommended_option, related_umr=args.related_umr,
+        )
+        conn.commit()
+    conn.close()
+    print(json.dumps({"id": decision_id}, indent=2, default=str))
+
+
+def cmd_resolve_pm_decision_pending(args):
+    """CLI entry point over resolve_pm_decision_pending() -- see that
+    function's own docstring. Exits non-zero (after still printing the real
+    JSON result) when --id did not name a real, currently-open row, same
+    "print then sys.exit(1) on a real refusal/no-op" convention as
+    cmd_certify_pr_merge above."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_pm_decisions_pending_table(conn)
+    with _write_lock():
+        resolved = resolve_pm_decision_pending(
+            conn, args.decision_id, closed_by=args.closed_by,
+            closed_note=args.closed_note, status=args.status,
+        )
+        conn.commit()
+    conn.close()
+    print(json.dumps({"id": args.decision_id, "resolved": resolved}, indent=2, default=str))
+    if not resolved:
+        sys.exit(1)
+
+
 def init_db_silent():
     if not os.path.exists(DB_PATH):
         conn = _connect()
@@ -5616,6 +5755,26 @@ if __name__ == "__main__":
                                      "verdict against an explicit pr_merge_record JSON file")
     p_certify.add_argument("--pr-record-json", dest="pr_record_json", required=True)
 
+    p_inspm = sub.add_parser("insert-pm-decision-pending",
+                              help="Deterministic PM Reporting Contract V3 (UMR-20260805-181636-32f2): "
+                                   "open one real PM decision row for generate_pm_report_v3.py to surface")
+    p_inspm.add_argument("--title", required=True)
+    p_inspm.add_argument("--detail", required=True)
+    p_inspm.add_argument("--options-json", dest="options_json", default=None,
+                          help="path to a real JSON file holding the options list "
+                               "(same shape as pm_decisions_pending.options_json)")
+    p_inspm.add_argument("--recommended-option", dest="recommended_option", default=None)
+    p_inspm.add_argument("--related-umr", dest="related_umr", default=None)
+
+    p_respm = sub.add_parser("resolve-pm-decision-pending",
+                              help="Deterministic PM Reporting Contract V3: close one real, "
+                                   "currently-open pm_decisions_pending row")
+    p_respm.add_argument("--id", dest="decision_id", type=int, required=True)
+    p_respm.add_argument("--closed-by", dest="closed_by", required=True)
+    p_respm.add_argument("--closed-note", dest="closed_note", default=None)
+    p_respm.add_argument("--status", default="resolved",
+                          help="terminal status to record (default: resolved)")
+
     args = p.parse_args()
     if args.cmd == "init":
         with _write_lock():
@@ -5711,3 +5870,7 @@ if __name__ == "__main__":
         cmd_reconcile_umr_status(args)
     elif args.cmd == "certify-pr-merge":
         cmd_certify_pr_merge(args)
+    elif args.cmd == "insert-pm-decision-pending":
+        cmd_insert_pm_decision_pending(args)
+    elif args.cmd == "resolve-pm-decision-pending":
+        cmd_resolve_pm_decision_pending(args)

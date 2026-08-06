@@ -543,6 +543,12 @@ def build_scripts_and_cron(reg):
             "verification_status": "VERIFIED_MATCH" if os.path.exists(s["path"]) else "PATH_MISSING",
             "source_ref": ["software_catalog"],
             "metadata": {"purpose": s.get("purpose"), "cron_scheduled": s.get("cron_scheduled")},
+            # 2026-08-06 (task-20260806-035541, Owner directive "real PM cycle
+            # script registry"): pass through SOFTWARE_CATALOG.yaml's own real,
+            # mechanically recovered originating_umr/script_version -- computed
+            # once in generate_software_catalog.py, not re-derived here.
+            "originating_umr": s.get("originating_umr"),
+            "script_version": s.get("script_version"),
         })
         script_ids_by_path[s["path"]] = eid
         script_count += 1

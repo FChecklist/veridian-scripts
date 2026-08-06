@@ -284,6 +284,46 @@ if [ "$CLI_HIT_BUDGET_CAP" = "1" ]; then
   exit 0
 fi
 
+# --- Real Anthropic weekly-usage-limit 429 hard stop (2026-08-06 RCA fix) ---
+# Root cause (task-20260805-193951-build-a-deterministic-writer-for-pm-deci,
+# UMR-20260806-031211-64de): dispatched right as the Owner's real weekly
+# Claude usage limit was hit. All 3 lifetime-invocation attempts got a real
+# `claude -p` API-level 429 ("api_error_status":429, result text "You've hit
+# your weekly limit ... resets 2am (UTC)") -- zero tokens, zero turns, the
+# request never reached a model at all (confirmed via $MAIN_OUT: every
+# usage.*_tokens field is 0). This is the SAME class of failure as the
+# max-budget-usd hard stop directly above: retrying produces the identical
+# rejection until the real weekly reset time passes, no amount of retrying
+# sooner can ever change the outcome, and each blind retry (previously) burned
+# one more of the lifetime-invocation cap for nothing -- exactly the "no
+# matching approved plan for this task_id/increment -- report rejected"
+# downstream symptom this real incident surfaced (a correct, separate gate
+# refusing an empty/error report, not itself the bug). Same treatment:
+# checkpoint blocked, disable the unit, exit 0 -- no retry. Deliberately does
+# NOT try to compute/wait-for the exact reset time here (that's dispatch-tick/
+# a human's job to re-enable and restart); this block's only job is to stop
+# wasting invocations once the condition is detected.
+CLI_HIT_WEEKLY_LIMIT=$(python3 -c "
+import json
+try:
+    with open('$MAIN_OUT') as f:
+        d = json.load(f)
+    result_text = (d.get('result') or '')
+    print('1' if d.get('api_error_status') == 429 and 'weekly limit' in result_text.lower() else '0')
+except Exception:
+    print('0')
+")
+if [ "$CLI_HIT_WEEKLY_LIMIT" = "1" ]; then
+  python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status blocked --note "CLI HARD STOP (weekly_usage_limit): the real Anthropic API rejected this invocation with a 429, real weekly usage limit hit ($MAIN_OUT), zero tokens spent, no model call happened. Stopping rather than retrying -- a retry will get the identical rejection until the real weekly reset passes. Not a task/environment bug: re-dispatch (manually or via the next dispatch-tick sweep) once the reset window has passed."
+  git -C "$WORKSPACE" add -A
+  git -C "$WORKSPACE" commit -m "Worker $TASK_ID: automated checkpoint commit (real Anthropic weekly usage limit 429)" >> "$TASK_DIR/worker.log" 2>&1 || true
+  git -C "$WORKSPACE" push -u origin "$BRANCH" >> "$TASK_DIR/worker.log" 2>&1 || true
+  systemctl --user disable "veridian-worker@${TASK_ID}.service" >> "$TASK_DIR/worker.log" 2>&1 || true
+  kill "$CHECKPOINT_PID" 2>/dev/null || true
+  wait "$CHECKPOINT_PID" 2>/dev/null || true
+  exit 0
+fi
+
 # NOTE: the periodic-checkpoint heartbeat (started above, CHECKPOINT_PID) is
 # deliberately NOT killed here anymore. It used to be killed at this exact
 # point -- right after the main claude invocation returns but BEFORE the

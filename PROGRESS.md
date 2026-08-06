@@ -79,7 +79,36 @@ SOP that this one script is the canonical read/write surface for
 - [x] Committed (`d69a40b`), pushed
       `worker/task-20260806-031857-extend-superboss-register-py-with-pm-dec`,
       opened real PR: https://github.com/FChecklist/veridian-scripts/pull/103
+- [x] Independent review (separate agent, own disposable clone at
+      `/tmp/vs-pr103`, never touched `/opt/veridian/repos/veridian-scripts`
+      or the live DB): **Approve**. Independently re-confirmed the
+      SPEC/live-state schema-not-on-`main` finding, idempotent resolve
+      (via code read + `git log`/`git branch --contains`), parameterized
+      SQL (no injection risk), test isolation genuinely never touches the
+      live DB (re-checked before/after both the new test file and the
+      full 18-file suite -- `pm_decisions_pending` stayed at exactly 1 row
+      throughout). Flagged two cosmetic nits (this repo's other
+      `_ensure_*_table()` helpers all call `conn.commit()`;
+      `cmd_reconcile_umr_status`/`cmd_certify_pr_merge` print JSON with
+      `indent=2, default=str`) and an FYI: a separate, unrelated, unmerged,
+      no-PR branch (`feat/pm-decisions-pending-writer-umr20260806-031558-4dbd`)
+      implements the same two functions independently (an apparent
+      duplicate/concurrent dispatch of this same task) -- its
+      `resolve_pm_decision_pending()` lacks the `status='open'` idempotency
+      guard this PR has, so this PR's version is strictly safer; that
+      stale branch isn't attached to any open PR and doesn't block this
+      one, but is worth a separate cleanup/duplicate-dispatch note to the
+      Owner.
+- [x] Applied both cosmetic nits from review: added the missing
+      `conn.commit()` to `_ensure_pm_decisions_pending_table()`, and
+      `indent=2, default=str` on both new `cmd_*` JSON prints, matching
+      sibling functions exactly. Re-ran `tests/test_pm_decisions_pending.py`
+      (8/8) and the full 18-file suite (all pass) after the change;
+      re-verified the live DB still has exactly its one original row.
 
 ## Remaining
 
-- [ ] Independent review before merge.
+- [ ] Push the two post-review convention fixes, then merge PR #103.
+- [ ] (Not this task's scope, FYI only) Owner may want to clean up the
+      stale duplicate branch
+      `feat/pm-decisions-pending-writer-umr20260806-031558-4dbd`.

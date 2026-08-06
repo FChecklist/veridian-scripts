@@ -5402,6 +5402,7 @@ def _ensure_pm_decisions_pending_table(conn):
         closed_by TEXT,
         closed_note TEXT
     )""")
+    conn.commit()
 
 
 def insert_pm_decision_pending(conn, title, detail, *, options=None,
@@ -5477,7 +5478,7 @@ def cmd_insert_pm_decision_pending(args):
         )
         conn.commit()
     conn.close()
-    print(json.dumps({"id": decision_id}))
+    print(json.dumps({"id": decision_id}, indent=2, default=str))
 
 
 def cmd_resolve_pm_decision_pending(args):
@@ -5496,7 +5497,7 @@ def cmd_resolve_pm_decision_pending(args):
         )
         conn.commit()
     conn.close()
-    print(json.dumps({"id": args.decision_id, "resolved": resolved}))
+    print(json.dumps({"id": args.decision_id, "resolved": resolved}, indent=2, default=str))
     if not resolved:
         sys.exit(1)
 

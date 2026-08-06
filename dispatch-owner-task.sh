@@ -37,6 +37,22 @@
 #       --status completed [--reason "what finished"]
 #   (--status also accepts failed / killed for other genuine terminal outcomes)
 #
+# UMR-20260806-112013-088f (structural fix, second half of the above
+# UMR-20260806-085144-9c63 finding): the paragraph just above was, until
+# this change, the *only* place this requirement was written down -- an
+# optional-looking doc comment nothing downstream was ever required to
+# read, which is the real, confirmed reason 29+ real dispatched rows sat at
+# status='dispatched'/ts_completed=NULL indefinitely even when the
+# underlying work had genuinely finished. Every real tmux relay below now
+# appends a mandatory, UMR-id-specific completion instruction (naming this
+# exact mark-umr-terminal command) directly onto the relayed prompt text
+# itself, so it travels with the task instead of living only here. There is
+# no systemd unit to hook an ExecStopPost= into for this dispatch path --
+# task_kind='veridian_task_create' rows are relayed to a live interactive
+# session, never started as a systemd unit (only task_kind='systemctl_action'
+# rows are, a separate resource_governor.py path) -- so the relayed-prompt
+# instruction is the real mechanism here, not a substitute for a better one.
+#
 # DISPATCH_TMUX_SESSION - overrides the tmux session name relayed into
 #   (default: claude, the real live interactive session). Exists solely as a
 #   real testability seam: point it at a disposable session (e.g.
@@ -129,11 +145,35 @@ echo "DISPATCHED: umr_id=$UMR_ID instruction_id=$INSTRUCTION_ID work_item_id=$WO
 # serializes the has-session-check + both send-keys calls as one atomic
 # unit across concurrent invocations, same real per-open-file-description
 # discipline superboss-register.py's own _write_lock() already documents.
+#
+# UMR-20260806-112013-088f (structural fix for "nothing ever calls
+# mark-umr-terminal", second half of UMR-20260806-085144-9c63 / PR #150):
+# every real dispatch through this script is task_kind='veridian_task_create'
+# -- it is relayed straight into a live interactive tmux session and never
+# gets a backing systemd unit (only task_kind='systemctl_action' rows in
+# resource_governor.py do, an unrelated code path), so there is no real
+# ExecStopPost= hook available to attach completion-recording to. The one
+# real structural seam that exists is the relayed text itself: appending a
+# mandatory, UMR-id-specific final instruction to every relayed prompt puts
+# the exact real command in front of whoever/whatever is doing the work, in
+# the same message that carries the task -- not in a header comment several
+# dozen lines above that nothing downstream was ever required to read
+# (which is the real, confirmed root cause: mark-umr-terminal already
+# existed and was already documented there, and 29+ real dispatched rows
+# still sat at ts_completed=NULL). This cannot force an interactive session
+# to record its own outcome honestly -- no code can -- but it removes "I
+# didn't know I was supposed to" as a real, provable failure mode.
+COMPLETION_INSTRUCTION="
+
+MANDATORY FINAL STEP for ${UMR_ID} (structural, not optional -- read this even if the rest of this message was skimmed): once the real work above reaches a genuine terminal outcome, record it by running this exact command with this exact UMR id (from the veridian-scripts repo, e.g. /opt/veridian/repos/veridian-scripts):
+  python3 superboss-register.py mark-umr-terminal --umr-id ${UMR_ID} --status completed --reason \"<real one-line summary of what finished>\"
+Use --status failed or --status killed instead of completed, with a real --reason, if the work genuinely did not finish successfully -- never record a genuine failure as a success. Run this as the actual last action for ${UMR_ID}, after any PR/merge work, not before. Leave it unrun only if the work is genuinely still in progress."
+RELAY_TEXT="[${UMR_ID}] ${PROMPT}${COMPLETION_INSTRUCTION}"
 if [ "$RELAY" -eq 1 ]; then
   exec 9>"$TMUX_RELAY_LOCK"
   flock -x 9
   if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
-    tmux send-keys -t "$TMUX_SESSION" -l "[${UMR_ID}] ${PROMPT}"
+    tmux send-keys -t "$TMUX_SESSION" -l "$RELAY_TEXT"
     sleep 1
     tmux send-keys -t "$TMUX_SESSION" Enter
     flock -u 9

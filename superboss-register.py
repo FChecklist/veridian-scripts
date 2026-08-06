@@ -5547,6 +5547,94 @@ def upsert_umr_task(conn, record):
     return umr_id
 
 
+_GTM_CATEGORY_MUTABLE_COLUMNS = ("child_umr_id", "fix_commit", "fix_file_path", "fix_pr_number")
+
+
+def update_gtm_certification_category(conn, category_index, **fields):
+    """Partial UPDATE of one gtm_certification_categories row, keyed on its
+    real category_index. Ported onto current main from PR #165
+    (UMR-20260806-114728-d469's own governance-linkage + evidence-
+    completeness fix -- all 25 rows were found sharing one shared, itself-
+    failed child_umr_id, and only category 3 carried any fix_pr_number).
+    PR #165 itself was found stale (branched 25 commits behind current
+    main -- merging it as-is would have silently deleted the since-merged
+    mark-umr-relay-attempted/requeue-build-lock-contended functionality),
+    so this is a fresh, rebased port of just this isolated, additive piece
+    rather than a merge of that PR (UMR-20260806-161614-5850).
+
+    Deliberately restricted to _GTM_CATEGORY_MUTABLE_COLUMNS -- child_umr_id
+    and the three fix_* columns -- and nothing else. evidence_json,
+    evidence_summary, passed, and validated_at are structurally excluded:
+    this function raises rather than silently ignoring an attempt to touch
+    them, so a real validated result already sitting on a row (most rows
+    have one) can never be overwritten by a later governance-linkage pass.
+    A verdict change (passed) is explicitly never this function's job.
+
+    Does NOT commit -- caller owns the transaction/commit, same convention
+    as update_umr_task()/upsert_umr_task() above. Always stamps
+    last_updated_at with a real current timestamp on any real write."""
+    unknown = set(fields) - set(_GTM_CATEGORY_MUTABLE_COLUMNS)
+    if unknown:
+        raise ValueError(
+            f"update_gtm_certification_category: refusing to write protected/unknown "
+            f"column(s) {sorted(unknown)} -- only {_GTM_CATEGORY_MUTABLE_COLUMNS} are "
+            f"mutable through this function (evidence_json/evidence_summary/passed/"
+            f"validated_at are never touched here, by design)"
+        )
+    if not fields:
+        return
+    set_clauses, values = [], []
+    for column, value in fields.items():
+        set_clauses.append(f"{column}=?")
+        values.append(value)
+    set_clauses.append("last_updated_at=?")
+    values.append(_now_iso())
+    values.append(category_index)
+    conn.execute(
+        f"UPDATE gtm_certification_categories SET {', '.join(set_clauses)} WHERE category_index=?",
+        values,
+    )
+
+
+def cmd_update_gtm_category(args):
+    """CLI entry point for update_gtm_certification_category() above, under
+    _write_lock() -- same convention as cmd_mark_umr_dispatched/
+    cmd_mark_umr_terminal. Refuses (via update_gtm_certification_category's
+    own ValueError) to touch anything but child_umr_id/fix_commit/
+    fix_file_path/fix_pr_number.
+
+    Usage:
+      python3 superboss-register.py update-gtm-category --category-index N \\
+          [--child-umr-id UMR-...] [--fix-commit SHA] [--fix-file-path PATH] \\
+          [--fix-pr-number N]
+    """
+    init_db_silent()
+    conn = _connect()
+    fields = {}
+    if args.child_umr_id is not None:
+        fields["child_umr_id"] = args.child_umr_id
+    if args.fix_commit is not None:
+        fields["fix_commit"] = args.fix_commit
+    if args.fix_file_path is not None:
+        fields["fix_file_path"] = args.fix_file_path
+    if args.fix_pr_number is not None:
+        fields["fix_pr_number"] = args.fix_pr_number
+    existing = conn.execute(
+        "SELECT category_index FROM gtm_certification_categories WHERE category_index=?",
+        (args.category_index,),
+    ).fetchone()
+    if not existing:
+        conn.close()
+        print(json.dumps({"error": f"no gtm_certification_categories row for "
+                                    f"category_index={args.category_index}"}))
+        sys.exit(1)
+    with _write_lock():
+        update_gtm_certification_category(conn, args.category_index, **fields)
+        conn.commit()
+    conn.close()
+    print(json.dumps({"category_index": args.category_index, "updated": fields}, indent=2, default=str))
+
+
 def update_umr_task(conn, umr_id, **fields):
     """Partial UPDATE of an existing umr_tasks row -- only the columns passed
     as keyword args are touched. json_fields are dicts that get json.dumps'd
@@ -7608,6 +7696,18 @@ if __name__ == "__main__":
     p_markterm.add_argument("--status", required=True, choices=["completed", "failed", "killed"])
     p_markterm.add_argument("--reason", default=None)
 
+    p_gtmupd = sub.add_parser("update-gtm-category",
+                               help="UMR-20260806-114728-d469 (ported to current main under "
+                                    "UMR-20260806-161614-5850): partial UPDATE of one "
+                                    "gtm_certification_categories row's child_umr_id/"
+                                    "fix_commit/fix_file_path/fix_pr_number ONLY -- never "
+                                    "evidence_json/evidence_summary/passed/validated_at")
+    p_gtmupd.add_argument("--category-index", dest="category_index", type=int, required=True)
+    p_gtmupd.add_argument("--child-umr-id", dest="child_umr_id", default=None)
+    p_gtmupd.add_argument("--fix-commit", dest="fix_commit", default=None)
+    p_gtmupd.add_argument("--fix-file-path", dest="fix_file_path", default=None)
+    p_gtmupd.add_argument("--fix-pr-number", dest="fix_pr_number", type=int, default=None)
+
     p_resetq = sub.add_parser("reset-umr-to-queued",
                                help="UMR-20260806-115605-854d: reset a real umr_tasks row from "
                                     "status='dispatched' back to 'queued' (clears ts_dispatched) -- "
@@ -7775,6 +7875,8 @@ if __name__ == "__main__":
         cmd_requeue_build_lock_contended(args)
     elif args.cmd == "mark-umr-terminal":
         cmd_mark_umr_terminal(args)
+    elif args.cmd == "update-gtm-category":
+        cmd_update_gtm_category(args)
     elif args.cmd == "reset-umr-to-queued":
         cmd_reset_umr_to_queued(args)
     elif args.cmd == "mark-external-agent-eligible":

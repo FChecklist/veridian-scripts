@@ -63,8 +63,14 @@
       of SKILL.md to this server, the equivalent instruction belongs there too -- flagged
       explicitly in the docstring for whoever does that sync.
 
+- [x] Real branch pushed, real PR opened: `worker/task-20260806-165917-extend-deterministic-report-to-cover-pr`
+      -> **PR #198** (`https://github.com/FChecklist/veridian-scripts/pull/198`), awaiting
+      independent review before merge.
+
 ## Remaining
-- [ ] None for this task's own scope. Open follow-ups for a *future* task (not started here):
+- [ ] PR #198 review + merge (not this task's own action -- independent review required per
+      this repo's own discipline).
+- [ ] None else for this task's own scope. Open follow-ups for a *future* task (not started here):
       - Fix the pre-existing, unrelated `test_end_to_end_smoke_run` failure (see above).
       - If the Owner ever makes the real Windows SKILL.md reachable from this server, mirror
         this task's "read the report, don't re-derive" instruction into it directly.

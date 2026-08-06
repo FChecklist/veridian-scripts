@@ -115,7 +115,7 @@ child-UMR proposals filed: 58
 - [x] Ran for real: `--apply --file-proposals` against the live trailing-24h
       set. 69 rows classified, 58 child-UMR proposals filed, bucket sum
       verified to equal the script's own computed failed+killed total.
-- [x] Rebased onto latest `origin/main`, committed, pushed, opened PR.
+- [x] Merged latest `origin/main`, committed, pushed, opened PR.
 
 ## Remaining
 - [ ] None from this task's side. The PM/Owner decides the 58 filed proposals

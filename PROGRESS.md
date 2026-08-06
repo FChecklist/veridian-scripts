@@ -1,25 +1,27 @@
-# PROGRESS -- task-20260806-192048-stop-all-other-work--re-run-the-real-exi
-
-UMR-20260806-130416-3d77 (this task), governing chain UMR-20260806-124055-bc80.
+# PROGRESS -- task-20260806-193955-deterministic-final-audit--zero-gap-zero
 
 ## Completed
-- [x] Verified the two functions the SPEC cites genuinely exist:
-      `upsert_live_wiring_registry()` (generate_wiring_registry.py:969),
-      `register_entity_row()`/`register_entity()` (superboss-register.py:2794/2832).
-- [x] Ran the real existing scanner fresh (live upsert, not report-only).
-- [x] Confirmed by name, before and after the fresh run, that both
-      `repos/compliance-tracker/src/lib/prompt-os-resolver.ts` and
-      `repos/compliance-tracker/src/lib/orchestra-execution-logger.ts` are present in
-      `wiring_registry` (file + function rows, all `VERIFIED_MATCH`). No manual
-      `register_entity` call needed/made -- the scanner already catches them.
-- [x] Comprehensive audit: honest partial numbers reported (engines 20/20 reconciled;
-      `/opt/veridian/scripts` has 381 real top-level files vs <=210 script/file rows,
-      a real disclosed ~171-file gap). Full server-wide file-vs-row reconciliation
-      deliberately left to sibling task `task-20260806-192052-...` (governing chain
-      cites this task's own UMR as its prerequisite), the correct designated owner,
-      rather than duplicating that build with a different exclusion/dedup design.
-      See `SPEC_VERIFICATION_2026-08-06.md` for full detail + sibling-task cross-check.
+- [x] Gate check: independently queried `superboss-register.sqlite` `umr_tasks` (not just FTS5
+      `--search`, which returned 0 hits for all three UMR IDs -- confirmed via direct SQL instead)
+      for both governing sibling UMRs required by the SPEC before this task may start:
+      - `UMR-20260806-124055-bc80` (stop-work order) -> status = **completed**
+      - `UMR-20260806-140841-46d1` (Vercel+GitHub+Supabase registration) -> status = **completed**
+      - `UMR-20260806-135632-329e` (file registration) -> status = **running** (NOT completed)
+        - `unit_name`: `veridian-worker@task-20260806-192052-deterministic-full-server-file-registrat.service`
+        - `ts_dispatched`: 2026-08-06T19:20:55Z, `ts_completed`: NULL, `last_heartbeat`: NULL
+        - cross-checked live: `systemctl --user is-active <unit>` -> `active` (genuinely still running,
+          not a stale/zombie row)
 
 ## Remaining
-- [ ] Read the authoritative disk-vs-registry number once sibling task `-192052`
-      completes (not this task's job to build).
+- [ ] **BLOCKED on gate**: SPEC requires BOTH sibling UMRs to show `status=completed` before any
+      audit step (checks 1-6) may run. `UMR-20260806-135632-329e` is still `running` as of this
+      check. Per SPEC: "do NOT run partial checks and do NOT report done -- instead re-check
+      periodically until both are genuinely completed, then proceed." No audit checks have been
+      run yet; none will run until re-verified as completed.
+- [ ] Once gate clears: check `capability_registry` + past `umr_tasks` for an existing
+      deterministic audit script matching this UMR's scope (per standing 4-step spec) before
+      building a new one.
+- [ ] Run/build the zero-gap/zero-dup/field-integrity/relationship-coverage/external-coverage/
+      total-count audit script with real SQL output only.
+- [ ] Post final ALL_CLEAR boolean verdict + evidence as a task completion note in `umr_tasks`.
+- [ ] `record-completion` call to `agent_work_briefing.py` for `UMR-20260806-141055-1fec`.

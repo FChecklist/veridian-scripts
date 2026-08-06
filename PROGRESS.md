@@ -166,7 +166,8 @@ entire purpose.
   with zero errors, ~100s wall-clock.
 
 ### Remaining
-- [ ] Independent review + merge of this fix PR.
-- [ ] Report back to Owner/PM: SPEC already fulfilled by PR #115 (merged);
-      this fix PR closes a real live defect found during independent
+- [ ] Independent review + merge of this fix PR
+      (https://github.com/FChecklist/veridian-scripts/pull/123).
+- [x] Report back to Owner/PM: SPEC already fulfilled by PR #115 (merged);
+      PR #123 closes a real live defect found during independent
       re-verification of that merge.

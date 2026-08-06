@@ -1642,6 +1642,184 @@ def _external_ai_mark_complete(session_id):
         return False
 
 
+_TASK_YAML_PR_URL_RE = re.compile(r"/pull/(\d+)")
+
+# Root-cause fix, UMR-20260806-082352-7b1b (child of Owner directive
+# UMR-20260806-081403-ebd3): backfill_null_heartbeats()'s systemd-dispatched
+# branch used to mark EVERY NULL-heartbeat, systemctl-confirmed-inactive row
+# 'failed' unconditionally, even when that task's own real task.yaml (under
+# TASKS_DIR/<task_identity>/) already recorded real forward progress (a
+# referenced PR/commit) or genuine completion (a merged PR) -- live-confirmed
+# this cycle by manual inspection of 9 real rows: 6 were genuinely
+# 'blocked with real forward progress' (mislabeled 'failed'), 1 was genuinely
+# 'completed' via a merged PR (mislabeled 'failed'), and 2 were correctly
+# 'failed' -- their own task.yaml's claimed progress did NOT hold up under an
+# independent cross-check (e.g. a referenced branch's real tip commit
+# predated that task's own real start time). The three helpers below
+# implement that same real, evidence-based cross-check -- a task.yaml's own
+# claims are NEVER trusted on their own; a referenced PR is only believed
+# after a real `gh pr view`, and a referenced-but-PR-less branch is only
+# believed after its own real tip-commit date is confirmed to postdate the
+# task's own real created_at.
+
+
+def _pr_number_from_task_yaml(doc):
+    """Real PR number referenced by this task.yaml doc, if any -- checked
+    only in the two real, structured places a task.yaml actually records a
+    PR it opened/adopted (the explicit adopted_pr_url field, and any
+    '.../pull/NNN' URL inside a real checkpoint's own note text), never a
+    loose title-text guess like _referenced_pr_number() above uses for the
+    (much lower-stakes) duplicate-dispatch guard. Returns None if no such
+    real reference exists. Never raises -- a malformed checkpoints shape
+    just yields no match."""
+    url = doc.get("adopted_pr_url")
+    if url:
+        m = _TASK_YAML_PR_URL_RE.search(url)
+        if m:
+            return m.group(1)
+    for cp in (doc.get("checkpoints") or []):
+        note = cp.get("note") if isinstance(cp, dict) else None
+        if note:
+            m = _TASK_YAML_PR_URL_RE.search(note)
+            if m:
+                return m.group(1)
+    return None
+
+
+def _real_pr_state_for_backfill(pr_number, repo):
+    """Real `gh pr view --json state,mergedAt,mergeCommit,url` call, same
+    shape pm_cycle_precheck.py's gather_pr_states() already uses -- ground
+    truth for whether a task.yaml-referenced PR is genuinely MERGED, still
+    OPEN, or genuinely CLOSED-unmerged. Returns {"ok": False, ...} (never
+    raises) on any timeout/non-zero-exit/unparseable output -- the caller
+    treats an unverifiable PR the same as no real evidence at all."""
+    try:
+        r = _run(
+            ["gh", "pr", "view", str(pr_number), "--repo", f"{GH_ORG}/{repo}",
+             "--json", "state,mergedAt,mergeCommit,url"],
+            timeout=GH_PR_CHECK_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"gh pr view #{pr_number} timed out (>{GH_PR_CHECK_TIMEOUT_SECONDS}s)"}
+    if r.returncode != 0:
+        return {"ok": False, "error": (r.stderr or f"gh pr view #{pr_number} failed, exit {r.returncode}").strip()}
+    try:
+        data = json.loads(r.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return {"ok": False, "error": f"unparseable `gh pr view #{pr_number}` output"}
+    return {
+        "ok": True, "state": data.get("state"), "merged_at": data.get("mergedAt"),
+        "merge_commit": (data.get("mergeCommit") or {}).get("oid"), "url": data.get("url"),
+    }
+
+
+def _real_branch_tip_commit_date(branch, repo):
+    """Real `gh api repos/<org>/<repo>/commits/<branch>` call -- the branch's
+    own real current tip commit's real committer date (an aware datetime),
+    ground truth for the "does this task.yaml's claimed branch progress
+    actually postdate the task's own start" cross-check. Returns None on any
+    error/timeout/missing-branch/unparseable-date (never raises, never
+    fabricates a date -- an unverifiable branch is treated as no real
+    evidence)."""
+    if not branch:
+        return None
+    try:
+        r = _run(
+            ["gh", "api", f"repos/{GH_ORG}/{repo}/commits/{branch}", "--jq", ".commit.committer.date"],
+            timeout=GH_PR_CHECK_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if r.returncode != 0:
+        return None
+    raw = (r.stdout or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _safe_parse_iso(value):
+    """Best-effort ISO-8601 parse (task.yaml's own created_at, always written
+    by veridian-task.py as a real timezone-aware isoformat() string) -- None
+    on anything missing/malformed, never raises."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _forward_progress_decision(doc):
+    """Real, evidence-based decision for a NULL-heartbeat, systemctl-confirmed
+    -inactive row that HAS a real task.yaml (the caller already handles the
+    no-task.yaml case as the original unconditional 'failed'). Returns
+    (status, detail) where status is one of 'failed' / 'running' /
+    'completed' -- 'failed' is the outcome of every branch below unless real,
+    independently cross-checked evidence positively justifies 'running' or
+    'completed'; this task.yaml's own claims are never trusted on their own
+    (see the module-level comment above this function for the real 2-of-9
+    live incident that made that cross-check a hard requirement, not an
+    optimization). `detail` is a dict of the real evidence gathered, folded
+    into the row's own `reason` by the caller."""
+    yaml_status = doc.get("status")
+    detail = {"task_yaml_status": yaml_status}
+
+    # A task.yaml that already recorded its own genuinely-terminal-negative
+    # outcome agrees with the original default -- nothing to override.
+    if yaml_status in ("failed", "cancelled", "rejected_duplicate", "superseded", "not_needed"):
+        detail["cross_check"] = f"task.yaml itself already status={yaml_status!r} -- no override, default failed retained"
+        return "failed", detail
+
+    repo = doc.get("repo")
+    pr_number = _pr_number_from_task_yaml(doc)
+    if pr_number and repo:
+        pr_state = _real_pr_state_for_backfill(pr_number, repo)
+        detail["pr_number"] = pr_number
+        detail["repo"] = repo
+        detail["pr_check"] = pr_state
+        if not pr_state.get("ok"):
+            detail["cross_check"] = f"gh pr view #{pr_number} unverifiable ({pr_state.get('error')}) -- default failed retained"
+            return "failed", detail
+        if pr_state["state"] == "MERGED":
+            detail["cross_check"] = f"gh pr view #{pr_number} confirms MERGED -- genuine completion"
+            return "completed", detail
+        if pr_state["state"] == "OPEN":
+            detail["cross_check"] = f"gh pr view #{pr_number} confirms OPEN -- real forward progress (blocked, not dead)"
+            return "running", detail
+        detail["cross_check"] = f"gh pr view #{pr_number} confirms {pr_state['state']} (not merged) -- genuinely rejected/stale"
+        return "failed", detail
+
+    # No real PR referenced -- only a 'blocked' task.yaml status plus a real
+    # referenced branch, itself cross-checked against this task's own real
+    # created_at, can justify 'running'. This is the exact real check that
+    # caught both of the 9 real rows whose claimed progress did NOT hold up.
+    branch = doc.get("branch")
+    if yaml_status == "blocked" and branch and repo:
+        tip_date = _real_branch_tip_commit_date(branch, repo)
+        created_at = _safe_parse_iso(doc.get("created_at"))
+        detail["branch"] = branch
+        detail["branch_tip_commit_date"] = tip_date.isoformat() if tip_date else None
+        detail["task_created_at"] = created_at.isoformat() if created_at else None
+        if tip_date is None:
+            detail["cross_check"] = f"branch {branch!r} tip commit date unverifiable via `gh api` -- default failed retained"
+            return "failed", detail
+        if created_at and tip_date < created_at:
+            detail["cross_check"] = (
+                f"branch {branch!r} real tip commit ({tip_date.isoformat()}) predates this task's own real "
+                f"created_at ({created_at.isoformat()}) -- claimed task.yaml progress does not hold up, genuinely failed"
+            )
+            return "failed", detail
+        detail["cross_check"] = f"branch {branch!r} real tip commit postdates task creation -- real forward progress (blocked, not dead)"
+        return "running", detail
+
+    detail["cross_check"] = "no real PR/commit evidence of forward progress in task.yaml -- default failed retained"
+    return "failed", detail
+
+
 def backfill_null_heartbeats(now=None, execute=False, email=None):
     """ONE-TIME operational backfill for the real gap reconcile_stale_heartbeats()
     cannot structurally close (see module docstring above it). Dry-run
@@ -1664,11 +1842,26 @@ def backfill_null_heartbeats(now=None, execute=False, email=None):
 
       (a) unit_name IS NOT NULL (systemd-dispatched): `systemctl --user
           is-active <unit_name>` is ground truth. Active -> genuine live work,
-          left alone untouched. Not active -> confirmed dead: marked 'failed'
-          (never 'completed' -- the real outcome of a row with no heartbeat
-          history at all is unknown, so the only honest terminal status is
-          failed), with ts_completed=now and a `reason` recording the real
-          evidence (unit_name checked, found inactive).
+          left alone untouched. Not active -> the unit itself is confirmed
+          dead, but that alone no longer means the WORK is dead: this task's
+          own real task.yaml (TASKS_DIR/<task_identity>/task.yaml, read via
+          dispatch_core.task_status_sync(), never a second parallel reader)
+          is real-checked for real evidence of forward progress before
+          defaulting to 'failed' -- see _forward_progress_decision()'s own
+          docstring for the full real algorithm and the real 2-of-9 live
+          incident (a claimed branch whose real tip commit predated its own
+          task's real start time) that makes an independent cross-check of
+          that evidence a hard requirement, not an optional nicety. A
+          referenced PR is only ever believed after a real `gh pr view`
+          (MERGED -> 'completed', OPEN -> 'running', CLOSED-unmerged ->
+          'failed'); a PR-less 'blocked' status with a referenced branch is
+          only believed after that branch's own real tip-commit date is
+          confirmed (via `gh api`) to postdate the task's own real
+          created_at. No task.yaml, no evidence, or any unverifiable check
+          all fail toward the original default: marked 'failed', with
+          ts_completed=now and a `reason` recording the real evidence
+          gathered (unit_name checked found inactive, plus whatever
+          task.yaml/PR/branch cross-check was or wasn't possible).
 
       (b) unit_name IS NULL (external_ai_state_machine.py-backed, e.g.
           sessions from that state machine which never write to
@@ -1710,12 +1903,28 @@ def backfill_null_heartbeats(now=None, execute=False, email=None):
         "counts": {
             "systemd_examined": len(systemd_rows),
             "systemd_marked_failed": 0,
+            "systemd_marked_running": 0,
+            "systemd_marked_completed": 0,
             "systemd_left_active": 0,
             "external_examined": len(external_rows),
             "external_reconciled_completed": 0,
             "external_left_untouched": 0,
         },
     }
+
+    # Real task.yaml ground truth for the cross-check below -- ONE real read
+    # of TASKS_DIR via dispatch_core's own canonical task_status_sync()
+    # (never a second, parallel glob/parse of TASKS_DIR), reused for every
+    # row in this loop rather than re-globbed per row.
+    try:
+        task_docs = _dispatch_core().task_status_sync()
+    except Exception as e:
+        task_docs = {}
+        _append_attention(
+            f"WARNING: backfill_null_heartbeats() could not read TASKS_DIR via dispatch_core.task_status_sync() "
+            f"({type(e).__name__}: {e}) -- proceeding with NO task.yaml cross-check this run, every systemd-"
+            f"dispatched inactive row falls back to the original unconditional 'failed' behavior."
+        )
 
     # --- (a) systemd-dispatched rows: ground-truth via systemctl -----------
     for row in systemd_rows:
@@ -1732,25 +1941,53 @@ def backfill_null_heartbeats(now=None, execute=False, email=None):
             })
             continue
 
-        reason = (
+        doc = task_docs.get(row["task_identity"])
+        if doc is not None:
+            decided_status, evidence = _forward_progress_decision(doc)
+        else:
+            decided_status = "failed"
+            evidence = {"cross_check": "no task.yaml found under TASKS_DIR for this task_identity -- default failed retained"}
+
+        base_note = (
             f"one-time backfill reconciliation (Stage 1, {now.isoformat()}): unit_name={unit!r} "
             f"checked via `systemctl --user is-active`, found inactive -- row had last_heartbeat=NULL "
-            f"and could never be reached by reconcile_stale_heartbeats()'s stale-heartbeat sweep. "
-            f"Marked 'failed' (not 'completed') because the real outcome of a row with no heartbeat "
-            f"history is unknown."
+            f"and could never be reached by reconcile_stale_heartbeats()'s stale-heartbeat sweep."
         )
+        reason = f"{base_note} Real task.yaml cross-check: {evidence['cross_check']} (full evidence: {json.dumps(evidence)})"
+
         entry = {
             "umr_id": row["umr_id"], "task_identity": row["task_identity"], "category": "systemd",
-            "unit_name": unit, "status_before": row["status"],
-            "decision": "marked_failed" if execute else "would_mark_failed",
-            "detail": f"systemctl --user is-active {unit} -> inactive; confirmed dead",
+            "unit_name": unit, "status_before": row["status"], "evidence": evidence,
+            "detail": f"systemctl --user is-active {unit} -> inactive; real task.yaml cross-check -> {decided_status}",
             "reason": reason,
         }
-        if execute:
-            with sbr._write_lock():
-                sbr.update_umr_task(conn, row["umr_id"], status="failed", ts_completed=_now_iso(), reason=reason)
-                conn.commit()
-            report["counts"]["systemd_marked_failed"] += 1
+
+        if decided_status == "completed":
+            entry["decision"] = "marked_completed" if execute else "would_mark_completed"
+            if execute:
+                with sbr._write_lock():
+                    sbr.update_umr_task(conn, row["umr_id"], status="completed", ts_completed=_now_iso(), reason=reason)
+                    conn.commit()
+                report["counts"]["systemd_marked_completed"] += 1
+        elif decided_status == "running":
+            entry["decision"] = "marked_running" if execute else "would_mark_running"
+            if execute:
+                # Real evidence-based reconciliation of the null heartbeat --
+                # refreshed to `now` so this row leaves this backfill's
+                # candidate set (last_heartbeat IS NULL) and returns to being
+                # tracked normally by reconcile_stale_heartbeats() going
+                # forward, exactly like any other genuinely-alive row.
+                with sbr._write_lock():
+                    sbr.update_umr_task(conn, row["umr_id"], status="running", last_heartbeat=_now_iso(), reason=reason)
+                    conn.commit()
+                report["counts"]["systemd_marked_running"] += 1
+        else:
+            entry["decision"] = "marked_failed" if execute else "would_mark_failed"
+            if execute:
+                with sbr._write_lock():
+                    sbr.update_umr_task(conn, row["umr_id"], status="failed", ts_completed=_now_iso(), reason=reason)
+                    conn.commit()
+                report["counts"]["systemd_marked_failed"] += 1
         report["examined"].append(entry)
 
     # --- (b) external_ai_state_machine.py-backed rows: ground-truth via ----

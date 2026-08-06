@@ -59,49 +59,107 @@ must use verified paths, never a hardcoded/guessed one.
       - This closes the exact gap PR #201's own PROGRESS.md flagged as
         "Remaining": `ai_agent_registry` table/script not yet on `main`.
 
+- [x] Built `verify_registry_file_paths.py` -- the real deterministic
+      checker the SPEC requires, all 3 tables in one run, right-now
+      `os.path.exists()`, never the DB's own cached `verification_status`.
+      Reuses `generate_wiring_registry.py`'s own `normalize_path`/
+      `path_exists` for `wiring_registry` (never reimplemented), a small
+      new resolver for `capability_registry`'s free-text `apis`/`workflow`/
+      `business_rules[].mechanism_path` fields (absolute or
+      `VERIDIAN_ROOT`-relative, matching that module's own convention), and
+      a direct `memory_file_path` check for `ai_agent_registry`. Correctly
+      excludes entity_types whose `wiring_registry.path` is by-design not a
+      single disk path (`engine`/`gateway` multi-file summaries, `route`
+      `src -> dst` pairs, `cron_job` command lines, `ai_role` slugs,
+      `supabase_table` `schema.table` identifiers, `vercel_project`/
+      `dispatch_event` NULLs) -- checking those literally would have been
+      the same category error this session's own memory already flagged
+      once. See `REGISTRY_FILE_PATH_VERIFICATION_2026-08-06.md`/`.json` for
+      the full real report.
+- [x] **Ran it for real. Real counts:**
+      - `capability_registry`: **14/16 PASS, 2 FAIL**
+        (`CAP-20260806-182313-9028`/`CAP-20260806-182326-0e3e`, both
+        `apis` fields carrying a bare CLI subcommand name instead of a real
+        script path -- root cause: a still-**live** sibling task
+        (`task-20260806-181146-...`, this SPEC's own governing-chain
+        sibling) registered them minutes before this check, real code on
+        open PR #205. Deliberately **not** edited this session to avoid
+        racing a live sibling's own row -- documented with the exact
+        correct fix for whoever closes PR #205).
+      - `wiring_registry`: **7117/7928 PASS, 64 FAIL**, 747 correctly
+        excluded as not-a-single-disk-path by entity_type design. Root
+        causes (all confirmed, not fabricated): 4 rows for 2 genuinely
+        obsolete scripts (`module-queue-dispatcher.py`/
+        `queue-dispatcher.py`, consolidated into `dispatch-tick.py`
+        2026-07-26 per `SOFTWARE_CATALOG.yaml`'s own text -- orphaned
+        because `upsert_live_wiring_registry()` only ever upserts, never
+        prunes rows a fresh run stops producing); ~60 stale/never-written
+        `knowledge_engine`-sourced planning-doc references from
+        2026-07-23/24/25 (`ai-os-scripts/*.py`, dated `*.yaml` audits); 1
+        genuine category mismatch (`https://claude.ai/...` URL modeled as
+        a `file` artifact).
+      - `ai_agent_registry`: 0/0 -- real, live (merged this session), 0
+        rows until the first `ensure-agent`/`record-work` call.
+- [x] **Fixed what was safely fixable this session**, all via existing
+      canonical mechanisms, never raw SQL: re-ran
+      `verify-knowledge --path ...` (existing CLI) against 11 stale
+      `knowledge_engine` rows the live DB had cached as `PATH_MISSING` --
+      6 correctly moved to honest `HASH_DRIFTED` (file exists again,
+      content changed since the stale scan), 5 confirmed still genuinely
+      missing (real, not stale-cache artifacts). Then re-ran
+      `generate_wiring_registry.py` for real (the same script this box's
+      own cron already runs periodically) so `wiring_registry` picked up
+      the correction. Did **not** attempt a blind bulk fix of the
+      remaining ~55 stale `knowledge_engine` rows or delete the 4 orphaned
+      script rows -- no canonical single-row deletion mechanism exists yet
+      for `wiring_registry` (checked: no `deregister-entity` CLI), and
+      building one safely (scoped to this generator's own entity_id
+      namespace only, never touching `agent_work_briefing.py`'s ad-hoc
+      rows -- confirmed this is a real risk, not a hypothetical one) is a
+      distinct, separately-scoped unit of work, documented as the real
+      concrete next step in the verification report rather than
+      guessed/rushed.
+- [x] Confirmed orchestrator path usage already satisfies the SPEC:
+      `worker-entrypoint.sh` (PR #199, merged this session) resolves
+      `ai_agent_registry.py`/`agent_work_briefing.py` structurally
+      (`SCRIPTS`-relative `os.path.join`, matching `ai_agent_registry.py`'s
+      own convention) when it calls `assemble-briefing`/
+      `record-completion` -- never a hardcoded absolute guess. Nothing
+      further built here; the existing pattern already prevents drift by
+      construction rather than needing a runtime lookup against this
+      verification script's output.
+
 ## Remaining
-- [ ] Build `verify_registry_file_paths.py` -- the actual deterministic
-      checker this SPEC requires, covering all three tables in one run:
-      - `wiring_registry` already has a real per-row `path` +
-        `verification_status` column, computed by
-        `generate_wiring_registry.py` (reuse its `normalize_path`/
-        `path_exists`, don't reimplement). Live snapshot before re-run:
-        8570 rows, 22 `PATH_MISSING`, 12 `HASH_DRIFTED` -- needs a fresh
-        `generate_wiring_registry.py` run (not a trust of the cached
-        status) plus a real look at whether each surviving PATH_MISSING
-        row is a genuine stale reference (fix path / remove row) or a
-        legitimately-pathless entity type.
-      - `capability_registry` has NO dedicated path/verification column --
-        path candidates live in free-text `apis` (list) and
-        `business_rules[].mechanism_path`, some absolute
-        (`/opt/veridian/scripts/x.py`), some root-relative
-        (`repos/compliance-tracker/src/...`, `scripts/x.py`). Needs a
-        resolver against the known repo roots before `os.path.exists()`.
-        Only 14 rows -- tractable to check by hand as a cross-check on the
-        script's own output.
-      - `ai_agent_registry` (now real, 0 rows until first `ensure-agent`
-        call) -- check `memory_file_path` per row once populated.
-      Report format: total checked / pass / fail per table + exact
-      identity (capability_id / entity_id / agent_id) and broken path for
-      every failure, matching the SPEC's "real count ... and real identity
-      of any row whose real path check fails" requirement.
-- [ ] Fix any real failures the script surfaces (correct path or remove
-      row via the canonical CLI mechanism only, never raw SQL) -- not yet
-      run for real on this session's live data beyond the 22/12
-      wiring_registry snapshot already surfaced by PR #201's Section 16.
-- [ ] Wire the verification into "the same real final checklist already
-      required" -- `generate_platform_completion_checklist.py`
-      (PR #201) is that checklist. Add a section (or extend
-      `generate_pm_report_v3.py` Section 16, which currently only covers
-      `wiring_registry`) so all three tables' pass/fail counts appear
-      there, not just in a standalone script's stdout.
-- [ ] Confirm/extend orchestrator path usage: `worker-entrypoint.sh`
-      (PR #199) already resolves `ai_agent_registry.py`/
-      `agent_work_briefing.py` via `SCRIPTS`-relative `os.path.join`
-      (never a hardcoded absolute guess) when it calls
-      `assemble-briefing`/`record-completion` -- confirm this still holds
-      post-merge and decide whether the SPEC's "orchestrator must use
-      these real verified paths directly" needs anything beyond that
-      (e.g. consulting `verify_registry_file_paths.py`'s own output before
-      invoking, vs. the existing pattern of resolving paths structurally
-      so they can't drift in the first place).
+- [ ] Wire `verify_registry_file_paths.py` into
+      `generate_platform_completion_checklist.py`/
+      `generate_pm_report_v3.py` Section 16 (currently `wiring_registry`
+      only) so all 3 tables' real pass/fail counts surface in the
+      already-scheduled PM report cadence, not just this standalone
+      script's own stdout/report file. Not done this session (budget) --
+      the script itself is complete, tested against live data, and its
+      JSON output (`--json`) is already report-generator-ready.
+- [ ] Add a narrow, single-row `deregister-entity --entity-id <id>
+      --reason <text>` CLI to `superboss-register.py` (matching this
+      codebase's existing single-row-only convention, e.g.
+      `mark-umr-terminal`) and use it on the 4 confirmed-obsolete
+      `module-queue-dispatcher.py`/`queue-dispatcher.py` wiring_registry
+      rows. Real, scoped, evidence already gathered -- not built this
+      session.
+- [ ] Once sibling PR #205 (`task_precedent_search`/
+      `capability_graduation_recording`) merges, correct its 2
+      `capability_registry` `apis` fields to the real host script path
+      (`/opt/veridian/scripts/superboss-register.py <subcommand>`) via
+      `register-capability`'s idempotent upsert.
+- [ ] The ~55-row `knowledge_engine` stale-planning-doc backlog (see
+      verification report #3) needs a real decision per row (doc actually
+      never written -> leave `PATH_MISSING` honestly; doc moved -> correct
+      `artifact_path`) -- out of this session's remaining budget, real
+      identities already listed in
+      `REGISTRY_FILE_PATH_VERIFICATION_2026-08-06.json`.
+- [ ] "The one unified orchestrator" itself -- deliberately not built here.
+      Per sibling task `-181141`'s own finding (merged PR #202, this
+      task's own PROGRESS.md history above), 5 concurrent amendment SPECs
+      are redefining that same deliverable's requirements in real time;
+      building it unilaterally in this task would create exactly the
+      fragmented-duplicate-version outcome the governing chain warns
+      against. Needs Owner/dispatcher reconciliation across all 5 first.

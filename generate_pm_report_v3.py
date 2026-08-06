@@ -26,6 +26,10 @@ Real sources, one per header/status field:
     overridable via VERIDIAN_STUCK_TASKS_HEARTBEAT_PATH -- same env var name
     dispatch-tick.py reads, so a test/deploy override affects both
     consistently).
+  - `df -B1 /` (real exact byte counts, not `df -h`'s human-rounded strings
+    -- same reasoning as /proc/meminfo above) for the real root-filesystem
+    disk-usage section, added task-20260806-151345 after a real
+    disk-exhaustion emergency this report had no section for at all.
   - `tmux has-session -t claude` for direct CLI status.
   - resource_governor.py's own EMERGENCY_STOP_PATH constant, imported (not
     hardcoded) from the real script at SCRIPTS/resource_governor.py.
@@ -384,6 +388,7 @@ STUCK_TASKS_HEARTBEAT_PATH = os.environ.get(
 
 PROC_MEMINFO_PATH = os.environ.get("VERIDIAN_PM_REPORT_MEMINFO", "/proc/meminfo")
 PROC_LOADAVG_PATH = os.environ.get("VERIDIAN_PM_REPORT_LOADAVG", "/proc/loadavg")
+DISK_USAGE_PATH = os.environ.get("VERIDIAN_PM_REPORT_DISK_PATH", "/")
 
 REPORT_LATEST_PATH = os.environ.get(
     "VERIDIAN_PM_REPORT_LATEST", f"{AI_OS}/reports/pm-report-latest.txt")
@@ -400,6 +405,19 @@ WORKER_UNIT_GLOB = "veridian-worker@*"
 # ---------------------------------------------------------------------------
 SWAP_FREE_PCT_WARN_THRESHOLD = 10.0
 LOAD_1MIN_WARN_THRESHOLD = 25.0
+
+# task-20260806-151345 (real disk-exhaustion incident, parent
+# UMR-20260806-071025-1d28): real / avail dropped from 3.0G to 680M in 18
+# real minutes during the triggering incident. Two thresholds, either one
+# alone opens the issue -- a pure percentage misses the real failure mode on
+# this box's real 301G disk (10% of 301G is still 30G, far past the point
+# writes actually started failing), and a pure absolute-GB floor misses a
+# much smaller real disk genuinely running low well above any fixed GB
+# number. DISK_AVAIL_GB_WARN_THRESHOLD=5.0 is chosen with real margin above
+# the 680M the real incident bottomed out at -- 5G still gives real time to
+# react before sqlite writes/git operations/worker builds start failing.
+DISK_AVAIL_GB_WARN_THRESHOLD = 5.0
+DISK_AVAIL_PCT_WARN_THRESHOLD = 10.0
 
 REPORT_FORMAT_VERSION = "pm-report-v3-placeholder-gtm-score"
 
@@ -444,7 +462,16 @@ REPORT_FORMAT_VERSION = "pm-report-v3-placeholder-gtm-score"
 # PLACEHOLDER GTM readiness bucket/recommendation with the real formula that
 # UMR supplied verbatim -- see the module docstring's "Section 4: real
 # readiness bucket formula" block above.
-SCRIPT_VERSION = "3.4.0"
+# 3.5.0 (task-20260806-151345, child UMR-20260806-151559-30d5, parent
+# UMR-20260806-071025-1d28 -- the real disk-exhaustion emergency this report
+# had NO section for at all until now): adds a real disk-usage section
+# (`header_status.disk_usage`, a real `df -B1 /` read, same
+# parse-then-wrap-in-getter pattern as ram_swap/load_average above) plus a
+# new `disk_space_low` open-issue rule (DISK_AVAIL_GB_WARN_THRESHOLD=5.0 /
+# DISK_AVAIL_PCT_WARN_THRESHOLD=10.0, either one trips it -- see the
+# threshold's own comment block for why both a GB floor and a % floor are
+# needed on this box's real 301G disk).
+SCRIPT_VERSION = "3.5.0"
 
 # ---------------------------------------------------------------------------
 # Section 9-13 constants (UMR-20260806-041307-0bfd) -- see module docstring
@@ -615,6 +642,54 @@ def get_load_average():
         return parse_loadavg(text)
     except OSError as e:
         return {"error": f"could not read {PROC_LOADAVG_PATH}: {e}"}
+
+
+def parse_df_output(text):
+    """Pure function: parses the data row of `df -B1 <path>` output (real
+    exact byte counts -- chosen over `df -h`'s human-rounded "24G"/"680M"
+    strings for the same reason parse_meminfo() above reads /proc/meminfo
+    directly instead of un-parsing `free -h`). Real incident this exists
+    for: task-20260806-151345 -- a real disk-exhaustion emergency this
+    report had NO section for at the time it happened."""
+    lines = [l for l in text.splitlines() if l.strip()]
+    if len(lines) < 2:
+        return {"error": f"unexpected df output (no data row): {text!r}"}
+    parts = lines[1].split()
+    if len(parts) < 6:
+        return {"error": f"unexpected df output (expected >=6 columns): {text!r}"}
+    try:
+        size_bytes = int(parts[1])
+        used_bytes = int(parts[2])
+        avail_bytes = int(parts[3])
+    except ValueError:
+        return {"error": f"unexpected df output (non-numeric byte columns): {text!r}"}
+    used_pct = round((used_bytes / size_bytes) * 100.0, 2) if size_bytes > 0 else None
+    avail_pct = round((avail_bytes / size_bytes) * 100.0, 2) if size_bytes > 0 else None
+    gib = 1024 ** 3
+    return {
+        "filesystem": parts[0],
+        "mount_point": parts[-1],
+        "size_bytes": size_bytes,
+        "used_bytes": used_bytes,
+        "avail_bytes": avail_bytes,
+        "size_gb": round(size_bytes / gib, 2),
+        "used_gb": round(used_bytes / gib, 2),
+        "avail_gb": round(avail_bytes / gib, 2),
+        "used_pct": used_pct,
+        "avail_pct": avail_pct,
+    }
+
+
+def get_disk_usage(path=None):
+    """Real `df -B1 <path>` read for the real root-filesystem disk-space
+    section (task-20260806-151345). Defaults to DISK_USAGE_PATH ("/" unless
+    overridden), same env-var-override pattern as PROC_MEMINFO_PATH/
+    PROC_LOADAVG_PATH above."""
+    target = path or DISK_USAGE_PATH
+    rc, out, err = run_cmd(["df", "-B1", target], timeout=10)
+    if rc != 0:
+        return {"error": f"df -B1 {target} exited {rc}: {(err or '').strip()}"}
+    return parse_df_output(out)
 
 
 def parse_dispatch_tick_timer_active(stdout, unit_name):
@@ -1299,7 +1374,7 @@ def compute_deltas(prior, current):
 # ---------------------------------------------------------------------------
 # Section 6: open issues -- pure threshold/rule logic, zero AI judgment
 # ---------------------------------------------------------------------------
-def build_open_issues(gtm_section, db_integrity, ram_swap, load_avg):
+def build_open_issues(gtm_section, db_integrity, ram_swap, load_avg, disk_usage=None):
     issues = []
 
     for cat in gtm_section.get("categories", []):
@@ -1343,6 +1418,24 @@ def build_open_issues(gtm_section, db_integrity, ram_swap, load_avg):
             "detail": (
                 f"load_1min={load1} exceeds the {LOAD_1MIN_WARN_THRESHOLD} threshold "
                 "(see module docstring for why this exact number was chosen)."
+            ),
+        })
+
+    disk_usage = disk_usage or {}
+    avail_gb = disk_usage.get("avail_gb")
+    avail_pct = disk_usage.get("avail_pct")
+    disk_low = (
+        (isinstance(avail_gb, (int, float)) and avail_gb < DISK_AVAIL_GB_WARN_THRESHOLD)
+        or (isinstance(avail_pct, (int, float)) and avail_pct < DISK_AVAIL_PCT_WARN_THRESHOLD)
+    )
+    if disk_low:
+        issues.append({
+            "kind": "disk_space_low",
+            "detail": (
+                f"avail_gb={avail_gb} ({avail_pct}%) on {disk_usage.get('mount_point')} is below "
+                f"the {DISK_AVAIL_GB_WARN_THRESHOLD}GB / {DISK_AVAIL_PCT_WARN_THRESHOLD}% threshold "
+                "(see module docstring for why these exact numbers were chosen -- real "
+                "task-20260806-151345 incident evidence)."
             ),
         })
 
@@ -2265,6 +2358,7 @@ def get_wiring_registry_health_section(sbr):
 def build_report(sbr):
     ram_swap = get_ram_swap()
     load_avg = get_load_average()
+    disk_usage = get_disk_usage()
     dispatch = get_dispatch_tick_status()
     workers = get_worker_count()
     worker_ceiling = get_worker_ceiling()
@@ -2301,6 +2395,8 @@ def build_report(sbr):
         "load_1min": load_avg.get("load_1min"),
         "load_5min": load_avg.get("load_5min"),
         "load_15min": load_avg.get("load_15min"),
+        "disk_avail_gb": disk_usage.get("avail_gb"),
+        "disk_avail_pct": disk_usage.get("avail_pct"),
         "dispatch_tick_active": dispatch.get("dispatch_tick_active"),
         "parallel_worker_count": workers.get("parallel_worker_count"),
         "stuck_task_count": stuck.get("stuck_task_count"),
@@ -2312,7 +2408,7 @@ def build_report(sbr):
     }
     deltas = compute_deltas(prior, current_flat)
 
-    open_issues = build_open_issues(gtm_section, db_integrity, ram_swap, load_avg)
+    open_issues = build_open_issues(gtm_section, db_integrity, ram_swap, load_avg, disk_usage)
     decisions = get_pm_decisions_pending(sbr)
     owner_proposals = get_owner_proposals_pending(sbr)
 
@@ -2342,6 +2438,7 @@ def build_report(sbr):
         "header_status": {
             "ram_swap": ram_swap,
             "load_average": load_avg,
+            "disk_usage": disk_usage,
             "dispatch_tick": dispatch,
             "parallel_workers": workers,
             "parallel_workers_ceiling": worker_ceiling,
@@ -2378,6 +2475,8 @@ def build_report(sbr):
             "SWAP_FREE_PCT_WARN_THRESHOLD": SWAP_FREE_PCT_WARN_THRESHOLD,
             "LOAD_1MIN_WARN_THRESHOLD": LOAD_1MIN_WARN_THRESHOLD,
             "TREND_STABLE_TOLERANCE_PCT": TREND_STABLE_TOLERANCE_PCT,
+            "DISK_AVAIL_GB_WARN_THRESHOLD": DISK_AVAIL_GB_WARN_THRESHOLD,
+            "DISK_AVAIL_PCT_WARN_THRESHOLD": DISK_AVAIL_PCT_WARN_THRESHOLD,
         },
     }
     return report
@@ -2405,6 +2504,9 @@ def render_report_text(report):
     lines.append(f"Swap free: {rs.get('swap_free_mb')} MB / total {rs.get('swap_total_mb')} MB "
                   f"({rs.get('swap_free_pct')}%)")
     lines.append(f"Load average: 1m={la.get('load_1min')} 5m={la.get('load_5min')} 15m={la.get('load_15min')}")
+    du = hs.get("disk_usage", {})
+    lines.append(f"Disk ({du.get('mount_point')}): avail {du.get('avail_gb')} GB / total {du.get('size_gb')} GB "
+                  f"({du.get('avail_pct')}% avail, {du.get('used_pct')}% used)")
     lines.append(f"dispatch-tick timer active: {hs['dispatch_tick'].get('dispatch_tick_active')}")
     lines.append(f"Parallel workers running: {hs['parallel_workers'].get('parallel_worker_count')}")
     wc = hs["parallel_workers_ceiling"]

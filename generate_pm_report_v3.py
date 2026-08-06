@@ -259,6 +259,36 @@ pure function of those reads -- no new AI/LLM call anywhere.
           rounded to 1 decimal, plus the full trailing-24h status breakdown.
           "insufficient_data" (not 0.0/100.0) when the window has zero real
           rows -- same honest-no-data spirit as Section 10.
+
+Section 1 additions (UMR-20260806-084701-0d40, citing prior UMR-20260806-
+081403-ebd3):
+  - PARALLEL_WORKERS_CEILING: previously absent from this section entirely
+    (there was no ceiling/cap field at all -- only the live running count).
+    Now a real read of dispatch_core.py's own CONCURRENCY_CAP constant
+    (get_worker_ceiling(), same load_module_from_path() import pattern
+    get_emergency_stop() already uses for resource_governor.py's
+    EMERGENCY_STOP_PATH) -- never a hardcoded literal, so it cannot drift
+    out of sync if that constant changes later. Confirmed live this task:
+    no VERIDIAN_DISPATCH_CONCURRENCY_CAP env override exists anywhere on
+    this server, so the real effective value today is dispatch_core.py's
+    own default, 5.
+  - INTERACTIVE_SUBAGENT_COUNT: a real, purely observational count of
+    active `claude -p` child processes (the exact real invocation shape
+    worker-entrypoint.sh uses, confirmed by reading that script) under the
+    main tmux session's (TMUX_SESSION_NAME) own real process tree --
+    fetched via one real `tmux list-panes` call + one real `ps -eo
+    pid,ppid` call (not one subprocess per candidate process), with exact-
+    argv matching via real /proc/<pid>/cmdline reads (get_worker_ceiling()'s
+    sibling get_interactive_subagent_count()). Real finding this field
+    documents: PARALLEL_WORKERS_CEILING/CONCURRENCY_CAP only governs the
+    systemd veridian-worker@* fleet -- it has never governed how many
+    `claude -p` subagents an interactive tmux session backgrounds on its
+    own; the "up to five parallel agents" wording some PM dispatch prompts
+    use is a convention followed by whoever reads the prompt, not a
+    systemically enforced cap. This field is purely observational (not
+    enforced) so the PM can see both concurrency layers together every
+    cycle, since a real 2026-08-06 memory-pressure incident involved both
+    layers running heavy work at the same time.
 -------------------------------------------------------------------------
 """
 import argparse
@@ -285,6 +315,8 @@ SCRIPTS = os.environ.get("VERIDIAN_SCRIPTS_DIR", f"{VERIDIAN_ROOT}/scripts")
 SBR_PATH = os.environ.get("VERIDIAN_SUPERBOSS_REGISTER_PY", f"{SCRIPTS}/superboss-register.py")
 RESOURCE_GOVERNOR_PATH = os.environ.get(
     "VERIDIAN_RESOURCE_GOVERNOR_PY", f"{SCRIPTS}/resource_governor.py")
+DISPATCH_CORE_PATH = os.environ.get(
+    "VERIDIAN_DISPATCH_CORE_PY", f"{SCRIPTS}/dispatch_core.py")
 
 STUCK_TASKS_HEARTBEAT_PATH = os.environ.get(
     "VERIDIAN_STUCK_TASKS_HEARTBEAT_PATH", f"{AI_OS}/STUCK_TASKS_HEARTBEAT.json")
@@ -340,7 +372,13 @@ REPORT_FORMAT_VERSION = "pm-report-v3-placeholder-gtm-score"
 # not a redo of that accuracy fix. Also adds Section 14 (UMR-20260806-070018-
 # d88b item 4, extended by UMR-20260806-071942-5132): deterministic UMR
 # closure tracking for source_trigger='owner_dispatch_gateway' rows.
-SCRIPT_VERSION = "3.2.0"
+# 3.3.0 (UMR-20260806-084701-0d40, citing prior UMR-20260806-081403-ebd3):
+# Section 1 adds PARALLEL_WORKERS_CEILING (real read of dispatch_core.py's
+# own CONCURRENCY_CAP, not a hardcoded literal) and INTERACTIVE_SUBAGENT_COUNT
+# (real, observational-only count of `claude -p` processes under the main
+# tmux session's process tree) -- see the module docstring's "Section 1
+# additions" block above.
+SCRIPT_VERSION = "3.3.0"
 
 # ---------------------------------------------------------------------------
 # Section 9-13 constants (UMR-20260806-041307-0bfd) -- see module docstring
@@ -551,6 +589,23 @@ def get_worker_count():
     return {"parallel_worker_count": parse_worker_count(out), "raw_stdout": out.strip()}
 
 
+def get_worker_ceiling():
+    """UMR-20260806-084701-0d40 (citing prior UMR-20260806-081403-ebd3): real
+    read of dispatch_core.py's own CONCURRENCY_CAP constant -- the real,
+    live ceiling on veridian-worker@* concurrency (int(env
+    VERIDIAN_DISPATCH_CONCURRENCY_CAP, default 5)). Imports the real module
+    (same load_module_from_path() pattern get_emergency_stop() already uses
+    for resource_governor.py's EMERGENCY_STOP_PATH) rather than hardcoding
+    the literal 5, so this can never silently drift out of sync if that
+    constant changes later."""
+    try:
+        core = load_module_from_path("dispatch_core", DISPATCH_CORE_PATH)
+        cap = core.CONCURRENCY_CAP
+    except Exception as e:
+        return {"parallel_workers_ceiling": None, "error": f"could not import {DISPATCH_CORE_PATH}: {e}"}
+    return {"parallel_workers_ceiling": cap, "source": "dispatch_core.CONCURRENCY_CAP"}
+
+
 def _load_stuck_tasks_heartbeat_doc():
     """Shared real read/parse of STUCK_TASKS_HEARTBEAT.json -- the ONE place
     this file opens/parses that JSON file. get_stuck_tasks() (Section 1
@@ -608,6 +663,131 @@ def get_stuck_tasks_detail():
 def get_tmux_status():
     code, out, err = run_cmd(["tmux", "has-session", "-t", TMUX_SESSION_NAME])
     return {"tmux_session_alive": code == 0, "raw_exit_code": code}
+
+
+# ---------------------------------------------------------------------------
+# INTERACTIVE_SUBAGENT_COUNT (UMR-20260806-084701-0d40, citing prior
+# UMR-20260806-081403-ebd3) -- see module docstring "Section 1 additions".
+# One real `tmux list-panes` call + one real `ps -eo pid,ppid` call (not one
+# subprocess per candidate process), then a pure in-memory tree walk, then
+# exact-argv confirmation via real /proc/<pid>/cmdline reads only for the
+# small set of candidates already named "claude".
+# ---------------------------------------------------------------------------
+def get_tmux_pane_pids(session_name=TMUX_SESSION_NAME):
+    code, out, err = run_cmd(["tmux", "list-panes", "-t", session_name, "-F", "#{pane_pid}"])
+    if code != 0:
+        return [], err.strip() or f"exit {code}"
+    pids = []
+    for line in out.splitlines():
+        line = line.strip()
+        if line.isdigit():
+            pids.append(int(line))
+    return pids, None
+
+
+def parse_ps_ppid_map(stdout):
+    """Pure function: parses real `ps -eo pid,ppid --no-headers` output into
+    a ppid -> [child_pid, ...] map. Skips any malformed line rather than
+    raising -- a real process table row this script does not need to
+    understand should never crash the whole tree walk."""
+    children = {}
+    for line in stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append(pid)
+    return children
+
+
+def get_process_children_map():
+    code, out, err = run_cmd(["ps", "-eo", "pid,ppid", "--no-headers"], timeout=10)
+    if code != 0:
+        return None, err.strip() or f"exit {code}"
+    return parse_ps_ppid_map(out), None
+
+
+def get_descendant_pids(root_pids, children_map):
+    """Pure function: real BFS over an already-fetched real ppid map -- one
+    real `ps` call regardless of tree depth/size, the same 'fetch once,
+    compute in-memory' discipline as Section 12's real perf fix
+    (SCRIPT_VERSION 3.2.0)."""
+    seen = set()
+    queue = list(root_pids)
+    while queue:
+        pid = queue.pop()
+        for child in children_map.get(pid, []):
+            if child not in seen:
+                seen.add(child)
+                queue.append(child)
+    return seen
+
+
+def read_proc_cmdline(pid, proc_root="/proc"):
+    """Real read of /proc/<pid>/cmdline -- the exact, unambiguous real argv
+    (NUL-separated), not a guess parsed from a formatted `ps` column. Returns
+    None (not a fabricated empty list) when the process has already exited
+    or is unreadable -- real processes come and go between the `ps` snapshot
+    and this read, and that race is honestly reported as 'unreadable', never
+    silently treated as 'not a match'."""
+    try:
+        with open(os.path.join(proc_root, str(pid), "cmdline"), "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    return [p for p in raw.decode("utf-8", errors="replace").split("\0") if p != ""]
+
+
+def is_claude_dash_p_argv(argv):
+    """Pure function: the real, exact invocation shape worker-entrypoint.sh's
+    own `claude -p "$PROMPT" ...` call has (confirmed by reading that real
+    script before writing this) -- argv[0]'s basename is exactly 'claude'
+    AND '-p' appears as an exact argv token. Deliberately an exact-token
+    check, not a substring match on a joined command line, so a prompt that
+    happens to contain the literal text '-p' can never produce a false
+    positive."""
+    if not argv:
+        return False
+    basename = argv[0].rsplit("/", 1)[-1]
+    return basename == "claude" and "-p" in argv[1:]
+
+
+def get_interactive_subagent_count(session_name=TMUX_SESSION_NAME):
+    """Real, purely observational count of active `claude -p` child
+    processes under the main tmux session's own real process tree. NOT the
+    same concurrency layer as PARALLEL_WORKERS_CEILING/CONCURRENCY_CAP
+    above, and NOT enforced by this field -- see module docstring "Section 1
+    additions" for the real finding this documents."""
+    pane_pids, err = get_tmux_pane_pids(session_name)
+    if err:
+        return {"interactive_subagent_count": None, "tmux_session": session_name, "error": err}
+    if not pane_pids:
+        return {"interactive_subagent_count": None, "tmux_session": session_name,
+                "error": f"no real panes found for tmux session '{session_name}'"}
+
+    children_map, err = get_process_children_map()
+    if err:
+        return {"interactive_subagent_count": None, "tmux_session": session_name, "error": err}
+
+    descendants = get_descendant_pids(pane_pids, children_map)
+    matched = []
+    for pid in sorted(descendants):
+        argv = read_proc_cmdline(pid)
+        if argv and is_claude_dash_p_argv(argv):
+            matched.append(pid)
+
+    return {
+        "interactive_subagent_count": len(matched),
+        "tmux_session": session_name,
+        "pane_pids": pane_pids,
+        "matched_pids": matched,
+        "error": None,
+    }
 
 
 def get_emergency_stop():
@@ -1687,8 +1867,10 @@ def build_report(sbr):
     load_avg = get_load_average()
     dispatch = get_dispatch_tick_status()
     workers = get_worker_count()
+    worker_ceiling = get_worker_ceiling()
     stuck = get_stuck_tasks()
     tmux = get_tmux_status()
+    interactive_subagents = get_interactive_subagent_count()
     estop = get_emergency_stop()
     db_integrity = get_db_integrity(sbr)
 
@@ -1754,8 +1936,10 @@ def build_report(sbr):
             "load_average": load_avg,
             "dispatch_tick": dispatch,
             "parallel_workers": workers,
+            "parallel_workers_ceiling": worker_ceiling,
             "stuck_tasks": stuck,
             "tmux": tmux,
+            "interactive_subagents": interactive_subagents,
             "emergency_stop": estop,
             "db_integrity": db_integrity,
         },
@@ -1812,9 +1996,17 @@ def render_report_text(report):
     lines.append(f"Load average: 1m={la.get('load_1min')} 5m={la.get('load_5min')} 15m={la.get('load_15min')}")
     lines.append(f"dispatch-tick timer active: {hs['dispatch_tick'].get('dispatch_tick_active')}")
     lines.append(f"Parallel workers running: {hs['parallel_workers'].get('parallel_worker_count')}")
+    wc = hs["parallel_workers_ceiling"]
+    lines.append(f"PARALLEL_WORKERS_CEILING (dispatch_core.CONCURRENCY_CAP): {wc.get('parallel_workers_ceiling')}"
+                  + (f"  ERROR: {wc['error']}" if wc.get("error") else ""))
     lines.append(f"Stuck tasks (STUCK_TASKS_HEARTBEAT.json): {hs['stuck_tasks'].get('stuck_task_count')} "
                   f"(heartbeat generated_at={hs['stuck_tasks'].get('heartbeat_generated_at')})")
     lines.append(f"tmux session 'claude' alive: {hs['tmux'].get('tmux_session_alive')}")
+    ia = hs["interactive_subagents"]
+    lines.append(f"INTERACTIVE_SUBAGENT_COUNT (real 'claude -p' processes under tmux session "
+                  f"'{ia.get('tmux_session')}'): {ia.get('interactive_subagent_count')}"
+                  + (f"  ERROR: {ia['error']}" if ia.get("error") else "")
+                  + " (observational only -- not governed by PARALLEL_WORKERS_CEILING above)")
     lines.append(f"EMERGENCY_STOP present: {hs['emergency_stop'].get('emergency_stop_present')} "
                   f"(path={hs['emergency_stop'].get('emergency_stop_path')})")
     lines.append(f"DB integrity_check OK: {hs['db_integrity'].get('db_integrity_ok')} "

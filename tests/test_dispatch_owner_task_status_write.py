@@ -237,6 +237,34 @@ def test_wrapper_relay_fails_marks_failed_with_reason(scratch_db, fake_tmux_path
     assert row["ts_dispatched"] is None
 
 
+def test_wrapper_relay_includes_mandatory_completion_instruction(scratch_db, fake_tmux_path, tmp_path):
+    """UMR-20260806-112013-088f: the real gap this covers is that
+    mark-umr-terminal existed and was documented, but nothing structural
+    ever told the session doing the relayed work to call it. The fix makes
+    the relayed prompt text itself carry a mandatory, UMR-id-specific final
+    instruction naming the exact real command -- assert it actually reaches
+    the tmux send-keys call (via the fake tmux's real invocation log), not
+    just that the script exits 0."""
+    result, tmux_log = _run_wrapper(
+        scratch_db, fake_tmux_path, "fake-claude-session",
+        live_sessions=["fake-claude-session"], tmp_path=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+
+    umr_id = None
+    for line in result.stdout.splitlines():
+        if line.startswith("DISPATCHED:"):
+            umr_id = line.split("umr_id=")[1].split()[0]
+    assert umr_id
+
+    assert "MANDATORY FINAL STEP for " + umr_id in tmux_log
+    assert f"mark-umr-terminal --umr-id {umr_id} --status completed" in tmux_log
+    assert "never record a genuine failure as a success" in tmux_log
+    # The original prompt body must still be present, unaltered, ahead of
+    # the appended instruction -- this is additive, not a replacement.
+    assert "unit-test dispatch prompt body, unique-fake-claude-session" in tmux_log
+
+
 def test_wrapper_no_relay_leaves_row_queued_untouched(scratch_db, fake_tmux_path, tmp_path):
     """--no-relay is the pure background-worker path (out of scope for this
     UMR's dispatched/failed bookkeeping -- that row's real lifecycle is

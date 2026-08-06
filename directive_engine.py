@@ -23,13 +23,29 @@ except ImportError:
     subprocess.run([sys.executable, "-m", "pip", "install", "--user", "pyyaml"], check=False)
     import yaml
 
-SUPERBOSS_DB = "/opt/veridian/ai-os/memory/superboss-register.sqlite"
-GOVERNOR = "/opt/veridian/scripts/resource_governor.py"
-TASK_GATEWAY = "/opt/veridian/scripts/task-gateway.py"
-DIRECTIVE_FILE = "/opt/veridian/ai-os/DIRECTIVE.yaml"
-LOG_PATH = "/opt/veridian/ai-os/tasks/directive_status.log"
-PENDING_REVIEW_FILE = "/opt/veridian/ai-os/PENDING_OWNER_REVIEW.md"
-SPEC_TMP_DIR = "/tmp/directive_specs"
+# Real fix (dispatch-queue-starvation investigation, UMR-20260806-090229-f2a7):
+# env-overridable, same convention as every other real path constant in this
+# codebase (e.g. superboss-register.py's SUPERBOSS_REGISTER_DB) -- previously
+# hardcoded, which meant a real test could only ever point at the live
+# production DB/files, or not exercise this module's file-touching functions
+# at all. Defaults are unchanged, so production behavior is 100% identical.
+SUPERBOSS_DB = os.environ.get(
+    "VERIDIAN_DIRECTIVE_SUPERBOSS_DB", "/opt/veridian/ai-os/memory/superboss-register.sqlite")
+GOVERNOR = os.environ.get("VERIDIAN_DIRECTIVE_GOVERNOR_SCRIPT", "/opt/veridian/scripts/resource_governor.py")
+TASK_GATEWAY = os.environ.get("VERIDIAN_DIRECTIVE_TASK_GATEWAY_SCRIPT", "/opt/veridian/scripts/task-gateway.py")
+DIRECTIVE_FILE = os.environ.get("VERIDIAN_DIRECTIVE_FILE", "/opt/veridian/ai-os/DIRECTIVE.yaml")
+LOG_PATH = os.environ.get("VERIDIAN_DIRECTIVE_LOG_PATH", "/opt/veridian/ai-os/tasks/directive_status.log")
+PENDING_REVIEW_FILE = os.environ.get(
+    "VERIDIAN_DIRECTIVE_PENDING_REVIEW_FILE", "/opt/veridian/ai-os/PENDING_OWNER_REVIEW.md")
+SPEC_TMP_DIR = os.environ.get("VERIDIAN_DIRECTIVE_SPEC_TMP_DIR", "/tmp/directive_specs")
+# Real fix, round 2 (dispatch-queue-starvation investigation, UMR-20260806-090229-f2a7):
+# real independent Superboss review of the first round found the retry-once gate's
+# original signal (umr_tasks.reason) was fragile -- see process_one()'s own comment
+# below for the full real finding. This file is written ONLY by this module (never
+# by resource_governor.py or any other real caller), so nothing else can ever
+# silently overwrite it.
+DIRECTIVE_RETRY_STATE_FILE = os.environ.get(
+    "VERIDIAN_DIRECTIVE_RETRY_STATE_FILE", "/opt/veridian/ai-os/tasks/DIRECTIVE_RETRY_STATE.json")
 TERMINAL_STATES = {"completed", "failed", "rejected_duplicate", "killed"}
 
 os.makedirs(SPEC_TMP_DIR, exist_ok=True)
@@ -69,6 +85,59 @@ def umr_status_for_identity(task_identity):
     r = cur.fetchone()
     conn.close()
     return (r[0], r[1]) if r else (None, None)
+
+
+def _load_retry_state():
+    """Real, durable, EXCLUSIVELY-owned-by-this-module retry-tracking state
+    (dispatch-queue-starvation investigation, UMR-20260806-090229-f2a7, round 2
+    fix after real independent Superboss review).
+
+    Round 1 of this fix read umr_tasks.reason (set by resource_governor.py's
+    submit() to "resubmitted (reused umr_id, prior status was ...)" on exactly
+    the one real retry this module intends) as its durable "already retried"
+    signal. Real review found a genuine, mainline-reachable gap: resource_
+    governor.py's dispatch_one() legitimately overwrites that SAME `reason`
+    column via update_umr_task(..., reason=reason) on its own rejected_duplicate
+    paths (the OCID-superseded-evidence check and the duplicate-PR guard,
+    resource_governor.py ~lines 1330/1371) -- both explicitly scoped to
+    task_kind=='veridian_task_create', exactly what this module's submit_task()
+    always creates. If a retried task_identity's retry itself lands in one of
+    those two branches, the 'resubmitted' marker is silently erased and
+    process_one() misreads the row as a fresh first-ever failure -- reopening
+    the exact retry-storm/head-of-line-blocking poison pill this fix exists to
+    close.
+
+    Real fix: track retry-once state in a small local JSON file that ONLY this
+    module ever writes -- resource_governor.py, task-gateway.py, and every
+    other real caller never touch this path, so nothing else can ever silently
+    clobber it, unlike a shared umr_tasks column. Fails open (empty dict) on
+    any read/parse failure -- a corrupt/missing state file must never crash a
+    real tick or block a real retry that should be allowed."""
+    if not os.path.exists(DIRECTIVE_RETRY_STATE_FILE):
+        return {}
+    try:
+        with open(DIRECTIVE_RETRY_STATE_FILE) as f:
+            return json.load(f) or {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _has_already_retried(task_identity):
+    return bool(_load_retry_state().get(task_identity))
+
+
+def _mark_retried(task_identity, umr_id):
+    """Records that `task_identity` has now used its one real retry. Atomic
+    write (write-to-tmp then os.replace), same convention as this project's
+    other real heartbeat/state files (e.g. DISPATCH_TICK_HEARTBEAT.json) --
+    a reader can never observe a half-written file."""
+    os.makedirs(os.path.dirname(DIRECTIVE_RETRY_STATE_FILE) or ".", exist_ok=True)
+    state = _load_retry_state()
+    state[task_identity] = {"umr_id": umr_id, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    tmp_path = f"{DIRECTIVE_RETRY_STATE_FILE}.tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp_path, DIRECTIVE_RETRY_STATE_FILE)
 
 
 NON_TERMINAL_STATES = ("queued", "dispatched", "running")
@@ -202,7 +271,27 @@ def submit_task(task_identity, tier, title, prompt, repo):
         return {"accepted": False, "reason": f"unparseable governor output: {result.stdout[:200]} {result.stderr[:200]}"}
 
 
+def _already_flagged_for_review(task_identity):
+    """Real idempotency guard (dispatch-queue-starvation investigation,
+    UMR-20260806-090229-f2a7): PENDING_OWNER_REVIEW.md is append-only and this
+    engine ticks forever (every poll_seconds, default 60s) -- without this
+    check, a task_identity whose retry is exhausted would get a fresh line
+    appended on literally every subsequent tick, silently growing this file
+    unbounded. This project has already hit exactly this shape of bug once for
+    a different log (see resource_governor_tick_loop.sh's own header comment:
+    "argparse ... got silently appended to LOG 7946 times before anyone
+    noticed"). Real, simple check against the actual on-disk file -- no new
+    state file, no new schema, no new database write."""
+    if not os.path.exists(PENDING_REVIEW_FILE):
+        return False
+    marker = f"- {task_identity}:"
+    with open(PENDING_REVIEW_FILE) as f:
+        return any(line.startswith(marker) for line in f)
+
+
 def note_needs_review(task_identity, reason):
+    if _already_flagged_for_review(task_identity):
+        return
     with open(PENDING_REVIEW_FILE, "a") as f:
         f.write(f"- {task_identity}: {reason} (logged {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())})\n")
     log_status(task_identity, f"queued for Owner review: {reason[:60]}")
@@ -228,10 +317,62 @@ def process_one(entry):
     if status in ("queued", "dispatched", "running"):
         return status
     if status in ("failed", "rejected_duplicate", "killed"):
-        if entry.get("_retried"):
-            note_needs_review(task_identity, f"ended {status} after retry, needs human judgment")
+        # Real fix (dispatch-queue-starvation investigation, UMR-20260806-090229-f2a7,
+        # parent UMR-20260806-071025-1d28): this branch used to gate its real
+        # retry-once policy on entry.get("_retried") -- an in-memory flag set on a
+        # dict that main()'s own `directive = load_directive()` recreates fresh
+        # from DIRECTIVE.yaml every single outer-loop tick (every poll_seconds,
+        # default 60s). That flag NEVER survived to the next tick, so this branch
+        # resubmitted the SAME task_identity via submit_task() below on literally
+        # every real tick, forever, instead of the one real retry the code always
+        # intended. Confirmed live via task_identity PHASE-3-BUILD-CALC /
+        # PHASE-4-BUILD-WORKFLOW (DIRECTIVE.yaml priority_queue): resubmitted 20+
+        # times since 2026-07-29, each later resubmission reusing the SAME umr_id
+        # (resource_governor.py submit()'s Rule-1 reuse-on-resubmit path) whose
+        # ts_submitted is, by that function's own documented design, NEVER
+        # refreshed on reuse -- so that one row aged to TIER_MIN=0 within minutes
+        # and then permanently won next_queued_task()'s ascending-ts_submitted
+        # tiebreak against every other real queued row, including 30 genuinely
+        # distinct tier-1 rows dated 2026-08-04 (confirmed ~2 real days stuck at
+        # the time this was found) that could never even be ATTEMPTED --
+        # dispatch_one() only ever evaluates the single top-ranked row per call,
+        # and run_tick() stops the whole tick the moment that one row's own
+        # dispatch attempt isn't "dispatched" (e.g. deferred for a free
+        # concurrency/resource slot). A real, durable head-of-line-blocking
+        # poison pill.
+        #
+        # Real fix, round 2 (after real independent Superboss review of round 1):
+        # round 1 read umr_tasks.reason (set by resource_governor.py's submit()
+        # to "resubmitted (reused umr_id, prior status was ...)" on exactly the
+        # one real retry this code intends) as the durable "already retried"
+        # signal. Real review found that fragile: resource_governor.py's
+        # dispatch_one() legitimately overwrites that SAME `reason` column on
+        # its own rejected_duplicate paths (OCID-superseded-evidence and the
+        # duplicate-PR guard, both scoped to task_kind=='veridian_task_create',
+        # exactly what this module submits) -- silently erasing the marker and
+        # reopening this same retry storm for that case. See _load_retry_state()'s
+        # own docstring for the full real finding. Real fix: track retry-once
+        # state in DIRECTIVE_RETRY_STATE_FILE, a small local file EXCLUSIVELY
+        # owned/written by this module -- nothing in resource_governor.py (or
+        # any other real caller) ever touches it, so it can never be silently
+        # clobbered by another module's own legitimate row mutations. Durable
+        # across this process restarting or DIRECTIVE.yaml being reloaded,
+        # same as round 1 intended, without round 1's cross-module fragility.
+        if _has_already_retried(task_identity):
+            note_needs_review(
+                task_identity,
+                f"ended {status} after a real resubmission retry also ended {status} "
+                f"(durable retry-exhaustion via this module's own exclusively-owned "
+                f"retry-state file, immune to any other module's row mutations) -- "
+                f"needs human judgment",
+            )
             return status
-        entry["_retried"] = True  # in-memory only this pass; real state is umr_tasks
+        # else: this is the task_identity's first real terminal outcome seen so
+        # far -- fall through and allow exactly the one real resubmission the
+        # code has always intended, recording that fact durably below before
+        # submit_task() ever runs (so even a crash mid-resubmission still
+        # leaves the retry correctly marked as used).
+        _mark_retried(task_identity, umr_id)
 
     ok, blocking_dep = dependencies_satisfied(entry)
     if not ok:

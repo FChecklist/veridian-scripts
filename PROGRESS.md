@@ -1,34 +1,43 @@
-# PROGRESS -- task-20260806-151747-root-cause-fix--dispatch-owner-task-sh-n
+# PROGRESS -- task-20260806-155328-replace-placeholder-go-to-market-readine
 
 ## Completed
-- [x] Step one: read `/opt/veridian/scripts/dispatch-owner-task.sh` in full and independently verified the SPEC's "real evidence" against live state.
-- [x] Verified the SPEC's premise is **false** (see Findings below) -- stopped per "stop if any step fails" rather than proceeding to steps two-seven.
-- [x] Logged the false-premise finding into the register via the canonical `superboss-register.py insert-pm-decision-pending` (pm_decisions_pending row id 103, related-umr UMR-20260806-071025-1d28) so the sentinel/PM does not re-dispatch this identical ask blind to the fact it's already resolved.
-- [x] No code change made, no PR opened (nothing to fix -- see Findings).
+- [x] Verified the SPEC's premise against the live server: FALSE.
+  - SPEC claimed Section 4 of `/opt/veridian/ai-os/reports/pm-report-latest.txt`
+    still prints a PLACEHOLDER-marked NOT_READY recommendation, and that
+    `compute_readiness_bucket()` in `generate_pm_report_v3.py` has no real
+    source for the bucket-mapping formula/thresholds.
+  - Live check: `pm-report-latest.txt` Section 4 has **zero** occurrences of
+    "placeholder" and already prints a real reasoned line:
+    `Recommendation: NOT_READY` / `Reason: critical_open_issue_count=2,
+    blocked_category_count=6, overall_percent=60% -- at least one real
+    NOT_READY trigger is true.`
+  - `generate_pm_report_v3.py` (SCRIPT_VERSION 3.4.0, on `main` HEAD
+    76885f7) already has `GTM_READINESS_BUCKET_CATEGORIES` matching the
+    SPEC's bucket table byte-for-byte (product_ready 4,5,6,7,12,13;
+    end_user_ready 8,17,18,23,24; security_ready 3,14,15,16;
+    performance_ready 9,10,11; infra_ready 1,2,19,20; documentation_ready
+    22; deployment_ready 21,25), plus `compute_bucket_percents()`,
+    `compute_gtm_overall_percent()` (shared by Section 2 and Section 4 so
+    the two numbers can never diverge), and `compute_readiness_bucket()`
+    implementing the exact NOT_READY/LIMITED_PILOT/BETA/PRODUCTION rule in
+    the exact order the SPEC specifies.
+  - `test_generate_pm_report_v3.py` already has unit tests covering this:
+    `test_compute_bucket_percents_real_arithmetic`,
+    `test_compute_gtm_overall_percent_matches_section2_formula`, and five
+    `test_compute_readiness_bucket_*` fixture-state tests.
+  - This was already done, reviewed, and merged: commit `5114005`
+    "fix(pm-report-v3): Section 4 real GTM readiness bucket formula,
+    replaces PLACEHOLDER" via **PR #152**
+    (`worker/task-20260806-gtm-readiness-bucket-real-formula`, merge
+    commit `7c1171f`), citing UMR-20260806-091407-5767 and the same
+    governing contract UMR-20260806-042531-be9c this SPEC cites.
+  - Logged as `pm_decisions_pending` row id **108** via
+    `superboss-register.py insert-pm-decision-pending`
+    (`--related-umr UMR-20260805-181636-32f2`), recommending the task be
+    closed as already-satisfied.
 
 ## Remaining
-- [ ] None for this task. If a maintainer disagrees with the false-premise finding, re-open with fresh evidence against `origin/main` (not the stale `/opt/veridian/scripts` deploy copy) and a specific claim about what `origin/main`'s current design (PR #166) still gets wrong.
-
-## Findings (why this task stops here)
-
-**SPEC claim:** `/opt/veridian/scripts/dispatch-owner-task.sh` is 99 lines and never writes `ts_dispatched`, `ts_completed`, or an updated `status` onto the `umr_tasks` row it mints.
-
-**Verified reality:**
-1. The live deployed file is **196 lines** (not 99), at repo commit `60cbae1` (deployed copy is well behind origin/main -- see deploy-sync gap noted below). It already writes back:
-   - `mark-umr-dispatched` on successful tmux relay (line 184 of the live copy) -- added by **UMR-20260806-085144-9c63 / PR #150**.
-   - `mark-umr-terminal --status failed` on relay failure (lines 192-193 of the live copy) -- same PR.
-   - A mandatory completion instruction embedded in the relayed prompt text itself naming the exact `mark-umr-terminal` command -- added by **UMR-20260806-112013-088f** because the doc-comment-only version of this instruction was found insufficient.
-2. `origin/main` of `veridian-scripts` (already merged, commit `3498d8a`, **237 lines**) has gone further still: **PR #166 / UMR-20260806-115423-500d** ("dispatch-owner-task relay non-authoritative") deliberately *removed* the `mark-umr-dispatched`/`mark-umr-terminal` writes from the relay branches, because:
-   - A successful `tmux send-keys` only proves keystrokes were written into a pane, never that a live process read/acted on them -- it is not proof of delivery.
-   - Writing `status='dispatched'` or `status='failed'` from this script independently pulled the row out of `resource_governor.py`'s `next_queued_task()` query (`WHERE status='queued'`), the **real mechanical dispatch-tick.py pickup path** that spawns a `veridian-worker@*.service` regardless of tmux/interactive-session state -- so a relay that landed in a dead/wrong/busy pane got the row **permanently excluded** from the one channel that could still have picked it up. A real dead zone, confirmed by reading `next_queued_task()`/`_perform_spawn()` directly.
-   - The corrected, already-shipped design instead calls a new `mark-umr-relay-attempted` subcommand that writes **only** `ts_relay_attempted`/`relay_outcome`/`relay_detail`, and never touches `status`/`ts_dispatched`/`ts_completed`. Rows stay at `status='queued'`, fully eligible for the real mechanical pickup, no matter what the tmux relay achieved.
-
-**Conclusion:** implementing this SPEC's steps two/three/four as written -- making the wrapper write `status='dispatched'`/`status='failed'` straight onto the row after the tmux relay -- would **revert an already-merged, deliberate regression fix** and reintroduce the exact dead-zone bug UMR-20260806-115423-500d fixed. This is not a case of "root cause not yet found and fixed" -- it is a case of the root cause having already been found, fixed, found-flawed, and re-fixed with a materially different (and correct) design, upstream of this SPEC's evidence.
-
-**Separately noted, not fixed here (out of scope / needs its own owner):** the live `/opt/veridian/scripts` deployed copy is far behind `origin/main` (`60cbae1` vs `3498d8a`, dozens of merged PRs behind, including #166 itself). This deploy-sync gap is plausibly *why* the sentinel's "real evidence" query saw stale `queued`/`null` rows this cycle even though the real fix has already merged -- worth a real UMR of its own, but is a deploy/ops concern, not a `dispatch-owner-task.sh` code defect, and was not touched here.
-
-**Scope boundary respected:** did not touch `reconcile_owner_dispatch_status.py`, `apply_owner_dispatch_status_corrections.py`, PR #147, or branch `reconcile/owner-dispatch-status-UMR-20260806-075726-babc`.
-
-**Hard limits respected:** no credential rotated, no repository deleted or archived, reconciliation script/branch owned by UMR-20260806-082646-3aba untouched.
-
-**Pattern match:** this is another instance of the recurring "urgent PM SPEC with confident claims that don't match live state" pattern (11+ prior instances per standing memory) -- verified independently before any write, exactly as that memory prescribes. No write/restore/kill was performed against production state; the only write made was the canonical, non-destructive `insert-pm-decision-pending` finding record.
+- [ ] None -- no code change needed. If a genuinely new/different defect
+      exists in Section 4 on the live server, it needs a fresh SPEC citing
+      what is actually still wrong today (not this already-fixed
+      placeholder claim).

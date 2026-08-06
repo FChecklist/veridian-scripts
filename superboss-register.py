@@ -6158,6 +6158,79 @@ def cmd_mark_umr_relay_attempted(args):
                       indent=2, default=str))
 
 
+def cmd_requeue_build_lock_contended(args):
+    """UMR-20260806-123316-cf9f (proposal 62, child UMR-20260806-121247-a93a).
+    quality-gate.sh's own build step calls this -- and ONLY this -- CLI
+    command when it fails to acquire the host-wide build lock
+    (/tmp/veridian-quality-gate-build.lock) within its short, fixed 20s wait.
+    Root incident: all 5 systemd worker slots were serializing on that one
+    global lock (live wchan evidence: 4 of 5 genuinely blocked in
+    locks_lock_inode_wai for 582-1376s in one sample), so effective
+    concurrency was 1, not the configured ceiling of 5 -- this command is
+    the "give up the slot and let someone else in" half of the fix (the
+    other half is quality-gate.sh itself never internally retry-looping).
+
+    Resets the task's OWN existing umr_tasks row (found via
+    find_active_umr_by_identity() -- never a fresh INSERT, this must never
+    mint a new row, that is exactly the duplicate-row-explosion failure mode
+    proposals 50-53 already found) back to status='queued' so the real
+    dispatcher (resource_governor.next_queued_task() / dispatch_one(), the
+    same priority-ordered queue every other task goes through) picks it
+    back up on its own schedule -- never a direct systemctl call from here.
+
+    task_kind/inputs_json are always forced to 'systemctl_action' /
+    {"action": "start"} (mirroring dispatch-tick.py's
+    resume_interrupted_workers_tick() convention for exactly this "restart
+    the existing worker unit" shape) regardless of this row's ORIGINAL
+    task_kind -- leaving a 'veridian_task_create' task_kind in place would
+    wrongly mint a brand-new task_id/branch/worker on the next dispatch,
+    instead of resuming the real, already-in-progress workspace this row
+    already tracks.
+
+    reason='build_lock_contended' is a fixed, hardcoded literal -- never a
+    caller-supplied free-text field like mark-umr-terminal's --reason --
+    specifically so it stays a stable, greppable, structurally distinct
+    marker from every other status='queued' writer on this table. In
+    particular this can never collide with dispatch-tick:
+    resume_interrupted_workers_tick()'s own crash-recovery path: that
+    function's own find_active_umr_by_identity() pre-check already treats
+    the status='queued' row this command leaves behind as "already active"
+    and skips resubmitting it (see that function's own docstring) -- the two
+    mechanisms cannot both act on the same row.
+
+    Refuses (raises SystemExit) if no active (queued/dispatched/running) row
+    exists for --task-identity -- there is nothing real to requeue.
+
+    Usage:
+      python3 superboss-register.py requeue-build-lock-contended \\
+          --task-identity TASK_ID --unit-name veridian-worker@TASK_ID.service
+    """
+    init_db_silent()
+    conn = _connect()
+    _ensure_umr_table(conn)
+    with _write_lock():
+        row = find_active_umr_by_identity(conn, args.task_identity)
+        if not row:
+            conn.close()
+            raise SystemExit(
+                f"requeue-build-lock-contended: no active (queued/dispatched/running) "
+                f"umr_tasks row found for task_identity={args.task_identity!r} -- refusing "
+                f"to requeue a row that does not really exist")
+        fields = {
+            "status": "queued",
+            "ts_dispatched": None,
+            "reason": "build_lock_contended",
+            "task_kind": "systemctl_action",
+            "unit_name": args.unit_name,
+            "inputs_json": json.dumps({"action": "start", "requeued_after": "build_lock_contended"}),
+        }
+        update_umr_task(conn, row["umr_id"], **fields)
+        conn.commit()
+    conn.close()
+    print(json.dumps({"umr_id": row["umr_id"], "task_identity": args.task_identity,
+                       "status": "queued", "reason": "build_lock_contended"}, indent=2, default=str))
+
+
 def cmd_mark_umr_terminal(args):
     """UMR-20260806-085144-9c63. CLI entry point that writes a real
     ts_completed + a real terminal status onto an existing umr_tasks row via
@@ -7399,6 +7472,16 @@ if __name__ == "__main__":
     p_markrelay.add_argument("--outcome", required=True, choices=["sent", "session_not_found"])
     p_markrelay.add_argument("--detail", default=None)
 
+    p_reqlock = sub.add_parser("requeue-build-lock-contended",
+                                help="UMR-20260806-123316-cf9f: reset a task's OWN existing "
+                                     "umr_tasks row back to status='queued' (reason="
+                                     "'build_lock_contended') after quality-gate.sh's build "
+                                     "step failed to acquire the host-wide build lock within "
+                                     "its short wait -- called only by quality-gate.sh itself, "
+                                     "never mints a new row")
+    p_reqlock.add_argument("--task-identity", dest="task_identity", required=True)
+    p_reqlock.add_argument("--unit-name", dest="unit_name", required=True)
+
     p_markterm = sub.add_parser("mark-umr-terminal",
                                  help="UMR-20260806-085144-9c63: write a real ts_completed + "
                                       "terminal status onto a umr_tasks row -- used both by "
@@ -7564,6 +7647,8 @@ if __name__ == "__main__":
         cmd_mark_umr_dispatched(args)
     elif args.cmd == "mark-umr-relay-attempted":
         cmd_mark_umr_relay_attempted(args)
+    elif args.cmd == "requeue-build-lock-contended":
+        cmd_requeue_build_lock_contended(args)
     elif args.cmd == "mark-umr-terminal":
         cmd_mark_umr_terminal(args)
     elif args.cmd == "mark-external-agent-eligible":

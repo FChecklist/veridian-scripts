@@ -5811,6 +5811,79 @@ def cmd_record_owner_proposal_completion(args):
         sys.exit(1)
 
 
+def cmd_mark_umr_dispatched(args):
+    """UMR-20260806-085144-9c63 (prevention side of the owner_dispatch_gateway
+    stuck-at-'queued' finding; reconciliation side is PR #147 /
+    UMR-20260806-082646-3aba, out of scope here). CLI entry point that writes
+    a real ts_dispatched + status='dispatched' onto an existing, just-minted
+    umr_tasks row via the existing real update_umr_task(), under
+    _write_lock() -- same convention as cmd_reconcile_umr_status above.
+
+    Called by dispatch-owner-task.sh immediately after its real tmux relay
+    into the live interactive session succeeds, so a row that really was
+    delivered stops sitting at status='queued'/ts_dispatched=NULL forever.
+    Never touches rows this script didn't just mint -- retroactive
+    correction of pre-existing rows is PR #147's job, not this one's.
+
+    Usage:
+      python3 superboss-register.py mark-umr-dispatched --umr-id UMR-... [--unit-name NAME]
+    """
+    init_db_silent()
+    conn = _connect()
+    _ensure_umr_table(conn)
+    ts_dispatched = _now_iso()
+    fields = {"status": "dispatched", "ts_dispatched": ts_dispatched}
+    if args.unit_name:
+        fields["unit_name"] = args.unit_name
+    with _write_lock():
+        update_umr_task(conn, args.umr_id, **fields)
+        conn.commit()
+    conn.close()
+    print(json.dumps({"umr_id": args.umr_id, "status": "dispatched",
+                       "ts_dispatched": ts_dispatched}, indent=2, default=str))
+
+
+def cmd_mark_umr_terminal(args):
+    """UMR-20260806-085144-9c63. CLI entry point that writes a real
+    ts_completed + a real terminal status onto an existing umr_tasks row via
+    the existing real update_umr_task(), under _write_lock() -- same
+    convention as cmd_reconcile_umr_status above.
+
+    Two real callers:
+      1. dispatch-owner-task.sh's tmux-relay-failure branch (the real
+         'WARNING: tmux session claude not found' case) -- records
+         --status failed with a real --reason instead of silently leaving
+         the row at status='queued' forever.
+      2. Any worker or interactive session recording genuine completion of
+         real work done against a UMR, once it actually finishes -- so
+         PERCENT_COMPLETE_24H_OWNER_UMR_SET reflects real terminal status
+         instead of requiring a later reconciliation-sweep guess.
+
+    --status is restricted to real terminal states this command is meant to
+    assert directly (completed/failed/killed); 'rejected_duplicate' and
+    'sigterm_sent' are written by their own existing real code paths
+    (resource_governor.py's duplicate check, SIGTERM handling), not this
+    generic CLI.
+
+    Usage:
+      python3 superboss-register.py mark-umr-terminal --umr-id UMR-... \\
+          --status {completed,failed,killed} [--reason "why"]
+    """
+    init_db_silent()
+    conn = _connect()
+    _ensure_umr_table(conn)
+    ts_completed = _now_iso()
+    fields = {"status": args.status, "ts_completed": ts_completed}
+    if args.reason:
+        fields["reason"] = args.reason
+    with _write_lock():
+        update_umr_task(conn, args.umr_id, **fields)
+        conn.commit()
+    conn.close()
+    print(json.dumps({"umr_id": args.umr_id, "status": args.status,
+                       "ts_completed": ts_completed}, indent=2, default=str))
+
+
 def init_db_silent():
     if not os.path.exists(DB_PATH):
         conn = _connect()
@@ -6113,6 +6186,24 @@ if __name__ == "__main__":
     p_compprop.add_argument("--commit-sha", dest="commit_sha", required=True)
     p_compprop.add_argument("--evidence", required=True)
 
+    p_markdisp = sub.add_parser("mark-umr-dispatched",
+                                 help="UMR-20260806-085144-9c63: write a real ts_dispatched + "
+                                      "status='dispatched' onto a just-minted umr_tasks row, "
+                                      "called by dispatch-owner-task.sh right after its real "
+                                      "tmux relay succeeds")
+    p_markdisp.add_argument("--umr-id", dest="umr_id", required=True)
+    p_markdisp.add_argument("--unit-name", dest="unit_name", default=None)
+
+    p_markterm = sub.add_parser("mark-umr-terminal",
+                                 help="UMR-20260806-085144-9c63: write a real ts_completed + "
+                                      "terminal status onto a umr_tasks row -- used both by "
+                                      "dispatch-owner-task.sh's tmux-relay-failure branch "
+                                      "(--status failed) and by a worker/interactive session "
+                                      "recording genuine completion")
+    p_markterm.add_argument("--umr-id", dest="umr_id", required=True)
+    p_markterm.add_argument("--status", required=True, choices=["completed", "failed", "killed"])
+    p_markterm.add_argument("--reason", default=None)
+
     args = p.parse_args()
     if args.cmd == "init":
         with _write_lock():
@@ -6218,3 +6309,7 @@ if __name__ == "__main__":
         cmd_decide_owner_proposal(args)
     elif args.cmd == "record-owner-proposal-completion":
         cmd_record_owner_proposal_completion(args)
+    elif args.cmd == "mark-umr-dispatched":
+        cmd_mark_umr_dispatched(args)
+    elif args.cmd == "mark-umr-terminal":
+        cmd_mark_umr_terminal(args)

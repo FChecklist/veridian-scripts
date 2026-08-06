@@ -89,8 +89,112 @@ def test_parse_worker_count_zero():
     assert pm.parse_worker_count(stdout) == 0
 
 
-# ---------------------------------------------------------------------------
-# classify_passed -- must match the real, already-merged
+# --- Section 1 additions (UMR-20260806-084701-0d40, citing prior
+# UMR-20260806-081403-ebd3): PARALLEL_WORKERS_CEILING + INTERACTIVE_SUBAGENT_COUNT.
+def test_get_worker_ceiling_real_import(tmp_path, monkeypatch):
+    """Real proof this reads the actual constant, not a hardcoded literal --
+    a fake dispatch_core.py with a different CONCURRENCY_CAP value must
+    change the reported ceiling."""
+    fake_core = tmp_path / "fake_dispatch_core.py"
+    fake_core.write_text("CONCURRENCY_CAP = 7\n")
+    monkeypatch.setattr(pm, "DISPATCH_CORE_PATH", str(fake_core))
+    result = pm.get_worker_ceiling()
+    assert result["parallel_workers_ceiling"] == 7
+    assert result.get("error") is None
+
+
+def test_get_worker_ceiling_honest_error_on_missing_module(monkeypatch):
+    monkeypatch.setattr(pm, "DISPATCH_CORE_PATH", "/nonexistent/dispatch_core.py")
+    result = pm.get_worker_ceiling()
+    assert result["parallel_workers_ceiling"] is None
+    assert result["error"] is not None
+
+
+def test_parse_ps_ppid_map_builds_children():
+    stdout = "  100     1\n  200   100\n  201   100\n  300   200\n"
+    result = pm.parse_ps_ppid_map(stdout)
+    assert result == {1: [100], 100: [200, 201], 200: [300]}
+
+
+def test_parse_ps_ppid_map_skips_malformed_lines():
+    stdout = "  100     1\n garbage line here\n  200   100\n"
+    result = pm.parse_ps_ppid_map(stdout)
+    assert result == {1: [100], 100: [200]}
+
+
+def test_get_descendant_pids_real_tree_walk():
+    children_map = {1: [100], 100: [200, 201], 200: [300], 999: [888]}
+    result = pm.get_descendant_pids([1], children_map)
+    # 999/888 are a real, unrelated tree -- must never be included.
+    assert result == {100, 200, 201, 300}
+
+
+def test_get_descendant_pids_no_children():
+    assert pm.get_descendant_pids([42], {}) == set()
+
+
+def test_read_proc_cmdline_real_nul_separated(tmp_path):
+    proc_root = tmp_path
+    pid_dir = proc_root / "1234"
+    pid_dir.mkdir()
+    (pid_dir / "cmdline").write_bytes(b"claude\x00-p\x00do the real thing\x00")
+    result = pm.read_proc_cmdline(1234, proc_root=str(proc_root))
+    assert result == ["claude", "-p", "do the real thing"]
+
+
+def test_read_proc_cmdline_unreadable_returns_none(tmp_path):
+    # No such pid directory -- process already exited, a real race, not fabricated.
+    assert pm.read_proc_cmdline(999999, proc_root=str(tmp_path)) is None
+
+
+def test_is_claude_dash_p_argv_matches_real_shape():
+    assert pm.is_claude_dash_p_argv(["claude", "-p", "the prompt text"]) is True
+    assert pm.is_claude_dash_p_argv(["/usr/local/bin/claude", "-p", "x"]) is True
+
+
+def test_is_claude_dash_p_argv_rejects_non_matches():
+    assert pm.is_claude_dash_p_argv(["claude"]) is False  # interactive, no -p
+    assert pm.is_claude_dash_p_argv(["bash", "-c", "claude -p foo"]) is False  # not argv[0]
+    # A prompt that merely CONTAINS the substring "-p" must never false-positive
+    # via a joined-string match -- this is real argv, so it's already safe,
+    # but assert explicitly since that was the real risk this design avoids.
+    assert pm.is_claude_dash_p_argv(["claude", "--resume", "session-p-123"]) is False
+    assert pm.is_claude_dash_p_argv([]) is False
+
+
+def test_get_interactive_subagent_count_real_end_to_end(monkeypatch, tmp_path):
+    """Real end-to-end proof over a synthetic process tree + real /proc-shaped
+    cmdline files: exactly the 2 real `claude -p` descendants are counted,
+    a plain interactive `claude` and an unrelated `bash` are not."""
+    monkeypatch.setattr(pm, "get_tmux_pane_pids", lambda session_name=None: ([500], None))
+    monkeypatch.setattr(pm, "get_process_children_map", lambda: (
+        {500: [600, 601], 600: [700]}, None
+    ))
+    proc_root = tmp_path
+    cmdlines = {
+        500: ["bash"],
+        600: ["claude", "-p", "subagent one"],
+        601: ["bash", "-c", "sleep 1"],
+        700: ["claude", "-p", "subagent two"],
+    }
+
+    def fake_read_proc_cmdline(pid, proc_root=None):
+        return cmdlines.get(pid)
+    monkeypatch.setattr(pm, "read_proc_cmdline", fake_read_proc_cmdline)
+
+    result = pm.get_interactive_subagent_count()
+    assert result["error"] is None
+    assert result["interactive_subagent_count"] == 2
+    assert result["matched_pids"] == [600, 700]
+
+
+def test_get_interactive_subagent_count_honest_error_no_session(monkeypatch):
+    monkeypatch.setattr(pm, "get_tmux_pane_pids", lambda session_name=None: ([], "no such session"))
+    result = pm.get_interactive_subagent_count()
+    assert result["interactive_subagent_count"] is None
+    assert result["error"] == "no such session"
+
+
 # gtm_check_production_readiness_audit.py's classify() behavior exactly.
 # ---------------------------------------------------------------------------
 def test_classify_passed():
@@ -561,7 +665,8 @@ def test_render_report_text_survives_per_metric_insufficient_data(monkeypatch):
         "script_version": pm.SCRIPT_VERSION,
         "header_status": {
             "ram_swap": {}, "load_average": {}, "dispatch_tick": {}, "parallel_workers": {},
-            "stuck_tasks": {}, "tmux": {}, "emergency_stop": {}, "db_integrity": {},
+            "parallel_workers_ceiling": {}, "stuck_tasks": {}, "tmux": {},
+            "interactive_subagents": {}, "emergency_stop": {}, "db_integrity": {},
         },
         "ocid_020_gtm_section": {"categories": []},
         "ocid_canonical_registry_section": {},

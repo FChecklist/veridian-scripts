@@ -208,11 +208,19 @@ def test_mark_umr_relay_attempted_then_mechanical_pickup_still_selects_row(scrat
 
 @pytest.mark.parametrize("status", ["completed", "failed", "killed"])
 def test_mark_umr_terminal_writes_ts_completed_and_status(scratch_db, status):
+    """UMR-20260806-130914-e7f1: status=completed now requires real
+    structured evidence -- --file-path here points at this real,
+    genuinely-existing test file itself (via --repo-root=SCRIPTS_DIR),
+    satisfying the real gate without needing a real git repo/commit fixture.
+    failed/killed are unaffected by the gate, same as before."""
     umr_id = f"UMR-TEST-9c63-terminal-{status}"
     _insert_queued_row(scratch_db, umr_id)
 
+    extra_args = []
+    if status == "completed":
+        extra_args = ["--file-path", os.path.abspath(__file__), "--repo-root", SCRIPTS_DIR]
     out = _run_sbr(["mark-umr-terminal", "--umr-id", umr_id,
-                     "--status", status, "--reason", f"real {status} reason"], scratch_db)
+                     "--status", status, "--reason", f"real {status} reason"] + extra_args, scratch_db)
     assert out.returncode == 0, out.stderr
     payload = json.loads(out.stdout)
     assert payload["status"] == status
@@ -227,13 +235,17 @@ def test_mark_umr_terminal_writes_ts_completed_and_status(scratch_db, status):
 def test_mark_umr_dispatched_then_terminal_preserves_ts_dispatched(scratch_db):
     """A row that was marked dispatched, then later marked terminal, must
     keep its original real ts_dispatched -- update_umr_task()'s partial
-    UPDATE must never clobber a column it wasn't asked to touch."""
+    UPDATE must never clobber a column it wasn't asked to touch.
+    UMR-20260806-130914-e7f1: --status completed here needs the same real
+    --file-path evidence as above to pass the new structural gate."""
     umr_id = "UMR-TEST-9c63-preserve-ts-dispatched"
     _insert_queued_row(scratch_db, umr_id)
     _run_sbr(["mark-umr-dispatched", "--umr-id", umr_id], scratch_db)
     ts_dispatched = _row(scratch_db, umr_id)["ts_dispatched"]
 
-    _run_sbr(["mark-umr-terminal", "--umr-id", umr_id, "--status", "completed"], scratch_db)
+    out = _run_sbr(["mark-umr-terminal", "--umr-id", umr_id, "--status", "completed",
+                     "--file-path", os.path.abspath(__file__), "--repo-root", SCRIPTS_DIR], scratch_db)
+    assert out.returncode == 0, out.stderr
     after = _row(scratch_db, umr_id)
     assert after["ts_dispatched"] == ts_dispatched
     assert after["status"] == "completed"

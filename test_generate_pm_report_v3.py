@@ -16,6 +16,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import time
 
 import pytest
 
@@ -589,16 +590,24 @@ def test_render_report_text_survives_per_metric_insufficient_data(monkeypatch):
         "collision_detection_section": {
             "collision_detected": False, "tracked_repos": [], "checked_unit_globs": [],
             "file_overlap_max_age_hours": 48, "file_overlap_excluded_files": [],
+            "gh_max_workers": 8, "time_budget_seconds": 120.0, "total_skipped_due_to_time_budget": 0,
             "total_candidate_count": 0, "primary_candidate_count": 0, "secondary_candidate_count": 0,
             "capped": False, "shown_count": 0, "shown_collisions": [],
             "by_repo_citation": {}, "by_repo_file": {},
             "worker_umr_collisions": {"errors": []}, "errors": [],
         },
         "instruction_quality_section": {"error": None, "total_checked": 0, "pass_count": 0, "failing": []},
+        "owner_umr_closure_section": {
+            "error": None, "all_time_status_counts": {}, "all_time_total": 0,
+            "oldest_open_umr_id": None, "oldest_open_status": None, "oldest_open_age_hours": None,
+            "trailing_24h_status_counts": {}, "trailing_24h_total": 0, "trailing_24h_closed_count": 0,
+            "percent_complete_24h_owner_umr_set": None,
+        },
     }
     text = pm.render_report_text(report)  # must not raise
     assert "insufficient_data" in text
     assert "10. 10-REPORT TREND ANALYSIS" in text
+    assert "14. OWNER UMR CLOSURE TRACKING" in text
 
 
 def test_get_trend_analysis_zero_rows(tmp_path):
@@ -953,6 +962,91 @@ def test_get_collision_detection_section_applies_hard_cap(monkeypatch):
     assert len(result["shown_collisions"]) == pm.COLLISION_TOP_K
 
 
+# --- Section 12 real perf fix (SCRIPT_VERSION 3.2.0): concurrent gh fetch +
+# real overall time budget, root-caused against the real ~1h+ hangs of
+# veridian-pm-report-tick.service. -------------------------------------------
+def test_detect_pr_file_collisions_fetches_concurrently_not_sequentially(monkeypatch):
+    """Real regression test for the actual root cause: at real live PR
+    counts (94 combined recent-PR gh calls at investigation time) a
+    sequential loop of slow calls could sum past an hour even with each
+    call's own real 30s timeout. Proves wall-clock time for N slow calls is
+    now bounded by ceil(N / max_workers) * per_call_time, not N *
+    per_call_time."""
+    import threading
+    now = pm.datetime.now(pm.timezone.utc)
+    n_prs = 16
+    prs = [{"number": i, "title": f"pr {i}", "createdAt": now.isoformat()} for i in range(n_prs)]
+    per_call_seconds = 0.05
+    max_concurrent = {"value": 0}
+    current = {"value": 0}
+    lock = threading.Lock()
+
+    def fake_get_pr_changed_files(repo, pr_number):
+        with lock:
+            current["value"] += 1
+            max_concurrent["value"] = max(max_concurrent["value"], current["value"])
+        time.sleep(per_call_seconds)
+        with lock:
+            current["value"] -= 1
+        return {f"file_{pr_number}.py"}, None
+
+    monkeypatch.setattr(pm, "get_pr_changed_files", fake_get_pr_changed_files)
+
+    start = time.monotonic()
+    result = pm.detect_pr_file_collisions("fake-repo", prs, max_workers=8)
+    elapsed = time.monotonic() - start
+
+    assert result["recent_pr_count"] == n_prs
+    # Real proof of concurrency: more than one call really overlapped in time.
+    assert max_concurrent["value"] > 1
+    # Real proof of the wall-clock win: sequential would be n_prs * per_call_seconds
+    # (0.8s here); concurrent with 8 workers should be well under half that.
+    assert elapsed < (n_prs * per_call_seconds) / 2
+
+
+def test_detect_pr_file_collisions_honors_deadline(monkeypatch):
+    """Real overall time-budget fix: PRs not yet started once the deadline
+    passes are recorded as skipped, never silently dropped and never fetched
+    past the budget."""
+    now = pm.datetime.now(pm.timezone.utc)
+    prs = [{"number": i, "title": f"pr {i}", "createdAt": now.isoformat()} for i in range(5)]
+
+    def fake_get_pr_changed_files(repo, pr_number):
+        return {"real_module.py"}, None
+    monkeypatch.setattr(pm, "get_pr_changed_files", fake_get_pr_changed_files)
+
+    # Deadline already in the past -> every PR must be skipped, zero real calls.
+    past_deadline = time.monotonic() - 1.0
+    result = pm.detect_pr_file_collisions("fake-repo", prs, max_workers=8, deadline=past_deadline)
+    assert result["recent_pr_count"] == 5
+    assert result["skipped_due_to_time_budget"] == [0, 1, 2, 3, 4]
+    assert result["collisions"] == []
+
+
+def test_get_collision_detection_section_shares_one_deadline_across_repos(monkeypatch):
+    """Real fix detail: the time budget is computed ONCE for the whole
+    section and passed to every repo's detect_pr_file_collisions call, not
+    reset per repo -- a per-repo-only budget could double the real worst
+    case across the 2 tracked repos."""
+    monkeypatch.setattr(pm, "COLLISION_TRACKED_REPOS", ("repo-a", "repo-b"))
+    seen_deadlines = []
+
+    def fake_detect_pr_file_collisions(repo, prs, max_age_hours=48, max_workers=8, deadline=None):
+        seen_deadlines.append(deadline)
+        return {"recent_pr_count": 0, "collisions": [], "errors": [], "skipped_due_to_time_budget": []}
+
+    monkeypatch.setattr(pm, "get_open_pr_list", lambda repo: ([], None))
+    monkeypatch.setattr(pm, "detect_pr_file_collisions", fake_detect_pr_file_collisions)
+    monkeypatch.setattr(pm, "detect_worker_umr_collisions", lambda: {
+        "checked_units": [], "collisions": [], "errors": [],
+    })
+
+    pm.get_collision_detection_section(time_budget_seconds=60)
+    assert len(seen_deadlines) == 2
+    assert seen_deadlines[0] is not None and seen_deadlines[1] is not None
+    assert seen_deadlines[0] == seen_deadlines[1]
+
+
 # --- Section 13: deterministic instruction quality check --------------------
 def test_extract_prompt_text_present():
     assert pm.extract_prompt_text(json.dumps({"prompt": "do the thing"})) == "do the thing"
@@ -1087,6 +1181,119 @@ def test_get_last_n_umr_tasks_excludes_systemctl_action_bookkeeping_noise(tmp_pa
     result = pm.get_instruction_quality_section(fake_sbr)
     assert result["total_checked"] == 1
     assert result["pass_count"] == 1
+
+
+# --- Section 14 (UMR-20260806-070018-d88b item 4, extended by
+# UMR-20260806-071942-5132): real owner UMR closure tracking. -------------
+def _make_owner_umr_db(tmp_path, rows):
+    """rows: list of (umr_id, ts_submitted, status, source_trigger)."""
+    db_path = str(tmp_path / "owner_umr.sqlite")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE umr_tasks (umr_id TEXT PRIMARY KEY, ts_submitted TEXT, "
+        "status TEXT, source_trigger TEXT)"
+    )
+    conn.executemany("INSERT INTO umr_tasks VALUES (?, ?, ?, ?)", rows)
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_get_owner_dispatch_umr_status_counts_all_time(tmp_path):
+    db_path = _make_owner_umr_db(tmp_path, [
+        ("UMR-1", "2026-08-01T00:00:00+00:00", "completed", "owner_dispatch_gateway"),
+        ("UMR-2", "2026-08-01T01:00:00+00:00", "queued", "owner_dispatch_gateway"),
+        ("UMR-3", "2026-08-01T02:00:00+00:00", "queued", "some_other_trigger"),
+    ])
+    fake_sbr = _make_fake_sbr_module(db_path)
+    counts, err = pm.get_owner_dispatch_umr_status_counts(fake_sbr)
+    assert err is None
+    # The non-owner_dispatch_gateway row must never be counted.
+    assert counts == {"completed": 1, "queued": 1}
+
+
+def test_get_oldest_open_owner_umr_ignores_terminal_statuses(tmp_path):
+    db_path = _make_owner_umr_db(tmp_path, [
+        ("UMR-old-done", "2026-08-01T00:00:00+00:00", "completed", "owner_dispatch_gateway"),
+        ("UMR-oldest-open", "2026-08-01T01:00:00+00:00", "queued", "owner_dispatch_gateway"),
+        ("UMR-newer-open", "2026-08-02T00:00:00+00:00", "running", "owner_dispatch_gateway"),
+    ])
+    fake_sbr = _make_fake_sbr_module(db_path)
+    oldest, err = pm.get_oldest_open_owner_umr(fake_sbr)
+    assert err is None
+    assert oldest["umr_id"] == "UMR-oldest-open"
+
+
+def test_get_oldest_open_owner_umr_none_when_all_closed(tmp_path):
+    db_path = _make_owner_umr_db(tmp_path, [
+        ("UMR-1", "2026-08-01T00:00:00+00:00", "completed", "owner_dispatch_gateway"),
+        ("UMR-2", "2026-08-01T00:00:00+00:00", "killed", "owner_dispatch_gateway"),
+    ])
+    fake_sbr = _make_fake_sbr_module(db_path)
+    oldest, err = pm.get_oldest_open_owner_umr(fake_sbr)
+    assert err is None
+    assert oldest is None
+
+
+def test_age_hours_since_real_arithmetic():
+    now = pm.datetime(2026, 8, 6, 12, 0, 0, tzinfo=pm.timezone.utc)
+    ts = "2026-08-06T09, invalid"  # unparseable -> None, never fabricated
+    assert pm._age_hours_since(None) is None
+    assert pm._age_hours_since(ts) is None
+    real_ts = "2026-08-06T09:30:00+00:00"
+    assert pm._age_hours_since(real_ts, now_dt=now) == 2.5
+
+
+def test_get_owner_umr_closure_section_percent_complete_and_oldest_open(tmp_path):
+    now = pm.datetime(2026, 8, 6, 12, 0, 0, tzinfo=pm.timezone.utc)
+    rows = [
+        # Within trailing 24h (now-24h = 2026-08-05T12:00:00+00:00): 4 rows,
+        # 2 completed (closed), 1 queued, 1 killed (terminal but NOT in
+        # OWNER_UMR_CLOSED_STATUSES) -> percent = 2/4 * 100 = 50.0.
+        ("UMR-a", "2026-08-05T13:00:00+00:00", "completed", "owner_dispatch_gateway"),
+        ("UMR-b", "2026-08-05T14:00:00+00:00", "completed", "owner_dispatch_gateway"),
+        ("UMR-c", "2026-08-06T01:00:00+00:00", "queued", "owner_dispatch_gateway"),
+        ("UMR-d", "2026-08-06T02:00:00+00:00", "killed", "owner_dispatch_gateway"),
+        # Outside the 24h window -- must not count toward trailing_24h_total.
+        ("UMR-old", "2026-08-01T00:00:00+00:00", "completed", "owner_dispatch_gateway"),
+        # Different source_trigger -- must never appear anywhere in this section.
+        ("UMR-other", "2026-08-06T01:00:00+00:00", "queued", "some_other_trigger"),
+    ]
+    db_path = _make_owner_umr_db(tmp_path, rows)
+    fake_sbr = _make_fake_sbr_module(db_path)
+
+    section = pm.get_owner_umr_closure_section(fake_sbr, now_dt=now)
+    assert section["error"] is None
+    assert section["all_time_total"] == 5  # UMR-other excluded
+    assert section["all_time_status_counts"] == {"completed": 3, "queued": 1, "killed": 1}
+    assert section["oldest_open_umr_id"] == "UMR-c"
+    assert section["oldest_open_age_hours"] == 11.0
+    assert section["trailing_24h_total"] == 4
+    assert section["trailing_24h_closed_count"] == 2
+    assert section["percent_complete_24h_owner_umr_set"] == 50.0
+
+
+def test_get_owner_umr_closure_section_honest_none_when_no_24h_rows(tmp_path):
+    """Zero real rows in the trailing 24h window -> None, never a fabricated
+    0.0 or 100.0 -- same honest-no-data spirit as Section 10."""
+    now = pm.datetime(2026, 8, 6, 12, 0, 0, tzinfo=pm.timezone.utc)
+    rows = [("UMR-old", "2026-08-01T00:00:00+00:00", "completed", "owner_dispatch_gateway")]
+    db_path = _make_owner_umr_db(tmp_path, rows)
+    fake_sbr = _make_fake_sbr_module(db_path)
+
+    section = pm.get_owner_umr_closure_section(fake_sbr, now_dt=now)
+    assert section["trailing_24h_total"] == 0
+    assert section["percent_complete_24h_owner_umr_set"] is None
+
+
+def test_get_owner_umr_closure_section_no_rows_at_all(tmp_path):
+    db_path = _make_owner_umr_db(tmp_path, [])
+    fake_sbr = _make_fake_sbr_module(db_path)
+    section = pm.get_owner_umr_closure_section(fake_sbr, now_dt=pm.datetime.now(pm.timezone.utc))
+    assert section["error"] is None
+    assert section["all_time_total"] == 0
+    assert section["oldest_open_umr_id"] is None
+    assert section["percent_complete_24h_owner_umr_set"] is None
 
 
 if __name__ == "__main__":

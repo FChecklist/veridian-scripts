@@ -243,9 +243,26 @@ pure function of those reads -- no new AI/LLM call anywhere.
       denominator is the real umr_tasks row count actually returned, honestly
       reported even when fewer than 20 real rows exist) plus every failing
       row's real umr_id and the specific rule(s) it failed.
+  14. OWNER UMR CLOSURE TRACKING (UMR-20260806-070018-d88b item 4, extended
+      by UMR-20260806-071942-5132) -- real SQL over umr_tasks rows with
+      source_trigger='owner_dispatch_gateway' only, zero AI/LLM judgment:
+        - ALL_TIME_TOTAL + a real status breakdown (COUNT(*) GROUP BY
+          status).
+        - OLDEST_OPEN_UMR: the real oldest (MIN ts_submitted) row whose
+          status is still one of OWNER_UMR_OPEN_STATUSES (queued/dispatched/
+          running -- umr_tasks' own CHECK constraint's non-terminal values),
+          with its real age in hours. "none" (not fabricated) when no real
+          row is currently open.
+        - PERCENT_COMPLETE_24H_OWNER_UMR_SET: pure arithmetic over rows with
+          ts_submitted in the trailing 24h -- (count of status in
+          OWNER_UMR_CLOSED_STATUSES / real total rows in that window) * 100,
+          rounded to 1 decimal, plus the full trailing-24h status breakdown.
+          "insufficient_data" (not 0.0/100.0) when the window has zero real
+          rows -- same honest-no-data spirit as Section 10.
 -------------------------------------------------------------------------
 """
 import argparse
+import concurrent.futures
 import importlib.util
 import json
 import os
@@ -253,6 +270,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 # ---------------------------------------------------------------------------
@@ -302,7 +320,27 @@ REPORT_FORMAT_VERSION = "pm-report-v3-placeholder-gtm-score"
 # 3.1.2 (UMR-20260806-041307-0bfd): real fix, Section 13 (get_last_n_umr_tasks)
 # -- added the missing task_kind='veridian_task_create' filter; see that
 # function's own docstring for the real, confirmed-live bug this closes.
-SCRIPT_VERSION = "3.1.2"
+# 3.2.0 (real root-cause investigation, veridian-pm-report-tick.service +
+# veridian-cron-file-inventory.service both hung ~1h+ and were SIGTERM-killed
+# 2026-08-06 06:12/06:16): confirmed Section 12's secondary (file-overlap)
+# signal was making its real `gh pr diff --name-only` calls SEQUENTIALLY --
+# already O(n) real calls (one per recent PR, cached, PR#120 already fixed
+# the O(n^2)/no-recency-scoping shape), but with no overall time budget, so
+# at real live PR counts (94 combined recent-PR `gh` calls across both
+# tracked repos at investigation time) a run of slow/rate-limited calls could
+# still sum past an hour. Fix: (a) fetch each PR's changed-file set
+# CONCURRENTLY, bounded by COLLISION_GH_MAX_WORKERS, instead of one at a
+# time -- same real per-call gh invocations, same real 30s per-call timeout,
+# just no longer serialized; (b) a real overall wall-clock deadline
+# (COLLISION_SECTION_TIME_BUDGET_SECONDS) on the whole collision section, so
+# a report run degrades to an honest "N PRs skipped, time budget exceeded"
+# rather than blocking the whole 10-minute report tick for an hour. The
+# PRIMARY citation-match signal and the exclude-list from UMR-20260806-043900-
+# 8c48 are unchanged -- this is a wall-clock/parallelism fix layered on top,
+# not a redo of that accuracy fix. Also adds Section 14 (UMR-20260806-070018-
+# d88b item 4, extended by UMR-20260806-071942-5132): deterministic UMR
+# closure tracking for source_trigger='owner_dispatch_gateway' rows.
+SCRIPT_VERSION = "3.2.0"
 
 # ---------------------------------------------------------------------------
 # Section 9-13 constants (UMR-20260806-041307-0bfd) -- see module docstring
@@ -349,6 +387,34 @@ COLLISION_FILE_OVERLAP_EXCLUDE_FILES = frozenset({
 })
 COLLISION_CANDIDATE_CAP_TRIGGER = 200
 COLLISION_TOP_K = 50
+
+# Real perf fix (see SCRIPT_VERSION 3.2.0 note above): bounded parallelism
+# for the real `gh pr diff` calls, plus an overall wall-clock deadline for
+# the whole collision-detection section so a slow/rate-limited run of gh
+# calls can never again block the full report for an hour.
+COLLISION_GH_MAX_WORKERS = int(os.environ.get("VERIDIAN_PM_REPORT_COLLISION_MAX_WORKERS", "8"))
+COLLISION_SECTION_TIME_BUDGET_SECONDS = float(
+    os.environ.get("VERIDIAN_PM_REPORT_COLLISION_TIME_BUDGET_SECONDS", "120"))
+
+# Section 14 (UMR-20260806-070018-d88b item 4, extended by
+# UMR-20260806-071942-5132): real UMR closure tracking, scoped to
+# source_trigger='owner_dispatch_gateway' rows only -- the real Owner-
+# dispatch channel this section exists to make visible.
+OWNER_DISPATCH_SOURCE_TRIGGER = "owner_dispatch_gateway"
+# The umr_tasks CHECK constraint's own non-terminal values (see
+# superboss-register.py schema) -- rows in one of these statuses are real,
+# still "open" (not yet resolved either way).
+OWNER_UMR_OPEN_STATUSES = frozenset({"queued", "dispatched", "running"})
+# UMR-20260806-071942-5132's own literal status set for the "closed" side of
+# PERCENT_COMPLETE_24H_OWNER_UMR_SET. Documented honestly: umr_tasks.status
+# has a real CHECK(status IN ('queued','dispatched','running','completed',
+# 'failed','rejected_duplicate','sigterm_sent','killed')) constraint (see
+# superboss-register.py schema) -- 'merged'/'verified'/'closed' are not real
+# reachable values in the live schema today, so in practice only 'completed'
+# rows ever count toward the numerator. Kept as the exact set the directive
+# named (harmless supersets never match, real if the schema ever adds them)
+# rather than silently narrowing it to 'completed' alone.
+OWNER_UMR_CLOSED_STATUSES = frozenset({"completed", "merged", "verified", "closed"})
 CONCRETE_COMPLETION_FILE_PATH_RE = re.compile(
     r"\b[\w][\w\-./]*\.(?:py|md|ya?ml|json|sh|sqlite3?|txt|js|ts|toml|cfg|ini)\b",
     re.IGNORECASE,
@@ -1160,25 +1226,52 @@ def detect_pr_citation_collisions(repo, prs):
     return {"pr_with_citation_count": len(pr_tokens), "collisions": collisions}
 
 
-def detect_pr_file_collisions(repo, prs, max_age_hours=COLLISION_FILE_OVERLAP_MAX_AGE_HOURS):
+def detect_pr_file_collisions(repo, prs, max_age_hours=COLLISION_FILE_OVERLAP_MAX_AGE_HOURS,
+                               max_workers=COLLISION_GH_MAX_WORKERS, deadline=None):
     """SECONDARY signal (UMR-20260806-043900-8c48): file-overlap, narrowed
     to (a) PRs opened within the last `max_age_hours` hours only -- not the
     full historical backlog -- and (b) shared files outside
     COLLISION_FILE_OVERLAP_EXCLUDE_FILES only (a shared lockfile/scratch-doc/
     shared-schema touch is normal weekly churn, never real signal alone).
     `prs` is the same real `gh pr list` result list detect_pr_citation_collisions()
-    takes -- fetched once by the caller, not re-fetched here."""
+    takes -- fetched once by the caller, not re-fetched here.
+
+    Real perf fix (SCRIPT_VERSION 3.2.0): the real `gh pr diff --name-only`
+    call for each recent PR is still exactly one real subprocess call per PR
+    (same O(n) shape PR#120 already established, not re-derived here) but
+    now fetched CONCURRENTLY (bounded by `max_workers`) instead of one at a
+    time -- at real live PR counts (94 combined recent-PR calls across both
+    tracked repos, confirmed at investigation time) the old sequential loop
+    could sum past an hour even with each individual call's already-real 30s
+    timeout. `deadline`, if given, is a real time.monotonic() cutoff for the
+    whole collision section (see get_collision_detection_section()); any PR
+    whose fetch has not started by the time the deadline passes is recorded
+    in `skipped_due_to_time_budget` -- an honest "checked N of M" outcome,
+    never a silent drop and never a block past the budget."""
     cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
     recent_prs = [pr for pr in prs if _pr_is_recent(pr, cutoff)]
     pr_files = {}
     errors = []
-    for pr in recent_prs:
+    skipped_due_to_time_budget = []
+
+    def fetch(pr):
         n = pr["number"]
+        if deadline is not None and time.monotonic() >= deadline:
+            return n, pr.get("title"), None, None, True
         files, ferr = get_pr_changed_files(repo, n)
-        if ferr:
-            errors.append({"repo": repo, "pr": n, "error": ferr})
-            continue
-        pr_files[n] = {"title": pr.get("title"), "files": files - COLLISION_FILE_OVERLAP_EXCLUDE_FILES}
+        return n, pr.get("title"), files, ferr, False
+
+    if recent_prs:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, max_workers)) as ex:
+            for n, title, files, ferr, skipped in ex.map(fetch, recent_prs):
+                if skipped:
+                    skipped_due_to_time_budget.append(n)
+                    continue
+                if ferr:
+                    errors.append({"repo": repo, "pr": n, "error": ferr})
+                    continue
+                pr_files[n] = {"title": title, "files": files - COLLISION_FILE_OVERLAP_EXCLUDE_FILES}
+
     nums = sorted(pr_files.keys())
     collisions = []
     for i in range(len(nums)):
@@ -1191,7 +1284,12 @@ def detect_pr_file_collisions(repo, prs, max_age_hours=COLLISION_FILE_OVERLAP_MA
                     "pr_a_title": pr_files[a]["title"], "pr_b_title": pr_files[b]["title"],
                     "shared_files": sorted(shared),
                 })
-    return {"recent_pr_count": len(recent_prs), "collisions": collisions, "errors": errors}
+    return {
+        "recent_pr_count": len(recent_prs),
+        "collisions": collisions,
+        "errors": errors,
+        "skipped_due_to_time_budget": sorted(skipped_due_to_time_budget),
+    }
 
 
 def parse_running_collision_unit_names(stdout):
@@ -1283,7 +1381,16 @@ def _cap_collision_candidates(ranked, trigger=COLLISION_CANDIDATE_CAP_TRIGGER, t
     return capped, shown
 
 
-def get_collision_detection_section():
+def get_collision_detection_section(time_budget_seconds=COLLISION_SECTION_TIME_BUDGET_SECONDS):
+    """Real perf fix (SCRIPT_VERSION 3.2.0): `time_budget_seconds` sets a
+    real time.monotonic() deadline for the whole section's `gh` work,
+    computed once here and passed down to every detect_pr_file_collisions()
+    call so the budget is shared across BOTH tracked repos, not reset per
+    repo (a per-repo-only budget could still double the real worst case).
+    The PRIMARY citation signal (detect_pr_citation_collisions) is pure
+    in-memory work over the already-fetched `gh pr list` JSON -- zero extra
+    real subprocess calls -- so it is never deadline-limited."""
+    deadline = time.monotonic() + time_budget_seconds if time_budget_seconds else None
     by_repo_citation = {}
     by_repo_file = {}
     errors = []
@@ -1293,7 +1400,7 @@ def get_collision_detection_section():
             errors.append({"repo": repo, "error": err})
             continue
         by_repo_citation[repo] = detect_pr_citation_collisions(repo, prs)
-        file_result = detect_pr_file_collisions(repo, prs)
+        file_result = detect_pr_file_collisions(repo, prs, deadline=deadline)
         errors.extend(file_result.pop("errors"))
         by_repo_file[repo] = file_result
 
@@ -1307,6 +1414,8 @@ def get_collision_detection_section():
     ranked = _rank_collision_candidates(all_candidates)
     total_candidates = len(ranked)
     capped, shown = _cap_collision_candidates(ranked)
+    total_skipped_due_to_time_budget = sum(
+        len(r.get("skipped_due_to_time_budget", [])) for r in by_repo_file.values())
 
     return {
         "collision_detected": total_candidates > 0,
@@ -1314,6 +1423,9 @@ def get_collision_detection_section():
         "checked_unit_globs": list(WORKER_COLLISION_UNIT_GLOBS),
         "file_overlap_max_age_hours": COLLISION_FILE_OVERLAP_MAX_AGE_HOURS,
         "file_overlap_excluded_files": sorted(COLLISION_FILE_OVERLAP_EXCLUDE_FILES),
+        "gh_max_workers": COLLISION_GH_MAX_WORKERS,
+        "time_budget_seconds": time_budget_seconds,
+        "total_skipped_due_to_time_budget": total_skipped_due_to_time_budget,
         "total_candidate_count": total_candidates,
         "primary_candidate_count": len(pr_citation_pairs) + len(worker_pairs),
         "secondary_candidate_count": len(pr_file_pairs),
@@ -1437,6 +1549,137 @@ def get_instruction_quality_section(sbr):
 
 
 # ---------------------------------------------------------------------------
+# Section 14 (UMR-20260806-070018-d88b item 4, extended by
+# UMR-20260806-071942-5132): real UMR closure tracking, scoped to
+# source_trigger='owner_dispatch_gateway' -- so the PM can see, at a glance,
+# whether real Owner-dispatched directives are actually closing out or
+# piling up. Two real, independent SQL reads, zero AI/LLM judgment:
+#   (a) ALL-TIME status breakdown + the real oldest still-open row's age
+#       (status IN OWNER_UMR_OPEN_STATUSES -- the umr_tasks CHECK
+#       constraint's own non-terminal values: queued/dispatched/running).
+#   (b) TRAILING-24H status breakdown + PERCENT_COMPLETE_24H_OWNER_UMR_SET
+#       (UMR-20260806-071942-5132): pure arithmetic, (count of status in
+#       OWNER_UMR_CLOSED_STATUSES / real total rows in the 24h window) * 100,
+#       rounded to 1 decimal. None (not 0.0/100.0) when the window has zero
+#       real rows -- an honest no-data report, same spirit as Section 10's
+#       "insufficient_data".
+# ---------------------------------------------------------------------------
+def get_owner_dispatch_umr_status_counts(sbr, since_iso=None):
+    """Pure real-SQL read: status -> real COUNT(*) for
+    source_trigger='owner_dispatch_gateway' rows, optionally restricted to
+    ts_submitted >= since_iso. Never raises; returns (None, err) on a real
+    sqlite3.Error so callers report it honestly rather than crash the whole
+    report."""
+    try:
+        conn = sbr._connect()
+        if since_iso is not None:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) AS n FROM umr_tasks "
+                "WHERE source_trigger = ? AND ts_submitted >= ? GROUP BY status",
+                (OWNER_DISPATCH_SOURCE_TRIGGER, since_iso),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) AS n FROM umr_tasks WHERE source_trigger = ? GROUP BY status",
+                (OWNER_DISPATCH_SOURCE_TRIGGER,),
+            ).fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        return None, str(e)
+    return {r["status"]: r["n"] for r in rows}, None
+
+
+def get_oldest_open_owner_umr(sbr):
+    """Pure real-SQL read: the single oldest (MIN ts_submitted) real
+    owner_dispatch_gateway row whose status is still one of
+    OWNER_UMR_OPEN_STATUSES. Returns (None, None) -- not a fabricated row --
+    when no real open row exists."""
+    placeholders = ",".join("?" for _ in OWNER_UMR_OPEN_STATUSES)
+    try:
+        conn = sbr._connect()
+        row = conn.execute(
+            f"SELECT umr_id, ts_submitted, status FROM umr_tasks "
+            f"WHERE source_trigger = ? AND status IN ({placeholders}) "
+            f"ORDER BY ts_submitted ASC LIMIT 1",
+            (OWNER_DISPATCH_SOURCE_TRIGGER, *OWNER_UMR_OPEN_STATUSES),
+        ).fetchone()
+        conn.close()
+    except sqlite3.Error as e:
+        return None, str(e)
+    return (dict(row) if row else None), None
+
+
+def _age_hours_since(iso_ts, now_dt=None):
+    """Pure function: real hours between `iso_ts` and now (or `now_dt` if
+    given, for deterministic tests), rounded to 1 decimal, or None if
+    `iso_ts` is missing/unparseable -- never a fabricated age."""
+    if not iso_ts:
+        return None
+    try:
+        then = datetime.fromisoformat(str(iso_ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    now_dt = now_dt or datetime.now(timezone.utc)
+    return round((now_dt - then).total_seconds() / 3600.0, 1)
+
+
+def get_owner_umr_closure_section(sbr, now_dt=None):
+    now_dt = now_dt or datetime.now(timezone.utc)
+    empty_24h = {
+        "trailing_24h_status_counts": {}, "trailing_24h_total": 0,
+        "trailing_24h_closed_count": 0, "percent_complete_24h_owner_umr_set": None,
+    }
+
+    all_time_counts, err_all = get_owner_dispatch_umr_status_counts(sbr)
+    if err_all:
+        return {
+            "error": err_all, "all_time_status_counts": {}, "all_time_total": 0,
+            "oldest_open_umr_id": None, "oldest_open_status": None, "oldest_open_age_hours": None,
+            **empty_24h,
+        }
+
+    oldest_open, err_oldest = get_oldest_open_owner_umr(sbr)
+    if err_oldest:
+        return {
+            "error": err_oldest, "all_time_status_counts": all_time_counts,
+            "all_time_total": sum(all_time_counts.values()),
+            "oldest_open_umr_id": None, "oldest_open_status": None, "oldest_open_age_hours": None,
+            **empty_24h,
+        }
+
+    since_24h = (now_dt - timedelta(hours=24)).isoformat()
+    trailing_counts, err_24h = get_owner_dispatch_umr_status_counts(sbr, since_iso=since_24h)
+    if err_24h:
+        trailing_counts = None
+
+    if trailing_counts is None:
+        section_24h = {**empty_24h}
+    else:
+        trailing_total = sum(trailing_counts.values())
+        closed_24h = sum(n for status, n in trailing_counts.items() if status in OWNER_UMR_CLOSED_STATUSES)
+        section_24h = {
+            "trailing_24h_status_counts": trailing_counts,
+            "trailing_24h_total": trailing_total,
+            "trailing_24h_closed_count": closed_24h,
+            "percent_complete_24h_owner_umr_set": (
+                round(closed_24h / trailing_total * 100, 1) if trailing_total > 0 else None
+            ),
+        }
+
+    return {
+        "error": err_24h,
+        "all_time_status_counts": all_time_counts,
+        "all_time_total": sum(all_time_counts.values()),
+        "oldest_open_umr_id": oldest_open["umr_id"] if oldest_open else None,
+        "oldest_open_status": oldest_open["status"] if oldest_open else None,
+        "oldest_open_age_hours": _age_hours_since(oldest_open["ts_submitted"], now_dt) if oldest_open else None,
+        **section_24h,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Assembly + rendering
 # ---------------------------------------------------------------------------
 def build_report(sbr):
@@ -1495,6 +1738,9 @@ def build_report(sbr):
     stall_detection_section = get_stuck_tasks_detail()
     collision_detection_section = get_collision_detection_section()
     instruction_quality_section = get_instruction_quality_section(sbr)
+    # Section 14 (UMR-20260806-070018-d88b item 4, extended by
+    # UMR-20260806-071942-5132) -- see module docstring.
+    owner_umr_closure_section = get_owner_umr_closure_section(sbr)
 
     report = {
         "report_format_version": REPORT_FORMAT_VERSION,
@@ -1531,6 +1777,7 @@ def build_report(sbr):
         "stall_detection_section": stall_detection_section,
         "collision_detection_section": collision_detection_section,
         "instruction_quality_section": instruction_quality_section,
+        "owner_umr_closure_section": owner_umr_closure_section,
         "current_flat_fields": current_flat,
         "thresholds": {
             "SWAP_FREE_PCT_WARN_THRESHOLD": SWAP_FREE_PCT_WARN_THRESHOLD,
@@ -1732,8 +1979,13 @@ def render_report_text(report):
         lines.append(f"  ({repo}: {repo_data['pr_with_citation_count']} open PR(s) carry a citation token, "
                       f"checked pairwise)")
     for repo, repo_data in collision["by_repo_file"].items():
+        skipped = repo_data.get("skipped_due_to_time_budget") or []
+        skip_note = f", {len(skipped)} skipped (time budget exceeded): PR#{skipped}" if skipped else ""
         lines.append(f"  ({repo}: {repo_data['recent_pr_count']} PR(s) opened in the last "
-                      f"{collision['file_overlap_max_age_hours']}h, checked pairwise for file overlap)")
+                      f"{collision['file_overlap_max_age_hours']}h, checked pairwise for file overlap, "
+                      f"fetched with {collision['gh_max_workers']} concurrent gh calls{skip_note})")
+    lines.append(f"  (real gh-call time budget for this section: {collision['time_budget_seconds']}s; "
+                  f"{collision['total_skipped_due_to_time_budget']} PR(s) skipped total)")
     if collision["worker_umr_collisions"]["errors"]:
         lines.append(f"  Worker-unit-check errors: {collision['worker_umr_collisions']['errors']}")
     if collision["errors"]:
@@ -1752,6 +2004,25 @@ def render_report_text(report):
                               f"reasons={f['reasons']}")
         else:
             lines.append("No failing rows among those checked.")
+
+    h("14. OWNER UMR CLOSURE TRACKING (source_trigger='owner_dispatch_gateway', real umr_tasks rows)")
+    ouc = report["owner_umr_closure_section"]
+    if ouc.get("error"):
+        lines.append(f"ERROR reading umr_tasks: {ouc['error']}")
+    else:
+        lines.append(f"ALL_TIME_TOTAL={ouc['all_time_total']}  status_breakdown={ouc['all_time_status_counts']}")
+        if ouc["oldest_open_umr_id"]:
+            lines.append(f"OLDEST_OPEN_UMR={ouc['oldest_open_umr_id']} "
+                          f"status={ouc['oldest_open_status']} "
+                          f"age_hours={ouc['oldest_open_age_hours']}")
+        else:
+            lines.append("OLDEST_OPEN_UMR=none (no real row currently in queued/dispatched/running)")
+        pct = ouc["percent_complete_24h_owner_umr_set"]
+        pct_str = f"{pct}%" if pct is not None else "insufficient_data (0 real rows in trailing 24h)"
+        lines.append(f"PERCENT_COMPLETE_24H_OWNER_UMR_SET={pct_str}")
+        lines.append(f"  (trailing 24h: total={ouc['trailing_24h_total']} "
+                      f"closed={ouc['trailing_24h_closed_count']} "
+                      f"status_breakdown={ouc['trailing_24h_status_counts']})")
 
     lines.append("")
     lines.append("=" * 78)

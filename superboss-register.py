@@ -6126,6 +6126,33 @@ _EXTERNAL_AGENT_FORBIDDEN_PATH_RE = re.compile(
 )
 
 
+def _is_unsafe_external_agent_path(path):
+    """Real, defense-in-depth guard (found and fixed during real independent
+    review of UMR-20260806-095416-b6f0's implementation PR) against a
+    files_touched/diff path that could escape the real repo root: an
+    absolute path -- `os.path.join(repo_root, rel_path)` in
+    get_next_external_agent_task() silently DISCARDS repo_root when the
+    second argument is absolute, so an unchecked absolute files_touched
+    entry would read+embed the content of ANY file on disk (a secret, an
+    SSH key, the live production DB itself) into the real prompt handed to
+    chat.z.ai -- a real external, untrusted third party -- or a real `..`
+    path-traversal segment (same real risk, reached a different way). Used
+    on BOTH real sides of this channel: the outbound files_touched allow-
+    list (check_external_agent_eligibility(), gating BEFORE any file is
+    ever read) and the inbound diff paths chat.z.ai's reply names
+    (submit_external_agent_result()) -- the inbound side already had this
+    exact check inline; this function is the single shared real
+    implementation both now call, so the two can never drift apart again."""
+    if not path:
+        return True
+    normalized = path.replace("\\", "/")
+    if normalized.startswith("/"):
+        return True
+    if ".." in normalized.split("/"):
+        return True
+    return False
+
+
 def _is_external_agent_doc_path(path):
     """Real markdown/docs-path check for the doc_update task type's real
     up-to-3-files allowance (UMR-20260806-095416-b6f0 §3): a `.md`/`.rst`
@@ -6156,7 +6183,11 @@ def check_external_agent_eligibility(*, task_type, files_touched, blast_radius,
          doc_update, which allows up to 3, and only if every one of those
          (up to 3) is a real markdown/docs-path file (_is_external_agent_doc_path).
       3. Zero overlap between files_touched and
-         _EXTERNAL_AGENT_FORBIDDEN_PATH_RE.
+         _EXTERNAL_AGENT_FORBIDDEN_PATH_RE, AND no entry is an absolute path
+         or contains a '..' traversal segment (_is_unsafe_external_agent_path)
+         -- otherwise get_next_external_agent_task() could read and embed
+         real file content from OUTSIDE the repo root into the real prompt
+         handed to chat.z.ai, a real external, untrusted third party.
       4. acceptance_criteria is a real, non-empty (post-strip) string.
       5. For isolated_bugfix specifically: repro_steps is also a real,
          non-empty (post-strip) string.
@@ -6186,6 +6217,12 @@ def check_external_agent_eligibility(*, task_type, files_touched, blast_radius,
             reasons.append(
                 f"doc_update allows only markdown/docs-path files -- found non-doc entries: {non_doc}"
             )
+    unsafe_paths = [f for f in files if _is_unsafe_external_agent_path(f)]
+    if unsafe_paths:
+        reasons.append(
+            f"files_touched contains unsafe absolute/path-traversal entries -- would let this "
+            f"channel read and leak real file content from outside the real repo root: {unsafe_paths}"
+        )
     forbidden_hits = [f for f in files if _EXTERNAL_AGENT_FORBIDDEN_PATH_RE.search(f)]
     if forbidden_hits:
         reasons.append(
@@ -6517,6 +6554,22 @@ def get_next_external_agent_task(conn, *, artifacts_root, repo_root, now=None):
     metadata = json.loads(row["metadata_json"] or "{}")
     ext_meta = metadata.get("external_agent") or {}
     files_touched = json.loads(row["files_touched"] or "[]")
+    # Real defense-in-depth (found during real independent review): re-check
+    # every path here too, immediately before it's ever read, even though
+    # mark_external_agent_eligible() (the only real path that ever sets
+    # files_touched) already refuses an unsafe path via
+    # check_external_agent_eligibility(). os.path.join(repo_root, rel_path)
+    # below silently DISCARDS repo_root for an absolute rel_path -- this is
+    # the exact real line that would leak arbitrary local file content into
+    # the prompt handed to chat.z.ai if that first gate were ever bypassed
+    # or this function were ever called with a hand-built row.
+    unsafe = [p for p in files_touched if _is_unsafe_external_agent_path(p)]
+    if unsafe:
+        raise ValueError(
+            f"real invariant violation: umr_tasks {row['umr_id']!r} files_touched contains unsafe "
+            f"absolute/path-traversal entries {unsafe} -- refusing to read or embed them into a "
+            f"prompt for chat.z.ai"
+        )
     file_contents = {}
     for rel_path in files_touched:
         abs_path = os.path.join(repo_root, rel_path)
@@ -6617,7 +6670,7 @@ def submit_external_agent_result(conn, *, reply_text, artifacts_root, repo_root,
             conn, disp, task, now,
             reason="diff contains no recognizable file path headers ('diff --git'/'+++'/'---')",
         )
-    unsafe = sorted(p for p in diff_paths if p.startswith("/") or ".." in p.split("/"))
+    unsafe = sorted(p for p in diff_paths if _is_unsafe_external_agent_path(p))
     if unsafe:
         return _external_agent_apply_reject(
             conn, disp, task, now, reason=f"diff touches unsafe/absolute/traversal path(s): {unsafe}",

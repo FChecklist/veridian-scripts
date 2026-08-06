@@ -189,6 +189,66 @@ def test_eligibility_forbidden_path_patterns():
     print("PASS: test_eligibility_forbidden_path_patterns")
 
 
+def test_eligibility_rejects_absolute_and_traversal_paths():
+    """Real regression test for a real finding from independent review of
+    UMR-20260806-095416-b6f0's implementation PR: an absolute or `..`
+    path-traversal files_touched entry must be refused BEFORE it ever
+    reaches get_next_external_agent_task()'s real file read (which would
+    otherwise leak arbitrary local file content -- secrets, SSH keys, the
+    live production DB -- into the prompt handed to chat.z.ai)."""
+    sbr = _load("sbr_elig_traversal", "superboss-register.py")
+    for bad_path in [
+        "/etc/passwd", "/opt/veridian/ai-os/memory/superboss-register.sqlite",
+        "../../etc/passwd", "outside_repo/../../secrets_elsewhere.txt",
+        "..", "a/../../b.py",
+    ]:
+        ok, reasons = sbr.check_external_agent_eligibility(
+            task_type="single_file_refactor", files_touched=[bad_path], blast_radius="isolated",
+            requires_multi_file_context=False, acceptance_criteria="x", repro_steps=None, tier=3,
+        )
+        assert ok is False, f"{bad_path} should have been rejected"
+        assert any("unsafe absolute/path-traversal" in r for r in reasons), (bad_path, reasons)
+    # A genuinely safe relative path must NOT be rejected by this rule.
+    ok, reasons = sbr.check_external_agent_eligibility(
+        task_type="single_file_refactor", files_touched=["scripts/foo.py"], blast_radius="isolated",
+        requires_multi_file_context=False, acceptance_criteria="x", repro_steps=None, tier=3,
+    )
+    assert ok is True, reasons
+    print("PASS: test_eligibility_rejects_absolute_and_traversal_paths")
+
+
+def test_get_next_raises_on_unsafe_files_touched_invariant_violation():
+    """Real defense-in-depth check, same finding as above: even if
+    files_touched somehow held an unsafe path when get_next_external_agent_task()
+    runs (mark_external_agent_eligible() is the only real path that sets it,
+    and already refuses this), the function must refuse to read/embed it
+    rather than silently leaking file content outside the repo root."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        sbr = _seed_scratch_db(scratch_db)
+        sbr2 = _load("sbr_getnext_unsafe_invariant", "superboss-register.py", env=_scratch_env(scratch_db))
+        conn = sbr2._connect()
+        umr_id = _insert_umr(sbr2, conn, tier=3, task_identity="unsafe invariant test")
+        # Hand-craft a row bypassing mark_external_agent_eligible() entirely,
+        # simulating exactly the "first gate bypassed" scenario the
+        # defense-in-depth check exists for.
+        conn.execute(
+            "UPDATE umr_tasks SET external_agent_eligible=1, external_agent_task_type='single_file_refactor', "
+            "blast_radius='isolated', files_touched=? WHERE umr_id=?",
+            (json.dumps(["/etc/passwd"]), umr_id),
+        )
+        conn.commit()
+        raised = False
+        try:
+            sbr2.get_next_external_agent_task(conn, artifacts_root=os.path.join(d, "artifacts"), repo_root=d)
+        except ValueError as e:
+            raised = True
+            assert "unsafe absolute/path-traversal" in str(e)
+        assert raised, "expected a ValueError, not a silent file read outside the repo root"
+        conn.close()
+    print("PASS: test_get_next_raises_on_unsafe_files_touched_invariant_violation")
+
+
 def test_eligibility_empty_acceptance_criteria_rejected():
     sbr = _load("sbr_elig_empty_ac", "superboss-register.py")
     for ac in ["", "   ", None]:

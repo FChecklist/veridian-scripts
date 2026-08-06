@@ -174,18 +174,65 @@ def _abs_path(path):
 
 
 # ---------------------------------------------------------------------------
+# UMR-20260806-130110-c620 correction 3: real, direct invocation of the
+# already-registered `pruned_code_search` capability (scripts/find_code.sh)
+# -- never reimplements its pruned find/-prune/grep logic (that exact
+# reimplementation, done unscoped, is the real incident find_code.sh's own
+# header documents: 17+ min of D-state disk saturation, PID 2769369).
+def _run_find_code_search(pattern, scope_dir=None):
+    """Returns (matched: bool, files: list[str]). Raises on a real usage
+    error (exit 2, e.g. a malformed regex) -- never silently treats that the
+    same as a genuine no-match (exit 1), same distinction find_code.sh's
+    own header requires of its callers."""
+    cmd = [os.path.join(SCRIPT_DIR, "find_code.sh"), pattern] + ([scope_dir] if scope_dir else [])
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode == 0:
+        return True, [line for line in proc.stdout.splitlines() if line.strip()]
+    if proc.returncode == 1:
+        return False, []
+    raise RuntimeError(f"find_code.sh usage/error (exit {proc.returncode}): {proc.stderr.strip()}")
+
+
+# ---------------------------------------------------------------------------
 # STEP 1: script-match + prior-precedent search (UMR-124327-6ffb steps 1-2 /
 # UMR-124654-a8d6 steps 1-2). Composes plan_generator.check_reuse_before_
 # dispatch(), never reimplemented -- that function already queries
 # capability_registry, wiring_registry, knowledge_engine, and system_index
 # in one real call and is already the one real caller resource_governor.py's
 # submit() uses for every real task creation on this platform.
-def step_reuse_check(task_identity, intent_text, domain=None):
+#
+# That metadata lookup alone can be stale/incomplete (a capability_registry
+# row not yet written for real code that already exists), so this step ALSO
+# runs a real, live source-tree search via _run_find_code_search() above --
+# the real gap UMR-20260806-130110-c620 found: "does a script already
+# exist" was answered only from registry metadata, never from a real code
+# search. Only runs when real `scope_terms` are given -- never fabricates a
+# regex out of free-text intent_text (a bad guessed pattern would be worse
+# than not searching at all); honestly reports "not run" otherwise rather
+# than pretending a pattern-less search happened.
+def step_reuse_check(task_identity, intent_text, domain=None, scope_terms=None):
     pg = _plan_generator()
     result = pg.check_reuse_before_dispatch(intent_text, task_identity=task_identity, domain=domain)
     cap = result.get("capability") or {}
     cap_matches = cap.get("matches") or []
     script_matched = result.get("recommendation") == "reuse_instead"
+
+    code_search = {"ran": False, "scope_terms_searched": [], "matches_by_term": {}, "any_matches": False,
+                    "reason": "no scope_terms given -- code_search skipped, not fabricated"}
+    if scope_terms:
+        matches_by_term = {}
+        any_matches = False
+        for term in scope_terms:
+            try:
+                matched, files = _run_find_code_search(term)
+            except Exception as e:
+                matches_by_term[term] = {"error": str(e)}
+                continue
+            matches_by_term[term] = {"matched": matched, "files": files}
+            any_matches = any_matches or matched
+        code_search = {"ran": True, "scope_terms_searched": list(scope_terms),
+                        "matches_by_term": matches_by_term, "any_matches": any_matches, "reason": None}
+
     return {
         "ok": result.get("error") is None,
         "script_matched": script_matched,
@@ -193,6 +240,7 @@ def step_reuse_check(task_identity, intent_text, domain=None):
         "reuse_candidates": (result.get("reuse_candidates") or [])[:10],
         "recommendation": result.get("recommendation"),
         "error": result.get("error"),
+        "code_search": code_search,
     }
 
 
@@ -272,6 +320,15 @@ def step_assemble_briefing(umr_id, intent_text, scope_terms=None):
 # same gate task-gateway.py's dispatch path already enforces the PRESENCE
 # of; this is the first real caller that also extracts the literal command,
 # not merely checks one exists. Nothing else in this repo does this.
+#
+# UMR-20260806-130110-c620 correction 1: `submit_command`/`audit_method`
+# below used to be hardcoded f-string prose -- the real gap found: this is
+# exactly the "free composed prose dispatch text" repos/compliance-tracker's
+# own prompt-os-resolver.ts pattern (Wave 22) exists to replace. Both are
+# now real, versioned, labeled `prompt_templates` rows, resolved
+# deterministically via superboss-register.py's resolve_prompt_template()
+# (mirrors resolvePromptTemplate() exactly -- fails loud on a genuinely
+# missing template, never silently falls back to a different string).
 def _extract_runnable_command(success_criteria_text):
     ttv = _tight_task_validation()
     for raw_line in (success_criteria_text or "").splitlines():
@@ -289,17 +346,24 @@ def _extract_runnable_command(success_criteria_text):
 def step_submission_contract(workspace_dir, success_criteria_text, output_file_path=None):
     audit_cmd = _extract_runnable_command(success_criteria_text)
     output_file_path = output_file_path or os.path.join(workspace_dir, "PROGRESS.md")
+
+    sbr = _superboss_register()
+    conn = sbr._connect()
+    try:
+        sbr.seed_default_orchestrator_prompt_templates(conn)
+        submit_command_tpl = sbr.resolve_prompt_template(conn, "orchestrator.submission_contract.submit_command")
+        audit_method_tpl = (
+            sbr.resolve_prompt_template(conn, "orchestrator.submission_contract.audit_method")
+            if audit_cmd else None
+        )
+    finally:
+        conn.close()
+
     contract = {
         "output_file_path": output_file_path,
-        "submit_command": (
-            f"cd {workspace_dir} && git add -A && git commit -m '<real summary>' && git push"
-        ),
+        "submit_command": submit_command_tpl.format(workspace_dir=workspace_dir),
         "audit_command": audit_cmd,
-        "audit_method": (
-            f"the orchestrator independently re-runs `{audit_cmd}` itself after the agent reports "
-            f"done (step 7) -- status is written completed only if that real command really exits 0, "
-            f"never on the agent's own say-so"
-        ) if audit_cmd else None,
+        "audit_method": audit_method_tpl.format(audit_cmd=audit_cmd) if audit_method_tpl else None,
     }
     ok = bool(audit_cmd) and bool(output_file_path)
     return {"ok": ok, "contract": contract,
@@ -539,14 +603,40 @@ def step_verify_all_registry_paths():
 
 
 # ---------------------------------------------------------------------------
+# UMR-20260806-130110-c620 correction 2: real structured execution logging,
+# mirroring orchestra-execution-logger.ts's own org/task/layer/event_type/
+# input/output/model/cost shape (superboss-register.py's
+# orchestrator_executions table) -- this is the real gap found: task_audits
+# (Gap 2, above) already tracks independent-re-verification pass/fail, but
+# nothing recorded every real step's own input/output/status in this
+# structured shape, the completion-tracking/audit gap this closes. Never
+# blocks or fails the real step it is logging -- composes
+# log_orchestrator_execution(), which already catches its own persistence
+# errors (same fire-and-forget posture the real pattern being mirrored
+# documents).
+def _log_step(umr_id, layer_key, event_type, status, step_input=None, step_output=None):
+    sbr = _superboss_register()
+    conn = sbr._connect()
+    try:
+        sbr.log_orchestrator_execution(
+            conn, task_id=umr_id, layer_key=layer_key, event_type=event_type, status=status,
+            input=step_input, output=step_output, model=None, provider=None, cost_usd=None,
+        )
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # End-to-end runner -- executes every real step against ONE real task_spec,
 # printing the real boolean at each step (this task's own required test
 # shape, same as every prior UMR in this chain).
 def run(task_spec):
     steps = {}
+    umr_id = task_spec["umr_id"]
 
     steps["1_reuse_check"] = step_reuse_check(
-        task_spec["task_identity"], task_spec["intent_text"], task_spec.get("domain"))
+        task_spec["task_identity"], task_spec["intent_text"], task_spec.get("domain"),
+        task_spec.get("scope_terms"))
 
     steps["2_prior_agent_precedent"] = step_prior_agent_precedent(task_spec["intent_text"])
 
@@ -560,8 +650,15 @@ def run(task_spec):
     steps["5_submission_contract"] = step_submission_contract(
         task_spec["workspace_dir"], tight_task.get("successCriteria"),
         task_spec.get("output_file_path"))
+    _log_step(umr_id, "step_submission_contract", "orchestrator.submission_contract",
+               "completed" if steps["5_submission_contract"]["ok"] else "denied",
+               step_input={"workspace_dir": task_spec["workspace_dir"]},
+               step_output=steps["5_submission_contract"])
 
     steps["6_validate_input"] = step_validate_input(tight_task)
+    _log_step(umr_id, "step_validate_input", "orchestrator.validate_input",
+               "completed" if steps["6_validate_input"]["passed"] else "denied",
+               step_input=tight_task, step_output=steps["6_validate_input"])
 
     # --- real AI/script work happens here, outside this orchestrator ---
 
@@ -569,17 +666,32 @@ def run(task_spec):
     steps["7_reverify"] = step_reverify(
         audit_cmd, task_spec["task_identity"], work_item_id=task_spec.get("work_item_id"),
         cwd=task_spec["workspace_dir"])
+    _log_step(umr_id, "step_reverify", "orchestrator.reverify",
+               "completed" if steps["7_reverify"].get("passed") else
+               ("failed" if steps["7_reverify"].get("ok") else "denied"),
+               step_input={"audit_cmd": audit_cmd}, step_output=steps["7_reverify"])
 
     steps["8_validate_output"] = step_validate_output(
         steps["5_submission_contract"]["contract"], steps["7_reverify"],
         expected_files=task_spec.get("expected_files"))
+    _log_step(umr_id, "step_validate_output", "orchestrator.validate_output",
+               "completed" if steps["8_validate_output"]["passed"] else "gated",
+               step_input={"expected_files": task_spec.get("expected_files")},
+               step_output=steps["8_validate_output"])
 
     steps["9_writeback"] = step_writeback(
         task_spec["umr_id"], role_label, task_spec.get("outputs", {}),
         reverify_result=steps["7_reverify"], validate_result=steps["8_validate_output"])
+    _log_step(umr_id, "step_writeback", "orchestrator.writeback",
+               "completed" if steps["9_writeback"].get("written") else
+               ("gated" if steps["9_writeback"].get("ok") else "failed"),
+               step_input={"outputs": task_spec.get("outputs", {})}, step_output=steps["9_writeback"])
 
     steps["10_graduate_evaluation"] = step_graduate_evaluation(
         tight_task.get("complexityTier"), steps["7_reverify"], steps["8_validate_output"])
+    _log_step(umr_id, "step_graduate_evaluation", "orchestrator.graduate_evaluation",
+               "completed", step_input={"complexityTier": tight_task.get("complexityTier")},
+               step_output=steps["10_graduate_evaluation"])
 
     return steps
 

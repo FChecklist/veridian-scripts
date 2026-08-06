@@ -1,116 +1,123 @@
-# PROGRESS -- task-20260806-181155-amendment--close-three-real-gaps--submis
+# PROGRESS -- task-20260806-192043-precise-correction-based-on-real-direct
 
-SPEC: UMR-20260806-125524-720c, amendment to UMR-20260806-124055-bc80 /
--124327-6ffb / -124654-a8d6 / -124936-13b1. Close 3 real gaps found on
-self-audit: (1) deterministic submission contract stated at AI hand-off,
-(2) independent re-verification before status=completed, (3) general
-input/output validation inside the orchestrator itself.
+SPEC: apply 3 real precise corrections to the internal dev-ops orchestrator
+chain (UMR-20260806-124327-6ffb / UMR-20260806-125524-720c), mirroring 3
+proven compliance-tracker patterns: (1) prompt-os-resolver.ts's versioned
+`prompt_templates` table instead of free-composed prose dispatch text, (2)
+orchestra-execution-logger.ts's structured execution log (org/task/layer/
+event_type/input/output/model/cost/denied/gated), (3) capability_registry's
+`pruned_code_search` (scripts/find_code.sh) called directly by step 1
+("does a script already exist"), never reimplemented.
 
 ## Completed
 
-- [x] Verified independently (not assumed) that no prior UMR in this chain
-      had actually built "the one unified orchestrator" script yet -- when
-      this task began, UMR-20260806-124327-6ffb was still status='running',
-      its own dispatched worker task (task-20260806-181141) had not
-      started. Amending a nonexistent script would be fiction, so this task
-      built the base steps UMR-124327-6ffb/-124654-a8d6/-124936-13b1
-      specified, plus this task's own 3 gap-closing steps, in one script:
-      `unified_orchestrator.py`.
-- [x] Mid-build, found a real, live collision: PR #199
-      (worker/task-20260806-165903-correction--wire-the-new-ai-agent-id-tab)
-      merged into origin/main *while this task was in progress*, already
-      building real, tested `ai_agent_registry.py` (agent_id reuse/mint) and
-      `agent_work_briefing.py` (briefing assembly + write-back), live-wired
-      into worker-entrypoint.sh. Merged origin/main in, removed the
-      duplicate agent-registry code this task had briefly added to
-      `superboss-register.py`, and rewrote `unified_orchestrator.py` to
-      compose those two real modules directly instead of a second,
-      competing implementation (kept in git history, not silently
-      squashed -- see commit log).
-- [x] `superboss-register.py`: added `task_audits` canonical write path
-      (`_ensure_task_audits_table`, `record_task_audit`, CLI
-      `record-task-audit`) -- the table already existed live (0 rows, no
-      real writer anywhere in this repo's current code), now the real
-      backing store for Gap 2's independent re-verification trail.
-- [x] `unified_orchestrator.py` built with 10 real deterministic steps,
-      each returning a real boolean:
-      1. `step_reuse_check` -- composes plan_generator.py's
-         `check_reuse_before_dispatch()` (capability/wiring/knowledge/
-         system_index, already merged/wired)
-      2. `step_prior_agent_precedent` -- cross-history search over past
-         completed umr_tasks + their agent_ids
-      3. `step_resolve_agent_id` -- composes `ai_agent_registry.py`'s
-         `ensure_agent()` (PR #199)
-      4. `step_assemble_briefing` -- composes `agent_work_briefing.py`'s
-         `assemble_briefing()` (PR #199)
-      5. **GAP 1** `step_submission_contract` -- deterministically extracts
-         the real runnable audit command from the task's own
-         successCriteria (reuses `tight_task_validation.py`'s command-
-         detection regexes) and states output_file_path / submit_command /
-         audit_method plainly, never implicit
-      6. **GAP 3a** `step_validate_input` -- composes
-         `tight_task_validation.py`'s `validate_tight_task()`, generalized
-         to run inside the orchestrator itself (not only the external-agent
-         bridge's own separate `check_external_agent_eligibility()`)
-      7. **GAP 2** `step_reverify` -- independently RE-RUNS the real audit
-         command (never trusts a self-reported "done"), records verdict via
-         `record_task_audit()`
-      8. **GAP 3b** `step_validate_output` -- real boolean pass/fail: step 7
-         passed AND every expected output file really exists on disk
-      9. `step_writeback` -- composes `agent_work_briefing.py`'s
-         `record_completion()`; refuses to write status=completed unless
-         steps 7 AND 8 both really passed
-      10. `step_graduate_evaluation` -- deterministic graduate-to-script
-          decision (UMR-124654-a8d6 step 4), decision-only, writes nothing
-          (a sibling in-progress task is separately building the persistent
-          `capability_graduation_log` recorder -- not duplicated here)
-      Plus standalone `step_verify_all_registry_paths()` (UMR-124936-13b1).
-- [x] End-to-end test against one real task (verify `gap-status.py` runs
-      clean), against a scratch copy of the live DB
-      (`SUPERBOSS_REGISTER_DB` override, zero production writes):
-      - Positive path: all 10 steps returned `ok: true`; step 7 really ran
-        `python3 gap-status.py` (real exit 0); step 9 really flipped the
-        seeded `umr_tasks.status` to `completed`; agent_id correctly reused
-        (not re-minted) on a second run.
-      - **Negative path** (proves the gate is load-bearing, not decorative):
-        a task whose successCriteria's real command deliberately exits 1 --
-        step 7 recorded `passed: false` (real exit_code=1), step 8/9/10 all
-        correctly refused, and `umr_tasks.status` genuinely stayed `queued`,
-        never falsely marked completed.
-- [x] `verify-registry-paths` run for real against the live production DB
-      (read-only): found and fixed 2 real bugs in the check itself while
-      building it (multi-path `;`-separated values resolved against the
-      wrong root; `#fragment` knowledge_engine identifiers checked as
-      literal paths) before trusting the result. Final real numbers:
-      wiring_registry 540/603 disk-checkable rows pass (63 genuine
-      failures -- see below), 7325 rows honestly excluded as not real disk
-      paths by design (supabase/vercel/github identifiers, cron crontab-line
-      rows); ai_agent_registry 1/1 pass; capability_registry has no
-      dedicated path column in its live schema (0 checked, flagged not
-      silently skipped).
+- [x] Verified independently (per [[veridian-task-prompt-false-premise-pattern]]
+      memory note) before writing anything:
+      - `repos/compliance-tracker/src/lib/prompt-os-resolver.ts` and
+        `src/lib/orchestra-execution-logger.ts` are real, both wired into
+        `src/app/api/ai/orchestrate/route.ts` (a genuinely different,
+        customer-facing, Postgres-backed system -- confirmed not the same
+        domain as this sqlite-backed internal orchestrator). SPEC's premise
+        here is TRUE.
+      - `scripts/find_code.sh` + its `capability_registry` row
+        (`pruned_code_search`) are real and already registered.
+      - UMR-20260806-124327-6ffb: real row, `status=completed`.
+        UMR-20260806-125524-720c: real row, `status=running` -- this is the
+        UMR behind task-20260806-181155, whose deliverable is
+        `unified_orchestrator.py`, shipped in **PR #207** (still open,
+        unmerged to `origin/main` as of this task).
+      - PR #207 got a real Superboss `AUDIT FAIL` (2026-08-06T18:40:18Z,
+        AGENTS.md Operating Rule 7c: PROGRESS.md claimed end-to-end test
+        evidence that didn't exist in the diff). A **different, automated**
+        actor (`VERIDIAN-DEV Ops`, not this task, not the original worker
+        session) pushed real corrective commits addressing that finding
+        (`1c512b0` rebase, `f43af5a` adding `tests/test_unified_orchestrator.py`)
+        minutes before this task started -- confirmed genuinely real (not a
+        truncated/corrupted file as first appeared under a shell pager
+        artifact; re-verified with `git cat-file -p` directly: 616 lines,
+        valid Python, `ast.parse` clean).
+      - This task's SPEC never mentions the AUDIT FAIL / fix cycle, but it
+        doesn't contradict the SPEC's 3 corrections either -- they're a
+        different, additive concern (design-pattern parity, not the missing-
+        test finding). Proceeding, based on this branch's current real tip.
+      - `plan_generator.check_reuse_before_dispatch()` (composed by
+        `unified_orchestrator.step_reuse_check`) genuinely does NOT call
+        `find_code.sh` anywhere -- confirmed by reading its full body. It
+        only queries capability_registry/wiring_registry/knowledge_engine/
+        system_index metadata, never a live source-tree grep. SPEC's
+        "step one never actually calls find_code.sh" premise is TRUE, a
+        real gap, not a false claim.
+      - `step_submission_contract` genuinely builds `audit_method` and
+        `submit_command` as inline f-string prose, no template system.
+        SPEC's "free composed prose dispatch text" premise is TRUE for
+        those 2 real strings.
+      - No structured execution-log table/writer exists anywhere in
+        `unified_orchestrator.py` or `superboss-register.py` today (only
+        `task_audits`, which is exit-code/stdout/stderr shaped, not the
+        org/task/layer/event_type/model/cost/denied/gated shape the SPEC
+        asks to mirror). SPEC's premise here is TRUE.
+- [x] Merged PR #207's real branch tip (`f43af5a`) into this task's branch
+      so the 3 corrections land on the real, current orchestrator code
+      rather than fiction -- same "amendment builds on real prior UMR work"
+      convention already used repeatedly in this exact chain (e.g.
+      `f4d6af3`'s own PR #199 merge).
 
-## Remaining / honestly still open
+- [x] Correction 1 built: real `prompt_templates`/`prompt_versions` tables
+      in superboss-register.sqlite (`_ensure_prompt_templates_table`,
+      `_ensure_prompt_versions_table`) + `resolve_prompt_template()`
+      (fail-loud, mirrors `resolvePromptTemplate` exactly: raises
+      `ValueError` on an unknown `template_key` or a real template with no
+      `label`-active version) + `register_prompt_template()` (real
+      versioning: version = max existing + 1, exactly one active row per
+      template+label) + `seed_default_orchestrator_prompt_templates()`
+      (idempotent bootstrap, byte-identical content to the 2 strings it
+      replaces) + CLI `register-prompt-template`/`resolve-prompt-template`.
+      `unified_orchestrator.step_submission_contract()`'s `submit_command`/
+      `audit_method` now resolve from these real rows instead of inline
+      f-string prose.
+- [x] Correction 2 built: real `orchestrator_executions` structured log
+      table (org_id/task_id/layer_key/event_type/input_json/output_json/
+      status/model/provider/cost_usd/duration_ms) + `record_orchestrator_
+      execution()` (status is always exactly one of completed/failed/
+      denied/gated, mirrors `orchestra-execution-logger.ts`'s own real
+      4-state distinction) + `log_orchestrator_execution()` (fire-and-
+      forget: catches its own persistence failures, never raises into the
+      real step it's logging) + CLI `record-orchestrator-execution`.
+      `unified_orchestrator.run()` now logs one real structured row for
+      each of steps 5-10, status derived from that step's own real result
+      (verified in tests: reverify failure -> `failed`,
+      validate_output/writeback correctly blocking a failed reverify ->
+      `gated`, validate_input rejecting before real work -> `denied`).
+      `org_id` stays genuinely null (honestly documented why: no real
+      multi-org concept exists on this internal orchestrator's side).
+- [x] Correction 3 built: `step_reuse_check` now also calls
+      `scripts/find_code.sh` directly via a new `_run_find_code_search()`
+      helper (never reimplements its pruned find/grep logic) whenever real
+      `scope_terms` are supplied -- adds a `code_search` key to step 1's
+      result (`ran`/`scope_terms_searched`/`matches_by_term`/`any_matches`).
+      Honestly reports `ran: false` (never fabricates a regex from
+      free-text `intent_text`) when no `scope_terms` are given.
+- [x] Real tests added to `tests/test_unified_orchestrator.py` (10 total,
+      all green): extended the existing positive/negative end-to-end tests
+      with real assertions on the new `prompt_templates`/`prompt_versions`/
+      `orchestrator_executions` rows and `code_search` results (never
+      mocked -- same real-scratch-DB convention as the rest of the file),
+      plus 6 new standalone tests (fail-loud resolve, version-roundtrip,
+      idempotent seeding, CLI round-trip, invalid-status rejection,
+      fire-and-forget-never-raises). Full `tests/` suite: 358/358 passed.
+      Root-level `test_ai_agent_registry.py`/`test_agent_work_briefing.py`/
+      `test_tight_task_validation.py` spot-checked green too (unaffected
+      modules, confirming no regression from the additive schema changes).
+- [x] Committed + pushed; recorded completion via `agent_work_briefing.py`
+      against `UMR-20260806-130110-c620`.
 
-- [ ] 63 genuine wiring_registry path failures found (not fixed by this
-      task -- out of this amendment's 3-gap scope, flagged per
-      UMR-124936-13b1's own "record real defects, never leave a broken
-      path silently in the metadata" rule): includes 2 confirmed-stale
-      script rows (`module-queue-dispatcher.py` / `queue-dispatcher.py`,
-      genuinely absent from `/opt/veridian/scripts/`, referenced by both
-      wiring_registry and live crontab-backup rows -- likely superseded by
-      dispatch_core.py's own consolidated dispatch-tick.py per that
-      module's own docstring) and ~60 `ai-os-scripts/*.py` /
-      `ai-os/*.yaml` knowledge_engine rows pointing at files that do not
-      exist on this disk. A follow-up UMR should triage: fix path, or
-      remove row.
-- [ ] cron_job entity_type has two incompatible real `path` conventions
-      live today (a bare script path vs. a full crontab command line) --
-      found while building the path check, not corrected here (schema
-      decision, out of this task's scope).
-- [ ] UMR-20260806-124654-a8d6's own sibling task
-      (task-20260806-181146-critical-amendment) is independently building
-      `search-task-precedent` / `record-graduation` capability_registry
-      entries at the same time as this task -- not consumed here (their
-      code was not yet on origin/main at build time); a future pass should
-      reconcile `unified_orchestrator.py` steps 1/2/10 against whatever
-      that task lands, once merged, per the same reuse-not-duplicate rule.
+## Remaining
+
+- [ ] None for this task's own 3-correction scope. Honestly flagged, not
+      fixed here (out of scope): PR #207/UMR-20260806-125524-720c's own
+      still-open items (63 genuine `wiring_registry` path failures,
+      `cron_job` path-convention inconsistency, reconciling
+      `unified_orchestrator.py` steps 1/2/10 against
+      task-20260806-181146's sibling capability-registry work once that
+      lands) -- unrelated to this task's 3 corrections, already tracked
+      under that UMR's own PROGRESS.md.

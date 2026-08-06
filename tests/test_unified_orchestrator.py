@@ -211,6 +211,9 @@ def test_unified_orchestrator_positive_path_end_to_end():
             # (the scripts dir), not this test's workspace_dir, and could spuriously match
             # this repo's own real top-level PROGRESS.md -- found live while building this
             # test.
+            # UMR-20260806-130110-c620 correction 3: a real scope_term so step 1's
+            # code_search genuinely runs find_code.sh (never a fabricated pattern).
+            task_spec["scope_terms"] = ["find_code.sh"]
 
             steps_run1 = orch.run(task_spec)
 
@@ -225,6 +228,58 @@ def test_unified_orchestrator_positive_path_end_to_end():
 
             first_agent_id = steps_run1["3_resolve_agent_id"]["agent_id"]
             assert steps_run1["3_resolve_agent_id"]["minted"] is True, steps_run1["3_resolve_agent_id"]
+
+            # --- correction 3: step 1 really invoked scripts/find_code.sh (never
+            # reimplemented the search), and it really found the real file.
+            code_search = steps_run1["1_reuse_check"]["code_search"]
+            assert code_search["ran"] is True, code_search
+            assert code_search["any_matches"] is True, code_search
+            assert code_search["matches_by_term"]["find_code.sh"]["matched"] is True, code_search
+            assert any(
+                f.endswith("find_code.sh") for f in code_search["matches_by_term"]["find_code.sh"]["files"]
+            ), code_search
+
+            # --- correction 1: step 5's submit_command/audit_method are really
+            # resolved from real, versioned prompt_templates rows, not inline prose.
+            contract = steps_run1["5_submission_contract"]["contract"]
+            assert contract["submit_command"] == (
+                f"cd {workspace_dir} && git add -A && git commit -m '<real summary>' && git push"
+            ), contract
+            assert "independently re-runs" in contract["audit_method"], contract
+            conn = sqlite3.connect(scratch_db)
+            conn.row_factory = sqlite3.Row
+            tpl_rows = conn.execute(
+                "SELECT pt.template_key, pv.label, pv.version, pv.is_active FROM prompt_templates pt "
+                "JOIN prompt_versions pv ON pv.prompt_template_id = pt.id "
+                "WHERE pt.template_key LIKE 'orchestrator.submission_contract.%' ORDER BY pt.template_key"
+            ).fetchall()
+            conn.close()
+            assert len(tpl_rows) == 2, tpl_rows
+            for r in tpl_rows:
+                assert r["label"] == "production" and r["version"] == 1 and r["is_active"] == 1, dict(r)
+
+            # --- correction 2: real structured execution-log rows exist for
+            # every real step 5-10 transition, org/task/layer/event_type/input/
+            # output/model/cost shaped, all 'completed' on this real positive path.
+            conn = sqlite3.connect(scratch_db)
+            conn.row_factory = sqlite3.Row
+            exec_rows = conn.execute(
+                "SELECT layer_key, event_type, status, task_id, input_json, output_json FROM "
+                "orchestrator_executions WHERE task_id=? ORDER BY ts", (POSITIVE_UMR_ID,),
+            ).fetchall()
+            conn.close()
+            logged_layers = {r["layer_key"]: r["status"] for r in exec_rows}
+            assert logged_layers == {
+                "step_submission_contract": "completed",
+                "step_validate_input": "completed",
+                "step_reverify": "completed",
+                "step_validate_output": "completed",
+                "step_writeback": "completed",
+                "step_graduate_evaluation": "completed",
+            }, logged_layers
+            for r in exec_rows:
+                assert r["event_type"].startswith("orchestrator."), dict(r)
+                assert json.loads(r["output_json"]) is not None
 
             # Real umr_tasks row really flipped to completed.
             conn = sqlite3.connect(scratch_db)
@@ -309,6 +364,22 @@ def test_unified_orchestrator_negative_path_refuses_on_failed_reverify():
             assert audit_row is not None
             assert audit_row["verdict"] == "fail", dict(audit_row)
             assert audit_row["exit_code"] == 1, dict(audit_row)
+
+            # --- correction 2: the real structured execution log distinguishes
+            # 'failed' (step 7's real command genuinely errored) from 'gated'
+            # (steps 8/9's real checks blocked acceptance of that failure) --
+            # never collapses both into a single generic "not ok" status.
+            conn = sqlite3.connect(scratch_db)
+            conn.row_factory = sqlite3.Row
+            exec_rows = conn.execute(
+                "SELECT layer_key, status FROM orchestrator_executions WHERE task_id=?", (NEGATIVE_UMR_ID,),
+            ).fetchall()
+            conn.close()
+            logged_layers = {r["layer_key"]: r["status"] for r in exec_rows}
+            assert logged_layers["step_reverify"] == "failed", logged_layers
+            assert logged_layers["step_validate_output"] == "gated", logged_layers
+            assert logged_layers["step_writeback"] == "gated", logged_layers
+            assert logged_layers["step_graduate_evaluation"] == "completed", logged_layers
     print("PASS: test_unified_orchestrator_negative_path_refuses_on_failed_reverify")
 
 
@@ -368,6 +439,175 @@ def test_record_task_audit_rejects_invalid_verdict():
             pass
         conn.close()
     print("PASS: test_record_task_audit_rejects_invalid_verdict")
+
+
+def test_resolve_prompt_template_fails_loud_when_missing():
+    """UMR-20260806-130110-c620 correction 1: mirrors resolvePromptTemplate()'s
+    own fail-loud posture -- a genuinely missing template, and a genuinely
+    missing labeled-active version of a real template, must both raise
+    ValueError, never silently fall back to some other string."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        sbr = _load("sbr_test_prompt_missing", "superboss-register.py", env=_scratch_env(scratch_db))
+
+        conn = sbr._connect()
+        sbr._ensure_prompt_templates_table(conn)
+        sbr._ensure_prompt_versions_table(conn)
+        try:
+            sbr.resolve_prompt_template(conn, "does.not.exist")
+            assert False, "expected ValueError for a genuinely unknown template_key"
+        except ValueError as e:
+            assert "Unknown prompt template" in str(e)
+
+        sbr.register_prompt_template(conn, template_key="real.template", label="production", content="x")
+        conn.commit()
+        try:
+            sbr.resolve_prompt_template(conn, "real.template", label="staging")
+            assert False, "expected ValueError for a real template with no 'staging'-labeled active version"
+        except ValueError as e:
+            assert "No 'staging'-labeled" in str(e)
+        conn.close()
+    print("PASS: test_resolve_prompt_template_fails_loud_when_missing")
+
+
+def test_register_and_resolve_prompt_template_roundtrip_with_versioning():
+    """Real roundtrip: registering a second version under the same
+    template_key+label must genuinely become the new resolved content
+    (version 2, is_active=1), while the real version-1 row stays in history
+    (is_active flips to 0, never deleted -- same insert-only, full-history
+    convention this codebase already uses elsewhere)."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        sbr = _load("sbr_test_prompt_roundtrip", "superboss-register.py", env=_scratch_env(scratch_db))
+
+        conn = sbr._connect()
+        sbr._ensure_prompt_templates_table(conn)
+        sbr._ensure_prompt_versions_table(conn)
+        r1 = sbr.register_prompt_template(conn, template_key="orchestrator.roundtrip.test",
+                                           label="production", content="v1 content")
+        conn.commit()
+        assert r1["version"] == 1, r1
+        assert sbr.resolve_prompt_template(conn, "orchestrator.roundtrip.test") == "v1 content"
+
+        r2 = sbr.register_prompt_template(conn, template_key="orchestrator.roundtrip.test",
+                                           label="production", content="v2 content")
+        conn.commit()
+        assert r2["version"] == 2, r2
+        assert r2["template_id"] == r1["template_id"], (r1, r2)
+        assert sbr.resolve_prompt_template(conn, "orchestrator.roundtrip.test") == "v2 content"
+
+        rows = conn.execute(
+            "SELECT version, is_active FROM prompt_versions WHERE prompt_template_id=? ORDER BY version",
+            (r1["template_id"],),
+        ).fetchall()
+        conn.close()
+        assert [(r["version"], r["is_active"]) for r in rows] == [(1, 0), (2, 1)], rows
+    print("PASS: test_register_and_resolve_prompt_template_roundtrip_with_versioning")
+
+
+def test_seed_default_orchestrator_prompt_templates_is_idempotent():
+    """Real idempotency check: calling the seed function twice must never
+    insert a second version-1 row -- exactly one real version per default
+    template_key after any number of calls."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        sbr = _load("sbr_test_prompt_seed", "superboss-register.py", env=_scratch_env(scratch_db))
+
+        conn = sbr._connect()
+        sbr.seed_default_orchestrator_prompt_templates(conn)
+        sbr.seed_default_orchestrator_prompt_templates(conn)
+        rows = conn.execute(
+            "SELECT pt.template_key, COUNT(*) c FROM prompt_versions pv "
+            "JOIN prompt_templates pt ON pt.id = pv.prompt_template_id "
+            "WHERE pt.template_key LIKE 'orchestrator.submission_contract.%' GROUP BY pt.template_key"
+        ).fetchall()
+        conn.close()
+        assert len(rows) == 2, rows
+        for r in rows:
+            assert r["c"] == 1, dict(r)
+    print("PASS: test_seed_default_orchestrator_prompt_templates_is_idempotent")
+
+
+def test_cmd_register_and_resolve_prompt_template_cli_end_to_end():
+    """Real end-to-end test through the argparse cmd_register_prompt_template()/
+    cmd_resolve_prompt_template() CLI wrappers themselves."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        sbr = _load("sbr_test_prompt_cli", "superboss-register.py", env=_scratch_env(scratch_db))
+
+        content_file = os.path.join(d, "content.txt")
+        with open(content_file, "w", encoding="utf-8") as f:
+            f.write("real cli-registered content")
+
+        reg_args = argparse.Namespace(template_key="orchestrator.cli.test", label="production",
+                                       content_file=content_file, no_activate=False)
+        captured = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = captured
+        try:
+            sbr.cmd_register_prompt_template(reg_args)
+        finally:
+            sys.stdout = old_stdout
+        registered = json.loads(captured.getvalue())
+        assert registered["version"] == 1, registered
+
+        res_args = argparse.Namespace(template_key="orchestrator.cli.test", label="production")
+        captured = io.StringIO()
+        sys.stdout = captured
+        try:
+            sbr.cmd_resolve_prompt_template(res_args)
+        finally:
+            sys.stdout = old_stdout
+        resolved = json.loads(captured.getvalue())
+        assert resolved["content"] == "real cli-registered content", resolved
+    print("PASS: test_cmd_register_and_resolve_prompt_template_cli_end_to_end")
+
+
+def test_record_orchestrator_execution_rejects_invalid_status():
+    """UMR-20260806-130110-c620 correction 2: status must be exactly one of
+    completed/failed/denied/gated -- mirrors orchestra-execution-logger.ts's
+    own real 4-state distinction, never a free-text narrated status."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        sbr = _load("sbr_test_exec_bad_status", "superboss-register.py", env=_scratch_env(scratch_db))
+
+        conn = sbr._connect()
+        sbr._ensure_orchestrator_executions_table(conn)
+        try:
+            sbr.record_orchestrator_execution(
+                conn, task_id="UMR-test", layer_key="x", event_type="y", status="in_progress",
+            )
+            assert False, "expected ValueError: status must be one of completed/failed/denied/gated"
+        except ValueError:
+            pass
+        conn.close()
+    print("PASS: test_record_orchestrator_execution_rejects_invalid_status")
+
+
+def test_log_orchestrator_execution_never_raises_on_persistence_failure():
+    """Real fire-and-forget check: log_orchestrator_execution() must catch a
+    genuine persistence failure (here: a real closed connection) and return
+    None, never raise into the caller's own real step logic -- same
+    'observability logging must never block or fail the actual operation
+    it is recording' posture orchestra-execution-logger.ts's own header
+    documents."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        sbr = _load("sbr_test_exec_fire_and_forget", "superboss-register.py", env=_scratch_env(scratch_db))
+
+        conn = sbr._connect()
+        conn.close()  # genuinely closed -- any real write against it must fail
+        result = sbr.log_orchestrator_execution(
+            conn, task_id="UMR-test", layer_key="x", event_type="y", status="completed",
+        )
+        assert result is None
+    print("PASS: test_log_orchestrator_execution_never_raises_on_persistence_failure")
 
 
 if __name__ == "__main__":

@@ -53,3 +53,48 @@ SPEC: close PR #98 (credit-preserving, citing #100), stop "my own" duplicate ite
 agent, let the #100 thread finish items 1-5, independently verify #100's fleet-wide
 and secondary-bug claims before treating either as complete, keep watching for
 further duplication across items 2-5.
+
+---
+
+# PROGRESS -- UMR-20260806-122546-78d6-test-script-build-real
+
+## Completed
+- [x] Real, independent zero-dup precheck re-run (`resource_governor.py --query-umr
+      --search "TEST_SCRIPT_BUILD"` and `--search "gtm_checks"`, both 0 matches) before
+      starting -- confirmed undispatched, consistent with the PM's own precheck.
+- [x] Built `gtm_test_script_build_check.py`: the one real, deterministic, zero-AI-call
+      implementation of "does gtm_certification_categories row N's evidence_json cite a
+      real, existing, py_compile-valid script_path". Ran it cold against live state: 17/25
+      passed, 8 failed (categories 4, 5, 6, 7, 9, 12, 14, 24 -- each had real substantive
+      evidence_json but cited a script_path confirmed absent from both this repo and the
+      live deployed scripts/ dir).
+- [x] Built one real, committed, re-runnable `gtm_check_*.py` per failing category,
+      reproducing each category's own already-recorded real methodology. Ran every one of
+      the 8 in `--no-write` (evaluate-only) mode first; every fresh result matched the
+      already-recorded `passed` verdict exactly (all 8 were and remain `passed=1`) -- no
+      certification verdict changed by this task, per its own Hard Rule. Only then
+      registered each via the shared `gtm_write_category_result.py` (never raw SQL).
+- [x] Live re-check after registration: 25/25, `TEST_SCRIPT_BUILD_COMPLETE=YES`.
+      Categories 17 (browser compatibility) and 21 (deployment testing) already had real,
+      existing, re-runnable scripts from parallel same-cycle work (UMR-20260806-122604-346d
+      for 17; 21 separately escalated to the Owner for a Vercel credential decision) --
+      counted from live DB state, not rebuilt. No child UMR proposals were needed: no
+      category's fresh re-run disagreed with its recorded verdict.
+- [x] Wired `gtm_test_script_build_check.py` into `generate_pm_report_v3.py` Section 2 --
+      the standing 10-minute PM report now emits real `TEST_SCRIPT_BUILD: X out of 25` and
+      `TEST_SCRIPT_BUILD_COMPLETE: YES/NO` instead of `UNKNOWN`.
+- [x] Discovered mid-task: this repo checkout is a **shared** working directory -- another
+      concurrent process force-switched it to branch `pr166` (with its own unrelated
+      uncommitted edits to `quality-gate.sh`/`superboss-register.py`/`worker-entrypoint.sh`)
+      while this task's files were sitting in the working tree. Did not touch, stash, or
+      discard that other work. Recovered by copying only this task's own files into a
+      separate `git worktree` on this task's own branch, verified clean `git status` there
+      (only this task's intended diff), and continued from there.
+- [x] Rebased onto latest `origin/main` immediately before opening the PR (still `ccc5346`,
+      no new commits landed on `main` in the interim -- fast-forward, no PROGRESS.md
+      conflict to resolve).
+
+## Remaining
+- [ ] None from this task's side. Verdict-change decisions for any category (if a future
+      re-run of these scripts ever disagrees with a recorded `passed` value) are explicitly
+      out of this task's scope -- a separate real decision, per its own Hard Rule.

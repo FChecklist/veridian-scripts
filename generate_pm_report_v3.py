@@ -376,6 +376,8 @@ RESOURCE_GOVERNOR_PATH = os.environ.get(
     "VERIDIAN_RESOURCE_GOVERNOR_PY", f"{SCRIPTS}/resource_governor.py")
 DISPATCH_CORE_PATH = os.environ.get(
     "VERIDIAN_DISPATCH_CORE_PY", f"{SCRIPTS}/dispatch_core.py")
+TEST_SCRIPT_BUILD_CHECK_PATH = os.environ.get(
+    "VERIDIAN_GTM_TEST_SCRIPT_BUILD_CHECK_PY", f"{SCRIPTS}/gtm_test_script_build_check.py")
 
 STUCK_TASKS_HEARTBEAT_PATH = os.environ.get(
     "VERIDIAN_STUCK_TASKS_HEARTBEAT_PATH", f"{AI_OS}/STUCK_TASKS_HEARTBEAT.json")
@@ -943,6 +945,30 @@ def get_gtm_section(sbr):
             "gate_result": (gate_row["state"] if gate_row else "UNKNOWN (category 25 row not found)"),
         },
     }
+
+
+def get_test_script_build_section(sbr):
+    """UMR-20260806-122546-78d6 (TEST_SCRIPT_BUILD): real, deterministic,
+    zero-AI-call computation of whether each of the 25 real
+    gtm_certification_categories rows cites a real, existing, genuinely
+    re-runnable check script in its evidence_json -- delegated entirely to
+    gtm_test_script_build_check.py (same load_module_from_path() pattern
+    get_emergency_stop()/get_worker_ceiling() already use for their sibling
+    scripts) so there is exactly one real implementation of this check,
+    never a second copy drifting out of sync with the real one a human/AI
+    can re-run directly. Reuses the caller's already-loaded sbr module (same
+    canonical DB_PATH/_connect(), no second DB import). Returns the real
+    (x, total, complete, failing_category_indices) tuple's dict form, or an
+    honest error dict on a genuine failure -- never a fabricated result."""
+    try:
+        mod = load_module_from_path("gtm_test_script_build_check", TEST_SCRIPT_BUILD_CHECK_PATH)
+    except Exception as e:
+        return {
+            "total": 0, "x": 0, "complete": False,
+            "failing_category_indices": [], "per_category": [],
+            "error": f"could not import {TEST_SCRIPT_BUILD_CHECK_PATH}: {e}",
+        }
+    return mod.compute_test_script_build_status(sbr)
 
 
 def get_gtm_severity_rubric(sbr):
@@ -2129,6 +2155,7 @@ def build_report(sbr):
     db_integrity = get_db_integrity(sbr)
 
     gtm_section = get_gtm_section(sbr)
+    test_script_build_section = get_test_script_build_section(sbr)
     ocid_section = get_ocid_registry_section(sbr)
     umr_section = get_umr_tasks_section(sbr)
 
@@ -2199,6 +2226,7 @@ def build_report(sbr):
             "db_integrity": db_integrity,
         },
         "ocid_020_gtm_section": gtm_section,
+        "test_script_build_section": test_script_build_section,
         "ocid_canonical_registry_section": ocid_section,
         "umr_tasks_section": umr_section,
         "gtm_readiness": readiness,
@@ -2280,6 +2308,15 @@ def render_report_text(report):
     lines.append(f"ocid_canonical_registry: total={ocid.get('ocid_canonical_registry_total')} "
                   f"fully_complete={ocid.get('ocid_canonical_registry_fully_complete')}")
     lines.append(f"ocid_canonical_registry by status: {ocid.get('ocid_canonical_registry_by_status')}")
+    tsb = report.get("test_script_build_section", {}) or {}
+    if tsb.get("error"):
+        lines.append(f"TEST_SCRIPT_BUILD: UNKNOWN (real error: {tsb['error']})")
+        lines.append("TEST_SCRIPT_BUILD_COMPLETE: NO")
+    else:
+        lines.append(f"TEST_SCRIPT_BUILD: {tsb.get('x')} out of {tsb.get('total')}")
+        lines.append(f"TEST_SCRIPT_BUILD_COMPLETE: {'YES' if tsb.get('complete') else 'NO'}")
+        if tsb.get("failing_category_indices"):
+            lines.append(f"TEST_SCRIPT_BUILD failing category_index list: {tsb['failing_category_indices']}")
 
     h("3. TEST RESULTS + DETERMINISTIC GATE")
     for cat in gtm.get("categories", []):

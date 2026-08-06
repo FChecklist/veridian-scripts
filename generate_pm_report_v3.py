@@ -2,6 +2,7 @@
 """generate_pm_report_v3.py -- real, pure, deterministic PM report generator.
 
 UMR-20260805-181636-32f2 (parent UMR-20260802-165606-4413, OCID-020).
+Standing directive this script exists to satisfy: UMR-20260806-042531-be9c (real deterministic/boolean/close-ended PM decisioning, zero manual AI/PM work -- see Sections 9-13, UMR-20260806-041307-0bfd).
 
 Replaces the AI-reasoned-every-10-minutes PM report generator that was a
 real contributing factor to hitting the Owner's weekly Claude Code usage

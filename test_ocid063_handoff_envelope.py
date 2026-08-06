@@ -30,15 +30,44 @@ already uses).
 
 Usage: python3 test_ocid063_handoff_envelope.py
 Exit 0 = all assertions passed. Exit 1 = a test failed.
+
+Real minor fix (found independently while verifying full-suite regression for
+an unrelated task, standing PM-decision-gate demo round-trip evidence): every
+test function below takes `vt` as a plain positional parameter, populated by
+this file's own `if __name__ == "__main__":` block calling
+`load_veridian_task()` once and passing it in directly -- correct for running
+this file standalone (`python3 test_ocid063_handoff_envelope.py`), but this
+repo's own standard full-suite sweep (`python3 -m pytest test_*.py tests/ -q`,
+the exact command this repo's own PROGRESS.md history cites for "full suite
+N/N passing" verification, e.g. PR #103's) instead has bare pytest try to
+collect these as pytest tests and inject `vt` as a fixture -- one that never
+existed, so pytest errors "fixture 'vt' not found" at collection time for all
+four test functions here, instead of ever actually running them under that
+sweep. The `@pytest.fixture` below makes pytest collection work correctly
+(each test function receives a real, freshly-loaded veridian-task.py module)
+without changing this file's real standalone-script behavor at all -- the
+`if __name__ == "__main__":` block still calls `load_veridian_task()` and each
+test function directly, entirely bypassing pytest's fixture machinery, exactly
+as before this fix.
 """
 import importlib.util
 import os
 import sys
 
+import pytest
+
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPTS_DIR)
 
 failures = []
+
+
+@pytest.fixture
+def vt():
+    """Real pytest fixture -- see this module's own docstring above for why
+    this was missing and what it fixes. Returns a freshly-loaded
+    veridian-task.py module, same as load_veridian_task() itself."""
+    return load_veridian_task()
 
 
 def check(label, cond):

@@ -190,7 +190,27 @@ capability_registry            11
 
   **Step 4 verdict: PASS.** Proceeding to Step 5.
 
+- [x] Step 5 (final pre-swap backup) -- 2026-08-06T04:43:25Z
+  ```
+  $ cp /opt/veridian/ai-os/memory/superboss-register.sqlite \
+       /opt/veridian/backups/sqlite-daily/superboss-register.sqlite.20260806T044325Z-pre-swap-fresh.bak
+
+  $ ls -l /opt/veridian/ai-os/memory/superboss-register.sqlite
+  -rw-r--r-- 1 rajat rajat 1661845504 Aug  6 04:39 superboss-register.sqlite
+
+  $ ls -l /opt/veridian/backups/sqlite-daily/superboss-register.sqlite.20260806T044325Z-pre-swap-fresh.bak
+  -rw-r--r-- 1 rajat rajat 1661845504 Aug  6 04:43 ...pre-swap-fresh.bak
+
+  $ sha256sum /opt/veridian/ai-os/memory/superboss-register.sqlite
+  a3acf8c54d829caafe98210821aeed1a4005b8f1ad98b05bdb398d9cbf9b300f  superboss-register.sqlite
+
+  $ sha256sum /opt/veridian/backups/sqlite-daily/superboss-register.sqlite.20260806T044325Z-pre-swap-fresh.bak
+  a3acf8c54d829caafe98210821aeed1a4005b8f1ad98b05bdb398d9cbf9b300f  ...pre-swap-fresh.bak
+  ```
+  Checksums match. Note live file grew from 1,638,092,800 bytes (Step 1) to
+  1,661,845,504 bytes here (~23MB in ~5 min), consistent with the
+  confirmed real ongoing write activity noted throughout.
+
 ## Remaining
 
-- [ ] Step 5 (final pre-swap backup, only if Step 4 passes cleanly -- it did)
 - [ ] Step 6 (atomic swap under `_write_lock()` + post-swap re-verify)

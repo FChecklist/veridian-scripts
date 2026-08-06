@@ -118,9 +118,36 @@ capability_registry            11
   ```
   Checksums match Step 1's backup exactly.
 
+- [x] Step 3 (.recover to new file) -- 2026-08-06T04:40:25Z - 04:42:01Z
+  ```
+  $ /home/rajat/.local/bin/sqlite3 /tmp/veridian-recovery-work/superboss-register.sqlite.working-copy-fresh.sqlite ".recover" \
+      > /tmp/veridian-recovery-work/recovered-fresh.sql 2> /tmp/veridian-recovery-work/recovered-fresh.sql.err
+  start: 2026-08-06T04:40:25Z
+  end:   2026-08-06T04:41:34Z
+  exit code: 0
+  stderr: (empty)
+
+  $ wc -l /tmp/veridian-recovery-work/recovered-fresh.sql
+  179180 /tmp/veridian-recovery-work/recovered-fresh.sql
+
+  $ /home/rajat/.local/bin/sqlite3 /tmp/veridian-recovery-work/recovered-fresh.sqlite \
+      < /tmp/veridian-recovery-work/recovered-fresh.sql
+  build exit code: 0
+  end: 2026-08-06T04:42:01Z
+
+  $ ls -l /tmp/veridian-recovery-work/recovered-fresh.sqlite
+  -rw-r--r-- 1 rajat rajat 1637773312 Aug  6 04:42 recovered-fresh.sqlite
+  ```
+  Recovery emitted 179,180 lines of SQL and built cleanly; final recovered
+  file is 1,637,773,312 bytes (Step 2 working copy was 1,638,092,800 bytes --
+  expected small delta, `.recover` does not preserve exact page layout/free
+  space). Working copy left untouched at
+  `/tmp/veridian-recovery-work/superboss-register.sqlite.working-copy-fresh.sqlite`.
+  Total elapsed for Steps 1-3: ~4 minutes (04:38:18Z-04:42:01Z), far tighter
+  than the drift window that caused attempt #1's Step 4 failure.
+
 ## Remaining
 
-- [ ] Step 3 (.recover to new file)
 - [ ] Step 4 (verification -- integrity_check + row counts; STOP here if
       unexplained mismatch)
 - [ ] Step 5 (final pre-swap backup, only if Step 4 passes cleanly)

@@ -146,9 +146,51 @@ capability_registry            11
   Total elapsed for Steps 1-3: ~4 minutes (04:38:18Z-04:42:01Z), far tighter
   than the drift window that caused attempt #1's Step 4 failure.
 
+- [x] Step 4 (verification) -- 2026-08-06T04:42:42Z -- PASSED
+  ```
+  $ /home/rajat/.local/bin/sqlite3 /tmp/veridian-recovery-work/recovered-fresh.sqlite "PRAGMA integrity_check;"
+  ok
+
+  $ # recovered-fresh.sqlite counts
+  ocid_canonical_registry        69
+  gtm_certification_categories   25
+  umr_tasks                      7056
+  pm_decisions_pending           4
+  capability_registry            11
+  file_inventory                 27249
+
+  $ # live counts, fresh read at 2026-08-06T04:42:42Z
+  ocid_canonical_registry        69
+  gtm_certification_categories   25
+  umr_tasks                      7057
+  pm_decisions_pending           4
+  capability_registry            11
+  file_inventory                 -- Error: database disk image is malformed (expected; this is the table being recovered)
+  ```
+  `ocid_canonical_registry`, `gtm_certification_categories`,
+  `pm_decisions_pending`, `capability_registry`: exact match.
+  `umr_tasks`: recovered 7056 vs live 7057, off by exactly 1. Identified the
+  specific real row responsible:
+  ```
+  $ sqlite3 live "SELECT umr_id, task_identity, ts_submitted, status, source_trigger FROM umr_tasks
+                   WHERE ts_submitted > '2026-08-06T04:38:18' OR last_heartbeat > '2026-08-06T04:38:18';"
+  umr_id:         UMR-20260806-043900-8c48
+  task_identity:  owner-task-20260806-043858-1384521
+  ts_submitted:   2026-08-06T04:39:00.922560+00:00
+  status:         queued
+  source_trigger: owner_dispatch_gateway
+  ```
+  This UMR was submitted 42s after the Step 1 backup (04:38:18Z) and well
+  before this Step 4 read (04:42:42Z) -- a real write landing squarely
+  inside the unavoidable snapshot-to-verify window, and it is the only row
+  in that window. Exactly accounts for the +1 drift; no other table shows
+  any mismatch. `file_inventory` recovered row count (27,249) matches the
+  count independently reported by the earlier task-030104/041150 recovery
+  attempt, corroborating this recovery is consistent and correct.
+
+  **Step 4 verdict: PASS.** Proceeding to Step 5.
+
 ## Remaining
 
-- [ ] Step 4 (verification -- integrity_check + row counts; STOP here if
-      unexplained mismatch)
-- [ ] Step 5 (final pre-swap backup, only if Step 4 passes cleanly)
+- [ ] Step 5 (final pre-swap backup, only if Step 4 passes cleanly -- it did)
 - [ ] Step 6 (atomic swap under `_write_lock()` + post-swap re-verify)

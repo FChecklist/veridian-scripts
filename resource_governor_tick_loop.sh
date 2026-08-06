@@ -32,6 +32,17 @@ while true; do
   # real, stale last_heartbeat only (NULL heartbeats -- e.g. all 5 real
   # in-flight tasks at the moment this deploys -- are always skipped, see
   # resource_governor.py's reconcile_stale_heartbeats() docstring).
+  #
+  # UMR-20260806-141429-f447 (proposal 88 priority one): reconcile_stale_
+  # heartbeats() previously had NO execute gate at all -- it wrote/committed
+  # the instant it found any stale non-NULL last_heartbeat, real writes every
+  # 30s cadence, with zero dry-run path. It now has a real execute gate
+  # (default off, matching --backfill-null-heartbeats' own convention), so
+  # this invocation -- deliberately still WITHOUT --execute -- is now a
+  # read-only report-only pass: it finds and logs would-reconcile rows but
+  # writes nothing. Turning real writes back on here is a separate, explicit
+  # decision (add --execute below) for whoever owns that call, not bundled
+  # into this fix.
   run_governor --reconcile-stale
   sleep 30
 done

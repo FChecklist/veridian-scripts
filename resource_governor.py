@@ -1657,7 +1657,7 @@ def _unit_exit_terminal_status(unit):
     return "failed"
 
 
-def reconcile_stale_heartbeats(now=None, ttl_seconds=None):
+def reconcile_stale_heartbeats(now=None, ttl_seconds=None, execute=False):
     """Fix for 'task exits cleanly but umr_tasks status never reconciles' (5
     real historical instances found 2026-07-29): worker-entrypoint.sh /
     doc-worker-entrypoint.sh checkpoint task.yaml via veridian-task.py on
@@ -1680,8 +1680,31 @@ def reconcile_stale_heartbeats(now=None, ttl_seconds=None):
     first tick post-deploy, and systemctl is never even invoked for a
     healthy or not-yet-instrumented row.
 
-    Returns the list of rows actually reconciled this call (empty if none
-    were stale, which is the expected/normal steady-state result)."""
+    EXECUTE GATE (real fix, UMR-20260806-141429-f447 / proposal 88 priority
+    one): unlike --backfill-null-heartbeats (backfill_null_heartbeats(),
+    below), this function used to have NO execute gate at all -- it wrote/
+    committed the real terminal status the instant it found any stale
+    non-NULL last_heartbeat row, with no dry-run path and no caller-visible
+    way to preview first. That every umr_tasks row happened to have a NULL
+    last_heartbeat (so nothing was ever actually written) was an empirical
+    accident of this box's current data, never a structural safety property
+    of this function -- the very first row with a real, aged last_heartbeat
+    would have been written to unconditionally. `execute` now mirrors
+    backfill_null_heartbeats()'s own convention exactly: False (the default)
+    is a real read-only dry run -- every stale-and-inactive row is still
+    found and reported (decision 'would_reconcile'), but `systemctl --user
+    disable` and the umr_tasks write are both skipped -- and only
+    execute=True performs the real disable + write. A dry run's report is
+    therefore always a true preview of what execute=True would do, never a
+    different code path. Callers (this module's own CLI --reconcile-stale,
+    resource_governor_tick_loop.sh) must pass execute=True/--execute
+    explicitly to keep applying real writes; until they do, this sweep is
+    report-only.
+
+    Returns the list of rows examined this call, each tagged with a real
+    'decision' of 'would_reconcile' (dry run) or 'reconciled' (execute=True)
+    -- empty if none were stale-and-inactive, which is the expected/normal
+    steady-state result."""
     now = now or _utcnow()
     ttl = ttl_seconds if ttl_seconds is not None else HEARTBEAT_STALE_TTL_SECONDS
     cutoff = (now - timedelta(seconds=ttl)).isoformat()
@@ -1702,6 +1725,11 @@ def reconcile_stale_heartbeats(now=None, ttl_seconds=None):
         is_active = _run(["systemctl", "--user", "is-active", "--quiet", unit]).returncode == 0
         if is_active:
             continue  # genuinely still running, just a slow/missed heartbeat -- not stale
+        terminal = _unit_exit_terminal_status(unit)
+        if not execute:
+            actions.append({"umr_id": row["umr_id"], "unit_name": unit,
+                             "reconciled_to": terminal, "decision": "would_reconcile"})
+            continue
         # Real fix, 2026-07-29 (zombie-worker incident): a unit's real process
         # exiting does NOT remove its default.target.wants/ enable-symlink --
         # only `disable` does. Without this, a systemd --user manager restart
@@ -1711,7 +1739,6 @@ def reconcile_stale_heartbeats(now=None, ttl_seconds=None):
         # because is_active is already confirmed False above -- disable never
         # touches a running unit's live state, only its boot-time wiring.
         _run(["systemctl", "--user", "disable", unit])
-        terminal = _unit_exit_terminal_status(unit)
         with sbr._write_lock():
             sbr.update_umr_task(
                 conn, row["umr_id"], status=terminal, ts_completed=_now_iso(),
@@ -1719,7 +1746,8 @@ def reconcile_stale_heartbeats(now=None, ttl_seconds=None):
                         f"stale (>{ttl}s), real exit status={terminal}"),
             )
             conn.commit()
-        actions.append({"umr_id": row["umr_id"], "unit_name": unit, "reconciled_to": terminal})
+        actions.append({"umr_id": row["umr_id"], "unit_name": unit,
+                         "reconciled_to": terminal, "decision": "reconciled"})
     conn.close()
     return actions
 
@@ -2403,8 +2431,12 @@ def main():
     ap.add_argument("--scan-stuck", action="store_true", help="run only the stuck-task SIGTERM/SIGKILL scan")
     ap.add_argument("--reconcile-stale", action="store_true",
                      help="Stage 3: sweep umr_tasks rows in running/dispatched with a stale "
-                          "last_heartbeat (NULL heartbeats are always skipped) and write back real "
-                          "terminal status via systemctl --user is-active, scoped only to the stale subset")
+                          "last_heartbeat (NULL heartbeats are always skipped) and report/write back "
+                          "real terminal status via systemctl --user is-active, scoped only to the "
+                          "stale subset. Read-only dry run by default (UMR-20260806-141429-f447: "
+                          "reconcile_stale_heartbeats() has its own real execute gate now, matching "
+                          "--backfill-null-heartbeats); pass --execute to apply the real writes it "
+                          "reports.")
     ap.add_argument("--backfill-null-heartbeats", action="store_true",
                      help="ONE-TIME backfill (Stage 1, 2026-07-29): reconcile running/dispatched "
                           "umr_tasks rows with last_heartbeat IS NULL that reconcile_stale_heartbeats() "
@@ -2413,8 +2445,8 @@ def main():
                           "list-sessions. Deliberately excludes 'queued' rows. Read-only dry run by "
                           "default; pass --execute to apply the real writes it reports.")
     ap.add_argument("--execute", action="store_true",
-                     help="apply real writes for --backfill-null-heartbeats (default: read-only dry "
-                          "run that only reports what it WOULD do)")
+                     help="apply real writes for --reconcile-stale / --backfill-null-heartbeats "
+                          "(default: read-only dry run that only reports what it WOULD do)")
     ap.add_argument("--backfill-email", dest="backfill_email", default=None,
                      help="override the Owner email used for --backfill-null-heartbeats' "
                           "external_ai_state_machine.py list-sessions lookup "
@@ -2481,7 +2513,7 @@ def main():
         return
 
     if args.reconcile_stale:
-        print(json.dumps({"actions": reconcile_stale_heartbeats()}, default=str))
+        print(json.dumps({"actions": reconcile_stale_heartbeats(execute=args.execute)}, default=str))
         return
 
     if args.backfill_null_heartbeats:

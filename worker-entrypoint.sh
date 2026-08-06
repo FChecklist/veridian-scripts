@@ -174,6 +174,72 @@ cd "$WORKSPACE"
 
 PROGRESS_INSTRUCTION="PROTOCOL: maintain PROGRESS.md (## Completed / ## Remaining, markdown checkboxes), update after each step. commit+push after each meaningful unit, not only at the end. on a 2nd consecutive failure of the identical approach: STOP, do not attempt a 3rd time -- this is enforced by a circuit breaker on the next invocation regardless, so stopping yourself first saves a wasted restart."
 
+# --- Deterministic pre-work briefing (2026-08-06, direct correction/extension
+# to UMR-20260806-121332-6ba4, see scripts/agent_work_briefing.py) --------
+# Real, best-effort, ONLY on a genuine first start (never on resume -- the
+# agent already has this from its own PROGRESS.md/checkpoint history by
+# then, and umr_id below can legitimately point at a DIFFERENT umr_id than
+# a prior resume of this same unit did, see the UMR-reuse-on-resume note
+# just below). Resolves this exact worker unit's own CURRENT real umr_id via
+# umr_tasks.unit_name (the one stable identity across resumes -- the umr_id
+# itself can rotate when the SAME unit is reused for a resumed/corrected
+# re-dispatch, see upsert_umr_task()'s own docstring in
+# superboss-register.py -- so this is always looked up fresh, never cached),
+# then hands the result to agent_work_briefing.py's own assemble-briefing
+# (never a second, competing lookup). A failure anywhere here (DB
+# unreadable, no umr_id row yet, etc.) must NEVER block real dispatch --
+# same fail-open posture as every other purely-additive traceability write
+# in this file (see insert_ocid_artifact_link's own docstring) -- so this
+# degrades to an empty BRIEFING_INSTRUCTION, never a non-zero exit.
+BRIEFING_INSTRUCTION=""
+if [ "$IS_RESUME" -eq 0 ]; then
+  # python3's own sqlite3 module, not the `sqlite3` CLI binary -- every other
+  # DB read in this file already goes through python3 (see WORKSPACE/BRANCH
+  # above), and the CLI binary is not a guaranteed-present dependency on
+  # every real deployment host.
+  UMR_ID_FOR_BRIEFING=$(python3 -c "
+import sqlite3
+try:
+    conn = sqlite3.connect('/opt/veridian/ai-os/memory/superboss-register.sqlite')
+    row = conn.execute(
+        \"SELECT umr_id FROM umr_tasks WHERE unit_name=? ORDER BY ts_submitted DESC LIMIT 1\",
+        ('veridian-worker@${TASK_ID}.service',),
+    ).fetchone()
+    print(row[0] if row else '')
+except Exception:
+    pass
+" 2>>"$TASK_DIR/worker.log")
+  if [ -n "$UMR_ID_FOR_BRIEFING" ]; then
+    # intent-text is the task's own concise title (task.yaml), not the full
+    # prompt.txt spec -- lookup_capability()'s own keyword stage is a plain
+    # OR-of-terms FTS match (see its own docstring), so a multi-sentence
+    # query balloons the match count on incidental vocabulary alone. Only
+    # close_ended_facts (a handful of compact lines), not the full briefing
+    # JSON (matches/metadata_json can run tens of KB), is put in the prompt
+    # itself -- real cost discipline, same concern this file's own header
+    # cites (COST-CONTROL.md); the full JSON is one command away if the
+    # agent actually needs it.
+    TASK_TITLE=$(python3 -c "import yaml; print(yaml.safe_load(open('$TASK_DIR/task.yaml')).get('title',''))" 2>>"$TASK_DIR/worker.log")
+    BRIEFING_FACTS=$(python3 /opt/veridian/scripts/agent_work_briefing.py assemble-briefing \
+      --umr-id "$UMR_ID_FOR_BRIEFING" --scope-term "$TASK_ID" \
+      --intent-text "${TASK_TITLE:-$TASK_ID}" \
+      2>>"$TASK_DIR/worker.log" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    print('\n'.join('- ' + f for f in d.get('close_ended_facts', [])))
+except Exception:
+    pass
+")
+    if [ -n "$BRIEFING_FACTS" ]; then
+      BRIEFING_INSTRUCTION="DETERMINISTIC BRIEFING (umr_id=$UMR_ID_FOR_BRIEFING, from scripts/agent_work_briefing.py assemble-briefing, run before you started -- real, close-ended fact, not a suggestion to re-derive; re-run it yourself with --scope-term for any specific file/keyword if you need the full matches):
+$BRIEFING_FACTS
+
+When real work completes, call: python3 /opt/veridian/scripts/agent_work_briefing.py record-completion --umr-id \"$UMR_ID_FOR_BRIEFING\" --entry-text \"<real summary of what you actually did>\" -- this is the one canonical write-back into this UMR's own ai_agent_registry memory row. Add --new-entity-record-file <path> only if you registered a genuinely new wiring_registry entity (search-first dedup is automatic), and --gtm-category-index only if this work maps to a real gtm_certification_categories row."
+    fi
+  fi
+fi
+
 if [ "$IS_RESUME" -eq 1 ]; then
   RESUME_CONTEXT=$(python3 /opt/veridian/scripts/veridian-task.py resume-context "$TASK_ID")
   PROMPT="RESUME task=$TASK_ID invocation=$NEW_COUNT/$MAX_LIFETIME_INVOCATIONS
@@ -185,7 +251,8 @@ $PROGRESS_INSTRUCTION"
 else
   PROMPT="SPEC: $(cat "$TASK_DIR/prompt.txt")
 
-$PROGRESS_INSTRUCTION"
+$PROGRESS_INSTRUCTION
+$BRIEFING_INSTRUCTION"
 fi
 
 MAIN_OUT="$TASK_DIR/.claude-out-main.json"

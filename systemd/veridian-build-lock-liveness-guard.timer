@@ -1,0 +1,18 @@
+# NOT YET AUTHORIZED / NOT YET INSTALLED -- see
+# veridian-build-lock-liveness-guard.service in this same directory for the
+# full disclosure. A single invocation can legitimately run for up to ~3
+# real minutes (see that .service's own comment), so this timer's
+# OnUnitActiveSec is measured from the END of the previous run, not a fixed
+# wall-clock cadence -- back-to-back real re-checks with a real 30s idle gap
+# between them, never an overlapping second instance (systemd will not
+# start a Type=oneshot unit that is still active).
+[Unit]
+Description=Run veridian-build-lock-liveness-guard shortly after its own previous real run finishes (UMR-20260806-121640-bee5)
+
+[Timer]
+OnUnitActiveSec=30
+OnBootSec=90
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,40 @@
+# =============================================================================
+# NOT YET AUTHORIZED / NOT YET INSTALLED. See systemd/README.md in this same
+# directory on the live server: the veridian-cron-* units under
+# ~/.config/systemd/user/ are an explicitly CLOSED SET ("STANDING RULE --
+# this is a CLOSED SET"). Per that same rule, adding a genuinely new
+# cadence/purpose requires an explicit Owner decision -- never a default/
+# automatic action by any script, worker, or session. This pair is committed
+# here as a version-controlled reference copy ONLY (same precedent already
+# used for systemd/veridian-pm-report-tick.service in this same directory).
+# It has deliberately NOT been copied into ~/.config/systemd/user/ and has
+# NOT been enabled/started. That copy + `systemctl --user daemon-reload` +
+# `systemctl --user enable --now veridian-build-lock-liveness-guard.timer`
+# is an explicit, disclosed next step requiring Owner sign-off.
+#
+# UMR-20260806-121640-bee5 (governing UMR-20260806-071025-1d28, folding into
+# the already-completed UMR-20260806-120603-217b / pm_decisions_pending row
+# 62 / child UMR-20260806-121247-a93a's short-wait+requeue proposal -- this
+# unit is COMPLEMENTARY to, not a replacement for, that proposal: this
+# guards the LOCK HOLDER's own liveness so a genuinely idle holder is
+# released in minutes instead of the full 1800s outer `timeout`; the row-62
+# proposal separately addresses WAITERS requeuing instead of blocking for
+# their full flock wait).
+#
+# ExecStart runs build_lock_liveness_guard.py's own `--required-idle-windows
+# 2 --window-seconds 90` real production defaults (see that script's module
+# docstring for the full real reasoning): a single invocation can therefore
+# legitimately run for up to ~3 real minutes while actively confirming a
+# hang (plus up to 30s more if it actually kills one) -- Type=oneshot is
+# correct here specifically because that is bounded, finite, real work per
+# invocation, not a persistent daemon loop.
+# =============================================================================
+[Unit]
+Description=VERIDIAN build-lock holder liveness guard: detect a genuinely whole-tree-idle /tmp/veridian-quality-gate-build.lock holder and release it in minutes, not the full 1800s outer timeout (UMR-20260806-121640-bee5)
+ConditionPathExists=!/opt/veridian/ai-os/locks/resource-governor-EMERGENCY_STOP
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/veridian/scripts/build_lock_liveness_guard.py --lock-path /tmp/veridian-quality-gate-build.lock
+StandardOutput=append:/opt/veridian/ai-os/logs/build-lock-liveness-guard.log
+StandardError=append:/opt/veridian/ai-os/logs/build-lock-liveness-guard.log

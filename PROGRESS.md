@@ -1,50 +1,14 @@
-# PROGRESS -- task-20260806-201936-urgent-structural-fix--next-queued-task
+# PROGRESS -- task-20260806-205205-diagnose-real-running-count-discrepancy
 
 ## Completed
-- [x] Independently verified the SPEC's core factual claims against the real
-      superboss-register DB (`/opt/veridian/ai-os/memory/superboss-register.sqlite`
-      -- the paths under `/opt/veridian/scripts/`, `/opt/veridian/ai-os/`, and
-      `/opt/veridian/repos/veridian-scripts/` are all 0-byte stub files; the
-      resource_governor `--query-umr --search` CLI returned 0 matches even for
-      a known-real UMR pulled from git log, confirming it isn't reading the
-      live DB either) before touching scheduler code.
-- [x] Found the SPEC's premise is false. Direct query results:
-      - UMR-20260806-135632-329e: status=running, ts_dispatched=2026-08-06T19:20:55Z
-      - UMR-20260806-140841-46d1: status=completed, ts_dispatched=2026-08-06T19:20:59Z
-      - UMR-20260806-141055-1fec: status=running, ts_dispatched=2026-08-06T19:40:12Z
-      - UMR-20260806-162019-4b4f: status=running, ts_dispatched=2026-08-06T20:19:35Z
-      All four already have non-NULL ts_dispatched and are running/completed --
-      none are queued, none are starved. The SPEC claimed all four were
-      "queued", "ts_dispatched NULL", "ages 160-175+ minutes". That is not
-      what the live table shows.
-      Also: the SPEC's own "governing chain" UMR-20260806-124055-bc80 is
-      itself status=completed (dispatched 16:59), not an active stop-work
-      order over anything currently in flight.
-      Also: this task's own UMR-20260806-165509-4d7c was dispatched at
-      20:19:40Z -- in the same burst (20:19:29-20:19:44) as three of the
-      "stuck" IDs and UMR-20260806-171945-5767. That burst is exactly the
-      dispatcher doing its normal job, not evidence of a starvation bug.
-      The actual current `queued` rows (4 of them) are a completely
-      different set of IDs (UMR-20260806-173900-b504, -175442-1fed,
-      -180933-d3bb, -182453-702a), submitted 17:39-18:24 -- not the ones
-      named in the SPEC.
-      The `next_queued_task`/`run_tick` line numbers in the SPEC are also
-      off (next_queued_task is real at line 822 and does sort by
-      (effective_priority, ts_submitted) as claimed, but it's called from
-      `dispatch_one` at line 1263, not from `run_tick`, which is a separate
-      function at line 1504).
-- [x] Per standing memory (`veridian-task-prompt-false-premise-pattern`,
-      12th+ occurrence of this exact pattern), did NOT implement the
-      requested `owner_priority_override` table/file, scheduler preemption
-      logic, or capability_registry graduation -- there is no real
-      starvation bug evidenced by the live data to fix, and hardcoding a
-      permanent "sacred UMR" bypass into the scheduler on a fabricated
-      urgency claim would itself be the risky, hard-to-reverse action.
-- [x] Recorded completion via agent_work_briefing.py record-completion
-      with the real finding (premise false, no code change made).
+- [x] Verified real `status='running'` row count via `resource_governor.py --query-umr --status running` cross-checked directly against `/opt/veridian/ai-os/memory/superboss-register.sqlite` (the real DB path per `resolve_superboss_db_path()` -- the `scripts/superboss-register.sqlite` file is a known 0-byte decoy, not used). Real count at check time: **30** (SPEC said 32 -- minor time drift, not fabricated; system churns every few seconds).
+- [x] Split the 30 real rows: 27 `unit_name IS NOT NULL` (systemd-backed), 3 `unit_name IS NULL` (external_ai_state_machine-backed). Confirmed **all 30 rows have `last_heartbeat IS NULL`** -- so `--reconcile-stale` (which always skips NULL heartbeats) is structurally a no-op here; the correct existing canonical mechanism for this exact situation is `--backfill-null-heartbeats` (real `systemctl --user is-active` ground-truth for unit_name rows, real `external_ai_state_machine.py list-sessions` ground-truth for unit_name-null rows -- never a guess, never a delete, only `UPDATE ... status/reason` via the module's own `update_umr_task()`).
+- [x] Ran `--backfill-null-heartbeats` dry run, then `--execute` (real, reversible write via the existing canonical path only, no data deleted -- every corrected row keeps its full history plus a new `reason` recording the exact evidence used). Real result: **20 confirmed ghost rows corrected `running`→`failed`**, 3 confirmed real-forward-progress rows refreshed and kept `running` (real task.yaml/branch evidence), 4 systemd rows genuinely `active` left untouched, 3 external (unit_name-null) rows left untouched (no matching `list-sessions` entry -- inconclusive, not confirmed-dead, correctly not touched per the mechanism's own conservative design).
+- [x] Confirmed real freed capacity: DB `status='running'` count dropped **30 → 10** (real bookkeeping fix). Real live systemd worker count (`dispatch_core.running_worker_count()`, ground truth for the actual dispatch gate) was **unchanged at 4** before and after -- ghost DB rows never consumed real resources, so this reconciliation fixes the *reporting* discrepancy, it does not free real RAM/swap/CPU.
+- [x] Root-caused the Section-1-vs-query-umr discrepancy: `generate_pm_report_v3.py` Section 1 "Parallel workers running" deliberately reads real `systemctl --user list-units 'veridian-worker@*' --state=running` (ground truth), while `resource_governor.py --query-umr --status running` reads the DB status column, which had drifted upward from unreconciled dead workers (exactly the gap `--backfill-null-heartbeats` exists to close). This is not a code bug requiring a fix -- it is the known, documented gap the existing mechanism already covers; applying it is the correct remediation, not a new patch.
+- [x] Checked `UMR-20260806-162019-4b4f` (the "capacity-freeing" task SPEC says is "queued 107+ min, zero dispatch"): real DB row showed `status='running'`, `ts_dispatched=2026-08-06T20:19:35Z` (~37 min before check, NOT queued-and-undispatched), unit `veridian-worker@task-20260806-201931-...service` already inactive, no task.yaml evidence of real progress. **SPEC's premise was false** -- it was already dispatched once and its worker died, leaving a ghost `running` row (which is exactly why nothing was re-dispatching it: the DB believed it was still active). The `--backfill-null-heartbeats --execute` run above correctly reconciled it to `status='failed'` with full evidence in `reason` (reversible, not deleted).
+- [x] Checked whether "directly execute" is safely possible right now: real swap is genuinely saturated -- **99.75-99.93% used**, at/above the Owner's own real `HARD_CEILING_UTILIZATION_PCT=0.99` (worse than SPEC's claimed 97.5%). Ran the real canonical dispatch path `resource_governor.py --tick`: it attempted to dispatch the next real priority-ordered candidate and was correctly **deferred** by the real `swap_hard_ceiling` gate. `dispatch_core.has_free_slot_detail()` independently confirms the same veto. This hard ceiling is explicitly documented as "Owner's own number, never cross" -- forcing a dispatch around it (e.g. spawning a worker outside `dispatch_core.acquire_dispatch_lock()`/`has_free_slot()`) would bypass the exact safety mechanism this whole module exists to enforce, so I did not do that. This is a real, correct, expected block, not a bug to route around.
+- [x] Verified the other real-state claims in SPEC: real swap saturation (97.5% claimed vs 99.75-99.93% measured -- real, even worse); stuck-backlog count growing (774 stuck tasks per live STUCK_TASKS_HEARTBEAT.json, consistent direction with SPEC's 767→770); 0 real task completions system-wide in the last 15 minutes -- **confirmed true** (most recent real `ts_completed` was ~70 minutes before the check; my first pass at this query had a string-vs-datetime comparison bug that falsely showed 137 "recent" completions -- caught and fixed before reporting).
 
 ## Remaining
-- [ ] None from this SPEC. If a *real* starvation case is found later
-      (a genuinely `queued` row with `ts_dispatched IS NULL` and an age
-      that live data actually supports), re-open with real UMR IDs and
-      real before/after query output, not asserted ones.
+- [ ] None -- diagnosis, real-split report, canonical reconciliation, and capacity/dispatch-safety confirmation are all complete. Actual re-dispatch of `UMR-20260806-162019-4b4f` (now `failed`, real-progress-eligible) is correctly left to the next real `--tick` once swap drops back under the 99% hard ceiling -- forcing it now would bypass a real Owner safety gate under genuine resource exhaustion.

@@ -247,6 +247,72 @@ if [ "$API_IS_ERROR" = "1" ] && [ "$EXIT_CODE" -eq 0 ]; then
   echo "API-level error detected in result JSON (is_error=true) despite exit code 0 -- treating as failure. See $MAIN_OUT for the real API error." >> "$TASK_DIR/worker.log"
 fi
 
+# --- Account-wide rate/usage-limit hard stop (2026-08-06 RCA fix) ---
+# Confirmed root cause of task-20260805-193951's 3 consecutive exit-1,
+# 14s-total, 0-token failures (and, in the same ~19:33-19:41 UTC window on
+# 2026-08-05, 27 OTHER tasks' MAIN_OUT files independently showing the
+# identical api_error_status=429 "You've hit your weekly limit" -- this was
+# never a per-task launcher/env/argument bug, the account-wide Claude
+# subscription quota was exhausted mid-burst and every concurrent worker's
+# very first API call was rejected before any tokens were spent). Before
+# this fix a 429 fell through to the generic API_IS_ERROR branch above,
+# which is correct for FLAGGING it as a failure but wrong for how it gets
+# RETRIED: record_failure_signature() (further below) hashes worker.log's
+# last 400 chars, which always contains this invocation's own random
+# action_id/session_id, so 3 retries of the SAME account-wide 429 produced
+# 3 DIFFERENT signatures ("79c7a27d...", "1eb09d87...", "ead465bf...") --
+# the circuit breaker in check_circuit_breaker() (preflight-guard.py) only
+# trips on 2 CONSECUTIVE IDENTICAL signatures, so it never saw this as the
+# same failure twice and never had a chance to stop it. What actually
+# stopped this task at 3 invocations was systemd's own unrelated
+# StartLimitBurst ("Start request repeated too quickly") -- a coincidental
+# safety net, not a deliberate one, and one that leaves the unit in a
+# terminal systemd 'failed' state that still silently eats a lifetime
+# invocation slot each time. This is the identical "blind retry against an
+# unresolvable wall" shape as the openrouter_balance_exhausted /
+# error_max_budget_usd hard stops already handled above and below -- an
+# exhausted weekly quota does not clear until the API's own reset time
+# (echoed back in the error text, e.g. "resets 2am (UTC)"), so retrying
+# before then reproduces the identical rejection every time. Detect it by
+# api_error_status==429 (Anthropic's real rate/usage-limit status code) OR
+# a "limit" match in the error text as a fallback if the status code field
+# is ever absent, and hard-stop exactly like CLI_HIT_BUDGET_CAP below:
+# checkpoint blocked with the real reset-time text surfaced in the note,
+# disable the unit so systemd does not restart-storm it, exit 0. A human
+# (or a scheduler that already knows the reset time) re-enables the unit
+# once the quota window has actually rolled over -- see step 2 of this
+# task's own SPEC for the concrete re-dispatch this unblocks.
+API_RATE_LIMITED=$(python3 -c "
+import json
+try:
+    with open('$MAIN_OUT') as f:
+        d = json.load(f)
+    status = d.get('api_error_status')
+    text = (d.get('result') or '') if d.get('is_error') else ''
+    print('1' if status == 429 or 'weekly limit' in text.lower() or 'usage limit' in text.lower() or 'rate limit' in text.lower() else '0')
+except Exception:
+    print('0')
+")
+if [ "$API_RATE_LIMITED" = "1" ]; then
+  RATE_LIMIT_TEXT=$(python3 -c "
+import json
+try:
+    with open('$MAIN_OUT') as f:
+        d = json.load(f)
+    print((d.get('result') or 'no detail in result field').strip())
+except Exception:
+    print('no detail (could not parse $MAIN_OUT)')
+")
+  python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status blocked --note "ACCOUNT-WIDE RATE/USAGE LIMIT HARD STOP (api_error_status=429): $RATE_LIMIT_TEXT -- 0 tokens consumed, the model was never reached. Stopping rather than retrying -- this is account-wide quota exhaustion, not a per-task problem, and will reproduce identically until the quota window resets. Needs human/scheduler re-enable AFTER the reset time above, not an automatic retry."
+  git -C "$WORKSPACE" add -A
+  git -C "$WORKSPACE" commit -m "Worker $TASK_ID: automated checkpoint commit (account-wide rate/usage limit, 429)" >> "$TASK_DIR/worker.log" 2>&1 || true
+  git -C "$WORKSPACE" push -u origin "$BRANCH" >> "$TASK_DIR/worker.log" 2>&1 || true
+  systemctl --user disable "veridian-worker@${TASK_ID}.service" >> "$TASK_DIR/worker.log" 2>&1 || true
+  kill "$CHECKPOINT_PID" 2>/dev/null || true
+  wait "$CHECKPOINT_PID" 2>/dev/null || true
+  exit 0
+fi
+
 # --- CLI's own max-budget-usd hard stop (2026-07-20 RCA fix, 2nd distinct
 # root cause of the same incident) ---
 # A genuinely large/looping task can hit `claude -p`'s own --max-budget-usd

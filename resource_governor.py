@@ -1407,27 +1407,70 @@ def _dispatch_one_inner(dry_run=False, now=None):
     return {"action": "dispatched", "umr_id": row["umr_id"], "result": result, "metrics": metrics}
 
 
+STALE_QUEUED_AGGREGATE_TITLE_PREFIX = "STALE-QUEUED-AGGREGATE:"
+
+
 def flag_stale_queued_tasks(now=None):
     """Real max-queued-age safeguard -- see the MAX_QUEUED_AGE_SECONDS module
     comment above for the full real incident this closes.
 
     Deliberately generic and deterministic, zero AI judgment: does not try to
     diagnose WHY a row is stale, only measures real age against a real,
-    documented, bounded threshold. Any row that has been status='queued' for
-    at least MAX_QUEUED_AGE_SECONDS gets exactly one real, idempotent
-    pm_decisions_pending row opened via superboss-register.py's own
-    insert_pm_decision_pending() -- never a raw UPDATE/DELETE against
-    umr_tasks, and this function never itself resolves/closes a flagged row or
-    changes umr_tasks in any way; only a real PM decision
-    (resolve_pm_decision_pending()) ever closes what this opens. Idempotent by
-    a real pre-check against pm_decisions_pending itself (skips a umr_id that
-    already has an open 'STALE-QUEUED:' row) -- safe to call every real tick,
-    same as scan_stuck_tasks() below.
+    documented, bounded threshold (unchanged by the aggregation fix below --
+    the 4h MAX_QUEUED_AGE_SECONDS default and the underlying detection are
+    real and valuable, and are not being weakened here).
 
-    Returns the list of umr_id values newly flagged this call (empty if
-    nothing newly stale). Fails open/silent (empty list) if Superboss
-    Register is unavailable -- a broken check here must never crash the real
-    dispatch tick that calls this, same philosophy as scan_stuck_tasks()."""
+    Real emission-shape fix (UMR-20260806-163738-4323, governing
+    UMR-20260806-071025-1d28, superseding the one-row-per-umr_id shape this
+    function originally shipped with under UMR-20260806-090229-f2a7): that
+    original shape opened one new real pm_decisions_pending row per stale
+    umr_id, which meant 48 of 118 real open decision rows (~41%) measured at
+    investigation time were the identical STALE-QUEUED condition repeated --
+    Section 7 of the standing 10-minute PM report (generate_pm_report_v3.py)
+    lists every open decision, and at that ratio the section stopped
+    supporting a real decision at all, just something to skim past (same
+    "always-on signal carries no information" failure class independently
+    found in COLLISION_DETECTED -- investigated separately; that one's real
+    root cause turned out to be a genuinely different mechanism, a real
+    pairwise citation/file-overlap count across many concurrently open PRs,
+    not a duplicate-row-per-instance emission bug, so it is deliberately left
+    unchanged here). This function now keeps exactly ONE real open
+    'STALE-QUEUED-AGGREGATE:' pm_decisions_pending row representing the
+    condition as a whole, carrying the real current count and the real full
+    list of currently-affected umr_id values in its detail, updated IN PLACE
+    (superboss-register.py's own new update_pm_decision_pending()) as the
+    real count changes on each call -- never a raw UPDATE/DELETE against
+    umr_tasks or against pm_decisions_pending outside superboss-register.py,
+    and this function still never itself resolves/closes the row for a real
+    PM decision to hold/investigate/intervene; only a real PM decision
+    (resolve_pm_decision_pending()) closes that. The one exception is the
+    condition genuinely clearing (zero real stale rows left): this function
+    then resolves its own aggregate row itself with an honest closed_note,
+    the same way a monitoring check clearing its own alert would, rather
+    than leaving a "48 stale" row open forever once nothing is actually
+    stale -- this is not a suppression of detection, the row still reopens
+    the moment a umr_task next crosses the real threshold.
+
+    The 48 real pre-existing per-umr_id rows this shape superseded were
+    resolved once, out of band from this function, as status='superseded'
+    (never deleted -- see PROGRESS.md / the governing UMR's evidence for that
+    one-time migration), each citing this aggregate row's real id.
+
+    Idempotent by construction: at most one real open
+    'STALE-QUEUED-AGGREGATE:' row can ever exist (this function is the only
+    writer of that title prefix), so calling this every real tick only ever
+    updates that same row's real title/detail, or inserts it once if
+    genuinely absent, or resolves it once the real condition clears -- same
+    "safe to call every real tick" property scan_stuck_tasks() below has.
+
+    Returns the real, current, full list of umr_id values that are stale as
+    of THIS call (not just newly-stale ones -- the aggregate shape has no
+    "newly" concept the way one-row-per-umr_id did; run_tick()'s
+    stale_queued_flagged key is documentation/observability only, nothing
+    downstream branches on new-vs-still-stale). Fails open/silent (empty
+    list) if Superboss Register is unavailable -- a broken check here must
+    never crash the real dispatch tick that calls this, same philosophy as
+    scan_stuck_tasks() below."""
     now = now or _utcnow()
     sbr, error = _safe_superboss_register("flag_stale_queued_tasks")
     if error:
@@ -1445,40 +1488,82 @@ def flag_stale_queued_tasks(now=None):
         age_seconds = max(0.0, (now - ts_submitted).total_seconds())
         if age_seconds >= MAX_QUEUED_AGE_SECONDS:
             stale.append((row, age_seconds))
+    # Oldest/most-stale first -- a real, deterministic, documented ordering
+    # rule for the detail list below, not an AI judgment call.
+    stale.sort(key=lambda pair: pair[1], reverse=True)
 
-    flagged = []
-    for row, age_seconds in stale:
-        umr_id = row["umr_id"]
-        already_open = conn.execute(
-            "SELECT id FROM pm_decisions_pending WHERE related_umr=? AND status='open' "
-            "AND title LIKE 'STALE-QUEUED:%'",
-            (umr_id,),
-        ).fetchone()
-        if already_open:
-            continue
-        age_hours = age_seconds / 3600.0
-        threshold_hours = MAX_QUEUED_AGE_SECONDS / 3600.0
-        title = f"STALE-QUEUED: {umr_id} queued {age_hours:.1f}h (exceeds {threshold_hours:.1f}h safeguard)"
-        detail = (
-            f"task_identity={row['task_identity']!r} tier={row['tier']} "
-            f"source_trigger={row['source_trigger']!r} ts_submitted={row['ts_submitted']!r} "
-            f"reason={row.get('reason')!r} unit_name={row.get('unit_name')!r} -- real, "
-            f"deterministic max-queued-age safeguard (resource_governor.py "
-            f"flag_stale_queued_tasks(), UMR-20260806-090229-f2a7): this row has never "
-            f"reached a real terminal status (completed/failed/killed/rejected_duplicate) "
-            f"within {threshold_hours:.1f}h of its real ts_submitted. Zero AI judgment "
-            f"applied here -- a real PM decision is needed on whether to hold, investigate, "
-            f"or manually intervene."
-        )
-        with sbr._write_lock():
+    threshold_hours = MAX_QUEUED_AGE_SECONDS / 3600.0
+    open_aggregates = conn.execute(
+        "SELECT id FROM pm_decisions_pending WHERE status='open' "
+        "AND title LIKE ? ORDER BY id",
+        (STALE_QUEUED_AGGREGATE_TITLE_PREFIX + "%",),
+    ).fetchall()
+
+    if not stale:
+        # Real condition cleared -- resolve any open aggregate row honestly
+        # rather than leaving a stale count open forever. Not a weakening of
+        # detection: the moment a real umr_task next crosses the threshold,
+        # a fresh aggregate row opens again exactly as below.
+        if open_aggregates:
+            with sbr._write_lock():
+                for row in open_aggregates:
+                    sbr.resolve_pm_decision_pending(
+                        conn, row["id"], closed_by="resource_governor:flag_stale_queued_tasks",
+                        closed_note="real stale-queued count returned to 0 -- condition cleared",
+                        status="resolved",
+                    )
+                conn.commit()
+        conn.close()
+        return []
+
+    umr_ids = [row["umr_id"] for row, _ in stale]
+    affected_lines = [
+        f"- {row['umr_id']}: queued {age_seconds / 3600.0:.1f}h "
+        f"(task_identity={row['task_identity']!r} tier={row['tier']} "
+        f"source_trigger={row['source_trigger']!r} ts_submitted={row['ts_submitted']!r} "
+        f"reason={row.get('reason')!r} unit_name={row.get('unit_name')!r})"
+        for row, age_seconds in stale
+    ]
+    title = (
+        f"{STALE_QUEUED_AGGREGATE_TITLE_PREFIX} {len(stale)} real umr_tasks rows queued "
+        f"past {threshold_hours:.1f}h safeguard"
+    )
+    detail = (
+        f"Real, deterministic max-queued-age safeguard, aggregated (resource_governor.py "
+        f"flag_stale_queued_tasks(), UMR-20260806-163738-4323, superseding the prior "
+        f"one-row-per-umr_id shape opened under UMR-20260806-090229-f2a7): {len(stale)} real "
+        f"umr_tasks rows have been status='queued' for at least {threshold_hours:.1f}h as of "
+        f"{now.isoformat()}. None of these rows have reached a real terminal status "
+        f"(completed/failed/killed/rejected_duplicate) within {threshold_hours:.1f}h of their "
+        f"real ts_submitted. Zero AI judgment applied here -- a real PM decision is needed on "
+        f"whether to hold, investigate, or manually intervene on the dispatcher's queued-work "
+        f"drain rate. This single row is kept updated in place as the real count changes -- it "
+        f"is not re-opened per occurrence.\n\n"
+        f"Real affected umr_id list ({len(stale)}):\n" + "\n".join(affected_lines)
+    )
+
+    with sbr._write_lock():
+        if open_aggregates:
+            keep_id = open_aggregates[0]["id"]
+            sbr.update_pm_decision_pending(conn, keep_id, title=title, detail=detail)
+            # Defensive only -- this function is the sole writer of this
+            # title prefix, so more than one open aggregate row should never
+            # happen, but real defensive coding costs nothing: resolve any
+            # extra as superseded by the one real row being kept.
+            for extra in open_aggregates[1:]:
+                sbr.resolve_pm_decision_pending(
+                    conn, extra["id"], closed_by="resource_governor:flag_stale_queued_tasks",
+                    closed_note=f"real duplicate open aggregate row -- superseded by id={keep_id}",
+                    status="superseded",
+                )
+        else:
             sbr.insert_pm_decision_pending(
-                conn, title, detail, related_umr=umr_id,
-                recommended_option="investigate real dispatch history for this umr_id",
+                conn, title, detail, related_umr=None,
+                recommended_option="investigate real dispatcher queued-work drain rate",
             )
-            conn.commit()
-        flagged.append(umr_id)
+        conn.commit()
     conn.close()
-    return flagged
+    return umr_ids
 
 
 # Real fix (UMR-20260806-101839-688e, dispatch-throughput-stall follow-up):

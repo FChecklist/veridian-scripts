@@ -848,12 +848,17 @@ def test_render_report_text_survives_per_metric_insufficient_data(monkeypatch):
         "dead_zone_reconciliation_section": {
             "recent_auto_remediations": [], "open_escalations": [],
         },
+        "wiring_registry_health_section": {
+            "total_entities": 0, "verification_status_counts": {}, "unhealthy_count": 0,
+            "unhealthy_examples": [], "oldest_last_verified_ts": None,
+        },
     }
     text = pm.render_report_text(report)  # must not raise
     assert "insufficient_data" in text
     assert "10. 10-REPORT TREND ANALYSIS" in text
     assert "14. OWNER UMR CLOSURE TRACKING" in text
     assert "15. DISPATCHED DEAD-ZONE AUTO-REMEDIATION" in text
+    assert "16. WIRING REGISTRY HEALTH" in text
 
 
 def test_get_trend_analysis_zero_rows(tmp_path):
@@ -1609,6 +1614,142 @@ def test_get_dead_zone_reconciliation_section_respects_recent_limit(tmp_path, mo
     fake_sbr = _make_fake_sbr_module(db_path)
     section = pm.get_dead_zone_reconciliation_section(fake_sbr)
     assert len(section["recent_auto_remediations"]) == 2
+
+
+# --- Section 16 (owner absolute stop-work order, task-20260806-165921):
+# real, proactive surface over wiring_registry's own verification_status --
+# see get_wiring_registry_health_section()'s own docstring. -----------------
+def _load_real_sbr_for_schema():
+    """Loads the real superboss-register.py purely to reuse its real
+    _ensure_wiring_registry_table() schema definition -- never connects to
+    or touches the real live DB_PATH (module import alone does not open a
+    connection)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "sbr_for_wiring_health_schema",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "superboss-register.py"))
+    sbr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sbr)
+    return sbr
+
+
+def _make_wiring_registry_db(tmp_path, rows):
+    """rows: list of (entity_id, entity_type, path, verification_status,
+    last_verified_ts). Uses the real _ensure_wiring_registry_table() schema
+    (same one generate_wiring_registry.py/wiring_query.py write/read against)
+    -- never a hand-duplicated CREATE TABLE that could drift from the real
+    one."""
+    real_sbr = _load_real_sbr_for_schema()
+    db_path = str(tmp_path / "wiring_health.sqlite")
+    conn = sqlite3.connect(db_path)
+    real_sbr._ensure_wiring_registry_table(conn)
+    for entity_id, entity_type, path, status, ts in rows:
+        conn.execute(
+            "INSERT INTO wiring_registry (entity_id, ts, entity_type, source_system, path, "
+            "last_verified_ts, verification_status) VALUES (?,?,?,?,?,?,?)",
+            (entity_id, ts, entity_type, "server", path, ts, status),
+        )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_get_wiring_registry_health_section_counts_unhealthy_rows(tmp_path):
+    db_path = _make_wiring_registry_db(tmp_path, [
+        ("e1", "script", "/opt/veridian/scripts/real.py", "VERIFIED_MATCH", "2026-08-06T10:00:00+00:00"),
+        ("e2", "file", "/opt/veridian/scripts/deleted.py", "PATH_MISSING", "2026-08-06T11:00:00+00:00"),
+        ("e3", "file", "/opt/veridian/scripts/changed.py", "HASH_DRIFTED", "2026-08-06T12:00:00+00:00"),
+        ("e4", "engine", None, "UNVERIFIED", "2026-08-06T09:00:00+00:00"),
+    ])
+    fake_sbr = _make_fake_sbr_module(db_path)
+    section = pm.get_wiring_registry_health_section(fake_sbr)
+    assert section.get("error") is None
+    assert section["total_entities"] == 4
+    assert section["verification_status_counts"] == {
+        "VERIFIED_MATCH": 1, "PATH_MISSING": 1, "HASH_DRIFTED": 1, "UNVERIFIED": 1,
+    }
+    assert section["unhealthy_count"] == 2
+    example_ids = {r["entity_id"] for r in section["unhealthy_examples"]}
+    assert example_ids == {"e2", "e3"}
+    assert section["oldest_last_verified_ts"] == "2026-08-06T09:00:00+00:00"
+
+
+def test_get_wiring_registry_health_section_all_healthy_zero_unhealthy(tmp_path):
+    db_path = _make_wiring_registry_db(tmp_path, [
+        ("e1", "script", "/real/a.py", "VERIFIED_MATCH", "2026-08-06T10:00:00+00:00"),
+        ("e2", "script", "/real/b.py", "VERIFIED_MATCH", "2026-08-06T10:01:00+00:00"),
+    ])
+    fake_sbr = _make_fake_sbr_module(db_path)
+    section = pm.get_wiring_registry_health_section(fake_sbr)
+    assert section["unhealthy_count"] == 0
+    assert section["unhealthy_examples"] == []
+
+
+def test_get_wiring_registry_health_section_missing_table_honest_error(tmp_path):
+    db_path = str(tmp_path / "no_wiring_table.sqlite")
+    sqlite3.connect(db_path).close()
+    fake_sbr = _make_fake_sbr_module(db_path)
+    section = pm.get_wiring_registry_health_section(fake_sbr)
+    assert section.get("error") is not None
+
+
+def test_wiring_registry_health_section_renders_unhealthy_examples_in_report_text(tmp_path):
+    """End-to-end via the REAL render_report_text(): a real PATH_MISSING row
+    computed by the real get_wiring_registry_health_section() genuinely
+    surfaces into the rendered report text -- the actual SPEC requirement
+    (proactive surfacing), not just a populated dict nothing reads."""
+    db_path = _make_wiring_registry_db(tmp_path, [
+        ("e-missing", "file", "/opt/veridian/scripts/gone.py", "PATH_MISSING", "2026-08-06T11:00:00+00:00"),
+    ])
+    fake_sbr = _make_fake_sbr_module(db_path)
+    wiring_section = pm.get_wiring_registry_health_section(fake_sbr)
+
+    report = {
+        "generated_at": "t", "umr": "UMR-x", "parent_umr": "UMR-y", "ocid": "OCID-020",
+        "script_version": pm.SCRIPT_VERSION,
+        "header_status": {
+            "ram_swap": {}, "load_average": {}, "dispatch_tick": {}, "parallel_workers": {},
+            "parallel_workers_ceiling": {}, "stuck_tasks": {}, "tmux": {},
+            "interactive_subagents": {}, "emergency_stop": {}, "db_integrity": {},
+        },
+        "ocid_020_gtm_section": {"categories": []},
+        "ocid_canonical_registry_section": {},
+        "umr_tasks_section": {},
+        "gtm_readiness": {"bucket": "x", "reason": "x", "is_placeholder": True},
+        "implementation_summary": {"prior_snapshot_found": False, "deltas": {}},
+        "open_issues": [],
+        "pm_decisions_pending": [],
+        "owner_proposals_pending": [],
+        "ocid_compliance_audit_section": {"error": "not exercised in this test"},
+        "trend_analysis_section": {
+            "error": None, "rows_used": 0, "window_size_requested": 10,
+            "stable_tolerance_pct": 5.0, "metrics": {},
+        },
+        "stall_detection_section": {"error": None, "stuck_task_threshold_minutes": 30.0, "tasks": []},
+        "collision_detection_section": {
+            "collision_detected": False, "tracked_repos": [], "checked_unit_globs": [],
+            "file_overlap_max_age_hours": 48, "file_overlap_excluded_files": [],
+            "gh_max_workers": 8, "time_budget_seconds": 120.0, "total_skipped_due_to_time_budget": 0,
+            "total_candidate_count": 0, "primary_candidate_count": 0, "secondary_candidate_count": 0,
+            "capped": False, "shown_count": 0, "shown_collisions": [],
+            "by_repo_citation": {}, "by_repo_file": {},
+            "worker_umr_collisions": {"errors": []}, "errors": [],
+        },
+        "instruction_quality_section": {"error": None, "total_checked": 0, "pass_count": 0, "failing": []},
+        "owner_umr_closure_section": {
+            "error": None, "all_time_status_counts": {}, "all_time_total": 0,
+            "oldest_open_umr_id": None, "oldest_open_status": None, "oldest_open_age_hours": None,
+            "trailing_24h_status_counts": {}, "trailing_24h_total": 0, "trailing_24h_closed_count": 0,
+            "percent_complete_24h_owner_umr_set": None,
+        },
+        "dead_zone_reconciliation_section": {"recent_auto_remediations": [], "open_escalations": []},
+        "wiring_registry_health_section": wiring_section,
+    }
+    text = pm.render_report_text(report)  # must not raise
+    assert "16. WIRING REGISTRY HEALTH" in text
+    assert "e-missing" in text
+    assert "PATH_MISSING" in text
+    assert "/opt/veridian/scripts/gone.py" in text
 
 
 if __name__ == "__main__":

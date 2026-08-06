@@ -2211,6 +2211,54 @@ def get_dead_zone_reconciliation_section(sbr):
     }
 
 
+WIRING_HEALTH_UNHEALTHY_STATUSES = ("PATH_MISSING", "HASH_DRIFTED")
+WIRING_HEALTH_EXAMPLE_LIMIT = 10
+
+
+def get_wiring_registry_health_section(sbr):
+    """Real, read-only, zero-AI-judgment PROACTIVE WIRING HEALTH CHECK
+    (owner absolute stop-work order, task-20260806-165921): surfaces
+    wiring_registry's own already-computed verification_status/
+    last_verified_ts (written by generate_wiring_registry.py, which already
+    runs on its own live cron cadence -- veridian-cron-generate-wiring-
+    registry.timer) into this report's own live cron cadence
+    (veridian-pm-report-tick.timer) so a genuinely unhealthy wiring row
+    (PATH_MISSING: the entity's real path no longer exists on disk;
+    HASH_DRIFTED: the real file's content changed since it was last hashed)
+    is proactively surfaced to a PM/human reading this report, instead of
+    only being visible to someone who separately, manually queries
+    wiring_registry or reruns generate_wiring_registry.py by hand. This
+    section computes nothing new -- it is a pure SELECT over
+    wiring_registry's live columns, never a second, competing verification
+    implementation. Never raises: returns an honest {"error": ...} dict on a
+    genuine read failure (e.g. table missing on an older DB)."""
+    try:
+        conn = sbr._connect()
+        total = conn.execute("SELECT COUNT(*) FROM wiring_registry").fetchone()[0]
+        counts = {row[0]: row[1] for row in conn.execute(
+            "SELECT verification_status, COUNT(*) FROM wiring_registry GROUP BY verification_status")}
+        placeholders = ",".join("?" for _ in WIRING_HEALTH_UNHEALTHY_STATUSES)
+        examples = conn.execute(
+            f"SELECT entity_id, entity_type, path, verification_status, last_verified_ts "
+            f"FROM wiring_registry WHERE verification_status IN ({placeholders}) "
+            f"ORDER BY last_verified_ts DESC LIMIT ?",
+            (*WIRING_HEALTH_UNHEALTHY_STATUSES, WIRING_HEALTH_EXAMPLE_LIMIT),
+        ).fetchall()
+        oldest_verified = conn.execute(
+            "SELECT MIN(last_verified_ts) FROM wiring_registry").fetchone()[0]
+        conn.close()
+    except sqlite3.Error as e:
+        return {"error": str(e)}
+    unhealthy_count = sum(counts.get(s, 0) for s in WIRING_HEALTH_UNHEALTHY_STATUSES)
+    return {
+        "total_entities": total,
+        "verification_status_counts": counts,
+        "unhealthy_count": unhealthy_count,
+        "unhealthy_examples": [dict(r) for r in examples],
+        "oldest_last_verified_ts": oldest_verified,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Assembly + rendering
 # ---------------------------------------------------------------------------
@@ -2280,6 +2328,9 @@ def build_report(sbr):
     # Section 15 (UMR-20260806-115538-1e55 / UMR-20260806-115605-854d) --
     # see module docstring.
     dead_zone_reconciliation_section = get_dead_zone_reconciliation_section(sbr)
+    # Section 16 (owner absolute stop-work order, task-20260806-165921) --
+    # see get_wiring_registry_health_section()'s own docstring.
+    wiring_registry_health_section = get_wiring_registry_health_section(sbr)
 
     report = {
         "report_format_version": REPORT_FORMAT_VERSION,
@@ -2321,6 +2372,7 @@ def build_report(sbr):
         "instruction_quality_section": instruction_quality_section,
         "owner_umr_closure_section": owner_umr_closure_section,
         "dead_zone_reconciliation_section": dead_zone_reconciliation_section,
+        "wiring_registry_health_section": wiring_registry_health_section,
         "current_flat_fields": current_flat,
         "thresholds": {
             "SWAP_FREE_PCT_WARN_THRESHOLD": SWAP_FREE_PCT_WARN_THRESHOLD,
@@ -2613,6 +2665,26 @@ def render_report_text(report):
                       f"{len(escalations)}")
         for e in escalations:
             lines.append(f"  [{e['opened_ts']}] id={e['id']} {e['related_umr']}: {e['title']}")
+
+    lines.append("")
+    h("16. WIRING REGISTRY HEALTH (proactive, real wiring_registry.verification_status "
+      "surfaced from generate_wiring_registry.py's own live cron-refreshed data -- "
+      "owner absolute stop-work order, task-20260806-165921)")
+    wh = report["wiring_registry_health_section"]
+    if wh.get("error"):
+        lines.append(f"ERROR reading wiring_registry: {wh['error']}")
+    else:
+        counts = wh["verification_status_counts"]
+        lines.append(f"TOTAL_ENTITIES: {wh['total_entities']} (oldest last_verified_ts: "
+                      f"{wh['oldest_last_verified_ts']})")
+        lines.append("VERIFICATION_STATUS_COUNTS: " +
+                      ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+        lines.append(f"UNHEALTHY_COUNT (PATH_MISSING + HASH_DRIFTED): {wh['unhealthy_count']}")
+        if wh["unhealthy_count"]:
+            lines.append(f"  most recent {len(wh['unhealthy_examples'])} unhealthy row(s):")
+            for r in wh["unhealthy_examples"]:
+                lines.append(f"    [{r['last_verified_ts']}] {r['verification_status']} "
+                              f"{r['entity_type']} {r['entity_id']}: {r['path']}")
 
     lines.append("")
     lines.append("=" * 78)

@@ -79,48 +79,114 @@ declared "done".
         fix to get the corrected count (was 34/148 with the pre-existing
         failure poisoning every script that shares that one test file).
       - Committed: `fix(generate_pm_report_v3): harden get_test_script_build_section
-        + fix test fake routing (found by platform completion checklist)`.
+        + fix test fake routing (found by platform completion checklist)`
+        (`65b1643`, pushed).
+- [x] **"Proactive wiring health check" (SPEC-named absorbed item) -- built,
+      real, tested, closed.** Verified first that it genuinely did not
+      already exist: `generate_wiring_registry.py` computes
+      `verification_status`/`content_hash` on every run and DOES run
+      periodically (`veridian-cron-generate-wiring-registry.timer`, live,
+      confirmed via `systemctl --user list-timers`), but nothing ever
+      surfaced an unhealthy result anywhere -- `generate_pm_report_v3.py` had
+      zero mentions of "wiring" before this change, live counts right now
+      are `HASH_DRIFTED=12, PATH_MISSING=22` out of 8564 real entities, and
+      none of that was visible to a PM/human without manually querying the
+      DB. Added `get_wiring_registry_health_section()` +
+      `render_report_text()` Section 16 ("WIRING REGISTRY HEALTH") to
+      `generate_pm_report_v3.py` -- pure read-only SELECT over
+      `wiring_registry`'s own already-computed columns (no second
+      verification implementation), piggy-backing on the report's own
+      already-live 10-minute cron cadence
+      (`veridian-pm-report-tick.timer`) instead of requesting a new,
+      separately-authorized cron unit (this server's systemd units are an
+      explicit "closed set" per `~/.config/systemd/user/README.md`).
+      4 new real tests in `test_generate_pm_report_v3.py` (isolated temp DB,
+      real `superboss-register.py::_ensure_wiring_registry_table()` schema,
+      not hand-duplicated) prove: correct counts/examples over a real
+      healthy+unhealthy mix, zero-unhealthy case, honest error on a missing
+      table, and -- the actual requirement -- a real PATH_MISSING row
+      genuinely appears in `render_report_text()`'s real output text
+      end-to-end. Live-ran `generate_pm_report_v3.py --no-db-write` against
+      the real DB: **the new section correctly surfaced all 34 real
+      currently-unhealthy rows** (confirmed by direct output inspection).
+      Full suite: 540/540 pass. Committed
+      (`feat(generate_pm_report_v3): add Section 16 WIRING REGISTRY HEALTH`).
+- [x] **"Unregistered mentions sweep against wiring_registry" (SPEC-named
+      absorbed item) -- built, real, tested, closed.** Verified the gap was
+      real, not a false premise: `resolve_unregistered_mentions()` in
+      `regenerate_master_index.py` only ever cross-checks/registers into
+      `system_index`, never `wiring_registry` -- confirmed by reading its
+      full body (only `SELECT ... FROM system_index` / `INSERT INTO
+      system_index`, no `wiring_registry` reference anywhere in that
+      function). Live backlog is currently fully drained (0 rows with
+      `status='NEEDS_REGISTRATION'`; all past rows already
+      `RESOLVED_AUTO_REGISTERED:...`), so this was a genuine design gap, not
+      an active blocking issue. Added `sweep_wiring_registry_coverage()`:
+      read-only, checks every real disk-resolved `unregistered_mentions`
+      path (already-resolved and still-open) against `wiring_registry.path`,
+      wired into `build_regenerated_model()`'s output and the CLI summary.
+      Deliberately read-only (never a second writer into `wiring_registry`,
+      which `generate_wiring_registry.py` already owns end-to-end). New
+      `test_regenerate_master_index.py` (0 pre-existing tests for this
+      script -- this closes that gap too): 5 real tests over an isolated
+      temp DB, using this script's own real `superboss-register.py` source
+      file as the real disk-resolvable seed path (no path mocking). Live
+      `--dry-run` run against the real DB (read-only, safe) found **5 of 7
+      real backlog paths are genuinely absent from `wiring_registry`** --
+      a real, previously-invisible gap now surfaced (e.g.
+      `/opt/veridian/ai-os/SYSTEM_DIAGRAM.md`,
+      `generate_task_checklist-latest.yaml`). Full suite: 545/545 pass.
+      Committed (`feat(regenerate_master_index): add
+      sweep_wiring_registry_coverage + real tests`).
+- [x] Re-ran the checklist generator after each of the above; final numbers
+      this session: **scripts 47/148, tables 35/42, search 10/10** (see
+      `PLATFORM_COMPLETION_CHECKLIST.md`/`.json`, regenerated and committed
+      each time).
 
-## Remaining (honest, specific, why)
-- [ ] Re-run `generate_platform_completion_checklist.py` (full, with tests)
-      post-fix and record the corrected scripts count/evidence here (expect
-      >34/148 now that the poisoning test passes; still expect a large
-      genuine "NO" bucket for the many scripts with no dedicated test file at
-      all -- that is real, honest signal, not a bug to silently paper over).
+## Remaining (honest, specific, why -- this is the real, current NO-list,
+## not a narrated summary standing in for it)
 - [ ] `ai_agent_registry` table exists live (0 rows) but the script that
       creates/uses it, `ai_agent_registry.py`, is NOT on this branch -- it
       lives only in open, unmerged PR #194
       (`worker/task-20260806-163355-correction--ai-agent-id-scoped-one-per-u`,
       `mergeable=CONFLICTING`, `mergeStateStatus=DIRTY`, no review decision).
-      SPEC explicitly names "the UMR scoped agent id registry and its wiring
-      to wiring_registry and capability_registry" as absorbed, in-scope work
-      for this task -- not "other work" to stop for. Its own PR body already
-      flags "wiring of check-before-dispatch into the actual dispatch
-      chokepoint" as out of scope/not yet done even once merged. Real open
-      work: resolve the merge conflict, land it, then build+test the actual
-      wiring into wiring_registry/capability_registry and the dispatch
-      chokepoint.
-- [ ] "Proactive wiring health check" (named in SPEC) -- not found anywhere
-      in this repo by name/grep. Needs to be designed+built+tested, or a
-      false-premise verification recorded if it turns out to already exist
-      under a different name (checked: `generate_wiring_registry.py` +
-      `wiring_query.py` exist but are generation/lookup, not a proactive
-      *health check*).
-- [ ] "Unregistered mentions sweep against wiring_registry" (named in SPEC) --
-      `unregistered_mentions` table + `resolve_unregistered_mentions()` in
-      `regenerate_master_index.py` already exist, but sweep against
-      `postflight_audit_gate.py`-flagged `ai-os/scripts` paths specifically,
-      not explicitly cross-checked against `wiring_registry` as the SPEC
-      names. Needs verification of whether this is already an equivalent
-      real mechanism (false premise) or a genuine gap to close.
+      SPEC names "the UMR scoped agent id registry and its wiring to
+      wiring_registry and capability_registry" as absorbed, in-scope work.
+      Deliberately NOT force-merged this session: resolving another PR's
+      real merge conflict + verifying its now-corrected 1-UMR-1-agent design
+      is itself a nontrivial, separately-scoped unit of work, and forcing it
+      through blind risks landing a second, lower-quality implementation
+      exactly like the failure mode that PR's own PROGRESS.md already
+      documents avoiding once. Real open work, precisely scoped: resolve
+      PR #194's conflict, merge it, then build+test the actual wiring into
+      wiring_registry/capability_registry and the dispatch chokepoint (its
+      own PR body already flags the dispatch-chokepoint wiring as not done
+      even once merged).
 - [ ] "Report script extension covering PR state and PM own dispatch
-      tracking" (named in SPEC) -- not yet independently verified against
-      `generate_pm_report_v3.py`'s current sections.
-- [ ] The 7 "NO" tables above need a real per-table decision (genuine gap vs.
-      script living outside this checkout's root vs. correctly-unlinked
-      quarantine artifact).
+      tracking" -- investigated, not independently confirmed either way.
+      `generate_pm_report_v3.py` already has Section 12 (DETERMINISTIC
+      COLLISION DETECTION, real `gh pr list` data, PR-citation/file-overlap
+      state per tracked repo) and Section 14 (OWNER UMR CLOSURE TRACKING,
+      real `source_trigger='owner_dispatch_gateway'` rows = PM's own
+      dispatch tracking). No commit in this repo's history is titled/scoped
+      as "report script extension" under this exact name, so this may
+      already be substantively satisfied by Sections 12+14, or the SPEC may
+      want a distinct general PR open/closed/staleness summary Sections
+      12+14 don't provide. Not built this session -- flagged for an
+      explicit Owner call rather than guessed at.
+- [ ] 7 tables still show NO in the checklist: `ai_agent_registry` (see
+      above), `audit_events`/`audit_findings`/`audit_master_reports`/
+      `audit_orchestration_runs`/`audit_runs` (all populated live but this
+      checkout's root-level grep found no writer -- the writer likely lives
+      in a script outside this repo/checkout, needs a real follow-up
+      search), `file_inventory_corrupted_orig_20260806T044301Z` (a
+      quarantined corruption artifact -- correctly unlinked by design, this
+      NO is expected/correct, not a gap).
 - [ ] The full "every one of 148 scripts genuinely complete+tested" bar, at
       the SPEC's letter, is not reachable in one session at reasonable
-      confidence -- most of the ~114 scripts with no dedicated test file
-      would need one authored+verified individually. This file will report
-      the real, current NO-list rather than claim a false "all yes."
+      confidence -- 101 of 148 scripts still show NO in the checklist (down
+      from 114 pre-session; 13 net gained this session via the fix + two
+      builds above, each with real tests). Most remaining NOs have zero
+      dedicated test file at all and would each need a real one
+      authored+verified individually. This file reports the real, current
+      NO-list rather than a false "all yes."

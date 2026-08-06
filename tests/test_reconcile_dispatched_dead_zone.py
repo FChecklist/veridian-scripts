@@ -390,6 +390,92 @@ def test_dry_run_makes_no_writes():
 
 
 # ---------------------------------------------------------------------------
+# Real TOCTOU regression (independent review finding on this script's own
+# PR): a row that legitimately transitions away from 'dispatched' between
+# evidence-gathering and the real write must never be clobbered back to
+# 'queued' on stale evidence.
+# ---------------------------------------------------------------------------
+def test_row_that_legitimately_completes_mid_sweep_is_never_clobbered():
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.sqlite")
+        tasks_dir = os.path.join(tmp, "tasks")
+        os.makedirs(tasks_dir)
+        _seed_db(db_path)
+
+        now = datetime.now(timezone.utc)
+        old_ts = (now - timedelta(minutes=20)).isoformat()
+        _insert_umr_row(db_path, "UMR-race-a", "owner-task-race-a", old_ts)
+
+        with _Env(db_path, tasks_dir):
+            rdz = _load_rdz()
+            sbr = rdz._load_module("sbr_toctou_test", os.path.join(SCRIPTS_DIR, "superboss-register.py"))
+
+            # Build the same stale evidence run_sweep() would have gathered
+            # for this row BEFORE any real write happens...
+            conn = sbr._connect()
+            row = conn.execute(
+                "SELECT umr_id, task_identity, status, ts_dispatched, unit_name, "
+                "outputs_json, source_trigger FROM umr_tasks WHERE umr_id='UMR-race-a'"
+            ).fetchone()
+            evidence = rdz.classify(sbr, conn, dict(row), now, tasks_dir)
+            assert evidence["bucket"] == "DEAD_ZONE"
+
+            # ...then simulate a real, legitimate concurrent completion
+            # landing in the real gap between that evidence read and this
+            # script's own write (e.g. a genuine mark-umr-terminal call).
+            with sbr._write_lock():
+                sbr.update_umr_task(conn, "UMR-race-a", status="completed", ts_completed="2026-08-06T12:30:00+00:00")
+                conn.commit()
+
+            # The real auto-reset action must now see the row has moved on
+            # and must refuse to act on the stale evidence.
+            result = rdz.auto_reset_to_queued(sbr, conn, evidence)
+            conn.close()
+
+        assert result["action"] == "skipped_stale_evidence"
+        after = _row(db_path, "UMR-race-a")
+        assert after["status"] == "completed", (
+            f"a real legitimate completion must never be clobbered back to queued, got {after}")
+        assert _pm_decisions(db_path, related_umr="UMR-race-a") == [], (
+            "no audit-log entry must be written for a reset that never actually happened")
+        print("PASS: test_row_that_legitimately_completes_mid_sweep_is_never_clobbered")
+
+
+def test_escalation_never_duplicates_even_if_caller_side_check_is_stale():
+    """Direct regression for escalate()'s own inner re-check: even if a
+    caller invokes escalate() without having freshly checked
+    _has_open_escalation() itself (e.g. two real overlapping invocations),
+    at most one real open escalation row can ever exist."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "test.sqlite")
+        tasks_dir = os.path.join(tmp, "tasks")
+        os.makedirs(tasks_dir)
+        _seed_db(db_path)
+
+        now = datetime.now(timezone.utc)
+        old_ts = (now - timedelta(minutes=20)).isoformat()
+        _insert_umr_row(db_path, "UMR-race-b", "owner-task-race-b", old_ts)
+
+        with _Env(db_path, tasks_dir):
+            rdz = _load_rdz()
+            sbr = rdz._load_module("sbr_escalate_race_test", os.path.join(SCRIPTS_DIR, "superboss-register.py"))
+            conn = sbr._connect()
+            evidence = {"umr_id": "UMR-race-b", "reason": "test", "ts_dispatched": old_ts}
+
+            first = rdz.escalate(sbr, conn, dict(evidence))
+            # Simulate a second, concurrent caller that never itself
+            # re-checked _has_open_escalation() before calling escalate().
+            second = rdz.escalate(sbr, conn, dict(evidence))
+            conn.close()
+
+        assert first["action"] == "escalated_blocking_decision"
+        assert second["action"] == "already_escalated_skipped"
+        open_escalations = [d for d in _pm_decisions(db_path, related_umr="UMR-race-b") if d["status"] == "open"]
+        assert len(open_escalations) == 1
+        print("PASS: test_escalation_never_duplicates_even_if_caller_side_check_is_stale")
+
+
+# ---------------------------------------------------------------------------
 # Direct coverage of the new superboss-register.py canonical functions this
 # script depends on.
 # ---------------------------------------------------------------------------

@@ -110,6 +110,23 @@ generate_pm_report_v3.py's existing Section 7 "PM DECISION REQUIRED",
 status='open') pm_decisions_pending row instead, and never opens a second
 one for the same umr_id while one is already open (checked before writing).
 
+REAL TOCTOU FIX (found by this script's own independent PR review, applied
+before merge): run_sweep() gathers its candidate rows and every real
+task-dir/unit/ocid-evidence check BEFORE ever taking _write_lock() -- so a
+real concurrent writer (a genuine mark-umr-terminal call, an operator, a
+legitimately-finishing interactive session) could, in principle, move a
+row's real status/ts_dispatched in the narrow gap between that read and
+this script's own write. Both auto_reset_to_queued() and escalate() now
+re-verify their own evidence with a fresh, real SELECT taken INSIDE the
+write lock, immediately before the real write (_row_still_matches_evidence()/
+the inline _has_open_escalation() re-check) -- and skip their own write
+entirely (no reset, no audit log, no duplicate escalation) the instant that
+fresh check disagrees with the evidence gathered earlier, rather than ever
+acting on stale evidence. See test_row_that_legitimately_completes_mid_sweep_is_never_clobbered()
+and test_escalation_never_duplicates_even_if_caller_side_check_is_stale() in
+tests/test_reconcile_dispatched_dead_zone.py for the real regression
+coverage.
+
 Wired for real automatic/immediate operation into resource_governor_tick_loop.sh
 (same 30s cadence as --tick/--reconcile-stale) -- see that script's own
 comment block. generate_pm_report_v3.py's own Section 15 (read-only) surfaces
@@ -307,6 +324,33 @@ def _has_open_escalation(conn, umr_id):
     return (row["c"] if row else 0) > 0
 
 
+def _row_still_matches_evidence(conn, evidence):
+    """Real TOCTOU guard (found by independent review of this script's own
+    PR): run_sweep() gathers its candidate row list via one batch SELECT,
+    then classify()'s own real filesystem/DB checks, all BEFORE ever taking
+    _write_lock() -- so between that read and the moment a write actually
+    happens, a real concurrent writer (an operator's manual mark-umr-terminal,
+    a genuinely-finishing interactive session, dispatch-tick's own mechanical
+    pickup) could have legitimately moved this exact row's status/ts_dispatched
+    out from under this script. Re-checked here with a fresh, real SELECT,
+    taken INSIDE the write lock right before the real write -- both
+    auto_reset_to_queued() and escalate() call this and skip their own write
+    entirely (no reset, no audit log, no escalation) rather than act on
+    stale evidence. Returns the fresh row dict on a genuine match, None on
+    any mismatch (row gone, status changed, or a fresh ts_dispatched from a
+    real intervening redispatch)."""
+    fresh = conn.execute(
+        "SELECT status, ts_dispatched FROM umr_tasks WHERE umr_id=?", (evidence["umr_id"],)
+    ).fetchone()
+    if fresh is None:
+        return None
+    if fresh["status"] != "dispatched":
+        return None
+    if fresh["ts_dispatched"] != evidence["ts_dispatched"]:
+        return None
+    return dict(fresh)
+
+
 def auto_reset_to_queued(sbr, conn, evidence):
     """Real first-occurrence action: reset the row via the one real
     canonical function, then write one real, informational, already-closed
@@ -315,14 +359,22 @@ def auto_reset_to_queued(sbr, conn, evidence):
     get_owner_proposals_pending()'s own decision_type-scoped WHERE clauses,
     and immediately resolved here too, so it can never be mistaken for a
     real open/blocking item by any reader). Both writes happen inside one
-    real _write_lock() + one commit -- an audit-log entry for a reset that
-    never happened (or vice versa) would itself be a real correctness bug
-    this script exists to prevent elsewhere."""
+    real _write_lock() + one commit, and only after _row_still_matches_evidence()
+    reconfirms the row is still genuinely in the exact state this evidence
+    was computed against -- an audit-log entry for a reset that never
+    happened (or a reset applied against stale evidence) would itself be a
+    real correctness bug this script exists to prevent elsewhere."""
     umr_id = evidence["umr_id"]
     reason = (
         f"reconcile_dispatched_dead_zone.py auto-reset (UMR-20260806-115605-854d): {evidence['reason']}"
     )
     with sbr._write_lock():
+        if _row_still_matches_evidence(conn, evidence) is None:
+            evidence["action"] = "skipped_stale_evidence"
+            evidence["reason"] += (" [SKIPPED: a real, fresh re-check under the write lock found this "
+                                    "row's status/ts_dispatched had already changed -- never acted on "
+                                    "stale evidence.]")
+            return evidence
         sbr.reset_umr_task_to_queued(conn, umr_id, reason=reason)
         decision_id = sbr.insert_pm_decision_pending(
             conn,
@@ -348,8 +400,13 @@ def escalate(sbr, conn, evidence):
     (decision_type='pm_decision', the default -- appears in
     generate_pm_report_v3.py's existing Section 7 "PM DECISION REQUIRED",
     status='open') pm_decisions_pending row, and do NOT reset the row again.
-    Idempotent per run: only ever opens one such row per umr_id at a time
-    (checked by _has_open_escalation() before this is called)."""
+    Idempotent: _has_open_escalation() is re-checked HERE, inside the write
+    lock, immediately before the real INSERT (not only by the caller before
+    taking the lock -- found by independent review: two overlapping real
+    invocations, e.g. the tick loop's scheduled run overlapping a manual
+    --umr-id debug re-run, could otherwise both pass the caller-side check
+    and each insert a duplicate row) -- so at most one real open escalation
+    row can ever exist per umr_id, even under real concurrent callers."""
     umr_id = evidence["umr_id"]
     detail = (
         f"{umr_id} has fallen into the dispatched dead zone a SECOND time after already being "
@@ -358,6 +415,9 @@ def escalate(sbr, conn, evidence):
         f"again. Real current evidence: {json.dumps(evidence, default=str)}"
     )
     with sbr._write_lock():
+        if _has_open_escalation(conn, umr_id):
+            evidence["action"] = "already_escalated_skipped"
+            return evidence
         decision_id = sbr.insert_pm_decision_pending(
             conn,
             title=f"{ESCALATION_TITLE_PREFIX}: {umr_id} dead-zoned a second time after auto-reset",

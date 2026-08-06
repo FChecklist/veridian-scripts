@@ -1,6 +1,36 @@
-# PROGRESS -- task-20260806-075210-resume-real-queued-backlog-after-lock-in
+# PROGRESS -- task-20260806-075019-resume-backlog (prior content from task-20260806-075210 below, verified still accurate)
 
-## Note on this task (task-20260806-075210)
+## Note on this task (task-20260806-075019)
+
+This task's dispatched SPEC ("Root cause why file_inventory.py and generate_pm_report_v3.py ran
+over one hour. Fix collision detection bug at its root, PR 120 did not fix the underlying loop.
+Deploy or explain the missing PM cycle precheck script. Add UMR closure tracking section to the
+report script. Push PRs 954, 959, 962 through review.") is byte-for-byte the same 5-item SPEC
+(same fabricated PR numbers 954/959/962) already dispatched three times before this task started
+(task-20260806-074622 -> PR #138, task-20260806-074708 -> PR #140, task-20260806-075210 -> PR
+#141), and fully resolved on `main` by PR #133/#140 before this task even began.
+
+Independently re-verified against live state before writing anything (per this repo's own
+standing false-premise lesson, [[veridian-task-prompt-false-premise-pattern]]):
+- `ls file_inventory.py` / repo-wide grep -> no such script has ever existed in this repo; only
+  referenced as a systemd service name (`veridian-cron-file-inventory.service`) in PR bodies.
+- `gh pr view 954/959/962` -> all three still return "Could not resolve to a PullRequest",
+  confirmed again just now. `gh pr list --state all` -> highest real PR is #141 (this task's
+  immediate predecessor's own merge).
+- `origin/main` HEAD (`5b1fd37`) already contains PR #141, which already contains PR #140, which
+  already contains the real fix (PR #133, merged `99073fd`). `git merge origin/main` into this
+  branch was a clean fast-forward (`4f83ad5..5b1fd37`) -- no divergence, nothing to redo.
+- Re-read `generate_pm_report_v3.py` directly (not trusted from any prior task's commit message):
+  `COLLISION_GH_MAX_WORKERS` / `COLLISION_SECTION_TIME_BUDGET_SECONDS` (item 1's fix) and
+  `get_owner_umr_closure_section()` / report "Section 14" (item 3) are both present and live on
+  `main` right now, at lines ~395-400 and ~1552-1741 respectively.
+
+**Conclusion: no further action required, again.** All five SPEC items remain fully resolved on
+`main`. This is now the fourth consecutive duplicate dispatch of this exact SPEC text; the
+detailed per-item evidence below (from task-20260806-074708, re-confirmed unchanged by
+task-20260806-075210) still holds and was re-checked, not re-derived, by this task.
+
+## Note on the prior task (task-20260806-075210)
 
 This task's dispatched SPEC is a near-verbatim repeat of task-20260806-074708's SPEC (same 5
 items, same fabricated PR numbers 954/959/962, same "lock incident resolved" framing). Before
@@ -135,7 +165,14 @@ and merged instead).**
       Fast-forward-merged `origin/main` (`79cdf86..2345084`) into this branch so it reflects
       the already-resolved state instead of diverging from it.
 
+- [x] **(this task, 075019)** Independently re-verified all five SPEC items a fourth time against
+      current live state (file_inventory.py absence, PRs 954/959/962 nonexistence, main HEAD
+      `5b1fd37` already containing PR #133's fix and Section 14) -- confirmed nothing changed
+      since PR #141 landed. Fast-forward-merged `origin/main` (`4f83ad5..5b1fd37`) into this
+      branch; no divergence, no redundant work performed.
+
 ## Remaining
-- [ ] None. All five SPEC items independently verified as already resolved on `main` (PR #140);
-      no destructive, redundant, or fabricated action taken on the false-premise items (the
-      "stuck processes"/lock framing and PRs 954/959/962).
+- [ ] None. All five SPEC items independently verified as already resolved on `main` (PR #133,
+      landed via #140/#141); no destructive, redundant, or fabricated action taken on the
+      false-premise items (the recurring "lock incident"/"stuck processes" framing and the
+      nonexistent PRs 954/959/962).

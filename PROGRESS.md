@@ -62,21 +62,62 @@ event_type/input/output/model/cost/denied/gated), (3) capability_registry's
       convention already used repeatedly in this exact chain (e.g.
       `f4d6af3`'s own PR #199 merge).
 
+- [x] Correction 1 built: real `prompt_templates`/`prompt_versions` tables
+      in superboss-register.sqlite (`_ensure_prompt_templates_table`,
+      `_ensure_prompt_versions_table`) + `resolve_prompt_template()`
+      (fail-loud, mirrors `resolvePromptTemplate` exactly: raises
+      `ValueError` on an unknown `template_key` or a real template with no
+      `label`-active version) + `register_prompt_template()` (real
+      versioning: version = max existing + 1, exactly one active row per
+      template+label) + `seed_default_orchestrator_prompt_templates()`
+      (idempotent bootstrap, byte-identical content to the 2 strings it
+      replaces) + CLI `register-prompt-template`/`resolve-prompt-template`.
+      `unified_orchestrator.step_submission_contract()`'s `submit_command`/
+      `audit_method` now resolve from these real rows instead of inline
+      f-string prose.
+- [x] Correction 2 built: real `orchestrator_executions` structured log
+      table (org_id/task_id/layer_key/event_type/input_json/output_json/
+      status/model/provider/cost_usd/duration_ms) + `record_orchestrator_
+      execution()` (status is always exactly one of completed/failed/
+      denied/gated, mirrors `orchestra-execution-logger.ts`'s own real
+      4-state distinction) + `log_orchestrator_execution()` (fire-and-
+      forget: catches its own persistence failures, never raises into the
+      real step it's logging) + CLI `record-orchestrator-execution`.
+      `unified_orchestrator.run()` now logs one real structured row for
+      each of steps 5-10, status derived from that step's own real result
+      (verified in tests: reverify failure -> `failed`,
+      validate_output/writeback correctly blocking a failed reverify ->
+      `gated`, validate_input rejecting before real work -> `denied`).
+      `org_id` stays genuinely null (honestly documented why: no real
+      multi-org concept exists on this internal orchestrator's side).
+- [x] Correction 3 built: `step_reuse_check` now also calls
+      `scripts/find_code.sh` directly via a new `_run_find_code_search()`
+      helper (never reimplements its pruned find/grep logic) whenever real
+      `scope_terms` are supplied -- adds a `code_search` key to step 1's
+      result (`ran`/`scope_terms_searched`/`matches_by_term`/`any_matches`).
+      Honestly reports `ran: false` (never fabricates a regex from
+      free-text `intent_text`) when no `scope_terms` are given.
+- [x] Real tests added to `tests/test_unified_orchestrator.py` (10 total,
+      all green): extended the existing positive/negative end-to-end tests
+      with real assertions on the new `prompt_templates`/`prompt_versions`/
+      `orchestrator_executions` rows and `code_search` results (never
+      mocked -- same real-scratch-DB convention as the rest of the file),
+      plus 6 new standalone tests (fail-loud resolve, version-roundtrip,
+      idempotent seeding, CLI round-trip, invalid-status rejection,
+      fire-and-forget-never-raises). Full `tests/` suite: 358/358 passed.
+      Root-level `test_ai_agent_registry.py`/`test_agent_work_briefing.py`/
+      `test_tight_task_validation.py` spot-checked green too (unaffected
+      modules, confirming no regression from the additive schema changes).
+- [x] Committed + pushed; recorded completion via `agent_work_briefing.py`
+      against `UMR-20260806-130110-c620`.
+
 ## Remaining
 
-- [ ] Correction 1: real `prompt_templates`/`prompt_versions` tables in
-      superboss-register.sqlite + `resolve_prompt_template()` (fail-loud,
-      mirrors `resolvePromptTemplate`), replacing `step_submission_contract`'s
-      2 inline prose strings with resolved, versioned, labeled rows.
-- [ ] Correction 2: real `orchestrator_executions` structured log table
-      (org/task/layer/event_type/input/output/model/cost/status incl.
-      denied/gated) + `record_orchestrator_execution()` (never throws,
-      mirrors `recordOrchestraExecution`'s fire-and-forget posture), wired
-      into `unified_orchestrator.run()`'s real step transitions.
-- [ ] Correction 3: `step_reuse_check` calls `scripts/find_code.sh` directly
-      (the real, already-registered `pruned_code_search` capability) in
-      addition to the existing registry-metadata lookups, never
-      reimplementing search logic.
-- [ ] Real tests for all 3 corrections, run green locally before push.
-- [ ] Commit + push; record completion via `agent_work_briefing.py`
-      against `UMR-20260806-130110-c620`.
+- [ ] None for this task's own 3-correction scope. Honestly flagged, not
+      fixed here (out of scope): PR #207/UMR-20260806-125524-720c's own
+      still-open items (63 genuine `wiring_registry` path failures,
+      `cron_job` path-convention inconsistency, reconciling
+      `unified_orchestrator.py` steps 1/2/10 against
+      task-20260806-181146's sibling capability-registry work once that
+      lands) -- unrelated to this task's 3 corrections, already tracked
+      under that UMR's own PROGRESS.md.

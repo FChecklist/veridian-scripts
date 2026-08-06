@@ -7421,6 +7421,287 @@ def cmd_record_task_audit(args):
     print(json.dumps({"audit_id": audit_id, "verdict": args.verdict}, indent=2, default=str))
 
 
+# --- Prompt Operating System (task-20260806-192043 correction 1 /
+# UMR-20260806-125524-720c): mirrors repos/compliance-tracker's own real,
+# proven `prompt-os-resolver.ts` pattern (Wave 22) -- a versioned, labeled
+# prompt_templates/prompt_versions table, never free-composed prose dispatch
+# text. That resolver is a genuinely different, customer-facing, Postgres-
+# backed system (src/app/api/ai/orchestrate/route.ts's own Mother Router),
+# confirmed by direct inspection before building this -- this is the SAME
+# real pattern, mirrored exactly (never reinvented weaker), applied to this
+# sqlite-backed internal dev-ops orchestrator's own dispatch prose: today
+# that is unified_orchestrator.py's step_submission_contract(), whose
+# `submit_command`/`audit_method` strings are hardcoded f-string prose with
+# no versioning/labeling at all -- the real gap this closes.
+#
+# Two tables, not one, same real split prompt-os-resolver.ts uses: a
+# template (identified by templateKey) can have many versions, each with a
+# label ("production" by default, same convention) and an is_active flag --
+# resolving a template+label always returns the highest-`version` row that
+# is genuinely active for that label, never an assumed/newest-by-timestamp
+# row (matches resolvePromptTemplate()'s own real query shape: WHERE
+# promptTemplateId=? AND label=? AND isActive=true ORDER BY version DESC).
+def _ensure_prompt_templates_table(conn):
+    """Standalone idempotent create, same defensiveness convention as
+    _ensure_task_audits_table."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS prompt_templates (
+        id TEXT PRIMARY KEY,
+        template_key TEXT NOT NULL UNIQUE,
+        created_at TEXT NOT NULL
+    )""")
+    conn.commit()
+
+
+def _ensure_prompt_versions_table(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS prompt_versions (
+        id TEXT PRIMARY KEY,
+        prompt_template_id TEXT NOT NULL,
+        label TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (prompt_template_id) REFERENCES prompt_templates(id)
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_prompt_versions_template_label "
+                  "ON prompt_versions(prompt_template_id, label)")
+    conn.commit()
+
+
+def resolve_prompt_template(conn, template_key, label="production"):
+    """Resolves the active, labeled version of a real prompt template.
+    Fails LOUD (raises) if no such template/labeled-active-version exists --
+    same posture as prompt-os-resolver.ts's own resolvePromptTemplate():
+    silently falling back to a stale hardcoded string would defeat the
+    entire point of centralizing dispatch prose here, so a missing
+    template/label is a real configuration error, never papered over with a
+    default."""
+    template = conn.execute(
+        "SELECT id FROM prompt_templates WHERE template_key = ?", (template_key,)
+    ).fetchone()
+    if not template:
+        raise ValueError(f"Unknown prompt template: {template_key!r}")
+    version = conn.execute(
+        "SELECT content FROM prompt_versions WHERE prompt_template_id = ? AND label = ? "
+        "AND is_active = 1 ORDER BY version DESC LIMIT 1",
+        (template["id"], label),
+    ).fetchone()
+    if not version:
+        raise ValueError(f"No {label!r}-labeled active version found for prompt template: {template_key!r}")
+    return version["content"]
+
+
+def register_prompt_template(conn, *, template_key, label, content, activate=True):
+    """Upsert path: get-or-create the template row (by template_key), then
+    insert a real new version row (version = 1 + the highest existing
+    version for this exact template_key+label pair, 1 if none yet). When
+    `activate` (the default), every OTHER existing version sharing this
+    exact template_key+label is deactivated first -- exactly one version is
+    ever active per template+label pair, same invariant resolve_prompt_
+    template()'s own query relies on. Does NOT commit, same convention as
+    every other record_*()/register_*() helper in this file."""
+    row = conn.execute("SELECT id FROM prompt_templates WHERE template_key = ?", (template_key,)).fetchone()
+    if row:
+        template_id = row["id"]
+    else:
+        template_id = _new_id("PROMPTTPL")
+        conn.execute(
+            "INSERT INTO prompt_templates (id, template_key, created_at) VALUES (?,?,?)",
+            (template_id, template_key, _now_iso()),
+        )
+    existing_max = conn.execute(
+        "SELECT MAX(version) v FROM prompt_versions WHERE prompt_template_id = ? AND label = ?",
+        (template_id, label),
+    ).fetchone()
+    next_version = (existing_max["v"] or 0) + 1
+    if activate:
+        conn.execute(
+            "UPDATE prompt_versions SET is_active = 0 WHERE prompt_template_id = ? AND label = ?",
+            (template_id, label),
+        )
+    version_id = _new_id("PROMPTVER")
+    conn.execute(
+        "INSERT INTO prompt_versions (id, prompt_template_id, label, version, content, is_active, created_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (version_id, template_id, label, next_version, content, 1 if activate else 0, _now_iso()),
+    )
+    return {"template_id": template_id, "version_id": version_id, "version": next_version}
+
+
+# Default seed content -- byte-identical to what unified_orchestrator.py's
+# step_submission_contract() used to return as inline f-string prose before
+# this correction, same "seeded 'production' version is a byte-identical
+# copy of what this function used to return inline" convention prompt-os-
+# resolver.ts's own real migration uses (this is that same real migration
+# step, mirrored, not a resolver-side fallback -- resolve_prompt_template()
+# above still fails loud on a genuinely missing template; this only ever
+# seeds the two specific real rows unified_orchestrator.py depends on, and
+# only if they don't already exist).
+_DEFAULT_ORCHESTRATOR_PROMPT_TEMPLATES = {
+    "orchestrator.submission_contract.submit_command":
+        "cd {workspace_dir} && git add -A && git commit -m '<real summary>' && git push",
+    "orchestrator.submission_contract.audit_method":
+        "the orchestrator independently re-runs `{audit_cmd}` itself after the agent reports "
+        "done (step 7) -- status is written completed only if that real command really exits 0, "
+        "never on the agent's own say-so",
+}
+
+
+def seed_default_orchestrator_prompt_templates(conn):
+    """Idempotent: only inserts a real version 1 row for a template_key that
+    genuinely has none yet under label='production' -- never overwrites an
+    already-seeded or already-edited row, and never re-inserts a duplicate
+    version on repeat calls (checked via resolve_prompt_template's own
+    query, not assumed)."""
+    _ensure_prompt_templates_table(conn)
+    _ensure_prompt_versions_table(conn)
+    for template_key, content in _DEFAULT_ORCHESTRATOR_PROMPT_TEMPLATES.items():
+        try:
+            resolve_prompt_template(conn, template_key, "production")
+            continue  # already seeded (or already real-configured) -- leave it alone
+        except ValueError:
+            pass
+        register_prompt_template(conn, template_key=template_key, label="production", content=content)
+    conn.commit()
+
+
+def cmd_register_prompt_template(args):
+    """Usage: python3 superboss-register.py register-prompt-template --template-key KEY \\
+        [--label production] --content-file PATH [--no-activate]"""
+    with open(args.content_file, encoding="utf-8") as f:
+        content = f.read()
+    init_db_silent()
+    conn = _connect()
+    _ensure_prompt_templates_table(conn)
+    _ensure_prompt_versions_table(conn)
+    with _write_lock():
+        result = register_prompt_template(
+            conn, template_key=args.template_key, label=args.label, content=content,
+            activate=not args.no_activate,
+        )
+        conn.commit()
+    conn.close()
+    print(json.dumps(result, indent=2, default=str))
+
+
+def cmd_resolve_prompt_template(args):
+    """Usage: python3 superboss-register.py resolve-prompt-template --template-key KEY [--label production]"""
+    init_db_silent()
+    conn = _connect()
+    _ensure_prompt_templates_table(conn)
+    _ensure_prompt_versions_table(conn)
+    try:
+        content = resolve_prompt_template(conn, args.template_key, args.label)
+        print(json.dumps({"template_key": args.template_key, "label": args.label, "content": content},
+                          indent=2, default=str))
+    finally:
+        conn.close()
+
+
+# --- Structured execution log (task-20260806-192043 correction 2 /
+# UMR-20260806-125524-720c): mirrors repos/compliance-tracker's own real,
+# proven `orchestra-execution-logger.ts` pattern (Wave 23) -- org/task/
+# layer/event-type/input/output/model/cost, with explicit denied and gated
+# states, never a narrower ad hoc shape. task_audits (Gap 2, above) already
+# gives independent-re-verification pass/fail a real home, but it is exit-
+# code/stdout/stderr shaped, not this shape -- it does not answer "what
+# real layer/step ran, with what real input/output, at what real cost,
+# and was it denied/gated/completed/failed" the way this table does. This
+# directly closes the audit/completion-tracking gap UMR-20260806-125524-720c
+# itself already found and flagged as open. `org_id` is kept in the shape
+# (schema parity with the real pattern being mirrored) but is genuinely
+# nullable here and expected to stay null for this internal, single-tenant,
+# server-local orchestrator -- there is no real multi-org concept on this
+# side to fabricate one for, honestly reported as such rather than forcing
+# a fake value into a real column.
+def _ensure_orchestrator_executions_table(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS orchestrator_executions (
+        execution_id TEXT PRIMARY KEY,
+        ts TEXT NOT NULL,
+        org_id TEXT,
+        task_id TEXT,
+        layer_key TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        input_json TEXT,
+        output_json TEXT,
+        status TEXT NOT NULL,
+        duration_ms INTEGER,
+        model TEXT,
+        provider TEXT,
+        cost_usd REAL
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_orchestrator_executions_task_id "
+                  "ON orchestrator_executions(task_id)")
+    conn.commit()
+
+
+_VALID_ORCHESTRATOR_EXECUTION_STATUSES = ("completed", "failed", "denied", "gated")
+
+
+def record_orchestrator_execution(conn, *, task_id, layer_key, event_type, status, input=None, output=None,
+                                   duration_ms=None, model=None, provider=None, cost_usd=None, org_id=None):
+    """Insert ONE real structured execution record. `status` is always
+    exactly one of completed/failed/denied/gated (real boolean-shaped
+    states, never a narrated summary) -- same 4-state distinction orchestra-
+    execution-logger.ts's own RecordOrchestraExecutionInput documents:
+    'denied' = the step never really ran at all (e.g. step_validate_input
+    rejected the task before any real work started); 'gated' = the real
+    step ran but its result was blocked from being accepted (e.g.
+    step_validate_output's real checks failed after step_reverify's real
+    command genuinely passed); 'failed' = the real underlying command/
+    process itself errored; 'completed' = it genuinely passed. Does NOT
+    commit, same convention as every other record_*() helper in this file."""
+    if status not in _VALID_ORCHESTRATOR_EXECUTION_STATUSES:
+        raise ValueError(f"status must be one of {_VALID_ORCHESTRATOR_EXECUTION_STATUSES}, got {status!r}")
+    execution_id = _new_id("ORCHEXEC")
+    conn.execute(
+        "INSERT INTO orchestrator_executions (execution_id, ts, org_id, task_id, layer_key, event_type, "
+        "input_json, output_json, status, duration_ms, model, provider, cost_usd) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (execution_id, _now_iso(), org_id, task_id, layer_key, event_type,
+         json.dumps(input, default=str) if input is not None else None,
+         json.dumps(output, default=str) if output is not None else None,
+         status, duration_ms, model, provider, cost_usd),
+    )
+    return execution_id
+
+
+def log_orchestrator_execution(conn, **kwargs):
+    """Fire-and-forget wrapper -- same posture orchestra-execution-logger.ts's
+    own recordOrchestraExecution() documents in its header: observability
+    logging must never block or fail the real operation it is recording, so
+    a genuine persistence failure here is caught and reported to stderr,
+    never raised into the caller's own control flow. Commits immediately
+    (unlike the non-committing record_* helpers) since callers of this
+    specific wrapper are not expected to already be inside a shared
+    transaction the way task_audits/prompt_versions writers are."""
+    try:
+        _ensure_orchestrator_executions_table(conn)
+        with _write_lock():
+            execution_id = record_orchestrator_execution(conn, **kwargs)
+            conn.commit()
+        return execution_id
+    except Exception as e:
+        print(f"log_orchestrator_execution: non-fatal logging failure: {e}", file=sys.stderr)
+        return None
+
+
+def cmd_record_orchestrator_execution(args):
+    """Usage: python3 superboss-register.py record-orchestrator-execution --task-id ID \\
+        --layer-key KEY --event-type TYPE --status {completed,failed,denied,gated} \\
+        [--input-json JSON] [--output-json JSON] [--duration-ms N] [--model M] [--provider P] [--cost-usd F]"""
+    init_db_silent()
+    conn = _connect()
+    execution_id = log_orchestrator_execution(
+        conn, task_id=args.task_id, layer_key=args.layer_key, event_type=args.event_type,
+        status=args.status,
+        input=json.loads(args.input_json) if args.input_json else None,
+        output=json.loads(args.output_json) if args.output_json else None,
+        duration_ms=args.duration_ms, model=args.model, provider=args.provider, cost_usd=args.cost_usd,
+    )
+    conn.close()
+    print(json.dumps({"execution_id": execution_id, "status": args.status}, indent=2, default=str))
+
+
 # Real, env-overridable defaults (same convention as DB_PATH's own
 # SUPERBOSS_REGISTER_DB env override above) -- tests point these at real
 # scratch directories/repos instead of the real, live
@@ -7847,6 +8128,34 @@ if __name__ == "__main__":
     p_recaudit.add_argument("--stdout-tail", dest="stdout_tail", default=None)
     p_recaudit.add_argument("--stderr-tail", dest="stderr_tail", default=None)
 
+    p_regprompt = sub.add_parser("register-prompt-template",
+                                  help="task-20260806-192043 correction 1: register one real, versioned, "
+                                       "labeled prompt template row (mirrors prompt-os-resolver.ts)")
+    p_regprompt.add_argument("--template-key", dest="template_key", required=True)
+    p_regprompt.add_argument("--label", dest="label", default="production")
+    p_regprompt.add_argument("--content-file", dest="content_file", required=True)
+    p_regprompt.add_argument("--no-activate", dest="no_activate", action="store_true", default=False)
+
+    p_resprompt = sub.add_parser("resolve-prompt-template",
+                                  help="resolve the real active labeled version of a prompt template")
+    p_resprompt.add_argument("--template-key", dest="template_key", required=True)
+    p_resprompt.add_argument("--label", dest="label", default="production")
+
+    p_recexec = sub.add_parser("record-orchestrator-execution",
+                                help="task-20260806-192043 correction 2: record one real structured "
+                                     "execution log row (mirrors orchestra-execution-logger.ts)")
+    p_recexec.add_argument("--task-id", dest="task_id", default=None)
+    p_recexec.add_argument("--layer-key", dest="layer_key", required=True)
+    p_recexec.add_argument("--event-type", dest="event_type", required=True)
+    p_recexec.add_argument("--status", dest="status", required=True,
+                            choices=list(_VALID_ORCHESTRATOR_EXECUTION_STATUSES))
+    p_recexec.add_argument("--input-json", dest="input_json", default=None)
+    p_recexec.add_argument("--output-json", dest="output_json", default=None)
+    p_recexec.add_argument("--duration-ms", dest="duration_ms", type=int, default=None)
+    p_recexec.add_argument("--model", dest="model", default=None)
+    p_recexec.add_argument("--provider", dest="provider", default=None)
+    p_recexec.add_argument("--cost-usd", dest="cost_usd", type=float, default=None)
+
     args = p.parse_args()
     if args.cmd == "init":
         with _write_lock():
@@ -7974,3 +8283,9 @@ if __name__ == "__main__":
         cmd_expire_external_agent_dispatches(args)
     elif args.cmd == "record-task-audit":
         cmd_record_task_audit(args)
+    elif args.cmd == "register-prompt-template":
+        cmd_register_prompt_template(args)
+    elif args.cmd == "resolve-prompt-template":
+        cmd_resolve_prompt_template(args)
+    elif args.cmd == "record-orchestrator-execution":
+        cmd_record_orchestrator_execution(args)

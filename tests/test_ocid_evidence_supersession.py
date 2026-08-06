@@ -133,15 +133,26 @@ def test_reproduces_the_real_incident_queued_task_superseded_by_newer_evidence()
         scratch_db = os.path.join(d, "scratch.sqlite")
         sbr, conn = _seed_scratch_db(scratch_db)
 
-        # Real, old submission -- as if relayed and queued long ago (this
-        # session's own real incident: ts_submitted 19:41, ts_dispatched
-        # would-be 74 minutes later at 20:55).
+        # Real, old-enough-to-supersede submission -- as if relayed and
+        # queued a while ago (this session's own real incident: ts_submitted
+        # 19:41, ts_dispatched would-be 74 minutes later at 20:55). Computed
+        # dynamically (real "now" minus 5 minutes -- comfortably before the
+        # ocid_artifact_link's own real, server-assigned created_at inserted
+        # just below, and comfortably under resource_governor.py's real
+        # MAX_QUEUED_AGE_SECONDS staleness gate) rather than a hardcoded past
+        # literal -- same real fix already applied to this file's own
+        # test_older_evidence_before_submission_does_not_supersede() below,
+        # for the same reason: a hardcoded past literal silently ages past
+        # any real, later-added staleness gate (UMR-20260806-151638-48cc:
+        # next_queued_task() gained exactly such a gate and this test's old
+        # 2026-08-04 literal started falling outside it).
+        ts_submitted_recent = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
         umr_id = sbr.upsert_umr_task(conn, {
             "task_identity": "owner-task-20260804-194355-test", "tier": 2,
             "status": "queued", "source_trigger": "owner_dispatch_gateway",
             "task_kind": "veridian_task_create",
             "inputs": {"title": "OCID-068 guardrails addendum real status", "prompt": "x", "repo": "veridian-scripts"},
-            "reason": "queued", "ts_submitted": "2026-08-04T19:43:55+00:00",
+            "reason": "queued", "ts_submitted": ts_submitted_recent,
         })
         conn.commit()
 

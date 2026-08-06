@@ -57,6 +57,14 @@ the others.
    back in at the existing concurrency cap instead of all firing at once
    (the same shape of bug this whole RCA fix closes, just for "many tasks
    resume at once" instead of "many tasks boot at once").
+
+   RESUME_STALE_HOURS gate (added 2026-08-06, UMR-20260806-151638-48cc):
+   a task.yaml this old (>2h since its own last_checkpoint_at/created_at,
+   see the constant's own docstring) is no longer auto-resumed here -- it's
+   flagged into pm_decisions_pending for a real human/PM decision instead.
+   A genuine crash/reboot is found and requeued within minutes by this same
+   tick, so this only ever gates real, silent, hours-old staleness, never a
+   fresh interruption.
 """
 import argparse
 import contextlib
@@ -88,6 +96,101 @@ TASKS_DIR = dispatch_core.TASKS_DIR
 # "pending_review"/"awaiting_human_approval" (the work is already done;
 # supervisor_sweep_tick above is what re-triggers those, not this).
 RESUMABLE_STATUSES = {"pending", "in_progress"}
+
+# Real staleness gate for resume_interrupted_workers_tick() below (fix for
+# UMR-20260806-151638-48cc / governing UMR-20260806-071025-1d28: the real,
+# live-reproduced incident where 4 task.yaml rows submitted 2026-08-06
+# 08:22-08:47Z (real disk near-capacity at that moment) sat with their
+# veridian-worker@ unit inactive and were blindly re-submitted through this
+# exact function 7 hours later, replaying their now-stale prompt text --
+# real umr_tasks evidence for those rows: source_trigger showed
+# 'owner_dispatch_gateway', not this function's own 'dispatch-tick:
+# resume_interrupted_workers' tag, and their task.yaml created_at matched
+# the 15:13Z re-dispatch, not the original 08:22Z submission -- i.e. the
+# real firing mechanism for THAT specific incident was resource_governor.py's
+# own queued-dispatch path (_dispatch_one_inner()/_perform_spawn(), which
+# intentionally ages/holds queued work for hours by design -- see its
+# AGING_PROMOTION_INTERVAL_SECONDS/effective_priority()), not this function.
+# This function is nonetheless hardened here too, on request and because it
+# has the exact same class of defect (blind resubmission of a real, possibly
+# hours-stale task.yaml, zero re-validation): reuses this codebase's own
+# existing hours-scale staleness convention rather than inventing a new one
+# -- health-check-15min.py's BLOCKED_STALE_HOURS=2 ("old enough that it's
+# abandoned/archived debris rather than a live problem"), same reasoning
+# applied here to "was this unit really just interrupted mid-work, or has it
+# genuinely sat dead for hours with zero real checkpoint movement". 2 hours
+# is deliberately generous relative to this tick's own cadence (the real
+# veridian-cron-dispatch-tick.timer fires every ~3 minutes, confirmed via
+# `systemctl --user list-timers`) -- a real crash-recovery resume is found
+# and requeued within minutes, so 2h of total silence is never a false
+# positive against genuine long-running work, only against real, silent
+# staleness. A task.yaml with NO real timestamp to check is never treated as
+# stale (fail-open, matching every other real staleness check in this
+# module and in health-check-15min.py) -- resume proceeds exactly as before.
+RESUME_STALE_HOURS = 2
+
+
+def _resume_staleness_hours(doc, now=None):
+    """Real hours since this task.yaml's last real activity
+    (last_checkpoint_at, falling back to created_at when no checkpoint has
+    ever been written yet), or None if neither timestamp is present/parseable
+    -- never fabricated. Reuses _parse_iso_ts() (defined below in this same
+    module) rather than a second ad hoc ISO parser."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    ts = _parse_iso_ts(doc.get("last_checkpoint_at") or doc.get("created_at"))
+    if ts is None:
+        return None
+    return (now - ts).total_seconds() / 3600.0
+
+
+def _flag_stale_resume_for_pm(task_id, doc, age_hours, sbr_module=None):
+    """Real, non-blocking record of a task this tick declined to blindly
+    resume because it's stale (RESUME_STALE_HOURS) -- opens one real
+    pm_decisions_pending row via insert_pm_decision_pending() (Deterministic
+    PM Reporting Contract V3's one real write path for this table, same
+    function reconcile_owner_dispatch_status.py-style scripts already use),
+    so a real human/PM decision is what un-sticks this task next, not a
+    silent auto-replay of hours-stale prompt text. Same fail-open philosophy
+    as _existing_active_umr() above: if the Superboss Register is genuinely
+    unavailable, this is a best-effort log line, never a crash of the tick
+    -- the task is still correctly skipped from auto-resume either way."""
+    sbr_module = sbr_module or resource_governor
+    sbr, error = sbr_module._safe_superboss_register("resume_interrupted_workers_tick:flag_stale")
+    if error:
+        print(f"WARN: could not open pm_decisions_pending row for stale resume {task_id} "
+              f"(Superboss Register unavailable: {error}) -- skip logged here only")
+        return None
+    conn = sbr._connect()
+    try:
+        with sbr._write_lock():
+            decision_id = sbr.insert_pm_decision_pending(
+                conn,
+                title=f"Stale interrupted task not auto-resumed: {task_id}",
+                detail=(
+                    f"resume_interrupted_workers_tick found {task_id} in a resumable status "
+                    f"({doc.get('status')!r}) with its veridian-worker@ unit not active, but its "
+                    f"last real checkpoint/creation activity is {age_hours:.1f}h old -- over the "
+                    f"{RESUME_STALE_HOURS}h staleness gate. NOT auto-resumed (the original prompt "
+                    "text may describe a condition that no longer holds). Real options: (a) verify "
+                    "the task's premise is still current and manually resume via resource_governor "
+                    "submit, (b) mark it failed/blocked with a real reason if it is genuinely "
+                    "abandoned, (c) re-dispatch with corrected/refreshed instructions."
+                ),
+                options=[
+                    {"option": "resume_as_is", "detail": "Verify premise still holds, then resume unchanged.", "recommended": False},
+                    {"option": "mark_terminal", "detail": "Genuinely abandoned/superseded -- mark failed/blocked with real reason.", "recommended": False},
+                    {"option": "redispatch_refreshed", "detail": "Re-dispatch with corrected/refreshed instructions.", "recommended": False},
+                ],
+                recommended_option=None,
+                related_umr=None,
+            )
+            conn.commit()
+        return decision_id
+    except Exception as e:
+        print(f"WARN: pm_decisions_pending write failed for stale resume {task_id}: {type(e).__name__}: {e}")
+        return None
+    finally:
+        conn.close()
 
 GAP_QUEUE_PATH = os.environ.get("VERIDIAN_GAP_QUEUE_PATH", f"{AI_OS}/gap_queue.yaml")
 GAP_QUEUE_LOCK = os.environ.get("VERIDIAN_GAP_QUEUE_LOCK", f"{AI_OS}/.gap_queue.lock")
@@ -382,7 +485,7 @@ def resume_interrupted_workers_tick(tasks):
     that starts being accepted again has its streak cleared, so it is never
     wrongly kept dead by stale history.
     """
-    resumed, skipped_running, skipped_duplicate, skipped_dead = [], [], [], []
+    resumed, skipped_running, skipped_duplicate, skipped_dead, flagged_stale = [], [], [], [], []
     for task_id, doc in tasks.items():
         service = doc.get("service")
         if not service or not service.startswith("veridian-worker@"):
@@ -407,6 +510,15 @@ def resume_interrupted_workers_tick(tasks):
             skipped_duplicate.append(task_id)
             print(f"SKIP resume (already {existing['status']} as umr_id={existing['umr_id']}, "
                   f"no duplicate row written): {task_id}")
+            continue
+
+        age_hours = _resume_staleness_hours(doc)
+        if age_hours is not None and age_hours > RESUME_STALE_HOURS:
+            decision_id = _flag_stale_resume_for_pm(task_id, doc, age_hours)
+            flagged_stale.append(task_id)
+            print(f"SKIP resume (stale: {age_hours:.1f}h since last real checkpoint/creation, "
+                  f"over {RESUME_STALE_HOURS}h gate -- flagged for PM decision"
+                  f"{f' id={decision_id}' if decision_id else ''}, not auto-replayed): {task_id}")
             continue
 
         action = "reset_failed_and_start" if state == "failed" else "start"
@@ -437,6 +549,7 @@ def resume_interrupted_workers_tick(tasks):
         "skipped_running": skipped_running,
         "skipped_duplicate": skipped_duplicate,
         "skipped_dead": skipped_dead,
+        "flagged_stale": flagged_stale,
     }
 
 

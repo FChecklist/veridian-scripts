@@ -68,7 +68,7 @@ pm_report_snapshots, and every other table in this file. Real raw SQL against th
 from outside this script (a one-off sqlite3.connect() in another script, an ad hoc
 migration, a bare INSERT/UPDATE) is NOT the standard procedure -- extend the function
 library here instead (see insert_pm_decision_pending()/resolve_pm_decision_pending()/
-insert_owner_proposal()/decide_owner_proposal()/record_owner_proposal_completion()/
+update_pm_decision_pending()/insert_owner_proposal()/decide_owner_proposal()/record_owner_proposal_completion()/
 record_ocid_master_standard_audit_event()/insert_ocid_artifact_link()/update_umr_task()
 for the established convention: module-level _connect()/_write_lock(), caller-owned
 commit, an idempotent _ensure_<table>_table() at the top of anything that creates
@@ -7763,6 +7763,60 @@ def resolve_pm_decision_pending(conn, decision_id, *, closed_by, closed_note=Non
     return cur.rowcount > 0
 
 
+def update_pm_decision_pending(conn, decision_id, *, title=None, detail=None,
+                                related_umr=None, recommended_option=None):
+    """Updates one real, currently-open pm_decisions_pending row IN PLACE --
+    added for the STALE-QUEUED aggregation fix (UMR-20260806-163738-4323,
+    governing UMR-20260806-071025-1d28). Real incident this closes: prior to
+    this, flag_stale_queued_tasks() (resource_governor.py) opened one new
+    real row per stale umr_id, so 48 of 118 real open pm_decisions_pending
+    rows (~41%) were the identical STALE-QUEUED condition repeated -- Section
+    7 of the standing 10-minute PM report (generate_pm_report_v3.py) lists
+    every open decision, and at that ratio it stopped supporting a real
+    decision at all. The real fix keeps exactly one open aggregate row per
+    ongoing condition, and this function is what lets a caller refresh that
+    single row's real current count/detail as the real underlying condition
+    changes, rather than resolving-and-reinserting (which would needlessly
+    burn a fresh id and lose the row's real continuous opened_ts) or
+    resorting to a raw UPDATE outside this script (which would violate the
+    Owner's standing SOP that this script is the one canonical read/write
+    surface for superboss-register.sqlite -- see
+    _ensure_pm_decisions_pending_table's own docstring).
+
+    Only touches the four real, editable-in-place fields a caller passes
+    (any left None is left completely unchanged, same "only touch what you
+    explicitly pass" convention as reconcile_umr_status_against_pr() above);
+    options_json/recommended_option's sibling columns are deliberately not
+    included here since no real caller has needed them yet -- add them the
+    same way if one does. Explicit `WHERE status='open'` guard, same
+    idempotent-safety convention as resolve_pm_decision_pending() above: a
+    caller can never accidentally revive/edit an already-closed row by id
+    collision. Caller owns conn/transaction/commit, same convention as
+    insert_pm_decision_pending()/resolve_pm_decision_pending() above -- this
+    function itself never commits. Returns True if a real open row was found
+    and updated, False otherwise (already closed, or no such id)."""
+    sets = []
+    params = []
+    if title is not None:
+        sets.append("title=?")
+        params.append(title)
+    if detail is not None:
+        sets.append("detail=?")
+        params.append(detail)
+    if related_umr is not None:
+        sets.append("related_umr=?")
+        params.append(related_umr)
+    if recommended_option is not None:
+        sets.append("recommended_option=?")
+        params.append(recommended_option)
+    if not sets:
+        return False
+    sql = f"UPDATE pm_decisions_pending SET {', '.join(sets)} WHERE id=? AND status='open'"
+    params.append(decision_id)
+    cur = conn.execute(sql, params)
+    return cur.rowcount > 0
+
+
 _OWNER_PROPOSAL_DECISIONS = ("approved", "redirected", "held")
 
 
@@ -7921,6 +7975,27 @@ def cmd_resolve_pm_decision_pending(args):
     conn.close()
     print(json.dumps({"id": args.decision_id, "resolved": resolved}, indent=2, default=str))
     if not resolved:
+        sys.exit(1)
+
+
+def cmd_update_pm_decision_pending(args):
+    """CLI entry point over update_pm_decision_pending() -- see that
+    function's own docstring. Exits non-zero (after still printing the real
+    JSON result) when --id did not name a real, currently-open row, same
+    "print then sys.exit(1) on a real refusal/no-op" convention as
+    cmd_resolve_pm_decision_pending above."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_pm_decisions_pending_table(conn)
+    with _write_lock():
+        updated = update_pm_decision_pending(
+            conn, args.decision_id, title=args.title, detail=args.detail,
+            related_umr=args.related_umr, recommended_option=args.recommended_option,
+        )
+        conn.commit()
+    conn.close()
+    print(json.dumps({"id": args.decision_id, "updated": updated}, indent=2, default=str))
+    if not updated:
         sys.exit(1)
 
 
@@ -10745,6 +10820,17 @@ if __name__ == "__main__":
     p_respm.add_argument("--status", default="resolved",
                           help="terminal status to record (default: resolved)")
 
+    p_updpm = sub.add_parser("update-pm-decision-pending",
+                              help="UMR-20260806-163738-4323: update one real, currently-open "
+                                   "pm_decisions_pending row IN PLACE (e.g. refresh an aggregate "
+                                   "condition row's count/detail as the real condition changes) "
+                                   "rather than opening a new row per occurrence")
+    p_updpm.add_argument("--id", dest="decision_id", type=int, required=True)
+    p_updpm.add_argument("--title", default=None)
+    p_updpm.add_argument("--detail", default=None)
+    p_updpm.add_argument("--related-umr", dest="related_umr", default=None)
+    p_updpm.add_argument("--recommended-option", dest="recommended_option", default=None)
+
     p_insprop = sub.add_parser("insert-owner-proposal",
                                 help="Owner standing mandate (task-20260806-034817, cites "
                                      "UMR-20260805-185000-e94f): deposit one real child-UMR "
@@ -11096,6 +11182,8 @@ if __name__ == "__main__":
         cmd_insert_pm_decision_pending(args)
     elif args.cmd == "resolve-pm-decision-pending":
         cmd_resolve_pm_decision_pending(args)
+    elif args.cmd == "update-pm-decision-pending":
+        cmd_update_pm_decision_pending(args)
     elif args.cmd == "insert-owner-proposal":
         cmd_insert_owner_proposal(args)
     elif args.cmd == "decide-owner-proposal":

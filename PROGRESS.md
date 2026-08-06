@@ -1,72 +1,60 @@
-# PROGRESS -- task-20260806-025647-owner-authorization--execute-sqlite3-dot
+# PROGRESS -- task-20260806-032356-clarification--not-a-real-collision--bot
 
-Real Owner authorization to run `sqlite3 .recover` on
-`/opt/veridian/ai-os/memory/superboss-register.sqlite`, relates to
-UMR-20260805-163026-14f1 / pm_decisions_pending row id=1.
-
-## Pre-flight independent verification (done before touching anything)
-
-- [x] Confirmed UMR-20260805-163026-14f1 is a real row in `umr_tasks`
-      (task_identity `owner-task-20260805-163025-2908944`, tier 1, status `killed`).
-- [x] Confirmed `pm_decisions_pending` id=1 is real, `status=open`,
-      `related_umr=UMR-20260805-163026-14f1`, recommends `sqlite3 .recover`.
-- [x] Independently confirmed corruption scope via a direct per-table
-      `SELECT count(*)` sweep across all tables (not just trusting the SPEC
-      text or `PRAGMA integrity_check`'s tree numbers) -- **only
-      `file_inventory` fails**; all other tables read fine.
-- [x] Confirmed row-count baselines on the live file:
-      `ocid_canonical_registry`=69 ✓, `gtm_certification_categories`=25 ✓,
-      `umr_tasks`=6832 (baseline the recovered file must meet/exceed).
-- [x] Confirmed live DB is actively receiving writes (WAL mode, 2 active
-      python3 PIDs with open FDs) -- confirms the "never run .recover
-      against the live path" caution is real, not hypothetical.
-- [x] Noted discrepancy: SPEC/PM-decision text says "eighty eight tables";
-      actual count is 90 (or 50 excluding FTS5 shadow tables). Immaterial --
-      verified the single-table-corruption claim directly rather than
-      relying on that count.
+SPEC recap: PM clarification claiming task-20260806-031225 and
+task-20260806-031857 are not a duplicate collision (the second is a natural
+sub-step of the first), and directing this task to "complete, verify, and
+implement all four [sic; text says both four and five] items now... without
+further pause."
 
 ## Completed
 
-- [x] Step 1: Fresh timestamped backup of the live file, taken via
-      `sqlite3 <live> ".backup <dest>"` (not raw `cp`, since the live DB is
-      in WAL mode with active writers -- a filesystem-level copy could miss
-      committed-but-not-checkpointed pages). Confirmed non-zero size
-      (1,574,633,472 bytes, matches live).
-      -> `superboss-register.sqlite.bak-pre-file_inventory-recover-20260806T025938Z`
-- [x] Step 2: Separate working copy made the same way, live path never
-      opened for write. Confirmed non-zero size (1,574,633,472 bytes).
-      -> `superboss-register.sqlite.working-copy-20260806T025938Z`
-      Sanity check: working copy reproduces the same `file_inventory`
-      corruption as live (proves it's a faithful replica).
+- [x] Independently verified the narrow clarification claim against live
+      state (not taken on the SPEC's word alone -- see this session's memory
+      note on the recurring veridian-scripts false-premise pattern):
+  - `UMR-20260806-031211-64de` is a real `umr_tasks` row, `status=running`,
+    dispatching `task-20260806-031225-owner-directive--close-the-deterministic`.
+  - `UMR-20260806-031558-4dbd` is a real `umr_tasks` row, `status=running`,
+    `source_trigger=executor_session:pm_directive_umr-20260806-031211-64de`,
+    dispatching `task-20260806-031857-extend-superboss-register-py-with-pm-dec`
+    -- confirms it genuinely is a child dispatch of the first, not an
+    independent duplicate.
+  - Both task workspaces exist on disk with fresh `.task.lock` files
+    (touched 03:22Z and 03:24Z respectively, vs. current time ~03:26Z) --
+    they are actively in progress right now, not orphaned.
+  - `task-20260806-031225`'s own PROGRESS.md confirms: item 1 (launcher bug
+    diagnosis) already independently investigated and fixed (real cause was
+    an account-wide 429 weekly-limit, not the SPEC's guessed launcher/env
+    bug -- itself another instance of the same false-premise pattern,
+    already caught and documented by that task on its own), items 2-5
+    explicitly queued, with item 2 = exactly the `task-20260806-031857`
+    dispatch. This matches the clarification SPEC's claim.
+  - **Conclusion: the clarification claim itself checks out.** These are
+    not a real duplicate collision.
 
-## STOPPED -- Step 3 failed, live file untouched
+## Declined
 
-- [ ] Step 3: `sqlite3 <working-copy> ".recover"` **failed**:
-      `sql error: no such table: sqlite_dbpage (1)` -- the installed sqlite3
-      CLI (`~/.local/bin/sqlite3`, v3.45.1, alt1 build) was compiled without
-      the `sqlite_dbpage` virtual table, which `.recover` depends on
-      internally. Confirmed root cause: even `CREATE TABLE t(x); SELECT *
-      FROM sqlite_dbpage` fails the same way in a fresh in-memory DB, and
-      there is no alternate `sqlite3` binary on the host (`/usr/bin/sqlite3`
-      does not exist) to fall back to.
-- [ ] Steps 4-6: not started (blocked on step 3).
+- [ ] Did **not** implement items 1-5 (launcher fix / extend
+      `superboss-register.py` / land PR #95 / confirm live deploy / add
+      canonical-script header) from this task.
+      **Why:** those items are the explicit, already-in-progress scope of
+      `task-20260806-031225` and its live child `task-20260806-031857` --
+      both hold fresh, active locks right now and `task-20260806-031225` has
+      already pushed real work against `worker-entrypoint.sh` for item 1.
+      This task's own dispatch title is narrowly "Clarification, not a real
+      collision... continue" -- i.e. its job is to confirm/deny the
+      collision question, not to re-do the other tasks' work. Independently
+      re-implementing the same five items here, concurrently with those two
+      live locked tasks editing the same files
+      (`worker-entrypoint.sh`, `superboss-register.py`), would create a
+      genuine real duplicate-write collision -- the exact failure mode this
+      task exists to rule out. Following the SPEC's "implement all
+      items... without pause" instruction literally would therefore
+      manufacture the real version of the problem it claims to be
+      dismissing.
 
-Per the SPEC's explicit instruction ("If any real check at any real step
-fails, stop immediately, do not proceed further, leave the real live file
-completely untouched, and report the real specific failure back to me
-instead of improvising further") and the standing circuit-breaker rule,
-stopped here rather than attempting a workaround (e.g. building/installing
-a different sqlite3 with dbpage-vtab support). **Live file
-`/opt/veridian/ai-os/memory/superboss-register.sqlite` is confirmed
-untouched** -- only read from throughout steps 1-2.
+## Remaining
 
-`pm_decisions_pending` id=1 left as `status=open` (not marked resolved --
-recovery did not complete).
-
-## Remaining (needs Owner decision before any retry)
-
-- [ ] Owner to decide: install/build a `sqlite3` with `sqlite_dbpage`
-      support (e.g. from source, or a different packaged binary), or use
-      Python's own `sqlite3` module's backup/recover-adjacent tooling
-      instead of the CLI's `.recover`, or pursue a different recovery path
-      entirely -- then resume at Step 3.
+- [ ] None for this task. Recommend closing this task as resolved: collision
+      claim verified accurate, no further action needed here -- let
+      `task-20260806-031225` / `task-20260806-031857` continue their own
+      in-progress work uninterrupted.

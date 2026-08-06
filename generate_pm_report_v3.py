@@ -67,19 +67,23 @@ Established real precedent this script reuses rather than re-inventing:
     already-computed value, zero AI/LLM judgment applied here or in the
     category-25 script that computed it.
 
-THE ONE PIECE THIS SCRIPT DOES NOT HAVE A REAL SOURCE FOR:
+FORMERLY THE ONE PIECE THIS SCRIPT HAD NO REAL SOURCE FOR (RESOLVED
+UMR-20260806-091407-5767, see "Section 4" docstring block below):
   The Go-To-Market readiness score's real bucket-mapping formula and the
-  exact NOT_READY / LIMITED_PILOT / BETA / PRODUCTION threshold rule are
-  defined by "Reporting Contract V3" SKILL.md, which normally lives at
+  exact NOT_READY / LIMITED_PILOT / BETA / PRODUCTION threshold rule were
+  originally defined by "Reporting Contract V3" SKILL.md, which normally
+  lives at
   C:\\Users\\Dell\\.claude\\scheduled-tasks\\veridian-server-sentinel\\SKILL.md
   -- a Windows path that does NOT exist anywhere on this Linux server
   (confirmed via a full pruned search before this script was written). This
-  script does NOT invent plausible-looking thresholds and present them as if
-  copied from that real source. See compute_readiness_bucket() below: a
-  clearly-labeled placeholder that always returns a fixed, conservative,
-  explicitly-labeled non-answer. The report text also marks this with a
-  "PLACEHOLDER" marker next to the recommendation line so it cannot be
-  mistaken for a real computed score.
+  script never invented plausible-looking thresholds and presented them as
+  if copied from that real source -- compute_readiness_bucket() was a
+  clearly-labeled placeholder (fixed, conservative, explicitly-labeled
+  non-answer, with a "PLACEHOLDER" marker next to the recommendation line)
+  until UMR-20260806-091407-5767 supplied the real formula/thresholds
+  verbatim (confirmed live via that UMR's own real dispatched prompt text
+  in umr_tasks.inputs_json before implementing). See the "Section 4" module
+  docstring block below for the full real formula now in place.
 
 Threshold values chosen BY THIS TASK (not from SKILL.md, which is
 unavailable -- see above) for the auto-generated open-issues section. These
@@ -289,6 +293,61 @@ Section 1 additions (UMR-20260806-084701-0d40, citing prior UMR-20260806-
     enforced) so the PM can see both concurrency layers together every
     cycle, since a real 2026-08-06 memory-pressure incident involved both
     layers running heavy work at the same time.
+
+Section 4: real readiness bucket formula (UMR-20260806-091407-5767, citing
+the governing report-contract UMR-20260806-042531-be9c) -- replaces the
+prior explicitly-labeled PLACEHOLDER (see "FORMERLY THE ONE PIECE..." block
+above). The bucket-membership table, bucket-percent formula, overall-percent
+formula, and recommendation rule below were supplied verbatim by that UMR's
+own real dispatched prompt text (confirmed live via `sqlite3 umr_tasks`
+inputs_json.prompt before implementing) -- not independently derived or
+invented by this script. Independently verified before implementing: the 7
+buckets are a complete, non-overlapping partition of all 25 real
+category_index values (6+5+4+3+4+1+2 = 25), and every category's real name
+is semantically consistent with the bucket it was placed in.
+  - GTM_READINESS_BUCKET_CATEGORIES: the fixed membership table (see its
+    own comment block above compute_gtm_overall_percent()).
+  - Bucket percent = (real pass-state count in that bucket / real total
+    categories in that bucket) * 100, rounded to an integer
+    (compute_bucket_percents()).
+  - Overall GTM-ready percent = real gtm_pass_count / 25 * 100, rounded to
+    an integer (compute_gtm_overall_percent()) -- Section 2 and Section 4
+    both call this exact function on the exact same gtm_section, so the two
+    numbers can never diverge inside one report run.
+  - Recommendation rule, first real match wins, in this exact order:
+      1. real critical_open_issue_count > 0, OR real blocked_category_count
+         > 0, OR overall_percent < 50 -> NOT_READY
+      2. elif 50 <= overall_percent <= 74 -> LIMITED_PILOT
+      3. elif 75 <= overall_percent <= 99, OR real
+         high_severity_open_issue_count > 0 -> BETA
+      4. elif overall_percent == 100 AND real certified boolean == YES ->
+         PRODUCTION
+    (compute_readiness_bucket()).
+  - Real data-honesty note, followed exactly per that UMR's own explicit
+    instruction: gtm_certification_categories.passed is a real INTEGER
+    column with exactly 3 real values -- 1 (pass), 0 (fail), NULL (a single
+    COMBINED blocked-or-pending state; confirmed via the real live schema +
+    data before implementing -- no column anywhere in this database
+    distinguishes a genuinely-'blocked' row from a merely-'pending' one).
+    Every blocked_or_pending category counts as NOT passed for every bucket
+    percent, and as 'blocked' for the recommendation rule's
+    blocked_category_count check -- the conservative choice that UMR itself
+    specified for exactly this real data-honesty situation.
+  - critical_open_issue_count / high_severity_open_issue_count: real
+    counts, cross-referencing category_index=25's own real, already-
+    established P0/P1/P2/P3 severity_rubric (get_gtm_severity_rubric()) --
+    reused verbatim, the same established precedent get_gtm_section()'s
+    deterministic_gate already follows -- against gtm_section's own LIVE
+    per-category state (compute_severity_open_issue_counts()). A P0
+    category counts as critical whether its real state is 'fail' or
+    'blocked_or_pending'; a P1 category counts as high-severity only when
+    its real state is 'fail' -- matching category 25's own real
+    pass_criterion text verbatim ("P1/P2/P3 blocked-or-pending is
+    tolerated on its own").
+  - certified boolean: real gtm_section.deterministic_gate.gate_result ==
+    "pass" (category 25's own already-established real state) -- the same
+    "deterministic gate" concept this script already reuses elsewhere, not
+    a new field invented for this rule.
 -------------------------------------------------------------------------
 """
 import argparse
@@ -378,7 +437,12 @@ REPORT_FORMAT_VERSION = "pm-report-v3-placeholder-gtm-score"
 # (real, observational-only count of `claude -p` processes under the main
 # tmux session's process tree) -- see the module docstring's "Section 1
 # additions" block above.
-SCRIPT_VERSION = "3.3.0"
+# 3.4.0 (UMR-20260806-091407-5767, citing governing report-contract
+# UMR-20260806-042531-be9c): Section 4 replaces the prior explicitly-labeled
+# PLACEHOLDER GTM readiness bucket/recommendation with the real formula that
+# UMR supplied verbatim -- see the module docstring's "Section 4: real
+# readiness bucket formula" block above.
+SCRIPT_VERSION = "3.4.0"
 
 # ---------------------------------------------------------------------------
 # Section 9-13 constants (UMR-20260806-041307-0bfd) -- see module docstring
@@ -881,6 +945,52 @@ def get_gtm_section(sbr):
     }
 
 
+def get_gtm_severity_rubric(sbr):
+    """UMR-20260806-091407-5767: real read of
+    gtm_certification_categories.category_index=25's own evidence_json ->
+    severity_rubric -- the real, already-established P0/P1/P2/P3 severity
+    classification for the other 24 categories (produced by that category's
+    own production-readiness-audit synthesis; reused verbatim here, same
+    established precedent get_gtm_section()'s deterministic_gate already
+    follows, never a new judgment invented by this script).
+
+    Deliberately does NOT reuse category 25's own embedded per-category
+    pass/fail snapshot from that JSON blob -- that snapshot is only as
+    fresh as category 25's own last audit run. Only the severity
+    CLASSIFICATION is taken from it; callers cross-reference it against
+    gtm_section's own live, freshly-queried per-category state, so severity
+    counts in this report are never computed off a stale snapshot.
+
+    Returns (rubric_dict, error). rubric_dict maps int category_index ->
+    'P0'/'P1'/'P2'/'P3'. On any real failure (row/column/JSON key missing or
+    unparseable), returns (None, <honest reason>) -- never a fabricated
+    empty-but-successful rubric."""
+    try:
+        conn = sbr._connect()
+        row = conn.execute(
+            "SELECT evidence_json FROM gtm_certification_categories WHERE category_index = 25"
+        ).fetchone()
+        conn.close()
+    except sqlite3.Error as e:
+        return None, str(e)
+    if row is None or not row["evidence_json"]:
+        return None, "category_index=25 row or its evidence_json not found"
+    try:
+        evidence = json.loads(row["evidence_json"])
+    except json.JSONDecodeError as e:
+        return None, f"could not parse category 25 evidence_json: {e}"
+    raw_rubric = evidence.get("severity_rubric")
+    if not isinstance(raw_rubric, dict):
+        return None, "category 25 evidence_json has no real 'severity_rubric' dict key"
+    rubric = {}
+    for k, v in raw_rubric.items():
+        try:
+            rubric[int(k)] = v
+        except (TypeError, ValueError):
+            continue
+    return rubric, None
+
+
 def get_ocid_registry_section(sbr):
     try:
         conn = sbr._connect()
@@ -918,37 +1028,181 @@ def get_umr_tasks_section(sbr):
 
 
 # ---------------------------------------------------------------------------
-# Section 4: GTM readiness score placeholder -- SEE MODULE DOCSTRING.
+# Section 4: GTM readiness score (UMR-20260806-091407-5767, citing the
+# governing report-contract UMR-20260806-042531-be9c) -- see module
+# docstring "Section 4: real readiness bucket formula" for the full real
+# formula this replaces the prior explicitly-labeled placeholder with. The
+# real bucket-membership table/thresholds below were supplied verbatim by
+# that UMR's own real dispatched prompt text (confirmed live: `sqlite3
+# umr_tasks` inputs_json.prompt) -- NOT independently invented by this
+# script. Independently verified before implementing: the 7 buckets are a
+# complete, non-overlapping partition of all 25 real category_index values
+# (6+5+4+3+4+1+2 = 25, no gaps/duplicates), and each grouping is semantically
+# consistent with the real category_name for every index in it.
 # ---------------------------------------------------------------------------
-def compute_readiness_bucket(gtm_section):
-    """PLACEHOLDER -- NOT a real computed GTM readiness bucket.
+GTM_READINESS_BUCKET_CATEGORIES = {
+    "product_ready": (4, 5, 6, 7, 12, 13),
+    "end_user_ready": (8, 17, 18, 23, 24),
+    "security_ready": (3, 14, 15, 16),
+    "performance_ready": (9, 10, 11),
+    "infra_ready": (1, 2, 19, 20),
+    "documentation_ready": (22,),
+    "deployment_ready": (21, 25),
+}
 
-    TODO(SKILL.md section 8, not available on this server): the real
-    bucket-mapping formula and the exact NOT_READY / LIMITED_PILOT / BETA /
-    PRODUCTION threshold rule live in "Reporting Contract V3" SKILL.md at
-    C:\\Users\\Dell\\.claude\\scheduled-tasks\\veridian-server-sentinel\\SKILL.md
-    (a Windows path). That file does not exist anywhere on this Linux
-    server (confirmed via a full pruned search before this script was
-    written). Nobody has copied its real section-8 formula/thresholds onto
-    this box. DO NOT replace this function with invented-but-plausible-
-    looking numbers/thresholds and present them as if they came from that
-    real source -- that would be worse than this honest placeholder.
 
-    This function deliberately ignores gtm_section's real counts (even
-    though they are passed in, so a future real implementation has them
-    ready to use) and always returns the same fixed, conservative,
-    explicitly-labeled non-answer.
-    """
-    del gtm_section  # unused on purpose -- see docstring
+def compute_gtm_overall_percent(gtm_section):
+    """Pure function: the ONE real overall GTM-ready percent -- real
+    gtm_pass_count / 25 * 100, rounded to an integer. Section 2 and Section
+    4 both call this exact function on the exact same gtm_section, so the
+    two numbers can never diverge inside a single report (per
+    UMR-20260806-091407-5767's explicit 'never a separate estimate'
+    instruction). None (not a fabricated number) if gtm_pass_count is
+    missing/invalid."""
+    pass_count = gtm_section.get("gtm_pass_count")
+    if not isinstance(pass_count, int):
+        return None
+    return round(pass_count / 25 * 100)
+
+
+def compute_bucket_percents(gtm_section):
+    """Pure function: per-bucket real percent, using GTM_READINESS_BUCKET_
+    CATEGORIES (UMR-20260806-091407-5767's real fixed membership) -- (real
+    pass-state count in that bucket / real total categories in that bucket)
+    * 100, rounded to an integer. Per that UMR's own explicit data-honesty
+    instruction, the combined 'blocked_or_pending' state counts as NOT
+    passed here (see module docstring for why that combined state exists in
+    the real source data)."""
+    state_by_index = {c["category_index"]: c["state"] for c in gtm_section.get("categories", [])}
+    percents = {}
+    for bucket_name, indices in GTM_READINESS_BUCKET_CATEGORIES.items():
+        total = len(indices)
+        passed = sum(1 for i in indices if state_by_index.get(i) == "pass")
+        percents[bucket_name] = round(passed / total * 100) if total else None
+    return percents
+
+
+def compute_severity_open_issue_counts(gtm_section, severity_rubric):
+    """Pure function: real critical/high-severity open-issue counts,
+    cross-referencing the real severity_rubric (category_index -> P0..P3,
+    see get_gtm_severity_rubric()) against gtm_section's own LIVE
+    per-category state -- never against category 25's own possibly-stale
+    embedded snapshot. Matches category 25's own real, already-established
+    pass_criterion definition exactly (confirmed live in its evidence_json
+    before writing this): a P0 category is 'critical' whether its real
+    state is 'fail' OR 'blocked_or_pending'; a P1 category is
+    'high-severity' only when its real state is 'fail' -- P1/P2/P3
+    blocked_or_pending is real, established precedent as 'tolerated', not a
+    gating issue, per that same pass_criterion text."""
+    critical = 0
+    high = 0
+    for cat in gtm_section.get("categories", []):
+        sev = severity_rubric.get(cat["category_index"])
+        state = cat["state"]
+        if sev == "P0" and state in ("fail", "blocked_or_pending"):
+            critical += 1
+        elif sev == "P1" and state == "fail":
+            high += 1
+    return {"critical_open_issue_count": critical, "high_severity_open_issue_count": high}
+
+
+def compute_readiness_bucket(gtm_section, severity_rubric_result=(None, "severity_rubric not provided")):
+    """Real, deterministic GTM readiness bucket + recommendation
+    (UMR-20260806-091407-5767, citing the governing report-contract
+    UMR-20260806-042531-be9c). Replaces the prior explicitly-labeled
+    PLACEHOLDER now that a real source for the bucket-mapping formula and
+    thresholds has been supplied (see GTM_READINESS_BUCKET_CATEGORIES's own
+    comment block above for the real provenance/verification of that
+    source).
+
+    Real data-honesty note (that UMR's own explicit instruction, followed
+    exactly): the real gtm_certification_categories.passed column is
+    INTEGER with exactly 3 real values -- 1 (pass), 0 (fail), NULL (a
+    single COMBINED blocked-or-pending state; confirmed via the real live
+    schema + data before writing this function -- there is no column
+    anywhere in this database that distinguishes a genuinely-'blocked' row
+    from a merely-'pending' one). Per that UMR's own conservative fallback
+    for exactly this situation: every blocked_or_pending category counts as
+    'blocked' for the recommendation rule's blocked-category-count check
+    below -- never guessed apart into a fake blocked/pending split with no
+    real backing data to justify where the line falls.
+
+    `severity_rubric_result` is the (rubric, error) tuple from
+    get_gtm_severity_rubric(sbr) -- passed in rather than fetched here so
+    this function stays a pure function of its real inputs, testable
+    without a real database."""
+    rubric, rubric_err = severity_rubric_result
+    bucket_percents = compute_bucket_percents(gtm_section)
+    overall_percent = compute_gtm_overall_percent(gtm_section)
+    blocked_count = gtm_section.get("gtm_blocked_or_pending_count")
+    gate_result = gtm_section.get("deterministic_gate", {}).get("gate_result")
+    certified = gate_result == "pass"
+
+    if overall_percent is None:
+        return {
+            "bucket": None, "is_placeholder": False,
+            "overall_percent": None, "bucket_percents": bucket_percents,
+            "critical_open_issue_count": None, "high_severity_open_issue_count": None,
+            "blocked_category_count": blocked_count, "certified": certified, "gate_result": gate_result,
+            "severity_rubric_error": rubric_err,
+            "reason": "cannot compute: gtm_section.gtm_pass_count missing/invalid (real data, not fabricated).",
+        }
+
+    if rubric_err:
+        critical, high = None, None
+    else:
+        severity_counts = compute_severity_open_issue_counts(gtm_section, rubric)
+        critical = severity_counts["critical_open_issue_count"]
+        high = severity_counts["high_severity_open_issue_count"]
+
+    # Real fixed recommendation rule (UMR-20260806-091407-5767), first
+    # real match wins, in this exact order.
+    if critical is None or blocked_count is None:
+        recommendation = None
+        reason = (
+            "cannot apply the real recommendation rule -- "
+            + (f"critical_open_issue_count unavailable ({rubric_err}); " if critical is None else "")
+            + ("blocked_category_count unavailable" if blocked_count is None else "")
+        )
+    elif critical > 0 or blocked_count > 0 or overall_percent < 50:
+        recommendation = "NOT_READY"
+        reason = (
+            f"critical_open_issue_count={critical}, blocked_category_count={blocked_count}, "
+            f"overall_percent={overall_percent}% -- at least one real NOT_READY trigger is true."
+        )
+    elif 50 <= overall_percent <= 74:
+        recommendation = "LIMITED_PILOT"
+        reason = f"overall_percent={overall_percent}% is in the real 50-74% LIMITED_PILOT range."
+    elif 75 <= overall_percent <= 99 or high > 0:
+        recommendation = "BETA"
+        reason = (
+            f"overall_percent={overall_percent}% is in the real 75-99% range, "
+            f"or high_severity_open_issue_count={high} > 0."
+        )
+    elif overall_percent == 100 and certified:
+        recommendation = "PRODUCTION"
+        reason = "overall_percent=100% and the real deterministic gate (category 25) is certified (state=pass)."
+    else:
+        # Real, honest defensive fallback: mathematically unreachable given
+        # the rules above (overall_percent=100 forces category 25 itself to
+        # be counted 'pass', which forces certified=True), but a real number
+        # falling through every stated rule must still resolve to something
+        # honest and conservative, never a silent None.
+        recommendation = "NOT_READY"
+        reason = f"overall_percent={overall_percent}% did not match any real rule above -- conservative fallback."
+
     return {
-        "bucket": "NOT_READY -- placeholder, real thresholds pending SKILL.md",
-        "is_placeholder": True,
-        "reason": (
-            "compute_readiness_bucket() has no real source for the bucket-mapping "
-            "formula/thresholds on this server (SKILL.md unavailable -- see "
-            "module docstring and this function's own TODO). Returns a fixed "
-            "conservative placeholder rather than an invented score."
-        ),
+        "bucket": recommendation,
+        "is_placeholder": False,
+        "overall_percent": overall_percent,
+        "bucket_percents": bucket_percents,
+        "critical_open_issue_count": critical,
+        "high_severity_open_issue_count": high,
+        "blocked_category_count": blocked_count,
+        "certified": certified,
+        "gate_result": gate_result,
+        "severity_rubric_error": rubric_err,
+        "reason": reason,
     }
 
 
@@ -1878,7 +2132,8 @@ def build_report(sbr):
     ocid_section = get_ocid_registry_section(sbr)
     umr_section = get_umr_tasks_section(sbr)
 
-    readiness = compute_readiness_bucket(gtm_section)
+    severity_rubric_result = get_gtm_severity_rubric(sbr)
+    readiness = compute_readiness_bucket(gtm_section, severity_rubric_result)
 
     prior, prior_err = get_prior_snapshot(sbr)
 
@@ -2018,6 +2273,9 @@ def render_report_text(report):
                   f"blocked_or_pending={gtm.get('gtm_blocked_or_pending_count')} "
                   f"(blocked/pending is a single combined state in the real source data "
                   f"-- see module docstring)")
+    lines.append(f"Overall GTM-ready percent: {report['gtm_readiness'].get('overall_percent')}% "
+                  f"(real pass_count / 25 * 100, rounded -- the SAME number Section 4 uses, "
+                  f"never a separate estimate)")
     ocid = report["ocid_canonical_registry_section"]
     lines.append(f"ocid_canonical_registry: total={ocid.get('ocid_canonical_registry_total')} "
                   f"fully_complete={ocid.get('ocid_canonical_registry_fully_complete')}")
@@ -2037,6 +2295,14 @@ def render_report_text(report):
     marker = " \u26a0 PLACEHOLDER" if readiness.get("is_placeholder") else ""
     lines.append(f"Recommendation: {readiness.get('bucket')}{marker}")
     lines.append(f"Reason: {readiness.get('reason')}")
+    lines.append(f"Overall GTM-ready percent: {readiness.get('overall_percent')}%")
+    lines.append(f"Bucket percents: {readiness.get('bucket_percents')}")
+    lines.append(f"critical_open_issue_count={readiness.get('critical_open_issue_count')}  "
+                  f"high_severity_open_issue_count={readiness.get('high_severity_open_issue_count')}  "
+                  f"blocked_category_count={readiness.get('blocked_category_count')}  "
+                  f"certified={readiness.get('certified')} (gate_result={readiness.get('gate_result')})")
+    if readiness.get("severity_rubric_error"):
+        lines.append(f"severity_rubric error (real, honestly reported): {readiness['severity_rubric_error']}")
 
     h("5. IMPLEMENTATION SUMMARY (deltas since prior report)")
     impl = report["implementation_summary"]

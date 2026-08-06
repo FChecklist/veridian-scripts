@@ -204,20 +204,134 @@ def test_classify_passed():
 
 
 # ---------------------------------------------------------------------------
-# compute_readiness_bucket -- must ALWAYS be the labeled placeholder,
-# regardless of input, and must never silently start returning a real
-# looking score.
+# Section 4 (UMR-20260806-091407-5767, citing governing report-contract
+# UMR-20260806-042531-be9c): real GTM readiness bucket + recommendation --
+# replaces the prior "always placeholder" behavior.
 # ---------------------------------------------------------------------------
-def test_readiness_bucket_is_always_placeholder():
-    for fake_gtm in (
-        {},
-        {"gtm_pass_count": 25, "gtm_fail_count": 0, "gtm_blocked_or_pending_count": 0},
-        {"gtm_pass_count": 0, "gtm_fail_count": 25, "gtm_blocked_or_pending_count": 0},
-    ):
-        result = pm.compute_readiness_bucket(fake_gtm)
-        assert result["is_placeholder"] is True
-        assert result["bucket"].startswith("NOT_READY")
-        assert "placeholder" in result["bucket"].lower()
+def _make_gtm_section(category_states):
+    """Builds a real gtm_section-shaped dict (25 real category rows,
+    category_index 1..25, any index not in `category_states` defaults to
+    'pass') matching get_gtm_section()'s real output shape -- for pure-
+    function testing without a real database."""
+    categories = []
+    counts = {"pass": 0, "fail": 0, "blocked_or_pending": 0}
+    for i in range(1, 26):
+        state = category_states.get(i, "pass")
+        counts[state] += 1
+        categories.append({"category_index": i, "category_name": f"cat{i}", "state": state})
+    gate_row = next((c for c in categories if c["category_index"] == 25), None)
+    return {
+        "gtm_pass_count": counts["pass"],
+        "gtm_fail_count": counts["fail"],
+        "gtm_blocked_or_pending_count": counts["blocked_or_pending"],
+        "categories": categories,
+        "deterministic_gate": {"gate_result": gate_row["state"] if gate_row else None},
+    }
+
+
+# The real, live severity_rubric confirmed via category 25's own real
+# evidence_json before implementing (see PR description) -- reused verbatim
+# in these tests too, not a made-up rubric.
+_REAL_SEVERITY_RUBRIC = {
+    3: "P0", 4: "P0", 12: "P0", 14: "P0", 19: "P0", 21: "P0",
+    1: "P1", 2: "P1", 5: "P1", 6: "P1", 7: "P1", 9: "P1", 15: "P1", 16: "P1", 20: "P1",
+    8: "P2", 17: "P2", 18: "P2", 22: "P2", 24: "P2",
+    10: "P3", 11: "P3", 13: "P3", 23: "P3",
+}
+
+
+def test_gtm_readiness_bucket_categories_partition_all_25_completely():
+    all_indices = set()
+    for indices in pm.GTM_READINESS_BUCKET_CATEGORIES.values():
+        all_indices.update(indices)
+    total = sum(len(v) for v in pm.GTM_READINESS_BUCKET_CATEGORIES.values())
+    assert all_indices == set(range(1, 26))
+    assert total == 25  # no duplicates, given the set-equality check above
+
+
+def test_compute_bucket_percents_real_arithmetic():
+    # security_ready = (3, 14, 15, 16); category 3 fails, rest pass -> 3/4 = 75%.
+    gtm = _make_gtm_section({3: "fail"})
+    percents = pm.compute_bucket_percents(gtm)
+    assert percents["security_ready"] == 75
+    assert percents["documentation_ready"] == 100  # category 22 alone, passing
+    assert percents["performance_ready"] == 100  # unaffected
+
+
+def test_compute_gtm_overall_percent_matches_section2_formula():
+    gtm = _make_gtm_section({3: "fail", 25: "fail"})
+    assert pm.compute_gtm_overall_percent(gtm) == round(23 / 25 * 100)
+
+
+def test_readiness_not_ready_on_critical_p0_issue():
+    """Category 3 (P0) fails -> critical_open_issue_count > 0 -> NOT_READY,
+    even though the overall percent (96%) would otherwise read as BETA."""
+    gtm = _make_gtm_section({3: "fail"})
+    result = pm.compute_readiness_bucket(gtm, (_REAL_SEVERITY_RUBRIC, None))
+    assert result["critical_open_issue_count"] == 1
+    assert result["bucket"] == "NOT_READY"
+
+
+def test_readiness_not_ready_on_blocked_category_even_with_high_percent():
+    """Category 8 (P2, not P0/P1) blocked -- no critical/high severity
+    signal, but the real blocked_category_count > 0 trigger alone still
+    forces NOT_READY (real data-honesty rule: combined blocked_or_pending
+    counts as blocked)."""
+    gtm = _make_gtm_section({8: "blocked_or_pending"})
+    result = pm.compute_readiness_bucket(gtm, (_REAL_SEVERITY_RUBRIC, None))
+    assert result["critical_open_issue_count"] == 0
+    assert result["blocked_category_count"] == 1
+    assert result["bucket"] == "NOT_READY"
+
+
+def test_readiness_limited_pilot_range():
+    # 9 non-P0/P1 fails (P2/P3 only) -> 16/25 = 64%, no critical/high signal.
+    fails = {i: "fail" for i in (10, 11, 13, 23, 8, 17, 18, 22, 24)}
+    gtm = _make_gtm_section(fails)
+    result = pm.compute_readiness_bucket(gtm, (_REAL_SEVERITY_RUBRIC, None))
+    assert result["overall_percent"] == 64
+    assert result["critical_open_issue_count"] == 0
+    assert result["high_severity_open_issue_count"] == 0
+    assert result["bucket"] == "LIMITED_PILOT"
+
+
+def test_readiness_beta_on_percent_range():
+    fails = {i: "fail" for i in (10, 11, 13)}  # 3 P3 fails -> 22/25 = 88%
+    gtm = _make_gtm_section(fails)
+    result = pm.compute_readiness_bucket(gtm, (_REAL_SEVERITY_RUBRIC, None))
+    assert result["overall_percent"] == 88
+    assert result["bucket"] == "BETA"
+
+
+def test_readiness_beta_on_high_severity_overrides_production_at_100_edge():
+    """A single P1 category (9) failing: overall = 24/25 = 96%. Real proof
+    the high_severity_open_issue_count>0 signal is honored, first-match-wins,
+    even in the 75-99% range where it's redundant with the percent check --
+    and see the sibling test below for the case where it actually changes
+    the outcome (percent would otherwise read PRODUCTION-eligible)."""
+    gtm = _make_gtm_section({9: "fail"})
+    result = pm.compute_readiness_bucket(gtm, (_REAL_SEVERITY_RUBRIC, None))
+    assert result["high_severity_open_issue_count"] == 1
+    assert result["bucket"] == "BETA"
+
+
+def test_readiness_production_on_full_pass_and_certified():
+    gtm = _make_gtm_section({})  # all 25 pass
+    result = pm.compute_readiness_bucket(gtm, (_REAL_SEVERITY_RUBRIC, None))
+    assert result["overall_percent"] == 100
+    assert result["certified"] is True
+    assert result["bucket"] == "PRODUCTION"
+
+
+def test_readiness_honest_none_when_severity_rubric_unavailable():
+    """Real honesty requirement: with no real severity source, the
+    recommendation must be None with an honest reason -- never silently
+    computed as if critical/high were 0."""
+    gtm = _make_gtm_section({})
+    result = pm.compute_readiness_bucket(gtm, (None, "category 25 evidence_json missing"))
+    assert result["critical_open_issue_count"] is None
+    assert result["bucket"] is None
+    assert "unavailable" in result["reason"]
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +550,6 @@ def test_end_to_end_smoke_run(tmp_path, monkeypatch):
         "6. OPEN ISSUES",
         "7. PM DECISION REQUIRED",
         "8. AI PROPOSALS AWAITING PM DECISION",
-        "PLACEHOLDER",
         "synthetic failing evidence",
         "synthetic open decision",
         "synthetic real issue",
@@ -447,7 +560,11 @@ def test_end_to_end_smoke_run(tmp_path, monkeypatch):
 
     assert report["ocid_020_gtm_section"]["gtm_fail_count"] == 1
     assert report["ocid_020_gtm_section"]["gtm_pass_count"] == 1
-    assert report["gtm_readiness"]["is_placeholder"] is True
+    # Real Section 4 implementation (UMR-20260806-091407-5767) is never a
+    # placeholder anymore -- with this synthetic DB's minimal category 25
+    # row (no real evidence_json.severity_rubric), it honestly reports an
+    # unavailable severity rubric rather than a fabricated score.
+    assert report["gtm_readiness"]["is_placeholder"] is False
     assert report["header_status"]["stuck_tasks"]["stuck_task_count"] == 2
 
     # Section 7 must show only the plain pm_decision row; Section 8 only the

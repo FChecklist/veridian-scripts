@@ -96,7 +96,10 @@ Governing UMR: UMR-20260806-071025-1d28. This task's own UMR: UMR-20260806-09272
       1196 due to a 'T' vs space separator lexical-compare bug in that throwaway
       query -- caught and discarded, not used as evidence).
 
+- [x] Step 6 (partial) -- PR opened: https://github.com/FChecklist/veridian-scripts/pull/227
+
 ## Remaining
-- [ ] Step 6 -- record completion evidence via `superboss-register.py` (not raw
-      SQL) and `agent_work_briefing.py record-completion`; commit this PROGRESS.md;
-      open PR; record its number here.
+- [ ] Step 6 (final) -- record completion evidence via `superboss-register.py`
+      (not raw SQL) and `agent_work_briefing.py record-completion`, once the
+      live 10-minute after-window (started 2026-08-06T21:25:03Z) finishes
+      confirming 0 rejected_duplicate rows.

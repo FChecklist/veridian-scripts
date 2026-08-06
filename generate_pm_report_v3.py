@@ -2140,6 +2140,71 @@ def get_owner_umr_closure_section(sbr, now_dt=None):
 
 
 # ---------------------------------------------------------------------------
+# Section 15: DEAD-ZONE DISPATCHED-ROW AUTO-REMEDIATION (read-only)
+#
+# UMR-20260806-115538-1e55 (original real ask: a deterministic check for a
+# real umr_tasks row stuck at status='dispatched' with no real ts_completed
+# and no real task directory/systemd worker unit ever created) +
+# UMR-20260806-115605-854d (direct correction, implemented here: the real
+# detection + auto-remediation itself lives in the standalone, real,
+# periodic-sweep script reconcile_dispatched_dead_zone.py -- see that
+# script's own module docstring for the full real condition, the real
+# ocid_artifact_links safety guard, and the real d3b7/57a9 evidence this
+# design was built against -- wired for real automatic/immediate operation
+# into resource_governor_tick_loop.sh, same 30s cadence as --reconcile-stale).
+#
+# This section is PURE READ, same "zero AI calls, zero new judgment, direct
+# read of a real source" contract every other section in this file already
+# follows -- it never calls into reconcile_dispatched_dead_zone.py's write
+# path itself, it only surfaces that script's own real recent activity (via
+# pm_decisions_pending, the same real table Section 7/8 already read) so the
+# PM has real visibility into what was auto-fixed and when, and into any
+# real, still-open second-occurrence escalation, without this report ever
+# becoming a write surface itself.
+# ---------------------------------------------------------------------------
+DEAD_ZONE_RECENT_AUDIT_LOG_LIMIT = int(
+    os.environ.get("VERIDIAN_DEAD_ZONE_RECENT_AUDIT_LOG_LIMIT", "20"))
+
+
+def get_dead_zone_reconciliation_section(sbr):
+    """Real, read-only surface over reconcile_dispatched_dead_zone.py's own
+    real writes: the most recent DEAD_ZONE_RECENT_AUDIT_LOG_LIMIT real
+    'dead_zone_auto_remediation' audit-log rows (informational -- every one
+    of these already-resolved by construction, see that script's own
+    auto_reset_to_queued()) plus every real, currently-open second-occurrence
+    escalation (decision_type='pm_decision', title LIKE 'DEAD-ZONE REPEAT:%',
+    status='open' -- these ALSO already appear in Section 7's general
+    "PM DECISION REQUIRED" list since they share that same decision_type;
+    surfaced here too, filtered to just this UMR's own real escalations, so
+    a PM scanning this section alone still sees them without cross-
+    referencing Section 7)."""
+    try:
+        conn = sbr._connect()
+        if not _pm_decisions_pending_has_decision_type(conn):
+            conn.close()
+            return {"recent_auto_remediations": [], "open_escalations": [],
+                     "note": "DB predates decision_type -- no real dead-zone rows can exist yet"}
+        auto_remediations = conn.execute(
+            "SELECT id, opened_ts, title, detail, related_umr, status, closed_ts, closed_note "
+            "FROM pm_decisions_pending WHERE decision_type = 'dead_zone_auto_remediation' "
+            "ORDER BY id DESC LIMIT ?",
+            (DEAD_ZONE_RECENT_AUDIT_LOG_LIMIT,),
+        ).fetchall()
+        open_escalations = conn.execute(
+            "SELECT id, opened_ts, title, detail, related_umr, status, recommended_option "
+            "FROM pm_decisions_pending WHERE decision_type = 'pm_decision' AND status = 'open' "
+            "AND title LIKE 'DEAD-ZONE REPEAT:%' ORDER BY id"
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        return {"error": str(e)}
+    return {
+        "recent_auto_remediations": [dict(r) for r in auto_remediations],
+        "open_escalations": [dict(r) for r in open_escalations],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Assembly + rendering
 # ---------------------------------------------------------------------------
 def build_report(sbr):
@@ -2205,6 +2270,9 @@ def build_report(sbr):
     # Section 14 (UMR-20260806-070018-d88b item 4, extended by
     # UMR-20260806-071942-5132) -- see module docstring.
     owner_umr_closure_section = get_owner_umr_closure_section(sbr)
+    # Section 15 (UMR-20260806-115538-1e55 / UMR-20260806-115605-854d) --
+    # see module docstring.
+    dead_zone_reconciliation_section = get_dead_zone_reconciliation_section(sbr)
 
     report = {
         "report_format_version": REPORT_FORMAT_VERSION,
@@ -2245,6 +2313,7 @@ def build_report(sbr):
         "collision_detection_section": collision_detection_section,
         "instruction_quality_section": instruction_quality_section,
         "owner_umr_closure_section": owner_umr_closure_section,
+        "dead_zone_reconciliation_section": dead_zone_reconciliation_section,
         "current_flat_fields": current_flat,
         "thresholds": {
             "SWAP_FREE_PCT_WARN_THRESHOLD": SWAP_FREE_PCT_WARN_THRESHOLD,
@@ -2518,6 +2587,25 @@ def render_report_text(report):
         lines.append(f"  (trailing 24h: total={ouc['trailing_24h_total']} "
                       f"closed={ouc['trailing_24h_closed_count']} "
                       f"status_breakdown={ouc['trailing_24h_status_counts']})")
+
+    h("15. DISPATCHED DEAD-ZONE AUTO-REMEDIATION (real reconcile_dispatched_dead_zone.py activity, "
+      "read-only here -- see UMR-20260806-115538-1e55 / UMR-20260806-115605-854d)")
+    dz = report["dead_zone_reconciliation_section"]
+    if dz.get("error"):
+        lines.append(f"ERROR reading pm_decisions_pending: {dz['error']}")
+    elif dz.get("note"):
+        lines.append(dz["note"])
+    else:
+        remediations = dz["recent_auto_remediations"]
+        lines.append(f"RECENT_AUTO_REMEDIATIONS (most recent {DEAD_ZONE_RECENT_AUDIT_LOG_LIMIT}, "
+                      f"informational audit log, never blocking): {len(remediations)}")
+        for r in remediations:
+            lines.append(f"  [{r['opened_ts']}] {r['related_umr']}: {r['title']} (status={r['status']})")
+        escalations = dz["open_escalations"]
+        lines.append(f"OPEN_SECOND_OCCURRENCE_ESCALATIONS (real, blocking -- also listed in Section 7): "
+                      f"{len(escalations)}")
+        for e in escalations:
+            lines.append(f"  [{e['opened_ts']}] id={e['id']} {e['related_umr']}: {e['title']}")
 
     lines.append("")
     lines.append("=" * 78)

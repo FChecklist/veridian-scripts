@@ -44,5 +44,22 @@ while true; do
   # decision (add --execute below) for whoever owns that call, not bundled
   # into this fix.
   run_governor --reconcile-stale
+  # UMR-20260806-115538-1e55 / UMR-20260806-115605-854d: real, immediate,
+  # automatic dead-zone sweep -- any real umr_tasks row stuck at
+  # status='dispatched' >15min with no real task directory/systemd unit
+  # ever created gets auto-reset to 'queued' right here, same 30s cadence
+  # as --tick/--reconcile-stale above (never sits waiting for an AI to read
+  # a report first). Standalone script (not a resource_governor.py
+  # subcommand) -- see reconcile_dispatched_dead_zone.py's own module
+  # docstring for the full real condition, the real ocid_artifact_links
+  # safety guard, and the real second-occurrence escalation logic. Exit
+  # code is always 0 on a clean run (auto-reset/escalated/nothing-to-do are
+  # all real, expected steady-state outcomes) -- a non-zero exit here is a
+  # genuine internal error, logged the same way as any other real tick
+  # failure via the plain >> "$LOG" 2>&1 redirect below (no separate
+  # run_governor()-style exit-2 special-case: this script is not
+  # resource_governor.py's own argparse CLI, so that specific historical
+  # failure mode does not apply here).
+  python3 /opt/veridian/scripts/reconcile_dispatched_dead_zone.py >> "$LOG" 2>&1
   sleep 30
 done

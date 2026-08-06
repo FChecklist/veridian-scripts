@@ -825,11 +825,15 @@ def test_render_report_text_survives_per_metric_insufficient_data(monkeypatch):
             "trailing_24h_status_counts": {}, "trailing_24h_total": 0, "trailing_24h_closed_count": 0,
             "percent_complete_24h_owner_umr_set": None,
         },
+        "dead_zone_reconciliation_section": {
+            "recent_auto_remediations": [], "open_escalations": [],
+        },
     }
     text = pm.render_report_text(report)  # must not raise
     assert "insufficient_data" in text
     assert "10. 10-REPORT TREND ANALYSIS" in text
     assert "14. OWNER UMR CLOSURE TRACKING" in text
+    assert "15. DISPATCHED DEAD-ZONE AUTO-REMEDIATION" in text
 
 
 def test_get_trend_analysis_zero_rows(tmp_path):
@@ -1516,6 +1520,75 @@ def test_get_owner_umr_closure_section_no_rows_at_all(tmp_path):
     assert section["all_time_total"] == 0
     assert section["oldest_open_umr_id"] is None
     assert section["percent_complete_24h_owner_umr_set"] is None
+
+
+# --- Section 15 (UMR-20260806-115538-1e55 / UMR-20260806-115605-854d):
+# read-only surface over reconcile_dispatched_dead_zone.py's own real
+# pm_decisions_pending writes. ------------------------------------------
+def _make_dead_zone_pm_decisions_db(tmp_path, rows):
+    """rows: list of (title, related_umr, status, decision_type)."""
+    db_path = str(tmp_path / "dead_zone_pdp.sqlite")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE pm_decisions_pending (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "opened_ts TEXT, title TEXT, detail TEXT, related_umr TEXT, status TEXT, "
+        "closed_ts TEXT, closed_note TEXT, recommended_option TEXT, decision_type TEXT)"
+    )
+    for title, related_umr, status, decision_type in rows:
+        conn.execute(
+            "INSERT INTO pm_decisions_pending "
+            "(opened_ts, title, detail, related_umr, status, decision_type) VALUES (?,?,?,?,?,?)",
+            ("2026-08-06T12:00:00+00:00", title, "detail", related_umr, status, decision_type),
+        )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_get_dead_zone_reconciliation_section_separates_audit_log_from_escalations(tmp_path):
+    db_path = _make_dead_zone_pm_decisions_db(tmp_path, [
+        ("Auto-reset dead-zone dispatched row: UMR-a", "UMR-a", "resolved", "dead_zone_auto_remediation"),
+        ("DEAD-ZONE REPEAT: UMR-b dead-zoned a second time after auto-reset", "UMR-b", "open", "pm_decision"),
+        ("some unrelated real PM decision", "UMR-c", "open", "pm_decision"),
+    ])
+    fake_sbr = _make_fake_sbr_module(db_path)
+    section = pm.get_dead_zone_reconciliation_section(fake_sbr)
+    assert section.get("error") is None
+    assert len(section["recent_auto_remediations"]) == 1
+    assert section["recent_auto_remediations"][0]["related_umr"] == "UMR-a"
+    assert len(section["open_escalations"]) == 1
+    assert section["open_escalations"][0]["related_umr"] == "UMR-b"
+
+
+def test_get_dead_zone_reconciliation_section_excludes_closed_escalations(tmp_path):
+    """A resolved/closed second-occurrence escalation must not appear in
+    open_escalations -- only genuinely open ones."""
+    db_path = _make_dead_zone_pm_decisions_db(tmp_path, [
+        ("DEAD-ZONE REPEAT: UMR-x dead-zoned a second time after auto-reset", "UMR-x", "resolved", "pm_decision"),
+    ])
+    fake_sbr = _make_fake_sbr_module(db_path)
+    section = pm.get_dead_zone_reconciliation_section(fake_sbr)
+    assert section["open_escalations"] == []
+
+
+def test_get_dead_zone_reconciliation_section_empty_db_honest_empty_lists(tmp_path):
+    db_path = _make_dead_zone_pm_decisions_db(tmp_path, [])
+    fake_sbr = _make_fake_sbr_module(db_path)
+    section = pm.get_dead_zone_reconciliation_section(fake_sbr)
+    assert section["recent_auto_remediations"] == []
+    assert section["open_escalations"] == []
+
+
+def test_get_dead_zone_reconciliation_section_respects_recent_limit(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm, "DEAD_ZONE_RECENT_AUDIT_LOG_LIMIT", 2)
+    rows = [
+        (f"Auto-reset dead-zone dispatched row: UMR-{i}", f"UMR-{i}", "resolved", "dead_zone_auto_remediation")
+        for i in range(5)
+    ]
+    db_path = _make_dead_zone_pm_decisions_db(tmp_path, rows)
+    fake_sbr = _make_fake_sbr_module(db_path)
+    section = pm.get_dead_zone_reconciliation_section(fake_sbr)
+    assert len(section["recent_auto_remediations"]) == 2
 
 
 if __name__ == "__main__":

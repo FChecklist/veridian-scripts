@@ -164,6 +164,40 @@ def _search_system_index(query_text):
 # check_reuse_before_dispatch()'s own docstring.
 REUSE_CONFIDENCE_THRESHOLD = 0.7
 
+# Real fix (UMR-20260806-141250-1ceb, proposal 86 / governing
+# UMR-20260806-071025-1d28): defense-in-depth cap on what
+# check_reuse_before_dispatch() embeds into a caller's metadata_json (real
+# caller today: resource_governor.py's submit(),
+# metadata_json.reuse_check_result -- see that function's own docstring).
+# Independent from, and in ADDITION TO, the query-side LIMIT the same UMR
+# added to superboss-register.py's lookup_entity()/query_knowledge(): this
+# bound holds even if a future caller reaches those registries some other
+# way, or a regression later drops the query-side LIMIT -- per
+# UMR-20260806-135902-cf13's own root-cause finding that exactly this
+# (a full, unbounded match list embedded verbatim into a stored row) is what
+# grew umr_tasks to 1855.7MB in ~11 minutes (one sampled row's embedded
+# reuse_check_result.wiring.matches alone held all 8441 unranked-cutoff
+# matches for a single query). Every match LIST embedded in the returned
+# result is capped to this many items; a `total_matches` field is kept
+# alongside so "how many exist" is never silently lost -- only the full
+# verbatim dump is -- matching proposal 86's own approved `detail` field
+# ("top-N matches + a real total_matches count"). Deliberately smaller than
+# WIRING_LOOKUP_MATCH_LIMIT/KNOWLEDGE_QUERY_MATCH_LIMIT (superboss-register.py,
+# 50 each): those bound what one query fetches for the reuse-relevance logic
+# below to reason over; this bounds only what ends up permanently stored on
+# a umr_tasks row for accountability -- a human/PM skimming metadata_json
+# needs a few concrete examples, not fifty.
+EMBEDDED_MATCH_SUMMARY_LIMIT = 10
+
+
+def _bounded_list_summary(items, limit=EMBEDDED_MATCH_SUMMARY_LIMIT):
+    """items -> (truncated_list, total_count, was_truncated). Pure, no I/O
+    -- same 'extracted so it's directly testable' discipline as
+    split_objective_into_steps()/_name_overlaps_intent() above."""
+    items = items or []
+    total = len(items)
+    return items[:limit], total, total > limit
+
 # Small, local stopword set for _name_overlaps_intent() below -- deliberately
 # NOT importing superboss-register.py's own STOPWORDS in-process (this
 # module only ever talks to that script via subprocess, same convention as
@@ -332,6 +366,29 @@ def check_reuse_before_dispatch(intent_text, task_identity=None, domain=None):
         result["recommendation"] = "needs_review"
     else:
         result["recommendation"] = "proceed"
+
+    # Real fix (UMR-20260806-141250-1ceb): bound what actually gets embedded
+    # (see EMBEDDED_MATCH_SUMMARY_LIMIT's own comment above) -- computed from
+    # the SAME already-fetched match lists the relevance logic above already
+    # used, so recommendation/confidence/reuse_candidates are unaffected by
+    # this; only the stored representation shrinks, here, right before
+    # return, so every real caller (today: resource_governor.py's submit())
+    # gets an already-bounded result with no extra step required on its end.
+    cap_bounded, cap_total, cap_truncated = _bounded_list_summary(cap_matches)
+    result["capability"] = {**cap, "matches": cap_bounded,
+                             "total_matches": cap_total, "matches_truncated": cap_truncated}
+
+    wiring_bounded, wiring_total, wiring_truncated = _bounded_list_summary(wiring_matches)
+    result["wiring"] = {**(result["wiring"] or {}), "matches": wiring_bounded,
+                         "total_matches": wiring_total, "matches_truncated": wiring_truncated}
+
+    knowledge_bounded, knowledge_total, knowledge_truncated = _bounded_list_summary(knowledge_matches)
+    result["knowledge"] = {**(result["knowledge"] or {}), "matches": knowledge_bounded,
+                            "total_matches": knowledge_total, "matches_truncated": knowledge_truncated}
+
+    sys_bounded, sys_total, sys_truncated = _bounded_list_summary(sys_idx_matches)
+    result["system_index_search"] = {**(result["system_index_search"] or {}), "system_index": sys_bounded,
+                                      "total_matches": sys_total, "matches_truncated": sys_truncated}
 
     return result
 

@@ -1881,6 +1881,27 @@ def register_knowledge(args):
     }, indent=2, default=str))
 
 
+# Real fix (UMR-20260806-141250-1ceb): shared row-count cap for the two FTS
+# queries named in proposal 86 / UMR-20260806-135902-cf13's root-cause
+# evidence (this function's own knowledge_engine_fts query below, and
+# lookup_entity()'s wiring_registry_fts query further down this file) --
+# both previously had no LIMIT and returned every matching row, unbounded,
+# straight into a caller (plan_generator.check_reuse_before_dispatch(), via
+# resource_governor.submit()) that embeds the full result verbatim into
+# umr_tasks.metadata_json on every dispatch. 50 is a deliberate choice, not
+# an arbitrary one: FTS5's `ORDER BY rank` already sorts most-relevant-first,
+# so the top 50 keeps far more candidates than a human/agent reviewer could
+# usefully scan as "possible duplicates to check" (that job realistically
+# tops out around 5-10 before it stops being a useful signal) while still
+# being generous enough that a real near-duplicate is essentially never
+# pushed out of a top-50 rank-ordered slice by noise. No existing internal
+# LIMIT precedent to match: lookup_capability()'s own analogous
+# capability_registry_fts query was checked and found equally unbounded as
+# of this fix (out of this UMR's approved scope to also change).
+WIRING_LOOKUP_MATCH_LIMIT = 50
+KNOWLEDGE_QUERY_MATCH_LIMIT = 50
+
+
 def query_knowledge(args):
     """FTS5 search over knowledge_engine (purpose/tags/entity_relationships),
     same MATCH-via-_fts_query + rowid-join pattern as search()'s other trees.
@@ -1892,10 +1913,17 @@ def query_knowledge(args):
     _ensure_knowledge_engine_table(conn)
     q = _fts_query(args.query)
     try:
+        # Real fix (UMR-20260806-141250-1ceb, proposal 86): same unbounded-
+        # FTS-result issue as lookup_entity()'s wiring_registry_fts query
+        # above (root-caused live in UMR-20260806-135902-cf13 -- this
+        # query's own result feeds check_reuse_before_dispatch()'s
+        # result["knowledge"], embedded into metadata_json.reuse_check_result
+        # on every dispatch same as the wiring match list was). Same bound,
+        # same reasoning -- see WIRING_LOOKUP_MATCH_LIMIT's own comment.
         rows = conn.execute(
             "SELECT t.* FROM knowledge_engine_fts f JOIN knowledge_engine t ON t.rowid = f.rowid "
-            "WHERE knowledge_engine_fts MATCH ? ORDER BY rank",
-            (q,),
+            "WHERE knowledge_engine_fts MATCH ? ORDER BY rank LIMIT ?",
+            (q, KNOWLEDGE_QUERY_MATCH_LIMIT),
         ).fetchall()
         result = [dict(r) for r in rows]
     except sqlite3.OperationalError as e:
@@ -2849,10 +2877,27 @@ def lookup_entity(args):
     if not matches and args.query:
         q = _fts_query(args.query)
         try:
+            # Real fix (UMR-20260806-141250-1ceb, proposal 86 / governing
+            # UMR-20260806-071025-1d28): this query used to have NO LIMIT --
+            # confirmed live root cause of a 2034MB->4067MB (~11 min) DB
+            # blowup (UMR-20260806-135902-cf13's own dbstat + row-level
+            # evidence): a single sampled row's embedded
+            # reuse_check_result.wiring.matches held all 8441 unranked-cutoff
+            # matches for one query (~5.97MB just for that one field). Bound
+            # chosen as WIRING_LOOKUP_MATCH_LIMIT (see module-level constant
+            # below) -- FTS5's own `ORDER BY rank` already puts the most
+            # relevant hits first, so this keeps the reuse-check's real
+            # signal (top-ranked likely duplicates) while making the
+            # per-query result size structurally bounded regardless of how
+            # large wiring_registry grows. No internal LIMIT precedent
+            # existed to match here: lookup_capability()'s own analogous FTS
+            # query (capability_registry_fts, same file) was checked and, as
+            # of this fix, was equally unbounded -- out of this UMR's
+            # approved scope to change, noted for a future follow-up.
             rows = conn.execute(
                 "SELECT t.* FROM wiring_registry_fts f JOIN wiring_registry t ON t.rowid = f.rowid "
-                "WHERE wiring_registry_fts MATCH ? ORDER BY rank",
-                (q,),
+                "WHERE wiring_registry_fts MATCH ? ORDER BY rank LIMIT ?",
+                (q, WIRING_LOOKUP_MATCH_LIMIT),
             ).fetchall()
         except sqlite3.OperationalError:
             rows = []

@@ -225,6 +225,13 @@ _WRITE_LOCK_PATH = DB_PATH + ".writelock"
 # exclusion guarantee.
 _write_lock_depth = [0]
 
+# Same VERIDIAN_ROOT-relative resolution convention used by
+# verify_registry_file_paths.py's resolve_path()/generate_wiring_registry.py's
+# normalize_path(): absolute paths used as-is, root-relative paths (e.g.
+# "scripts/foo.py") resolved under this root. Used by
+# record_capability_graduation()'s real script_path existence check.
+VERIDIAN_ROOT = "/opt/veridian"
+
 
 @contextlib.contextmanager
 def _write_lock():
@@ -3519,6 +3526,23 @@ def record_capability_graduation(conn, umr_id, agent_id, task_summary, decision,
     real, already-registered capability_id + script_path backing it (raises
     ValueError otherwise -- this is the one guard that IS deterministic: no
     claiming a script was built without proof it was actually registered).
+
+    Both halves of that guarantee are checked for real, not just for
+    non-empty strings (2026-08-06 Superboss AUDIT FAIL on PR #205: a
+    fabricated, never-registered capability_id was silently accepted
+    because only `if not capability_id` was checked -- the schema's FK on
+    capability_id is inert since _connect() never sets
+    PRAGMA foreign_keys=ON, same documented limitation as
+    ocid_artifact_links, which compensates with an explicit Python-side
+    existence check; this function now does the same):
+      - capability_id must be a real row already present in
+        capability_registry (SELECT existence check, right now, never
+        assumed from the caller's say-so).
+      - script_path must resolve to a real file that actually exists on
+        disk, using the same VERIDIAN_ROOT-relative resolution convention
+        as verify_registry_file_paths.py's resolve_path()/path_exists()
+        (absolute paths used as-is, root-relative paths like
+        "scripts/foo.py" resolved under VERIDIAN_ROOT).
     Insert-only, mirrors route_replay's convention -- a UMR re-evaluated later
     gets a second row, so the full history stays queryable."""
     if decision not in ("graduated", "judgment_required"):
@@ -3530,6 +3554,24 @@ def record_capability_graduation(conn, umr_id, agent_id, task_summary, decision,
             raise ValueError(
                 "decision='graduated' requires a real capability_id (from register-capability) "
                 "and script_path -- never force a script claim without a registered artifact backing it"
+            )
+        existing = conn.execute(
+            "SELECT 1 FROM capability_registry WHERE capability_id = ?", (capability_id,)
+        ).fetchone()
+        if not existing:
+            raise ValueError(
+                f"decision='graduated' requires capability_id {capability_id!r} to already exist in "
+                "capability_registry (register it first via register-capability) -- a fabricated or "
+                "not-yet-registered capability_id can never back a 'graduated' claim"
+            )
+        resolved_script_path = (
+            script_path if script_path.startswith("/") else os.path.join(VERIDIAN_ROOT, script_path)
+        )
+        if not os.path.exists(resolved_script_path):
+            raise ValueError(
+                f"decision='graduated' requires script_path {script_path!r} (resolved to "
+                f"{resolved_script_path!r}) to be a real file that exists on disk right now -- "
+                "a 'graduated' row can never claim a script that was not actually built"
             )
     else:
         if capability_id or script_path:

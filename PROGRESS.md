@@ -1,53 +1,98 @@
-# PROGRESS -- task-20260806-065104-real-test-after-owner-confirmed-patch-ap
+# PROGRESS -- task-20260806-050102-owner-standing-directive--register-umr-f
 
-SPEC: "Real recheck, does the lock fix patch now work."
+SPEC: Real Owner standing directive. This dispatch itself mints the real
+permanent UMR ID for the whole nine-part directive covering UMR/UTR global
+registry consolidation and the Mini VERIDIAN browser-first local execution
+architecture. Hard constraint: **analysis only** -- investigation and
+written notes only, nothing built, nothing implemented, until PM reviews
+findings and gives explicit build authorization.
 
-## Note on duplicate dispatch
+In scope for this task (parts 1,2,3,4,7,8 only -- parts 5,6,9 are PM-level
+conceptual framing, PM handling those directly):
+1/2. Confirm whether UTR=umr_tasks / UMR=broader metadata taxonomy
+     (UMR-20260805-093630-29d1) already covers what the Owner described --
+     check `registry_taxonomy_notes` table content directly, don't assume.
+3. Confirm superboss-register.py is genuinely the one script AI agents use;
+   measure real search time + memory use on a representative query.
+4. Full inventory: every table in superboss-register.sqlite, every script
+   in live /opt/veridian/scripts, one line each.
+7. Two lists: global server-side tables/functions/scripts, and honest
+   client-side inventory for PROJEXA + veridian-compliance-ai frontends
+   (localStorage/IndexedDB/PWA manifest/offline support) -- report what's
+   real, invent nothing.
+8. Honest yes/no on whether a server<->browser sync mechanism exists today,
+   with evidence.
 
-A near-duplicate task (`task-20260806-064619-real-test-after-owner-confirmed-patch-ap`,
-same SPEC text, dispatched ~4.5 min before this one) already did this exact
-verification on its own branch (commit `75dfe66`), reaching the same "the fix
-works" verdict. Per standing lesson
-([[veridian-task-prompt-false-premise-pattern]]) that did not get trusted
-blindly -- everything below was independently re-run from scratch on this
-branch/workspace, not copied.
-
-## Identified target
-
-The "lock fix patch" is commit `6844c75` (fix: nested `_write_lock()` deadlock
-in evidence_json schema refusal path). `upsert_ocid_canonical_registry()`'s
-refusal path used to acquire a second, nested `with _write_lock():` around its
-audit-log insert. `flock()` is per-open-file-description, not
-per-process/re-entrant, so calling it from inside a caller that already holds
-the lock (the real production call pattern used by every current call site --
-`audit_ocid_canonical_registry.py`, `backfill_ocid_registry_phase2_columns.py`,
-`backfill_evidence_json_schema.py`, and this file's own CLI command) hung
-forever instead of raising `OcidEvidenceSchemaRefused`.
+## Standing practice applied (per memory: prior urgent PM SPECs in this
+## repo have not always matched live state -- verify independently first)
+All of the above is independent verification against live system state
+before any conclusion is written up. No file writes to live systems, no DB
+writes, no code changes -- this task only produces a findings document to
+deposit into the UMR row.
 
 ## Completed
+- [x] Located live system paths: DB = /opt/veridian/ai-os/memory/superboss-register.sqlite
+      (has WAL); canonical script = /opt/veridian/scripts/superboss-register.py;
+      candidate frontends = /opt/veridian/repos/projexa,
+      /opt/veridian/repos/compliance-tracker.
 
-- [x] Confirmed `6844c75` is on this branch's HEAD (`git merge-base
-      --is-ancestor 6844c75 HEAD` succeeds) -- already merged, not pending.
-- [x] Ran the existing regression test suite for this fix
-      (`tests/test_evidence_json_schema_gate.py`) -- 12 passed, including
-      `test_refused_upsert_from_inside_an_outer_write_lock_does_not_deadlock`.
-- [x] Independent repro #1 (own script, not the repo's test file): loaded
-      `superboss-register.py` **as of commit `6844c75^` (pre-fix)** via
-      `git show 6844c75^:superboss-register.py`, called
-      `upsert_ocid_canonical_registry()` with an incomplete-evidence
-      `status='completed'` row from inside an already-held `_write_lock()`,
-      under `timeout 8`: **hung, killed at 8s (exit 124)** -- confirms the
-      pre-fix bug was real, not a paper bug.
-- [x] Independent repro #2: identical call against the current HEAD
-      (post-fix) `superboss-register.py`: raised `OcidEvidenceSchemaRefused`
-      correctly in **0.0102s**, no hang.
-- [x] **Verdict: the lock fix patch works.** Confirmed independently end to
-      end (bug reproduced pre-fix, resolved post-fix, existing regression
-      test passes) -- not just trusting the commit message or the other
-      task's write-up.
+- [x] Confirmed "this UMR row" = `UMR-20260806-050055-d145`
+      (`task_identity owner-task-20260806-050053-1500765`, status
+      `running`) via direct read-only query -- matched its `inputs_json`
+      verbatim against the Owner's SPEC text rather than assuming.
+- [x] Part 1/2: read `registry_taxonomy_notes` table content directly +
+      UMR-20260805-093630-29d1 record verbatim -- verdict PARTIAL. Taxonomy
+      naming (UTR=umr_tasks, UMR=broader layer) is real and merged; zero
+      evidence anywhere of "consolidation" work or "Mini VERIDIAN
+      browser-first" architecture under that or any related UMR.
+- [x] Part 3: confirmed superboss-register.py is the real one script via
+      independent wiring grep (worker-entrypoint.sh, task-gateway.py,
+      prompt_gateway/gateway.py, etc, not just its own docstring). Measured
+      real numbers on a representative `search` query (mirroring the real
+      gateway_persistence.py call site) via read-only-connection harness:
+      ~0.04-0.05s wall clock, ~19.7MB peak RSS, both runs, against a live
+      1.6GB DB.
+- [x] Part 4: full inventory -- 36 real DB tables (+ FTS shadows) and all
+      124 live top-level scripts in /opt/veridian/scripts, one line each,
+      170 backup/dead files excluded and counted separately, 7-item
+      possible-duplication callout list (incl. 3 scripts still live
+      despite being marked superseded-by-consolidation).
+- [x] Part 7: server-side list (36 tables + 124 scripts) + honest
+      client-side inventory for PROJEXA and compliance-tracker (confirmed
+      as the real veridian-compliance-ai repo by its own docs, not
+      assumed). PROJEXA has a real working service worker + IndexedDB
+      offline queue. compliance-tracker has a real PWA manifest + real
+      IndexedDB (incl. an existing browser-execution ML model-cache tier
+      directly relevant to "Mini VERIDIAN") but zero service
+      worker/offline support.
+- [x] Part 8: verdict PARTIAL/leaning-NO -- only plain HTTP polling exists
+      client<->each app's own server; zero server-push; no frontend calls
+      /opt/veridian/scripts or ai-os at all; one real delta-sync module
+      (compliance-tracker's sync-engine.ts) exists but is unwired,
+      imported only by its own test file. Corroborated against (not just
+      trusted) an existing internal doc reaching the same conclusion.
+- [x] Compiled structured findings into
+      `UMR-20260806-050055-d145_MINI_VERIDIAN_UMR_UTR_ANALYSIS_2026-08-06.md`
+      and deposited it in this task's branch, citing the real UMR row.
+- [x] Explicitly stated in that document: nothing was built or changed --
+      all five investigation threads were read-only (DB opened
+      `-readonly` throughout, mtime confirmed unchanged; no source files
+      modified in scripts or either frontend repo; no
+      install/build/deploy commands run).
 
 ## Remaining
+- [ ] None -- analysis-only scope (parts 1,2,3,4,7,8) delivered. Awaiting
+      PM review of findings + explicit build authorization before any
+      implementation work (and before parts 5,6,9, which are PM-level
+      conceptual framing handled directly by the PM).
 
-- [ ] Full repo suite (`python3 -m pytest -q`) running in background to
-      confirm no unrelated regressions; will record result and commit again
-      once it finishes (>120s, backgrounded).
+## Post-delivery checkpoint (invocation 2/20)
+- [x] PR #125 was open but `mergeable: CONFLICTING` against `main`
+      (another task's PR, #126, had merged in between and also touched the
+      repo-root `PROGRESS.md` scratch file -- expected per-task scratch
+      collision, not a real content conflict). Merged `origin/main` into
+      this branch with `-X ours` on `PROGRESS.md` (kept this task's own
+      progress notes; the findings doc had no conflict) and pushed
+      (`7f140fc`). PR #125 is now `state: OPEN`, `mergeable: MERGEABLE`.
+- [ ] Nothing further for this worker to do -- PR ready to merge, still
+      pending PM review/authorization per the analysis-only constraint.

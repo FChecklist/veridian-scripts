@@ -83,6 +83,14 @@ from datetime import datetime, timezone
 
 DB_PATH = os.environ.get("SUPERBOSS_REGISTER_DB", "/opt/veridian/ai-os/memory/superboss-register.sqlite")
 _WRITE_LOCK_PATH = DB_PATH + ".writelock"
+# Root-cause fix, Real Owner directive UMR-20260806-084306-f599 Step 6.3: this
+# used to write its pre-migration snapshot as a sibling of DB_PATH itself
+# (i.e. directly into .../ai-os/memory/), which is exactly the ad-hoc-copy
+# pattern that let 20GB+ of redundant full-DB copies accumulate there with
+# nothing ever pruning them. Snapshots now go into DB_PATH's own backups/
+# subdirectory instead, so prune_memory_backups.py's retention policy
+# actually governs them.
+BACKUP_DIR = os.path.join(os.path.dirname(DB_PATH), "backups")
 
 
 @contextlib.contextmanager
@@ -105,8 +113,9 @@ def _write_lock():
 def _backup_db():
     if not os.path.isfile(DB_PATH):
         return None
+    os.makedirs(BACKUP_DIR, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%SZ")
-    backup_path = f"{DB_PATH}.pre-dedup-constraint-backup-{ts}"
+    backup_path = os.path.join(BACKUP_DIR, f"{os.path.basename(DB_PATH)}.pre-dedup-constraint-backup-{ts}")
     src = sqlite3.connect(DB_PATH, timeout=30)
     dst = sqlite3.connect(backup_path)
     with dst:

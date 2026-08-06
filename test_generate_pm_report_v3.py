@@ -534,9 +534,29 @@ def test_end_to_end_smoke_run(tmp_path, monkeypatch):
     class FakeGovernor:
         EMERGENCY_STOP_PATH = str(tmp_path / "EMERGENCY_STOP_nonexistent")
 
-    monkeypatch.setattr(pm, "load_module_from_path", lambda name, path: (
-        fake_sbr if "superboss" in path else FakeGovernor()
-    ))
+    class FakeTestScriptBuildCheck:
+        """Stand-in for gtm_test_script_build_check.py -- get_test_script_build_section()
+        calls mod.compute_test_script_build_status(sbr) unconditionally (not
+        just the import), so this needs a real callable, not just an
+        attribute-less object like FakeGovernor above (regression: without
+        this, build_report() raised AttributeError instead of degrading, the
+        one thing this whole smoke test exists to catch)."""
+        @staticmethod
+        def compute_test_script_build_status(sbr):
+            return {
+                "total": 1, "x": 1, "complete": True,
+                "failing_category_indices": [], "per_category": [{
+                    "category_index": 1, "category_name": "fake_category",
+                    "script_path_raw": "fake_check.py", "resolved_path": "fake_check.py",
+                    "exists": True, "compiles": True,
+                }],
+                "error": None,
+            }
+
+    monkeypatch.setattr(pm, "load_module_from_path", lambda name, path: {
+        "superboss_register": fake_sbr,
+        "gtm_test_script_build_check": FakeTestScriptBuildCheck(),
+    }.get(name, FakeGovernor()))
 
     report = pm.build_report(fake_sbr)
     text = pm.render_report_text(report)

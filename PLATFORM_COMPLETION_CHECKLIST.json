@@ -1,0 +1,1865 @@
+{
+  "db_path": "/opt/veridian/ai-os/memory/superboss-register.sqlite",
+  "scripts": [
+    {
+      "script": "anthropic_openrouter_proxy.py",
+      "referencing_tests": [
+        "test_generate_software_catalog.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_software_catalog.py'] -> {'test_generate_software_catalog.py': 'pass'}"
+    },
+    {
+      "script": "anthropic_openrouter_proxy_v2.py",
+      "referencing_tests": [
+        "test_generate_software_catalog.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_software_catalog.py'] -> {'test_generate_software_catalog.py': 'pass'}"
+    },
+    {
+      "script": "apply_owner_dispatch_status_corrections.py",
+      "referencing_tests": [
+        "test_apply_owner_dispatch_status_corrections.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_apply_owner_dispatch_status_corrections.py'] -> {'test_apply_owner_dispatch_status_corrections.py': 'pass'}"
+    },
+    {
+      "script": "audit_ocid_canonical_registry.py",
+      "referencing_tests": [
+        "tests/test_audit_ocid_canonical_registry.py",
+        "tests/test_evidence_json_schema_gate.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['tests/test_audit_ocid_canonical_registry.py', 'tests/test_evidence_json_schema_gate.py'] -> {'tests/test_audit_ocid_canonical_registry.py': 'pass', 'tests/test_evidence_json_schema_gate.py': 'pass'}"
+    },
+    {
+      "script": "audit_ocid_compliance.py",
+      "referencing_tests": [
+        "tests/test_audit_ocid_compliance_report.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['tests/test_audit_ocid_compliance_report.py'] -> {'tests/test_audit_ocid_compliance_report.py': 'pass'}"
+    },
+    {
+      "script": "auto_phase_continuation.py",
+      "referencing_tests": [
+        "test_tight_task_validation.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_tight_task_validation.py'] -> {'test_tight_task_validation.py': 'pass'}"
+    },
+    {
+      "script": "automation_rule_engine.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "backfill_evidence_json_schema.py",
+      "referencing_tests": [
+        "tests/test_evidence_json_schema_gate.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['tests/test_evidence_json_schema_gate.py'] -> {'tests/test_evidence_json_schema_gate.py': 'pass'}"
+    },
+    {
+      "script": "backfill_ocid_registry_phase2_columns.py",
+      "referencing_tests": [
+        "tests/test_evidence_json_schema_gate.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['tests/test_evidence_json_schema_gate.py'] -> {'tests/test_evidence_json_schema_gate.py': 'pass'}"
+    },
+    {
+      "script": "backfill_phase_self_report.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "batch-import-conversation-log.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "build_lock_liveness_guard.py",
+      "referencing_tests": [
+        "tests/test_build_lock_liveness_guard.py",
+        "tests/test_build_lock_liveness_guard_deployment.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['tests/test_build_lock_liveness_guard.py', 'tests/test_build_lock_liveness_guard_deployment.py'] -> {'tests/test_build_lock_liveness_guard.py': 'pass', 'tests/test_build_lock_liveness_guard_deployment.py': 'pass'}"
+    },
+    {
+      "script": "chatgpt_audit_guard.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "chatgpt_audit_versioning.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "chatgpt_promptlib_guard.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "check_latest_task.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "check_single_protocol_file.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "chrome_start.sh",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "chrome_stop.sh",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "claude-tmux-usage-limit-check.sh",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "claude-usage-limit-retry.sh",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "context_engine.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "cost-reconciliation.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "cost-usage-60min.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "credit-accountant.py",
+      "referencing_tests": [
+        "test_triage_owner_umr_24h.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_triage_owner_umr_24h.py'] -> {'test_triage_owner_umr_24h.py': 'pass'}"
+    },
+    {
+      "script": "ddl_authorization_check.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "decision-service.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "deploy-live-scripts.sh",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "detect_prompt_duplicates.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "directive_engine.py",
+      "referencing_tests": [
+        "tests/test_directive_engine_retry_gate.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['tests/test_directive_engine_retry_gate.py'] -> {'tests/test_directive_engine_retry_gate.py': 'pass'}"
+    },
+    {
+      "script": "directive_engine.sh",
+      "referencing_tests": [
+        "tests/test_directive_engine_retry_gate.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['tests/test_directive_engine_retry_gate.py'] -> {'tests/test_directive_engine_retry_gate.py': 'pass'}"
+    },
+    {
+      "script": "dispatch-docworker-task.sh",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "dispatch-owner-task.sh",
+      "referencing_tests": [
+        "tests/test_dispatch_owner_task_status_write.py",
+        "tests/test_dispatch_owner_task_tmux_relay_lock.py",
+        "tests/test_ocid_evidence_supersession.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['tests/test_dispatch_owner_task_status_write.py', 'tests/test_dispatch_owner_task_tmux_relay_lock.py', 'tests/test_ocid_evidence_supersession.py'] -> {'tests/test_dispatch_owner_task_status_write.py': 'pass', 'tests/test_dispatch_owner_task_tmux_relay_lock.py': 'pass', 'tests/test_ocid_evidence_supersession.py': 'pass'}"
+    },
+    {
+      "script": "dispatch-tick.py",
+      "referencing_tests": [
+        "test_generate_pm_report_v3.py",
+        "test_pm_cycle_precheck.py",
+        "test_pm_triage.py",
+        "test_stuck_task_heartbeat.py",
+        "test_worker_boot_activation_and_resume.py",
+        "tests/test_build_lock_contended_requeue.py",
+        "tests/test_dispatch_owner_task_status_write.py",
+        "tests/test_resume_interrupted_workers_no_duplicate_row.py",
+        "tests/test_rule4_pm_visible_real_counts.py",
+        "tests/test_rule5_real_stall_detection.py",
+        "tests/test_umr_reuse_on_resume.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_pm_report_v3.py', 'test_pm_cycle_precheck.py', 'test_pm_triage.py', 'test_stuck_task_heartbeat.py', 'test_worker_boot_activation_and_resume.py', 'tests/test_build_lock_contended_requeue.py', 'tests/test_dispatch_owner_task_status_write.py', 'tests/test_resume_interrupted_workers_no_duplicate_row.py', 'tests/test_rule4_pm_visible_real_counts.py', 'tests/test_rule5_real_stall_detection.py', 'tests/test_umr_reuse_on_resume.py'] -> {'test_generate_pm_report_v3.py': 'pass', 'test_pm_cycle_precheck.py': 'pass', 'test_pm_triage.py': 'pass', 'test_stuck_task_heartbeat.py': 'pass', 'test_worker_boot_activation_and_resume.py': 'pass', 'tests/test_build_lock_contended_requeue.py': 'pass', 'tests/test_dispatch_owner_task_status_write.py': 'pass', 'tests/test_resume_interrupted_workers_no_duplicate_row.py': 'pass', 'tests/test_rule4_pm_visible_real_counts.py': 'pass', 'tests/test_rule5_real_stall_detection.py': 'pass', 'tests/test_umr_reuse_on_resume.py': 'pass'}"
+    },
+    {
+      "script": "dispatch_core.py",
+      "referencing_tests": [
+        "test_generate_pm_report_v3.py",
+        "tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py",
+        "tests/test_build_lock_contended_requeue.py",
+        "tests/test_ocid_evidence_supersession.py",
+        "tests/test_reconcile_dispatched_dead_zone.py",
+        "tests/test_reconcile_stale_heartbeats_execute_gate.py",
+        "tests/test_resume_interrupted_workers_no_duplicate_row.py",
+        "tests/test_rule2_dispatch_outcomes.py",
+        "tests/test_rule4_pm_visible_real_counts.py",
+        "tests/test_rule5_real_stall_detection.py",
+        "tests/test_run_tick_continues_past_row_resolved_skip.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_pm_report_v3.py', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py', 'tests/test_build_lock_contended_requeue.py', 'tests/test_ocid_evidence_supersession.py', 'tests/test_reconcile_dispatched_dead_zone.py', 'tests/test_reconcile_stale_heartbeats_execute_gate.py', 'tests/test_resume_interrupted_workers_no_duplicate_row.py', 'tests/test_rule2_dispatch_outcomes.py', 'tests/test_rule4_pm_visible_real_counts.py', 'tests/test_rule5_real_stall_detection.py', 'tests/test_run_tick_continues_past_row_resolved_skip.py'] -> {'test_generate_pm_report_v3.py': 'pass', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py': 'pass', 'tests/test_build_lock_contended_requeue.py': 'pass', 'tests/test_ocid_evidence_supersession.py': 'pass', 'tests/test_reconcile_dispatched_dead_zone.py': 'pass', 'tests/test_reconcile_stale_heartbeats_execute_gate.py': 'pass', 'tests/test_resume_interrupted_workers_no_duplicate_row.py': 'pass', 'tests/test_rule2_dispatch_outcomes.py': 'pass', 'tests/test_rule4_pm_visible_real_counts.py': 'pass', 'tests/test_rule5_real_stall_detection.py': 'pass', 'tests/test_run_tick_continues_past_row_resolved_skip.py': 'pass'}"
+    },
+    {
+      "script": "doc-worker-entrypoint.sh",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "document_engine.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "external_ai_state_machine.py",
+      "referencing_tests": [
+        "tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py'] -> {'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py': 'pass'}"
+    },
+    {
+      "script": "find_code.sh",
+      "referencing_tests": [
+        "tests/test_find_code.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['tests/test_find_code.py'] -> {'tests/test_find_code.py': 'pass'}"
+    },
+    {
+      "script": "gap-status.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "generate-system-diagram.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "generate_chatgpt_audit_index.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "generate_chatgpt_audit_request.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "generate_chatgpt_promptbatch_request.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "generate_module_gap_audit_module_list.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "generate_pm_report_v3.py",
+      "referencing_tests": [
+        "test_generate_pm_report_v3.py",
+        "test_generate_software_catalog.py",
+        "test_pm_cycle_precheck.py",
+        "tests/test_gtm_check_ux_audit.py",
+        "tests/test_pm_decisions_pending.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_pm_report_v3.py', 'test_generate_software_catalog.py', 'test_pm_cycle_precheck.py', 'tests/test_gtm_check_ux_audit.py', 'tests/test_pm_decisions_pending.py'] -> {'test_generate_pm_report_v3.py': 'pass', 'test_generate_software_catalog.py': 'pass', 'test_pm_cycle_precheck.py': 'pass', 'tests/test_gtm_check_ux_audit.py': 'pass', 'tests/test_pm_decisions_pending.py': 'pass'}"
+    },
+    {
+      "script": "generate_prompt_coverage_report.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "generate_quick_reference.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "generate_software_catalog.py",
+      "referencing_tests": [
+        "test_generate_software_catalog.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_software_catalog.py'] -> {'test_generate_software_catalog.py': 'pass'}"
+    },
+    {
+      "script": "generate_task_checklist.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "generate_wiring_registry.py",
+      "referencing_tests": [
+        "tests/test_reuse_check_unbounded_metadata_fix.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['tests/test_reuse_check_unbounded_metadata_fix.py'] -> {'tests/test_reuse_check_unbounded_metadata_fix.py': 'pass'}"
+    },
+    {
+      "script": "gtm_check_accessibility_testing.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_ai_testing.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_api_testing.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_architecture_audit.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_backup_recovery_testing.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_browser_compatibility.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_database_testing.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_deployment_testing.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_documentation_audit.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_e2e_testing.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_governance_testing.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_lighthouse_audit.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_load_stress_testing.py",
+      "referencing_tests": [
+        "tests/test_gtm_check_load_stress_testing.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['tests/test_gtm_check_load_stress_testing.py'] -> {'tests/test_gtm_check_load_stress_testing.py': 'pass'}"
+    },
+    {
+      "script": "gtm_check_monitoring_testing.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_multi_tenant_testing.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_performance_testing.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_production_readiness_audit.py",
+      "referencing_tests": [
+        "test_generate_pm_report_v3.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_pm_report_v3.py'] -> {'test_generate_pm_report_v3.py': 'pass'}"
+    },
+    {
+      "script": "gtm_check_regression_testing.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_responsive_testing.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_role_permission_testing.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_security_audit.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_static_code_analysis.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_ui_testing.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "gtm_check_ux_audit.py",
+      "referencing_tests": [
+        "tests/test_gtm_check_ux_audit.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['tests/test_gtm_check_ux_audit.py'] -> {'tests/test_gtm_check_ux_audit.py': 'pass'}"
+    },
+    {
+      "script": "gtm_test_script_build_check.py",
+      "referencing_tests": [
+        "test_generate_pm_report_v3.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_pm_report_v3.py'] -> {'test_generate_pm_report_v3.py': 'pass'}"
+    },
+    {
+      "script": "gtm_write_category_result.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "health-check-15min.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "import-memory-history.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "index-logs.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "ingest_chatgpt_audit_response.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "ingest_chatgpt_promptbatch_response.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "intent_engine.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "knowledge_registry_multisource.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "launch-interactive-claude.sh",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "learning_engine.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "master-decompose.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "metadata_reconciliation.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "migrate_2026-07-31_dedup_constraints.py",
+      "referencing_tests": [
+        "test_dedup_constraints_2026-07-31.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_dedup_constraints_2026-07-31.py'] -> {'test_dedup_constraints_2026-07-31.py': 'pass'}"
+    },
+    {
+      "script": "module_gap_audit_lib.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "notification_engine.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "notify-owner.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "owner_engine_convergence/build_gold_items.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "owner_engine_convergence/measure_accuracy.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "owner_status.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "pallavi_stop.sh",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "phase-continuation-tick.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "plan_generator.py",
+      "referencing_tests": [
+        "tests/test_reuse_check_unbounded_metadata_fix.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['tests/test_reuse_check_unbounded_metadata_fix.py'] -> {'tests/test_reuse_check_unbounded_metadata_fix.py': 'pass'}"
+    },
+    {
+      "script": "pm_cycle_precheck.py",
+      "referencing_tests": [
+        "test_pm_cycle_precheck.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_pm_cycle_precheck.py'] -> {'test_pm_cycle_precheck.py': 'pass'}"
+    },
+    {
+      "script": "policy_decision.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "preflight-guard.py",
+      "referencing_tests": [
+        "test_check_crontab_unauthorized_change.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_check_crontab_unauthorized_change.py'] -> {'test_check_crontab_unauthorized_change.py': 'pass'}"
+    },
+    {
+      "script": "prompt_gateway/config.py",
+      "referencing_tests": [
+        "test_generate_pm_report_v3.py",
+        "test_pm_triage.py",
+        "test_stuck_task_heartbeat.py",
+        "test_tight_task_validation.py",
+        "test_worker_boot_activation_and_resume.py",
+        "tests/test_build_lock_liveness_guard_deployment.py",
+        "tests/test_external_agent_dispatch.py",
+        "tests/test_gtm_check_load_stress_testing.py",
+        "tests/test_rule5_real_stall_detection.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_pm_report_v3.py', 'test_pm_triage.py', 'test_stuck_task_heartbeat.py', 'test_tight_task_validation.py', 'test_worker_boot_activation_and_resume.py', 'tests/test_build_lock_liveness_guard_deployment.py', 'tests/test_external_agent_dispatch.py', 'tests/test_gtm_check_load_stress_testing.py', 'tests/test_rule5_real_stall_detection.py'] -> {'test_generate_pm_report_v3.py': 'pass', 'test_pm_triage.py': 'pass', 'test_stuck_task_heartbeat.py': 'pass', 'test_tight_task_validation.py': 'pass', 'test_worker_boot_activation_and_resume.py': 'pass', 'tests/test_build_lock_liveness_guard_deployment.py': 'pass', 'tests/test_external_agent_dispatch.py': 'pass', 'tests/test_gtm_check_load_stress_testing.py': 'pass', 'tests/test_rule5_real_stall_detection.py': 'pass'}"
+    },
+    {
+      "script": "prompt_gateway/engine/classifier.py",
+      "referencing_tests": [
+        "tests/test_reconcile_owner_dispatch_status.py",
+        "tests/test_rule2_dispatch_outcomes.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['tests/test_reconcile_owner_dispatch_status.py', 'tests/test_rule2_dispatch_outcomes.py'] -> {'tests/test_reconcile_owner_dispatch_status.py': 'pass', 'tests/test_rule2_dispatch_outcomes.py': 'pass'}"
+    },
+    {
+      "script": "prompt_gateway/engine/context_engine.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "prompt_gateway/engine/document_engine.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "prompt_gateway/engine/id_generator.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "prompt_gateway/engine/layer0_router.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "prompt_gateway/engine/prompt_engine.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "prompt_gateway/engine/snip_engine.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "prompt_gateway/gateway.py",
+      "referencing_tests": [
+        "test_apply_owner_dispatch_status_corrections.py",
+        "test_generate_pm_report_v3.py",
+        "test_tight_task_validation.py",
+        "test_triage_owner_umr_24h.py",
+        "tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py",
+        "tests/test_dispatch_owner_task_status_write.py",
+        "tests/test_ocid_evidence_supersession.py",
+        "tests/test_reconcile_dispatched_dead_zone.py",
+        "tests/test_reuse_check_unbounded_metadata_fix.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_apply_owner_dispatch_status_corrections.py', 'test_generate_pm_report_v3.py', 'test_tight_task_validation.py', 'test_triage_owner_umr_24h.py', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py', 'tests/test_dispatch_owner_task_status_write.py', 'tests/test_ocid_evidence_supersession.py', 'tests/test_reconcile_dispatched_dead_zone.py', 'tests/test_reuse_check_unbounded_metadata_fix.py'] -> {'test_apply_owner_dispatch_status_corrections.py': 'pass', 'test_generate_pm_report_v3.py': 'pass', 'test_tight_task_validation.py': 'pass', 'test_triage_owner_umr_24h.py': 'pass', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py': 'pass', 'tests/test_dispatch_owner_task_status_write.py': 'pass', 'tests/test_ocid_evidence_supersession.py': 'pass', 'tests/test_reconcile_dispatched_dead_zone.py': 'pass', 'tests/test_reuse_check_unbounded_metadata_fix.py': 'pass'}"
+    },
+    {
+      "script": "prompt_gateway/gateway_persistence.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "prompt_gateway/query.py",
+      "referencing_tests": [
+        "test_generate_pm_report_v3.py",
+        "test_tight_task_validation.py",
+        "test_triage_owner_umr_24h.py",
+        "tests/test_audit_ocid_canonical_registry.py",
+        "tests/test_audit_ocid_compliance_report.py",
+        "tests/test_evidence_json_schema_gate.py",
+        "tests/test_ocid_artifact_links.py",
+        "tests/test_ocid_canonical_registry.py",
+        "tests/test_ocid_evidence_supersession.py",
+        "tests/test_ocid_registry_completion_gate.py",
+        "tests/test_reuse_check_unbounded_metadata_fix.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_pm_report_v3.py', 'test_tight_task_validation.py', 'test_triage_owner_umr_24h.py', 'tests/test_audit_ocid_canonical_registry.py', 'tests/test_audit_ocid_compliance_report.py', 'tests/test_evidence_json_schema_gate.py', 'tests/test_ocid_artifact_links.py', 'tests/test_ocid_canonical_registry.py', 'tests/test_ocid_evidence_supersession.py', 'tests/test_ocid_registry_completion_gate.py', 'tests/test_reuse_check_unbounded_metadata_fix.py'] -> {'test_generate_pm_report_v3.py': 'pass', 'test_tight_task_validation.py': 'pass', 'test_triage_owner_umr_24h.py': 'pass', 'tests/test_audit_ocid_canonical_registry.py': 'pass', 'tests/test_audit_ocid_compliance_report.py': 'pass', 'tests/test_evidence_json_schema_gate.py': 'pass', 'tests/test_ocid_artifact_links.py': 'pass', 'tests/test_ocid_canonical_registry.py': 'pass', 'tests/test_ocid_evidence_supersession.py': 'pass', 'tests/test_ocid_registry_completion_gate.py': 'pass', 'tests/test_reuse_check_unbounded_metadata_fix.py': 'pass'}"
+    },
+    {
+      "script": "prune_memory_backups.py",
+      "referencing_tests": [
+        "tests/test_prune_memory_backups.py",
+        "tests/test_snapshot_memory_backup.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['tests/test_prune_memory_backups.py', 'tests/test_snapshot_memory_backup.py'] -> {'tests/test_prune_memory_backups.py': 'pass', 'tests/test_snapshot_memory_backup.py': 'pass'}"
+    },
+    {
+      "script": "quality-gate.sh",
+      "referencing_tests": [
+        "test_triage_owner_umr_24h.py",
+        "tests/test_build_lock_contended_requeue.py",
+        "tests/test_build_lock_liveness_guard.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_triage_owner_umr_24h.py', 'tests/test_build_lock_contended_requeue.py', 'tests/test_build_lock_liveness_guard.py'] -> {'test_triage_owner_umr_24h.py': 'pass', 'tests/test_build_lock_contended_requeue.py': 'pass', 'tests/test_build_lock_liveness_guard.py': 'pass'}"
+    },
+    {
+      "script": "reconcile_dispatched_dead_zone.py",
+      "referencing_tests": [
+        "test_generate_pm_report_v3.py",
+        "tests/test_reconcile_dispatched_dead_zone.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_pm_report_v3.py', 'tests/test_reconcile_dispatched_dead_zone.py'] -> {'test_generate_pm_report_v3.py': 'pass', 'tests/test_reconcile_dispatched_dead_zone.py': 'pass'}"
+    },
+    {
+      "script": "reconcile_owner_dispatch_status.py",
+      "referencing_tests": [
+        "test_triage_owner_umr_24h.py",
+        "tests/test_reconcile_owner_dispatch_status.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_triage_owner_umr_24h.py', 'tests/test_reconcile_owner_dispatch_status.py'] -> {'test_triage_owner_umr_24h.py': 'pass', 'tests/test_reconcile_owner_dispatch_status.py': 'pass'}"
+    },
+    {
+      "script": "recover-failed-workers.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "regenerate_master_index.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "repair_controller.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "resource_governor.py",
+      "referencing_tests": [
+        "test_generate_software_catalog.py",
+        "test_stuck_task_heartbeat.py",
+        "test_worker_boot_activation_and_resume.py",
+        "tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py",
+        "tests/test_build_lock_contended_requeue.py",
+        "tests/test_directive_engine_retry_gate.py",
+        "tests/test_dispatch_owner_task_status_write.py",
+        "tests/test_flag_stale_queued_tasks.py",
+        "tests/test_ocid_artifact_links.py",
+        "tests/test_ocid_evidence_supersession.py",
+        "tests/test_reconcile_owner_dispatch_status.py",
+        "tests/test_reconcile_stale_heartbeats_execute_gate.py",
+        "tests/test_resolve_superboss_db_path.py",
+        "tests/test_resume_interrupted_workers_no_duplicate_row.py",
+        "tests/test_reuse_check_unbounded_metadata_fix.py",
+        "tests/test_rule2_dispatch_outcomes.py",
+        "tests/test_rule3_no_premature_umr_minting.py",
+        "tests/test_rule4_pm_visible_real_counts.py",
+        "tests/test_rule5_real_stall_detection.py",
+        "tests/test_rule6_zero_duplication_by_ocid.py",
+        "tests/test_run_tick_continues_past_row_resolved_skip.py",
+        "tests/test_umr_reuse_on_resume.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_software_catalog.py', 'test_stuck_task_heartbeat.py', 'test_worker_boot_activation_and_resume.py', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py', 'tests/test_build_lock_contended_requeue.py', 'tests/test_directive_engine_retry_gate.py', 'tests/test_dispatch_owner_task_status_write.py', 'tests/test_flag_stale_queued_tasks.py', 'tests/test_ocid_artifact_links.py', 'tests/test_ocid_evidence_supersession.py', 'tests/test_reconcile_owner_dispatch_status.py', 'tests/test_reconcile_stale_heartbeats_execute_gate.py', 'tests/test_resolve_superboss_db_path.py', 'tests/test_resume_interrupted_workers_no_duplicate_row.py', 'tests/test_reuse_check_unbounded_metadata_fix.py', 'tests/test_rule2_dispatch_outcomes.py', 'tests/test_rule3_no_premature_umr_minting.py', 'tests/test_rule4_pm_visible_real_counts.py', 'tests/test_rule5_real_stall_detection.py', 'tests/test_rule6_zero_duplication_by_ocid.py', 'tests/test_run_tick_continues_past_row_resolved_skip.py', 'tests/test_umr_reuse_on_resume.py'] -> {'test_generate_software_catalog.py': 'pass', 'test_stuck_task_heartbeat.py': 'pass', 'test_worker_boot_activation_and_resume.py': 'pass', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py': 'pass', 'tests/test_build_lock_contended_requeue.py': 'pass', 'tests/test_directive_engine_retry_gate.py': 'pass', 'tests/test_dispatch_owner_task_status_write.py': 'pass', 'tests/test_flag_stale_queued_tasks.py': 'pass', 'tests/test_ocid_artifact_links.py': 'pass', 'tests/test_ocid_evidence_supersession.py': 'pass', 'tests/test_reconcile_owner_dispatch_status.py': 'pass', 'tests/test_reconcile_stale_heartbeats_execute_gate.py': 'pass', 'tests/test_resolve_superboss_db_path.py': 'pass', 'tests/test_resume_interrupted_workers_no_duplicate_row.py': 'pass', 'tests/test_reuse_check_unbounded_metadata_fix.py': 'pass', 'tests/test_rule2_dispatch_outcomes.py': 'pass', 'tests/test_rule3_no_premature_umr_minting.py': 'pass', 'tests/test_rule4_pm_visible_real_counts.py': 'pass', 'tests/test_rule5_real_stall_detection.py': 'pass', 'tests/test_rule6_zero_duplication_by_ocid.py': 'pass', 'tests/test_run_tick_continues_past_row_resolved_skip.py': 'pass', 'tests/test_umr_reuse_on_resume.py': 'pass'}"
+    },
+    {
+      "script": "resource_governor_tick_loop.sh",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "risk-tier.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "run-logged.sh",
+      "referencing_tests": [
+        "test_check_crontab_unauthorized_change.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_check_crontab_unauthorized_change.py'] -> {'test_check_crontab_unauthorized_change.py': 'pass'}"
+    },
+    {
+      "script": "sap_mapping_store.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "scope-check.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "security-check.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "snapshot_memory_backup.py",
+      "referencing_tests": [
+        "tests/test_snapshot_memory_backup.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['tests/test_snapshot_memory_backup.py'] -> {'tests/test_snapshot_memory_backup.py': 'pass'}"
+    },
+    {
+      "script": "status-remediation-tick.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "superboss-register.py",
+      "referencing_tests": [
+        "test_apply_owner_dispatch_status_corrections.py",
+        "test_dedup_constraints_2026-07-31.py",
+        "test_generate_pm_report_v3.py",
+        "test_pm_cycle_precheck.py",
+        "test_tight_task_validation.py",
+        "test_triage_owner_umr_24h.py",
+        "tests/test_audit_ocid_canonical_registry.py",
+        "tests/test_audit_ocid_compliance_report.py",
+        "tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py",
+        "tests/test_build_lock_contended_requeue.py",
+        "tests/test_directive_engine_retry_gate.py",
+        "tests/test_dispatch_owner_task_status_write.py",
+        "tests/test_dispatch_owner_task_tmux_relay_lock.py",
+        "tests/test_evidence_json_schema_gate.py",
+        "tests/test_external_agent_dispatch.py",
+        "tests/test_flag_stale_queued_tasks.py",
+        "tests/test_ocid_068_compliance.py",
+        "tests/test_ocid_artifact_links.py",
+        "tests/test_ocid_canonical_registry.py",
+        "tests/test_ocid_evidence_supersession.py",
+        "tests/test_ocid_master_standard_phase1.py",
+        "tests/test_ocid_registry_completion_gate.py",
+        "tests/test_pm_decisions_pending.py",
+        "tests/test_prune_memory_backups.py",
+        "tests/test_reconcile_dispatched_dead_zone.py",
+        "tests/test_reconcile_owner_dispatch_status.py",
+        "tests/test_reconcile_stale_heartbeats_execute_gate.py",
+        "tests/test_resolve_superboss_db_path.py",
+        "tests/test_resume_interrupted_workers_no_duplicate_row.py",
+        "tests/test_reuse_check_unbounded_metadata_fix.py",
+        "tests/test_rule2_dispatch_outcomes.py",
+        "tests/test_rule3_no_premature_umr_minting.py",
+        "tests/test_rule4_pm_visible_real_counts.py",
+        "tests/test_rule5_real_stall_detection.py",
+        "tests/test_rule6_zero_duplication_by_ocid.py",
+        "tests/test_run_tick_continues_past_row_resolved_skip.py",
+        "tests/test_snapshot_memory_backup.py",
+        "tests/test_umr_reuse_on_resume.py",
+        "tests/test_wiring_registry_umr_and_version.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_apply_owner_dispatch_status_corrections.py', 'test_dedup_constraints_2026-07-31.py', 'test_generate_pm_report_v3.py', 'test_pm_cycle_precheck.py', 'test_tight_task_validation.py', 'test_triage_owner_umr_24h.py', 'tests/test_audit_ocid_canonical_registry.py', 'tests/test_audit_ocid_compliance_report.py', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py', 'tests/test_build_lock_contended_requeue.py', 'tests/test_directive_engine_retry_gate.py', 'tests/test_dispatch_owner_task_status_write.py', 'tests/test_dispatch_owner_task_tmux_relay_lock.py', 'tests/test_evidence_json_schema_gate.py', 'tests/test_external_agent_dispatch.py', 'tests/test_flag_stale_queued_tasks.py', 'tests/test_ocid_068_compliance.py', 'tests/test_ocid_artifact_links.py', 'tests/test_ocid_canonical_registry.py', 'tests/test_ocid_evidence_supersession.py', 'tests/test_ocid_master_standard_phase1.py', 'tests/test_ocid_registry_completion_gate.py', 'tests/test_pm_decisions_pending.py', 'tests/test_prune_memory_backups.py', 'tests/test_reconcile_dispatched_dead_zone.py', 'tests/test_reconcile_owner_dispatch_status.py', 'tests/test_reconcile_stale_heartbeats_execute_gate.py', 'tests/test_resolve_superboss_db_path.py', 'tests/test_resume_interrupted_workers_no_duplicate_row.py', 'tests/test_reuse_check_unbounded_metadata_fix.py', 'tests/test_rule2_dispatch_outcomes.py', 'tests/test_rule3_no_premature_umr_minting.py', 'tests/test_rule4_pm_visible_real_counts.py', 'tests/test_rule5_real_stall_detection.py', 'tests/test_rule6_zero_duplication_by_ocid.py', 'tests/test_run_tick_continues_past_row_resolved_skip.py', 'tests/test_snapshot_memory_backup.py', 'tests/test_umr_reuse_on_resume.py', 'tests/test_wiring_registry_umr_and_version.py'] -> {'test_apply_owner_dispatch_status_corrections.py': 'pass', 'test_dedup_constraints_2026-07-31.py': 'pass', 'test_generate_pm_report_v3.py': 'pass', 'test_pm_cycle_precheck.py': 'pass', 'test_tight_task_validation.py': 'pass', 'test_triage_owner_umr_24h.py': 'pass', 'tests/test_audit_ocid_canonical_registry.py': 'pass', 'tests/test_audit_ocid_compliance_report.py': 'pass', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py': 'pass', 'tests/test_build_lock_contended_requeue.py': 'pass', 'tests/test_directive_engine_retry_gate.py': 'pass', 'tests/test_dispatch_owner_task_status_write.py': 'pass', 'tests/test_dispatch_owner_task_tmux_relay_lock.py': 'pass', 'tests/test_evidence_json_schema_gate.py': 'pass', 'tests/test_external_agent_dispatch.py': 'pass', 'tests/test_flag_stale_queued_tasks.py': 'pass', 'tests/test_ocid_068_compliance.py': 'pass', 'tests/test_ocid_artifact_links.py': 'pass', 'tests/test_ocid_canonical_registry.py': 'pass', 'tests/test_ocid_evidence_supersession.py': 'pass', 'tests/test_ocid_master_standard_phase1.py': 'pass', 'tests/test_ocid_registry_completion_gate.py': 'pass', 'tests/test_pm_decisions_pending.py': 'pass', 'tests/test_prune_memory_backups.py': 'pass', 'tests/test_reconcile_dispatched_dead_zone.py': 'pass', 'tests/test_reconcile_owner_dispatch_status.py': 'pass', 'tests/test_reconcile_stale_heartbeats_execute_gate.py': 'pass', 'tests/test_resolve_superboss_db_path.py': 'pass', 'tests/test_resume_interrupted_workers_no_duplicate_row.py': 'pass', 'tests/test_reuse_check_unbounded_metadata_fix.py': 'pass', 'tests/test_rule2_dispatch_outcomes.py': 'pass', 'tests/test_rule3_no_premature_umr_minting.py': 'pass', 'tests/test_rule4_pm_visible_real_counts.py': 'pass', 'tests/test_rule5_real_stall_detection.py': 'pass', 'tests/test_rule6_zero_duplication_by_ocid.py': 'pass', 'tests/test_run_tick_continues_past_row_resolved_skip.py': 'pass', 'tests/test_snapshot_memory_backup.py': 'pass', 'tests/test_umr_reuse_on_resume.py': 'pass', 'tests/test_wiring_registry_umr_and_version.py': 'pass'}"
+    },
+    {
+      "script": "supervisor-entrypoint.sh",
+      "referencing_tests": [
+        "tests/test_ocid_artifact_links.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['tests/test_ocid_artifact_links.py'] -> {'tests/test_ocid_artifact_links.py': 'pass'}"
+    },
+    {
+      "script": "supervisor-sweep.sh",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "sync-controller-back.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "sync-repos.sh",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "sync-vercel-env.sh",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "sync-verdian-ai-data.sh",
+      "referencing_tests": [
+        "test_check_crontab_unauthorized_change.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_check_crontab_unauthorized_change.py'] -> {'test_check_crontab_unauthorized_change.py': 'pass'}"
+    },
+    {
+      "script": "system-sync.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "task-gateway.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "task-template.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "tight_task_validation.py",
+      "referencing_tests": [
+        "test_tight_task_validation.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_tight_task_validation.py'] -> {'test_tight_task_validation.py': 'pass'}"
+    },
+    {
+      "script": "triage_owner_umr_24h.py",
+      "referencing_tests": [
+        "test_triage_owner_umr_24h.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_triage_owner_umr_24h.py'] -> {'test_triage_owner_umr_24h.py': 'pass'}"
+    },
+    {
+      "script": "veridian-task-watchdog.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "veridian-task.py",
+      "referencing_tests": [
+        "test_generate_pm_report_v3.py",
+        "test_ocid063_handoff_envelope.py",
+        "test_worker_boot_activation_and_resume.py",
+        "tests/test_build_lock_contended_requeue.py",
+        "tests/test_directive_engine_retry_gate.py",
+        "tests/test_dispatch_owner_task_status_write.py",
+        "tests/test_flag_stale_queued_tasks.py",
+        "tests/test_ocid_artifact_links.py",
+        "tests/test_ocid_evidence_supersession.py",
+        "tests/test_reconcile_dispatched_dead_zone.py",
+        "tests/test_rule3_no_premature_umr_minting.py",
+        "tests/test_rule6_zero_duplication_by_ocid.py",
+        "tests/test_rule7_completion_evidence.py",
+        "tests/test_run_tick_continues_past_row_resolved_skip.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_pm_report_v3.py', 'test_ocid063_handoff_envelope.py', 'test_worker_boot_activation_and_resume.py', 'tests/test_build_lock_contended_requeue.py', 'tests/test_directive_engine_retry_gate.py', 'tests/test_dispatch_owner_task_status_write.py', 'tests/test_flag_stale_queued_tasks.py', 'tests/test_ocid_artifact_links.py', 'tests/test_ocid_evidence_supersession.py', 'tests/test_reconcile_dispatched_dead_zone.py', 'tests/test_rule3_no_premature_umr_minting.py', 'tests/test_rule6_zero_duplication_by_ocid.py', 'tests/test_rule7_completion_evidence.py', 'tests/test_run_tick_continues_past_row_resolved_skip.py'] -> {'test_generate_pm_report_v3.py': 'pass', 'test_ocid063_handoff_envelope.py': 'pass', 'test_worker_boot_activation_and_resume.py': 'pass', 'tests/test_build_lock_contended_requeue.py': 'pass', 'tests/test_directive_engine_retry_gate.py': 'pass', 'tests/test_dispatch_owner_task_status_write.py': 'pass', 'tests/test_flag_stale_queued_tasks.py': 'pass', 'tests/test_ocid_artifact_links.py': 'pass', 'tests/test_ocid_evidence_supersession.py': 'pass', 'tests/test_reconcile_dispatched_dead_zone.py': 'pass', 'tests/test_rule3_no_premature_umr_minting.py': 'pass', 'tests/test_rule6_zero_duplication_by_ocid.py': 'pass', 'tests/test_rule7_completion_evidence.py': 'pass', 'tests/test_run_tick_continues_past_row_resolved_skip.py': 'pass'}"
+    },
+    {
+      "script": "veridian_remediation_dispatcher.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "webhook_receiver.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "wiring_query.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "worker-entrypoint.sh",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "workflow_contract.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    },
+    {
+      "script": "zai_agent_loop.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
+    }
+  ],
+  "tables": [
+    {
+      "table": "actions",
+      "row_count": 27950,
+      "linked_scripts_count": 16,
+      "linked_scripts": [
+        "batch-import-conversation-log.py",
+        "generate-system-diagram.py",
+        "generate_task_checklist.py",
+        "gtm_check_role_permission_testing.py",
+        "gtm_check_ux_audit.py",
+        "index-logs.py",
+        "reconcile_dispatched_dead_zone.py",
+        "resource_governor.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=27950; referenced by 16 real script(s)"
+    },
+    {
+      "table": "ai_agent_registry",
+      "row_count": 0,
+      "linked_scripts_count": 0,
+      "linked_scripts": [],
+      "complete_and_tested": false,
+      "evidence": "live COUNT(*)=0; referenced by 0 real script(s)"
+    },
+    {
+      "table": "audit_events",
+      "row_count": 150,
+      "linked_scripts_count": 0,
+      "linked_scripts": [],
+      "complete_and_tested": false,
+      "evidence": "live COUNT(*)=150; referenced by 0 real script(s)"
+    },
+    {
+      "table": "audit_findings",
+      "row_count": 16672,
+      "linked_scripts_count": 0,
+      "linked_scripts": [],
+      "complete_and_tested": false,
+      "evidence": "live COUNT(*)=16672; referenced by 0 real script(s)"
+    },
+    {
+      "table": "audit_master_reports",
+      "row_count": 2,
+      "linked_scripts_count": 0,
+      "linked_scripts": [],
+      "complete_and_tested": false,
+      "evidence": "live COUNT(*)=2; referenced by 0 real script(s)"
+    },
+    {
+      "table": "audit_orchestration_runs",
+      "row_count": 2,
+      "linked_scripts_count": 0,
+      "linked_scripts": [],
+      "complete_and_tested": false,
+      "evidence": "live COUNT(*)=2; referenced by 0 real script(s)"
+    },
+    {
+      "table": "audit_runs",
+      "row_count": 164,
+      "linked_scripts_count": 0,
+      "linked_scripts": [],
+      "complete_and_tested": false,
+      "evidence": "live COUNT(*)=164; referenced by 0 real script(s)"
+    },
+    {
+      "table": "automation_rule_runs",
+      "row_count": 13,
+      "linked_scripts_count": 3,
+      "linked_scripts": [
+        "automation_rule_engine.py",
+        "context_engine.py",
+        "learning_engine.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=13; referenced by 3 real script(s)"
+    },
+    {
+      "table": "automation_rules",
+      "row_count": 3,
+      "linked_scripts_count": 3,
+      "linked_scripts": [
+        "automation_rule_engine.py",
+        "context_engine.py",
+        "learning_engine.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=3; referenced by 3 real script(s)"
+    },
+    {
+      "table": "capability_registry",
+      "row_count": 14,
+      "linked_scripts_count": 14,
+      "linked_scripts": [
+        "automation_rule_engine.py",
+        "context_engine.py",
+        "document_engine.py",
+        "find_code.sh",
+        "generate_chatgpt_promptbatch_request.py",
+        "generate_prompt_coverage_report.py",
+        "generate_wiring_registry.py",
+        "ingest_chatgpt_promptbatch_response.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=14; referenced by 14 real script(s)"
+    },
+    {
+      "table": "conversation_memory",
+      "row_count": 1,
+      "linked_scripts_count": 2,
+      "linked_scripts": [
+        "context_engine.py",
+        "plan_generator.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=1; referenced by 2 real script(s)"
+    },
+    {
+      "table": "directive_compliance_runs",
+      "row_count": 9180,
+      "linked_scripts_count": 1,
+      "linked_scripts": [
+        "generate_task_checklist.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=9180; referenced by 1 real script(s)"
+    },
+    {
+      "table": "execution_log",
+      "row_count": 16,
+      "linked_scripts_count": 2,
+      "linked_scripts": [
+        "generate_task_checklist.py",
+        "superboss-register.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=16; referenced by 2 real script(s)"
+    },
+    {
+      "table": "external_agent_dispatch",
+      "row_count": 0,
+      "linked_scripts_count": 1,
+      "linked_scripts": [
+        "superboss-register.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=0; referenced by 1 real script(s)"
+    },
+    {
+      "table": "file_inventory",
+      "row_count": 30965,
+      "linked_scripts_count": 7,
+      "linked_scripts": [
+        "generate_pm_report_v3.py",
+        "generate_task_checklist.py",
+        "health-check-15min.py",
+        "knowledge_registry_multisource.py",
+        "security-check.py",
+        "system-sync.py",
+        "task-gateway.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=30965; referenced by 7 real script(s)"
+    },
+    {
+      "table": "file_inventory_corrupted_orig_20260806T044301Z",
+      "row_count": 27249,
+      "linked_scripts_count": 0,
+      "linked_scripts": [],
+      "complete_and_tested": false,
+      "evidence": "live COUNT(*)=27249; referenced by 0 real script(s)"
+    },
+    {
+      "table": "gtm_certification_categories",
+      "row_count": 25,
+      "linked_scripts_count": 6,
+      "linked_scripts": [
+        "generate_pm_report_v3.py",
+        "gtm_check_database_testing.py",
+        "gtm_check_production_readiness_audit.py",
+        "gtm_test_script_build_check.py",
+        "gtm_write_category_result.py",
+        "superboss-register.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=25; referenced by 6 real script(s)"
+    },
+    {
+      "table": "instructions",
+      "row_count": 3563,
+      "linked_scripts_count": 12,
+      "linked_scripts": [
+        "batch-import-conversation-log.py",
+        "generate-system-diagram.py",
+        "generate_task_checklist.py",
+        "import-memory-history.py",
+        "index-logs.py",
+        "migrate_2026-07-31_dedup_constraints.py",
+        "plan_generator.py",
+        "prompt_gateway/gateway.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=3563; referenced by 12 real script(s)"
+    },
+    {
+      "table": "intent_unmatched_log",
+      "row_count": 4,
+      "linked_scripts_count": 1,
+      "linked_scripts": [
+        "intent_engine.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=4; referenced by 1 real script(s)"
+    },
+    {
+      "table": "knowledge_engine",
+      "row_count": 381,
+      "linked_scripts_count": 16,
+      "linked_scripts": [
+        "context_engine.py",
+        "ddl_authorization_check.py",
+        "dispatch_core.py",
+        "generate_task_checklist.py",
+        "generate_wiring_registry.py",
+        "knowledge_registry_multisource.py",
+        "metadata_reconciliation.py",
+        "migrate_2026-07-31_dedup_constraints.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=381; referenced by 16 real script(s)"
+    },
+    {
+      "table": "known_fixes",
+      "row_count": 5,
+      "linked_scripts_count": 2,
+      "linked_scripts": [
+        "superboss-register.py",
+        "veridian-task-watchdog.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=5; referenced by 2 real script(s)"
+    },
+    {
+      "table": "learning_reflections",
+      "row_count": 5,
+      "linked_scripts_count": 1,
+      "linked_scripts": [
+        "learning_engine.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=5; referenced by 1 real script(s)"
+    },
+    {
+      "table": "log_index",
+      "row_count": 10938,
+      "linked_scripts_count": 2,
+      "linked_scripts": [
+        "index-logs.py",
+        "superboss-register.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=10938; referenced by 2 real script(s)"
+    },
+    {
+      "table": "ocid_artifact_links",
+      "row_count": 216,
+      "linked_scripts_count": 7,
+      "linked_scripts": [
+        "backfill_ocid_registry_phase2_columns.py",
+        "generate_pm_report_v3.py",
+        "reconcile_dispatched_dead_zone.py",
+        "resource_governor.py",
+        "resource_governor_tick_loop.sh",
+        "superboss-register.py",
+        "supervisor-entrypoint.sh"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=216; referenced by 7 real script(s)"
+    },
+    {
+      "table": "ocid_canonical_registry",
+      "row_count": 69,
+      "linked_scripts_count": 7,
+      "linked_scripts": [
+        "audit_ocid_canonical_registry.py",
+        "audit_ocid_compliance.py",
+        "backfill_evidence_json_schema.py",
+        "backfill_ocid_registry_phase2_columns.py",
+        "generate_pm_report_v3.py",
+        "pm_cycle_precheck.py",
+        "superboss-register.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=69; referenced by 7 real script(s)"
+    },
+    {
+      "table": "ocid_compliance_audit_log",
+      "row_count": 2938,
+      "linked_scripts_count": 2,
+      "linked_scripts": [
+        "audit_ocid_compliance.py",
+        "superboss-register.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=2938; referenced by 2 real script(s)"
+    },
+    {
+      "table": "ocid_compliance_state",
+      "row_count": 113,
+      "linked_scripts_count": 2,
+      "linked_scripts": [
+        "audit_ocid_compliance.py",
+        "superboss-register.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=113; referenced by 2 real script(s)"
+    },
+    {
+      "table": "ocid_master_standard_audit_log",
+      "row_count": 124,
+      "linked_scripts_count": 1,
+      "linked_scripts": [
+        "superboss-register.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=124; referenced by 1 real script(s)"
+    },
+    {
+      "table": "plan_steps",
+      "row_count": 3,
+      "linked_scripts_count": 2,
+      "linked_scripts": [
+        "plan_generator.py",
+        "prompt_gateway/gateway_persistence.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=3; referenced by 2 real script(s)"
+    },
+    {
+      "table": "plans",
+      "row_count": 1,
+      "linked_scripts_count": 7,
+      "linked_scripts": [
+        "audit_ocid_canonical_registry.py",
+        "auto_phase_continuation.py",
+        "backfill_phase_self_report.py",
+        "generate_task_checklist.py",
+        "phase-continuation-tick.py",
+        "plan_generator.py",
+        "prompt_gateway/gateway_persistence.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=1; referenced by 7 real script(s)"
+    },
+    {
+      "table": "pm_decisions_pending",
+      "row_count": 201,
+      "linked_scripts_count": 7,
+      "linked_scripts": [
+        "build_lock_liveness_guard.py",
+        "generate_pm_report_v3.py",
+        "reconcile_dispatched_dead_zone.py",
+        "reconcile_owner_dispatch_status.py",
+        "resource_governor.py",
+        "snapshot_memory_backup.py",
+        "superboss-register.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=201; referenced by 7 real script(s)"
+    },
+    {
+      "table": "pm_report_snapshots",
+      "row_count": 93,
+      "linked_scripts_count": 3,
+      "linked_scripts": [
+        "generate_pm_report_v3.py",
+        "pm_cycle_precheck.py",
+        "superboss-register.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=93; referenced by 3 real script(s)"
+    },
+    {
+      "table": "rca_open",
+      "row_count": 2,
+      "linked_scripts_count": 1,
+      "linked_scripts": [
+        "generate_task_checklist.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=2; referenced by 1 real script(s)"
+    },
+    {
+      "table": "registry_taxonomy_notes",
+      "row_count": 1,
+      "linked_scripts_count": 2,
+      "linked_scripts": [
+        "generate_software_catalog.py",
+        "superboss-register.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=1; referenced by 2 real script(s)"
+    },
+    {
+      "table": "route_replay",
+      "row_count": 8,
+      "linked_scripts_count": 1,
+      "linked_scripts": [
+        "superboss-register.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=8; referenced by 1 real script(s)"
+    },
+    {
+      "table": "system_index",
+      "row_count": 135,
+      "linked_scripts_count": 13,
+      "linked_scripts": [
+        "credit-accountant.py",
+        "dispatch_core.py",
+        "generate-system-diagram.py",
+        "generate_task_checklist.py",
+        "index-logs.py",
+        "plan_generator.py",
+        "pm_cycle_precheck.py",
+        "preflight-guard.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=135; referenced by 13 real script(s)"
+    },
+    {
+      "table": "task_audits",
+      "row_count": 16,
+      "linked_scripts_count": 4,
+      "linked_scripts": [
+        "generate_task_checklist.py",
+        "regenerate_master_index.py",
+        "superboss-register.py",
+        "veridian-task-watchdog.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=16; referenced by 4 real script(s)"
+    },
+    {
+      "table": "task_claims",
+      "row_count": 43,
+      "linked_scripts_count": 2,
+      "linked_scripts": [
+        "migrate_2026-07-31_dedup_constraints.py",
+        "superboss-register.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=43; referenced by 2 real script(s)"
+    },
+    {
+      "table": "umr_tasks",
+      "row_count": 7929,
+      "linked_scripts_count": 24,
+      "linked_scripts": [
+        "apply_owner_dispatch_status_corrections.py",
+        "audit_ocid_canonical_registry.py",
+        "audit_ocid_compliance.py",
+        "directive_engine.py",
+        "dispatch-owner-task.sh",
+        "dispatch-tick.py",
+        "generate_pm_report_v3.py",
+        "gtm_check_ai_testing.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=7929; referenced by 24 real script(s)"
+    },
+    {
+      "table": "unregistered_mentions",
+      "row_count": 8,
+      "linked_scripts_count": 2,
+      "linked_scripts": [
+        "generate_task_checklist.py",
+        "regenerate_master_index.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=8; referenced by 2 real script(s)"
+    },
+    {
+      "table": "wiring_registry",
+      "row_count": 8564,
+      "linked_scripts_count": 10,
+      "linked_scripts": [
+        "dispatch_core.py",
+        "generate_software_catalog.py",
+        "generate_wiring_registry.py",
+        "plan_generator.py",
+        "pm_cycle_precheck.py",
+        "regenerate_master_index.py",
+        "resource_governor.py",
+        "status-remediation-tick.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=8564; referenced by 10 real script(s)"
+    },
+    {
+      "table": "work_items",
+      "row_count": 2090,
+      "linked_scripts_count": 11,
+      "linked_scripts": [
+        "generate-system-diagram.py",
+        "generate_task_checklist.py",
+        "import-memory-history.py",
+        "index-logs.py",
+        "migrate_2026-07-31_dedup_constraints.py",
+        "prompt_gateway/engine/layer0_router.py",
+        "prompt_gateway/gateway_persistence.py",
+        "regenerate_master_index.py"
+      ],
+      "complete_and_tested": true,
+      "evidence": "live COUNT(*)=2090; referenced by 11 real script(s)"
+    }
+  ],
+  "search": [
+    {
+      "fts_table": "instructions_fts",
+      "base_table": "instructions",
+      "works": true,
+      "seed_term": "Confirm",
+      "hits": 558,
+      "evidence": "seeded real word 'Confirm' from live instructions_fts.raw_text, via real _fts_query() -> MATCH returned 558 row(s)"
+    },
+    {
+      "fts_table": "work_items_fts",
+      "base_table": "work_items",
+      "works": true,
+      "seed_term": "Fixed",
+      "hits": 11,
+      "evidence": "seeded real word 'Fixed' from live work_items_fts.utm_content, via real _fts_query() -> MATCH returned 11 row(s)"
+    },
+    {
+      "fts_table": "system_index_fts",
+      "base_table": "system_index",
+      "works": true,
+      "seed_term": "veridian",
+      "hits": 49,
+      "evidence": "seeded real word 'veridian' from live system_index_fts.path, via real _fts_query() -> MATCH returned 49 row(s)"
+    },
+    {
+      "fts_table": "log_index_fts",
+      "base_table": "log_index",
+      "works": true,
+      "seed_term": "veridian",
+      "hits": 10938,
+      "evidence": "seeded real word 'veridian' from live log_index_fts.log_file, via real _fts_query() -> MATCH returned 10938 row(s)"
+    },
+    {
+      "fts_table": "actions_fts",
+      "base_table": "actions",
+      "works": true,
+      "seed_term": "start",
+      "hits": 7811,
+      "evidence": "seeded real word 'start' from live actions_fts.utm_content, via real _fts_query() -> MATCH returned 7811 row(s)"
+    },
+    {
+      "fts_table": "knowledge_engine_fts",
+      "base_table": "knowledge_engine",
+      "works": true,
+      "seed_term": "veridian",
+      "hits": 277,
+      "evidence": "seeded real word 'veridian' from live knowledge_engine_fts.artifact_path, via real _fts_query() -> MATCH returned 277 row(s)"
+    },
+    {
+      "fts_table": "route_replay_fts",
+      "base_table": "route_replay",
+      "works": true,
+      "seed_term": "gratuity",
+      "hits": 2,
+      "evidence": "seeded real word 'gratuity' from live route_replay_fts.capability_name, via real _fts_query() -> MATCH returned 2 row(s)"
+    },
+    {
+      "fts_table": "wiring_registry_fts",
+      "base_table": "wiring_registry",
+      "works": true,
+      "seed_term": "veridian",
+      "hits": 2208,
+      "evidence": "seeded real word 'veridian' from live wiring_registry_fts.path, via real _fts_query() -> MATCH returned 2208 row(s)"
+    },
+    {
+      "fts_table": "capability_registry_fts",
+      "base_table": "capability_registry",
+      "works": true,
+      "seed_term": "gratuity",
+      "hits": 1,
+      "evidence": "seeded real word 'gratuity' from live capability_registry_fts.capability_name, via real _fts_query() -> MATCH returned 1 row(s)"
+    },
+    {
+      "fts_table": "umr_tasks_fts",
+      "base_table": "umr_tasks",
+      "works": true,
+      "seed_term": "reporting",
+      "hits": 7,
+      "evidence": "seeded real word 'reporting' from live umr_tasks_fts.task_identity, via real _fts_query() -> MATCH returned 7 row(s)"
+    }
+  ],
+  "pytest_summary": "536 passed in 95.54s (0:01:35)",
+  "pytest_returncode": 0
+}

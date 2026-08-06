@@ -962,13 +962,20 @@ def get_test_script_build_section(sbr):
     honest error dict on a genuine failure -- never a fabricated result."""
     try:
         mod = load_module_from_path("gtm_test_script_build_check", TEST_SCRIPT_BUILD_CHECK_PATH)
+        return mod.compute_test_script_build_status(sbr)
     except Exception as e:
+        # Sibling functions (get_emergency_stop()/get_worker_ceiling()) wrap
+        # their whole body, not just the import, in this same try/except --
+        # this one originally only wrapped the import, so a real but
+        # unexpected failure inside compute_test_script_build_status() (e.g.
+        # a genuine version-drift AttributeError, not just an import error)
+        # crashed the entire PM report build instead of degrading to an
+        # honest error dict like every other section here does.
         return {
             "total": 0, "x": 0, "complete": False,
             "failing_category_indices": [], "per_category": [],
-            "error": f"could not import {TEST_SCRIPT_BUILD_CHECK_PATH}: {e}",
+            "error": f"could not compute test-script-build status via {TEST_SCRIPT_BUILD_CHECK_PATH}: {e}",
         }
-    return mod.compute_test_script_build_status(sbr)
 
 
 def get_gtm_severity_rubric(sbr):

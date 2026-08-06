@@ -1,0 +1,16 @@
+# NOT YET AUTHORIZED / NOT YET INSTALLED -- see veridian-pm-report-tick.service
+# in this same directory for the full disclosure. 10-minute cadence,
+# jittered, offset from dispatch-tick's own *:2/10:00 schedule (minute 6
+# instead of minute 2) so the two 10-minute-cadence units do not cluster on
+# the same wall-clock minute.
+[Unit]
+Description=Run veridian-pm-report-tick on its scheduled cadence (jittered -- see the paired .service for why, and for the closed-set-of-18 authorization disclosure)
+
+[Timer]
+OnCalendar=*-*-* *:6/10:00
+RandomizedDelaySec=90
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

@@ -1,27 +1,46 @@
-# PROGRESS -- task-20260806-193955-deterministic-final-audit--zero-gap-zero
+# PROGRESS -- task-20260806-201941-single-deterministic-orchestrator--one-e
 
 ## Completed
-- [x] Gate check: independently queried `superboss-register.sqlite` `umr_tasks` (not just FTS5
-      `--search`, which returned 0 hits for all three UMR IDs -- confirmed via direct SQL instead)
-      for both governing sibling UMRs required by the SPEC before this task may start:
-      - `UMR-20260806-124055-bc80` (stop-work order) -> status = **completed**
-      - `UMR-20260806-140841-46d1` (Vercel+GitHub+Supabase registration) -> status = **completed**
-      - `UMR-20260806-135632-329e` (file registration) -> status = **running** (NOT completed)
-        - `unit_name`: `veridian-worker@task-20260806-192052-deterministic-full-server-file-registrat.service`
-        - `ts_dispatched`: 2026-08-06T19:20:55Z, `ts_completed`: NULL, `last_heartbeat`: NULL
-        - cross-checked live: `systemctl --user is-active <unit>` -> `active` (genuinely still running,
-          not a stale/zombie row)
+- [x] Hard precondition check (SPEC: do not start until UMR-20260806-135632-329e,
+      UMR-20260806-140841-46d1, UMR-20260806-141055-1fec all show status=completed).
+      Verified live, not assumed:
+      - `resource_governor.py --query-umr --task-identity/--search` returned 0 hits for
+        all 3 (FTS5 index gap, same tool quirk already noted in commit 685d322) -- fell
+        back to direct SQL against the real DB
+        (`/opt/veridian/ai-os/memory/superboss-register.sqlite`, the one
+        `resolve_superboss_db_path()` resolves to):
+        - UMR-20260806-140841-46d1 (Vercel+GitHub+Supabase registration): **completed** in umr_tasks.
+        - UMR-20260806-141055-1fec (final audit, zero-gap zero-dup): umr_tasks says
+          `running`, but real evidence shows it is actually done and the DB row is stale
+          (last_heartbeat NULL, never reachable by reconcile_stale_heartbeats()): its
+          systemd unit `veridian-worker@task-20260806-193955-...service` is
+          `inactive`/`dead`/`Result=success`, and its PR **#211 is MERGED**
+          (`9330c97 Merge pull request #211 ... task-20260806-193955-deterministic-final-audit`).
+        - UMR-20260806-135632-329e (full-server file registration): umr_tasks says
+          `running`. Its systemd unit `veridian-worker@task-20260806-192052-...service`
+          also already exited `inactive`/`dead`/`Result=success`, BUT its real work
+          product, **PR #212, is still OPEN/unmerged**
+          (`gh pr view 212` -> `state: OPEN`, `mergedAt: null`). Process exit success does
+          not mean the task's real output landed -- this sibling is genuinely NOT
+          complete yet, independent of the DB staleness question above.
+      - Conclusion: 1 of 3 siblings (135632-329e) is confirmed NOT completed by real,
+        live, independent evidence (an actually-open PR), so the ALL-3 gate fails
+        regardless of the other two. **This task must not start yet.**
 
 ## Remaining
-- [ ] **BLOCKED on gate**: SPEC requires BOTH sibling UMRs to show `status=completed` before any
-      audit step (checks 1-6) may run. `UMR-20260806-135632-329e` is still `running` as of this
-      check. Per SPEC: "do NOT run partial checks and do NOT report done -- instead re-check
-      periodically until both are genuinely completed, then proceed." No audit checks have been
-      run yet; none will run until re-verified as completed.
-- [ ] Once gate clears: check `capability_registry` + past `umr_tasks` for an existing
-      deterministic audit script matching this UMR's scope (per standing 4-step spec) before
-      building a new one.
-- [ ] Run/build the zero-gap/zero-dup/field-integrity/relationship-coverage/external-coverage/
-      total-count audit script with real SQL output only.
-- [ ] Post final ALL_CLEAR boolean verdict + evidence as a task completion note in `umr_tasks`.
-- [ ] `record-completion` call to `agent_work_briefing.py` for `UMR-20260806-141055-1fec`.
+- [ ] Re-check UMR-20260806-135632-329e (PR #212) periodically until it is genuinely
+      merged/completed, then re-verify all 3, then proceed with the actual SPEC:
+      extend one existing script (superboss-register.py / resource_governor.py /
+      closest-fit audit_*.py) into the single deterministic orchestrator per the
+      owner spec -- single entrance/single exit point, wiring_registry as the one
+      metadata registry, umr_tasks as the one task registry, standard
+      `{data, meta:{deterministic, close_ended, boolean, work_id}}` outputs_json
+      contract adapted from the DeepSeek JSON (work_id mapped to the real umr_id, no
+      new uuid, flags computed honestly per run, not hardcoded true).
+- [ ] Do not touch resource_governor.py's own `--backfill-null-heartbeats`
+      reconciliation gap for these rows (it currently defaults to
+      `would_mark_failed` for both stale rows, including the genuinely-merged
+      141055-1fec, for lack of a task.yaml cross-check in this workspace) -- that is
+      a separate, unrelated, wide-blast-radius maintenance concern (it touches many
+      other historical UMR rows too) and out of scope for this SPEC; not run with
+      `--execute`.

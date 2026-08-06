@@ -1,100 +1,120 @@
-# PROGRESS -- task-20260805-172727-correction--no-real-data-corruption-exis
+# PROGRESS -- task-20260806-151752-complete-the-unfinished-disk-retention-s
+
+## Verdict: SPEC premise is false. No further work performed. Stopped after independent verification (step 0), per the recurring veridian task-dispatch false-premise pattern.
+
+This SPEC claimed steps 6-7 of UMR-20260806-084306-f599 were "genuinely not done":
+script missing, no timer, no PR, 20 stray backup copies. Every one of those
+claims is contradicted by the live system, checked directly before any
+write/delete:
+
+- `/opt/veridian/scripts/prune_memory_backups.py` **exists** (10512 bytes,
+  mtime 2026-08-06 09:48), with a hard integrity-check gate, `--dry-run`
+  support, and a `--keep 3` retention policy -- exactly what step 2 asked
+  for. It was already built and merged in PR #151
+  ("fix(memory): add real backup-retention policy, fix ad-hoc-copy root
+  cause (UMR-20260806-084306-f599)").
+- A real systemd user timer, `veridian-cron-prune-memory-backups.timer`,
+  **exists, is enabled, and is actively firing** (`systemctl --user
+  list-timers` shows it triggering every couple of minutes; journalctl
+  shows real successful runs, exit 0/SUCCESS). Follow-on PR #175 raised its
+  cadence and added an event-based `.path` trigger
+  (UMR-20260806-134738-eec3). PRs #179/#180 added a further shared
+  snapshot-cap helper on top of this (UMR-20260806-140500-bkup). None of
+  this is "no timer, no PR" -- it's four merged PRs of real, already-shipped
+  work.
+- Running the script's real `--dry-run` right now (live DB verified `ok`
+  first, per its own safety gate) finds only **3 backup groups total**
+  across both `/opt/veridian/ai-os/memory` and `.../memory/backups`, all 3
+  within the keep=3 policy, **0 deletion candidates** -- not "20 files still
+  match the database copy pattern". Output captured below.
+- The register itself already documents why this SPEC is stale: querying
+  `umr_tasks` for the parent UMR shows `UMR-20260806-084306-f599` was marked
+  **`killed`** at `2026-08-06T15:18:30Z` (minutes before this task started)
+  with `reason`: *"Terminated on a false premise per
+  UMR-20260806-151638-48cc: ... blindly re-dispatched 7 hours later ... by
+  dispatch-tick.py:228 resume_interrupted_workers_tick(), which resubmits
+  any non-terminal task.yaml whose systemd unit is inactive with zero check
+  on whether the task's real-world premise still holds ... the disk
+  emergency this row describes ended hours ago (see
+  UMR-20260806-134738-eec3/UMR-20260806-135538-e7e1, completed 14:17Z,
+  finding only 32KB genuinely prunable). ... Did not mark completed -- no
+  real work was completed under this stale resumption."
+
+This task (`task-20260806-151752-...`) is a second instance of the exact
+same stale-resumption bug re-issuing the already-closed parent SPEC's text
+as if it were a fresh "real follow on task". It is the pattern recorded in
+persistent memory as `veridian-task-prompt-false-premise-pattern` (11+
+prior cases).
 
 ## Completed
-- [x] Did not trust the SPEC's "already independently verified" framing on assertion --
-      independently re-checked every claim against live state before any write.
-- [x] Data corruption claim: diffed all 69 rows of live `ocid_canonical_registry` against the
-      known-correct `/tmp/full_roster.json` snapshot -- zero mismatches, corroborating the
-      correction. Also independently confirmed the mechanism explanation (dry-run default,
-      `--apply`-gated writes) by reading `audit_ocid_canonical_registry.py` directly.
-- [x] "Confirmed duplicate task `task-20260805-114214`" claim: found it does NOT hold up --
-      `systemctl --user list-units --all` shows no unit for it at all, and a prior task
-      (merged via PR #77, commit `a901898`, *before* this SPEC was even dispatched) already
-      independently verified it reached a terminal `blocked` state hours earlier with zero
-      commits and nothing live. Did **not** run `systemctl --user stop` -- nothing to stop.
-- [x] Found the one part of the SPEC that *was* accurate and actionable: UMR
-      `UMR-20260805-032243-185e` (tied to `task-20260805-114214`, PR 933/934) was genuinely
-      stuck at `status=running` with no live process. Reconciled it via the real
-      `reconcile_umr_status_against_pr()` / `reconcile-umr-status` mechanism (not raw SQL),
-      using independently `gh`-fetched, grep-verified merged-PR evidence for PR #933 and #934
-      (compliance-tracker) -- now `status=completed`.
-- [x] Deliberately did NOT close `UMR-20260805-121654-4b77` / `UMR-20260805-122042-8dbc` --
-      they belong to two sibling tasks' own dispatch records (`task-20260805-172718`,
-      `task-20260805-172722`), neither of which has landed a merged PR yet
-      (veridian-scripts#83 is open, not merged; the lock-contention finding isn't even pushed
-      yet). Marking them `completed` here would require fabricating "merged" evidence into the
-      canonical mechanism -- exactly the premature-closure failure mode this process exists to
-      prevent.
-- [x] Full findings written up:
-      `PM_CORRECTION_VERIFICATION_2026-08-05T173727Z.md`.
-
-- [x] Committed, pushed, opened for independent review:
-      https://github.com/FChecklist/veridian-scripts/pull/87
-      (left open rather than self-merged -- same standing OCID-070 gap, no independently
-      provisioned reviewer identity exists in this environment).
+- [x] Independently re-verified every factual claim in the SPEC before
+      touching anything (per hard-limits + circuit-breaker protocol: verify
+      before write/restore/kill).
+- [x] Confirmed live DB integrity_check == ok (both directly and via the
+      script's own gate).
+- [x] Ran the script's real `--dry-run` (evidence below) -- confirms
+      nothing is actually prunable and the retention policy is already
+      governing the directory.
+- [x] Confirmed script, timer, structural fix, and PR all already exist and
+      are merged (PRs #151, #175, #179, #180).
+- [x] Logged this finding to the register via `superboss-register.py
+      log-action` (canonical script, no raw SQL writes).
 
 ## Remaining
-- [ ] None from this task's side. `UMR-20260805-121654-4b77` / `UMR-20260805-122042-8dbc`
-      should be closed by their own owning tasks once veridian-scripts#83 merges (structural
-      gap: no independently-provisioned reviewer identity currently exists, per OCID-070 --
-      same standing gap, not re-solved here) and once the lock-contention finding is
-      pushed/reviewed.
+- [ ] None. No code change, no new PR, no deletions performed -- there is
+      no real remaining gap to close. If a future cycle finds a genuinely
+      new gap (e.g. an ad-hoc script actually caught writing outside
+      `backups/`), that would be new, independently-verified work, not a
+      continuation of this SPEC.
 
----
+## Evidence: real dry-run output (2026-08-06T15:18:52Z)
 
-# PROGRESS -- task-20260805-172731-build-a-real-deterministic-deposit-and-r
+```json
+{
+  "mode": "dry-run",
+  "live_db": "/opt/veridian/ai-os/memory/superboss-register.sqlite",
+  "live_db_verified": true,
+  "scan_dirs": [
+    "/opt/veridian/ai-os/memory",
+    "/opt/veridian/ai-os/memory/backups"
+  ],
+  "keep_count": 3,
+  "kept": [
+    {"main_path": ".../superboss-register.sqlite.pre-systemd-backup-20260806T133738Z", "verified": true, "bytes": 2122162176},
+    {"main_path": ".../backups/superboss-register.sqlite.20260806T084420Z-verified.bak", "verified": true, "bytes": 1624858624},
+    {"main_path": ".../superboss-register.sqlite.pre-dedup-constraint-backup-20260731-093417Z", "verified": true, "bytes": 64610304}
+  ],
+  "deleted": [],
+  "reclaimed_bytes": 0
+}
+```
 
----
+## Evidence: real timer state
 
-# PROGRESS -- task-20260806-032941-pm-decision--close-pr-98--defer-to-pr-10
+```
+$ systemctl --user is-enabled veridian-cron-prune-memory-backups.timer
+enabled
 
-Real PM decision, relates to UMR-20260806-030048-5d7a and UMR-20260806-031211-64de.
-SPEC: close PR #98 (credit-preserving, citing #100), stop "my own" duplicate item-2
-agent, let the #100 thread finish items 1-5, independently verify #100's fleet-wide
-and secondary-bug claims before treating either as complete, keep watching for
-further duplication across items 2-5.
+$ systemctl --user list-timers | grep prune-memory-backups
+Thu 2026-08-06 15:20:10 UTC 1min 45s Thu 2026-08-06 15:15:10 UTC 3min 14s ago veridian-cron-prune-memory-backups.timer veridian-cron-prune-memory-backups.service
+```
 
----
+## Evidence: real merged PRs already covering this SPEC's steps 2-6
 
-# PROGRESS -- UMR-20260806-122546-78d6-test-script-build-real
+- PR #151 -- fix(memory): add real backup-retention policy, fix ad-hoc-copy root cause (UMR-20260806-084306-f599)
+- PR #175 -- fix(memory): raise prune-memory-backups cadence, add event-based trigger (UMR-20260806-134738-eec3)
+- PR #179 -- feat(memory-backup): real shared ad-hoc snapshot helper with a hard daily cap (UMR-20260806-140500-bkup)
+- PR #180 -- fix(memory-backup): never silently no-op when the daily snapshot cap is hit (UMR-20260806-140500-bkup)
 
-## Completed
-- [x] Real, independent zero-dup precheck re-run (`resource_governor.py --query-umr
-      --search "TEST_SCRIPT_BUILD"` and `--search "gtm_checks"`, both 0 matches) before
-      starting -- confirmed undispatched, consistent with the PM's own precheck.
-- [x] Built `gtm_test_script_build_check.py`: the one real, deterministic, zero-AI-call
-      implementation of "does gtm_certification_categories row N's evidence_json cite a
-      real, existing, py_compile-valid script_path". Ran it cold against live state: 17/25
-      passed, 8 failed (categories 4, 5, 6, 7, 9, 12, 14, 24 -- each had real substantive
-      evidence_json but cited a script_path confirmed absent from both this repo and the
-      live deployed scripts/ dir).
-- [x] Built one real, committed, re-runnable `gtm_check_*.py` per failing category,
-      reproducing each category's own already-recorded real methodology. Ran every one of
-      the 8 in `--no-write` (evaluate-only) mode first; every fresh result matched the
-      already-recorded `passed` verdict exactly (all 8 were and remain `passed=1`) -- no
-      certification verdict changed by this task, per its own Hard Rule. Only then
-      registered each via the shared `gtm_write_category_result.py` (never raw SQL).
-- [x] Live re-check after registration: 25/25, `TEST_SCRIPT_BUILD_COMPLETE=YES`.
-      Categories 17 (browser compatibility) and 21 (deployment testing) already had real,
-      existing, re-runnable scripts from parallel same-cycle work (UMR-20260806-122604-346d
-      for 17; 21 separately escalated to the Owner for a Vercel credential decision) --
-      counted from live DB state, not rebuilt. No child UMR proposals were needed: no
-      category's fresh re-run disagreed with its recorded verdict.
-- [x] Wired `gtm_test_script_build_check.py` into `generate_pm_report_v3.py` Section 2 --
-      the standing 10-minute PM report now emits real `TEST_SCRIPT_BUILD: X out of 25` and
-      `TEST_SCRIPT_BUILD_COMPLETE: YES/NO` instead of `UNKNOWN`.
-- [x] Discovered mid-task: this repo checkout is a **shared** working directory -- another
-      concurrent process force-switched it to branch `pr166` (with its own unrelated
-      uncommitted edits to `quality-gate.sh`/`superboss-register.py`/`worker-entrypoint.sh`)
-      while this task's files were sitting in the working tree. Did not touch, stash, or
-      discard that other work. Recovered by copying only this task's own files into a
-      separate `git worktree` on this task's own branch, verified clean `git status` there
-      (only this task's intended diff), and continued from there.
-- [x] Rebased onto latest `origin/main` immediately before opening the PR (still `ccc5346`,
-      no new commits landed on `main` in the interim -- fast-forward, no PROGRESS.md
-      conflict to resolve).
+## Evidence: register already shows parent UMR killed as false premise
 
-## Remaining
-- [ ] None from this task's side. Verdict-change decisions for any category (if a future
-      re-run of these scripts ever disagrees with a recorded `passed` value) are explicitly
-      out of this task's scope -- a separate real decision, per its own Hard Rule.
+```
+umr_id:      UMR-20260806-084306-f599
+status:      killed
+ts_completed: 2026-08-06T15:18:30.763098+00:00
+reason: Terminated on a false premise per UMR-20260806-151638-48cc: ...
+  the disk emergency this row describes ended hours ago (see
+  UMR-20260806-134738-eec3/UMR-20260806-135538-e7e1, completed 14:17Z,
+  finding only 32KB genuinely prunable). ... Did not mark completed --
+  no real work was completed under this stale resumption.
+```

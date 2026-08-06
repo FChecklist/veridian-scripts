@@ -156,29 +156,83 @@ def test_unresolvable_unit_name_needs_judgment(monkeypatch):
     print("PASS: test_unresolvable_unit_name_needs_judgment")
 
 
+class _FakeConnReadOnlySelect:
+    """Real conn stub used by the write-path tests below: permits exactly
+    the one real SELECT apply_correction() needs to read a row's existing
+    metadata_json (the real-project read-merge-write convention,
+    annotate_knowledge()'s own pattern), but raises if anything containing
+    a real SQL write verb (UPDATE/INSERT/DELETE) is ever executed directly
+    -- the actual write must always go through update_umr_task() only."""
+
+    def __init__(self, existing_metadata_json):
+        self._existing_metadata_json = existing_metadata_json
+
+    def execute(self, sql, params=()):
+        upper = sql.strip().upper()
+        if upper.startswith("SELECT"):
+            return _FakeCursor({"metadata_json": self._existing_metadata_json})
+        raise AssertionError(f"apply_correction() must never write via conn.execute() directly, got: {sql!r}")
+
+
+class _FakeCursor:
+    def __init__(self, row):
+        self._row = row
+
+    def fetchone(self):
+        return self._row
+
+
 def test_apply_correction_writes_only_via_update_umr_task(monkeypatch):
     """Confirms apply_correction() never issues a raw SQL UPDATE -- it must
     go through superboss_register.update_umr_task() only, per the real
-    Owner directive's own hard requirement."""
+    Owner directive's own hard requirement. (The one real conn.execute()
+    call it does make is a read-only SELECT to fetch existing metadata for
+    the merge below -- see test_apply_correction_preserves_prior_metadata.)"""
     mod = _load_module()
     calls = []
-
-    class FakeConn:
-        def execute(self, *a, **k):
-            raise AssertionError("apply_correction() must never call conn.execute() directly")
 
     def fake_update(conn, umr_id, **fields):
         calls.append((umr_id, fields))
 
     monkeypatch.setattr(mod._sbr, "update_umr_task", fake_update)
     ev = {"umr_id": "UMR-x", "new_status": "killed", "db_status": "running"}
-    mod.apply_correction(FakeConn(), ev, dry_run=False)
+    mod.apply_correction(_FakeConnReadOnlySelect(None), ev, dry_run=False)
     assert len(calls) == 1
     assert calls[0][0] == "UMR-x"
     assert calls[0][1]["status"] == "killed"
     assert "metadata" in calls[0][1]
-    assert calls[0][1]["metadata"]["reconciled_by"] == "reconcile_owner_dispatch_status.py"
+    assert calls[0][1]["metadata"]["reconcile_owner_dispatch_status"]["reconciled_by"] == "reconcile_owner_dispatch_status.py"
     print("PASS: test_apply_correction_writes_only_via_update_umr_task")
+
+
+def test_apply_correction_preserves_prior_metadata(monkeypatch):
+    """Regression test for the real data-loss bug caught by the real
+    AUDIT:FAIL on this script's own PR #147: update_umr_task()'s own
+    metadata=... kwarg is a blind column replace (confirmed by reading its
+    implementation), so apply_correction() must read the row's EXISTING
+    metadata_json first and merge into it -- never pass only the new
+    reconciliation fields, which would silently destroy real pre-existing
+    data such as a correlation_id set by resource_governor.py's submit()
+    at original dispatch time."""
+    import json as _json
+    mod = _load_module()
+    calls = []
+
+    def fake_update(conn, umr_id, **fields):
+        calls.append((umr_id, fields))
+
+    monkeypatch.setattr(mod._sbr, "update_umr_task", fake_update)
+    prior_metadata = {"correlation_id": "real-corr-id-12345", "some_other_real_field": "keep-me"}
+    ev = {"umr_id": "UMR-x", "new_status": "completed", "db_status": "running", "pr_number": 999}
+    mod.apply_correction(
+        _FakeConnReadOnlySelect(_json.dumps(prior_metadata)), ev, dry_run=False
+    )
+    assert len(calls) == 1
+    written_metadata = calls[0][1]["metadata"]
+    assert written_metadata["correlation_id"] == "real-corr-id-12345", "prior real metadata must survive"
+    assert written_metadata["some_other_real_field"] == "keep-me", "prior real metadata must survive"
+    assert "reconcile_owner_dispatch_status" in written_metadata
+    print("PASS: test_apply_correction_preserves_prior_metadata")
 
 
 def test_apply_correction_dry_run_makes_no_calls(monkeypatch):
@@ -189,6 +243,41 @@ def test_apply_correction_dry_run_makes_no_calls(monkeypatch):
     mod.apply_correction(object(), ev, dry_run=True)
     assert calls == []
     print("PASS: test_apply_correction_dry_run_makes_no_calls")
+
+
+def test_audit_verdict_detects_fresh_pass(monkeypatch):
+    """Regression test for the real 'claimed but not implemented' gap the
+    real AUDIT:FAIL on PR #147 caught: _audit_verdict() must actually
+    compare the audit comment's createdAt against the head commit's own
+    committedDate, not just fetch both and never compare them."""
+    import json as _json
+    mod = _load_module()
+    payload = {
+        "headRefOid": "deadbeef",
+        "comments": [{"body": "AUDIT: PASS\nfoo", "createdAt": "2026-08-06T09:00:00Z"}],
+        "commits": [{"committedDate": "2026-08-06T08:00:00Z", "oid": "deadbeef"}],
+    }
+    monkeypatch.setattr(mod, "_run", lambda cmd, timeout=30: (0, _json.dumps(payload), ""))
+    result = mod._audit_verdict("veridian-scripts", 147)
+    assert result["stale"] is False, result
+    print("PASS: test_audit_verdict_detects_fresh_pass")
+
+
+def test_audit_verdict_detects_stale_pass(monkeypatch):
+    """Same as above, but the audit comment predates the latest commit --
+    a new commit landed after review, so the PASS no longer covers what's
+    actually on the branch now."""
+    import json as _json
+    mod = _load_module()
+    payload = {
+        "headRefOid": "deadbeef",
+        "comments": [{"body": "AUDIT: PASS\nfoo", "createdAt": "2026-08-06T07:00:00Z"}],
+        "commits": [{"committedDate": "2026-08-06T08:00:00Z", "oid": "deadbeef"}],
+    }
+    monkeypatch.setattr(mod, "_run", lambda cmd, timeout=30: (0, _json.dumps(payload), ""))
+    result = mod._audit_verdict("veridian-scripts", 147)
+    assert result["stale"] is True, result
+    print("PASS: test_audit_verdict_detects_stale_pass")
 
 
 def test_load_rows_real_db_smoke():

@@ -142,8 +142,20 @@ def _fetch_prs(repo, cache):
 
 
 def _audit_verdict(repo, number):
+    """Real audit-comment lookup, WITH a real freshness check against the
+    PR's current head commit -- fixed per real AUDIT:FAIL finding on this
+    script's own PR #147: the module docstring always claimed this
+    comparison happened, but the first version only ever fetched
+    current_head_sha and never actually compared it to anything. Fresh here
+    means: the most-recent AUDIT:PASS/FAIL comment's createdAt is AFTER the
+    head commit's own committedDate (same convention this project's own
+    executor sessions already use by hand -- see pm_decisions_pending id=1's
+    real closed_note precedent: 'AFTER head commit ...'s own commit
+    timestamp -- verified not stale'). A comment posted BEFORE the latest
+    commit landed reviewed old code, not the code on the branch right now."""
     rc, out, err = _run(
-        ["gh", "pr", "view", str(number), "--repo", f"FChecklist/{repo}", "--json", "comments,headRefOid"],
+        ["gh", "pr", "view", str(number), "--repo", f"FChecklist/{repo}",
+         "--json", "comments,headRefOid,commits"],
         timeout=30,
     )
     if rc != 0 or not out.strip():
@@ -152,15 +164,45 @@ def _audit_verdict(repo, number):
         d = json.loads(out)
     except Exception:
         return None
+
     verdict = None
     for c in d.get("comments", []):
         body = c.get("body", "")
         if body.startswith("AUDIT: PASS") or body.startswith("AUDIT: FAIL"):
             verdict = {"verdict": body.splitlines()[0], "createdAt": c.get("createdAt")}
-    return {"verdict": verdict, "current_head_sha": d.get("headRefOid")}
+
+    commits = d.get("commits") or []
+    head_committed_at = commits[-1].get("committedDate") if commits else None
+
+    stale = None
+    if verdict and head_committed_at:
+        try:
+            verdict_dt = datetime.fromisoformat(verdict["createdAt"].replace("Z", "+00:00"))
+            head_dt = datetime.fromisoformat(head_committed_at.replace("Z", "+00:00"))
+            stale = verdict_dt < head_dt
+        except Exception:
+            stale = None  # real parse failure -- honestly unknown, never guessed as fresh
+
+    return {
+        "verdict": verdict,
+        "current_head_sha": d.get("headRefOid"),
+        "head_committed_at": head_committed_at,
+        "stale": stale,
+    }
 
 
 def load_rows(conn, umr_id=None):
+    """Real, live rows only -- deliberately NO time-window restriction on
+    the default (no --umr-id) query. Fixed per real AUDIT:FAIL finding on
+    this script's own PR #147: an earlier version silently hardcoded
+    `ts_submitted >= datetime('now', '-24 hours')` (inherited from the
+    scratchpad classifier this promotes, which really was scoped to one
+    cycle's 24h cleanup) while the module docstring claimed to reconcile
+    'every real umr_tasks row currently status=running' -- exactly the
+    stuck-longer-than-24h case this tool exists to catch would have been
+    silently excluded from both the default report AND --apply unless the
+    caller already knew the specific umr_id to pass. Every real row with
+    status='running' for this source_trigger is now in scope by default."""
     if umr_id:
         cur = conn.execute(
             "SELECT umr_id, task_identity, status, ts_submitted, unit_name "
@@ -171,7 +213,7 @@ def load_rows(conn, umr_id=None):
         cur = conn.execute(
             "SELECT umr_id, task_identity, status, ts_submitted, unit_name "
             "FROM umr_tasks WHERE source_trigger='owner_dispatch_gateway' AND status='running' "
-            "AND ts_submitted >= datetime('now', '-24 hours') ORDER BY ts_submitted"
+            "ORDER BY ts_submitted"
         )
     return [dict(r) for r in cur.fetchall()]
 
@@ -318,18 +360,50 @@ def classify_row(row, now, pr_cache):
 
 def apply_correction(conn, evidence, dry_run):
     """Writes exactly one real correction through update_umr_task() ONLY --
-    never a raw UPDATE statement. Caller holds _write_lock() and commits."""
+    never a raw UPDATE statement (enforced by
+    test_apply_correction_writes_only_via_update_umr_task, which stubs conn
+    to raise on any .execute() call).
+
+    Real read-merge-write, NOT a blind replace -- fixed per real AUDIT:FAIL
+    finding on this script's own PR #147: update_umr_task()'s own
+    metadata=... kwarg does a straight `metadata_json=?` column replace (see
+    its own docstring/implementation), so passing only the reconciliation
+    fields would silently destroy whatever real operational data was
+    already in the row's metadata_json (e.g. resource_governor.py's
+    submit() persists a real correlation_id there at submission time). This
+    reads the row's own CURRENT metadata_json first and merges the
+    reconciliation fields into it under one namespaced key, matching this
+    same codebase's own established read-existing/merge/write-back
+    convention (superboss-register.py's annotate_knowledge(): 'Appends a
+    dated correction note ... without touching' other fields) -- every
+    real pre-existing key survives untouched."""
     umr_id = evidence["umr_id"]
     new_status = evidence["new_status"]
-    metadata_patch = {
+
+    if dry_run:
+        return
+
+    existing_row = conn.execute(
+        "SELECT metadata_json FROM umr_tasks WHERE umr_id=?", (umr_id,)
+    ).fetchone()
+    existing_metadata = {}
+    if existing_row and existing_row["metadata_json"]:
+        try:
+            existing_metadata = json.loads(existing_row["metadata_json"])
+        except Exception:
+            # Real, non-empty, but non-JSON metadata_json (shouldn't happen
+            # given every real writer json.dumps()s it) -- preserved
+            # verbatim under its own key rather than silently discarded.
+            existing_metadata = {"_unparseable_prior_metadata_json": existing_row["metadata_json"]}
+
+    merged_metadata = dict(existing_metadata)
+    merged_metadata["reconcile_owner_dispatch_status"] = {
         "reconciled_by": "reconcile_owner_dispatch_status.py",
         "reconciled_at": datetime.now(timezone.utc).isoformat(),
         "prior_db_status": evidence["db_status"],
         "evidence": evidence,
     }
-    if dry_run:
-        return
-    _sbr.update_umr_task(conn, umr_id, status=new_status, metadata=metadata_patch)
+    _sbr.update_umr_task(conn, umr_id, status=new_status, metadata=merged_metadata)
 
 
 def main():
@@ -359,7 +433,7 @@ def main():
     conn.close()
 
     buckets = Counter(r["bucket"] for r in results)
-    print(f"TOTAL owner_dispatch_gateway rows examined (status='running', last 24h"
+    print(f"TOTAL owner_dispatch_gateway rows examined (status='running', no time window"
           f"{', umr_id=' + args.umr_id if args.umr_id else ''}): {len(results)}")
     for b, c in buckets.most_common():
         print(f"  {b}: {c}")

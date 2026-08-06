@@ -5828,7 +5828,8 @@ def _migrate_pm_decisions_pending_owner_proposal_columns(conn):
 
 
 def insert_pm_decision_pending(conn, title, detail, *, options=None,
-                                recommended_option=None, related_umr=None):
+                                recommended_option=None, related_umr=None,
+                                decision_type="pm_decision"):
     """Opens one real PM decision row -- the one real write path into
     pm_decisions_pending (see _ensure_pm_decisions_pending_table's own
     docstring). `options` is a real Python list, typically of dicts shaped
@@ -5843,14 +5844,26 @@ def insert_pm_decision_pending(conn, title, detail, *, options=None,
     ever moves it out of that state. Caller owns conn/transaction/commit,
     same convention as insert_ocid_artifact_link()/update_umr_task() above
     -- this function itself never commits. Returns the new row's real
-    integer id."""
+    integer id.
+
+    `decision_type` (UMR-20260806-115605-854d, dead-zone auto-remediation
+    audit log): defaults to 'pm_decision' -- byte-identical behavior to
+    every real caller before this parameter existed (cmd_insert_pm_decision_pending
+    never passes it). A caller may pass a different real, already-established
+    decision_type (e.g. 'dead_zone_auto_remediation', reconcile_dispatched_dead_zone.py's
+    own real audit-log write) so the row is structurally excluded from
+    get_pm_decisions_pending()'s/get_owner_proposals_pending()'s own
+    decision_type-scoped WHERE clauses (Section 7/8 of generate_pm_report_v3.py)
+    without requiring a second parallel insert function -- 'owner_proposal'
+    rows still go through insert_owner_proposal()'s own separate, unchanged
+    INSERT, never through here."""
     cur = conn.execute(
         "INSERT INTO pm_decisions_pending "
-        "(opened_ts, title, detail, options_json, recommended_option, related_umr, status) "
-        "VALUES (?, ?, ?, ?, ?, ?, 'open')",
+        "(opened_ts, title, detail, options_json, recommended_option, related_umr, status, decision_type) "
+        "VALUES (?, ?, ?, ?, ?, ?, 'open', ?)",
         (_now_iso(), title, detail,
          json.dumps(options) if options is not None else None,
-         recommended_option, related_umr),
+         recommended_option, related_umr, decision_type),
     )
     return cur.lastrowid
 
@@ -6315,6 +6328,64 @@ def cmd_mark_umr_terminal(args):
     conn.close()
     print(json.dumps({"umr_id": args.umr_id, "status": args.status,
                        "ts_completed": ts_completed}, indent=2, default=str))
+
+
+def reset_umr_task_to_queued(conn, umr_id, *, reason):
+    """UMR-20260806-115605-854d (dead-zone auto-remediation, real correction
+    to UMR-20260806-115538-1e55's original "just report" framing -- the
+    real ask is that mechanical, safe, reversible fixes happen
+    automatically, never sit waiting for an AI to read a report). The one
+    real, canonical write path that resets a real umr_tasks row from
+    status='dispatched' back to 'queued' -- through update_umr_task() only,
+    same convention as every other real status-transition wrapper in this
+    file (cmd_mark_umr_dispatched/cmd_mark_umr_terminal above,
+    reconcile_stale_heartbeats() in resource_governor.py). Never a raw SQL
+    UPDATE.
+
+    ts_dispatched is explicitly cleared back to NULL (not left stale) so a
+    genuinely fresh dispatch attempt, whenever it next happens, is recorded
+    honestly rather than inheriting a timestamp from the abandoned attempt
+    this call is correcting -- the same "a queued row's own ts_dispatched is
+    NULL until a real dispatch happens" invariant every other real writer of
+    this column already relies on (next_queued_task()/dispatch_one() in
+    resource_governor.py, cmd_mark_umr_dispatched above).
+
+    Deliberately does not touch unit_name or metadata_json: the one real
+    caller (reconcile_dispatched_dead_zone.py) only ever calls this for a
+    row it has already confirmed carries unit_name IS NULL (no real systemd
+    unit was ever spawned for it -- see that script's own dead-zone
+    condition), so there is nothing there to clear, and this is a pure
+    status/timestamp transition with no other real field to merge (unlike
+    reconcile_owner_dispatch_status.py's apply_correction(), which DOES
+    read-merge-write metadata_json because it also records structured
+    per-row evidence there -- this function has no such payload).
+
+    Caller owns conn/transaction/commit, same convention as every other
+    write function in this file -- this function itself never commits."""
+    update_umr_task(conn, umr_id, status="queued", ts_dispatched=None, reason=reason)
+
+
+def cmd_reset_umr_to_queued(args):
+    """CLI entry point over reset_umr_task_to_queued() -- see that
+    function's own docstring. The one real, canonical, script-only surface
+    for this transition (UMR-20260806-115605-854d): reconcile_dispatched_dead_zone.py
+    calls reset_umr_task_to_queued() directly (it already imports this
+    module), so this CLI wrapper exists for operator/manual re-runs and
+    testability, matching the same "function + thin CLI wrapper" shape as
+    mark-umr-dispatched/mark-umr-terminal above.
+
+    Usage:
+      python3 superboss-register.py reset-umr-to-queued --umr-id UMR-... --reason "why"
+    """
+    init_db_silent()
+    conn = _connect()
+    _ensure_umr_table(conn)
+    with _write_lock():
+        reset_umr_task_to_queued(conn, args.umr_id, reason=args.reason)
+        conn.commit()
+    conn.close()
+    print(json.dumps({"umr_id": args.umr_id, "status": "queued", "reason": args.reason},
+                      indent=2, default=str))
 
 
 EXTERNAL_AGENT_ALLOWED_TASK_TYPES = (
@@ -7537,6 +7608,14 @@ if __name__ == "__main__":
     p_markterm.add_argument("--status", required=True, choices=["completed", "failed", "killed"])
     p_markterm.add_argument("--reason", default=None)
 
+    p_resetq = sub.add_parser("reset-umr-to-queued",
+                               help="UMR-20260806-115605-854d: reset a real umr_tasks row from "
+                                    "status='dispatched' back to 'queued' (clears ts_dispatched) -- "
+                                    "the one real, canonical write path reconcile_dispatched_dead_zone.py's "
+                                    "own auto-remediation uses, never a raw SQL UPDATE")
+    p_resetq.add_argument("--umr-id", dest="umr_id", required=True)
+    p_resetq.add_argument("--reason", required=True)
+
     # Real Owner directive UMR-20260806-095416-b6f0: fourth real worker
     # channel, a fully manual human-paste bridge to chat.z.ai. NEVER any
     # browser automation against chat.z.ai (hard ToS constraint).
@@ -7696,6 +7775,8 @@ if __name__ == "__main__":
         cmd_requeue_build_lock_contended(args)
     elif args.cmd == "mark-umr-terminal":
         cmd_mark_umr_terminal(args)
+    elif args.cmd == "reset-umr-to-queued":
+        cmd_reset_umr_to_queued(args)
     elif args.cmd == "mark-external-agent-eligible":
         cmd_mark_external_agent_eligible(args)
     elif args.cmd == "get-next-external-agent-task":

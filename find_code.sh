@@ -79,6 +79,22 @@ if [[ ! -d "$scope_dir" ]]; then
   exit 2
 fi
 
+# Reject a malformed regex up front, against real input (/dev/null), so a
+# bad pattern is a real, visible usage error (exit 2) instead of being
+# silently indistinguishable from a genuine no-match (exit 1) once it's
+# buried inside the find | xargs pipeline below (real finding from this
+# script's own independent review, UMR-20260806-100604-4591). grep's own
+# exit status distinguishes "ran fine, no match" (1) from "real error, e.g.
+# malformed regex" (>1) -- only the latter is a usage error here.
+set +e
+regex_check_err="$(grep -E -- "$pattern" /dev/null 2>&1 >/dev/null)"
+regex_check_rc=$?
+set -e
+if [[ $regex_check_rc -gt 1 ]]; then
+  echo "find_code.sh: invalid pattern: $regex_check_err" >&2
+  exit 2
+fi
+
 prune_expr=()
 first=1
 for name in "${PRUNE_BASENAMES[@]}"; do
@@ -95,10 +111,12 @@ done
 # Real -prune (not -not-path, which still descends into and stats every
 # excluded directory -- see MASTER_INDEX.yaml's own root_cause_confirmed).
 # NUL-delimited throughout so filenames with spaces/newlines are handled
-# safely.
+# safely. `--` before $pattern (real finding from this script's own
+# independent review) so a pattern starting with `-` (e.g. `-v`, `-f`) is
+# never misparsed as a grep flag.
 set +e
 matches="$(find "$scope_dir" \( "${prune_expr[@]}" \) -prune -o -type f -print0 2>/dev/null \
-  | xargs -0 -r grep -IlE "$pattern" 2>/dev/null)"
+  | xargs -0 -r grep -IlE -- "$pattern" 2>/dev/null)"
 set -e
 
 if [[ -z "$matches" ]]; then

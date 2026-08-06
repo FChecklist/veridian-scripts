@@ -7347,6 +7347,80 @@ def cmd_mark_external_agent_eligible(args):
     print(json.dumps(result, indent=2, default=str))
 
 
+# --- Independent re-verification audit trail (this task's Gap 2:
+# task-20260806-181155 / UMR-20260806-125524-720c) -------------------------
+#
+# NOTE: UMR-124327-6ffb step 2 (UMR-scoped agent_id reuse/mint) is NOT
+# duplicated here -- mid-build, this task discovered PR #199 (merged into
+# main during this same work session) already built the real, tested,
+# canonical implementation: ai_agent_registry.py's ensure_agent()/
+# cmd_lookup_agent()/cmd_record_work(), live-wired into worker-entrypoint.sh.
+# An earlier version of this file briefly added a second, competing
+# resolve_agent_id()/ai_agent_registry writer here; it was removed the
+# moment the collision was found (git history has the add+remove, kept
+# honest rather than silently squashed away) -- unified_orchestrator.py
+# imports ai_agent_registry.py directly instead, per this whole task chain's
+# own "search before building, reuse before duplicating" rule
+# (UMR-20260806-124654-a8d6).
+#
+# task_audits already existed in this live DB (schema only, zero rows, no
+# real writer anywhere in this codebase before this change -- grepped
+# repo-wide) -- reused field-for-field, not redesigned.
+def _ensure_task_audits_table(conn):
+    """Standalone idempotent create, same defensiveness convention as
+    _ensure_capability_registry_table -- a no-op against the live DB's
+    already-existing table."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS task_audits (
+        audit_id TEXT PRIMARY KEY,
+        ts TEXT NOT NULL,
+        work_item_id TEXT,
+        software_task_id TEXT,
+        audit_cmd TEXT,
+        exit_code INTEGER,
+        stdout_tail TEXT,
+        stderr_tail TEXT,
+        verdict TEXT NOT NULL
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_task_audits_software_task_id ON task_audits(software_task_id)")
+    conn.commit()
+
+
+def record_task_audit(conn, *, work_item_id, software_task_id, audit_cmd, exit_code,
+                       stdout_tail, stderr_tail, verdict):
+    """Insert ONE real independent-re-verification record. verdict is always
+    exactly 'pass' or 'fail' -- never a narrated summary standing in for the
+    real boolean (this task's own Gap 2 requirement). Does NOT commit, same
+    convention as every other record_*()/insert_*() helper above."""
+    if verdict not in ("pass", "fail"):
+        raise ValueError(f"verdict must be exactly 'pass' or 'fail', got {verdict!r}")
+    audit_id = _new_id("AUDIT")
+    conn.execute(
+        "INSERT INTO task_audits (audit_id, ts, work_item_id, software_task_id, audit_cmd, exit_code, "
+        "stdout_tail, stderr_tail, verdict) VALUES (?,?,?,?,?,?,?,?,?)",
+        (audit_id, _now_iso(), work_item_id, software_task_id, audit_cmd, exit_code,
+         (stdout_tail or "")[-2000:], (stderr_tail or "")[-2000:], verdict),
+    )
+    return audit_id
+
+
+def cmd_record_task_audit(args):
+    """Usage: python3 superboss-register.py record-task-audit --software-task-id ID \\
+        --audit-cmd CMD --exit-code N --verdict {pass,fail} [--work-item-id ID] \\
+        [--stdout-tail TEXT] [--stderr-tail TEXT]"""
+    init_db_silent()
+    conn = _connect()
+    _ensure_task_audits_table(conn)
+    with _write_lock():
+        audit_id = record_task_audit(
+            conn, work_item_id=args.work_item_id, software_task_id=args.software_task_id,
+            audit_cmd=args.audit_cmd, exit_code=args.exit_code, stdout_tail=args.stdout_tail,
+            stderr_tail=args.stderr_tail, verdict=args.verdict,
+        )
+        conn.commit()
+    conn.close()
+    print(json.dumps({"audit_id": audit_id, "verdict": args.verdict}, indent=2, default=str))
+
+
 # Real, env-overridable defaults (same convention as DB_PATH's own
 # SUPERBOSS_REGISTER_DB env override above) -- tests point these at real
 # scratch directories/repos instead of the real, live
@@ -7762,6 +7836,17 @@ if __name__ == "__main__":
                                       "expired and apply the real two-strike rule; idempotent, "
                                       "safe on a real cron/systemd-timer schedule")
 
+    p_recaudit = sub.add_parser("record-task-audit",
+                                 help="task-20260806-181155 Gap 2: record one real independent "
+                                      "re-verification result (verdict is always exactly pass/fail)")
+    p_recaudit.add_argument("--software-task-id", dest="software_task_id", required=True)
+    p_recaudit.add_argument("--audit-cmd", dest="audit_cmd", default=None)
+    p_recaudit.add_argument("--exit-code", dest="exit_code", type=int, default=None)
+    p_recaudit.add_argument("--verdict", dest="verdict", required=True, choices=["pass", "fail"])
+    p_recaudit.add_argument("--work-item-id", dest="work_item_id", default=None)
+    p_recaudit.add_argument("--stdout-tail", dest="stdout_tail", default=None)
+    p_recaudit.add_argument("--stderr-tail", dest="stderr_tail", default=None)
+
     args = p.parse_args()
     if args.cmd == "init":
         with _write_lock():
@@ -7887,3 +7972,5 @@ if __name__ == "__main__":
         cmd_submit_external_agent_result(args)
     elif args.cmd == "expire-external-agent-dispatches":
         cmd_expire_external_agent_dispatches(args)
+    elif args.cmd == "record-task-audit":
+        cmd_record_task_audit(args)

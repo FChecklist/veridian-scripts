@@ -193,7 +193,7 @@ def test_search_task_precedent_step_two_finds_past_umr_and_graduation():
             conn, "UMR-test-precedent-0001", "AGENT-test-0001",
             "built the gratuity edge case handler script", "graduated",
             "purely rule-based, no judgment needed once inputs are structured",
-            capability_id=cap_id, script_path="gratuity_calculator.py",
+            capability_id=cap_id, script_path="scripts/superboss-register.py",
         )
         conn.commit()
         conn.close()
@@ -309,6 +309,63 @@ def test_record_graduation_requires_nonempty_reason():
     print("PASS: test_record_graduation_requires_nonempty_reason")
 
 
+def test_record_graduation_graduated_rejects_fabricated_capability_id():
+    """2026-08-06 Superboss AUDIT FAIL on PR #205: record_capability_graduation()
+    only checked capability_id/script_path were non-empty strings, never that
+    capability_id actually exists in capability_registry -- so a fabricated,
+    never-registered capability_id was silently accepted for decision='graduated',
+    contradicting this function's own docstring claim that this is "the one
+    guard that IS deterministic". This test reproduces the exact failure mode
+    the audit found and asserts it is now rejected."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        sbr = _load("sbr_test_grad_fake_cap_id", "superboss-register.py", env=_scratch_env(scratch_db))
+
+        conn = sbr._connect()
+        # Confirmed absent from capability_registry -- never registered by
+        # _register_test_capability() or anything else in this test.
+        fake_cap_id = "CAP-THIS-DOES-NOT-EXIST-ANYWHERE"
+        existing = conn.execute(
+            "SELECT 1 FROM capability_registry WHERE capability_id = ?", (fake_cap_id,)
+        ).fetchone()
+        assert existing is None, "test precondition: fake_cap_id must not already exist"
+        try:
+            sbr.record_capability_graduation(
+                conn, "UMR-test-fake-cap", "AGENT-test-fake-cap", "claims a script was built",
+                "graduated", "claims this is deterministic",
+                capability_id=fake_cap_id, script_path="scripts/superboss-register.py",
+            )
+            assert False, "expected ValueError: capability_id does not exist in capability_registry"
+        except ValueError as exc:
+            assert "capability_registry" in str(exc), exc
+        conn.close()
+    print("PASS: test_record_graduation_graduated_rejects_fabricated_capability_id")
+
+
+def test_record_graduation_graduated_rejects_nonexistent_script_path():
+    """Same audit finding, the script_path half: a script_path that does not
+    actually exist on disk must never back a decision='graduated' row."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        sbr = _load("sbr_test_grad_fake_script_path", "superboss-register.py", env=_scratch_env(scratch_db))
+
+        conn = sbr._connect()
+        cap_id = _register_test_capability(sbr, conn, "fake_script_path_test")
+        try:
+            sbr.record_capability_graduation(
+                conn, "UMR-test-fake-script", "AGENT-test-fake-script", "claims a script was built",
+                "graduated", "claims this is deterministic",
+                capability_id=cap_id, script_path="scripts/this_script_was_never_actually_built.py",
+            )
+            assert False, "expected ValueError: script_path does not exist on disk"
+        except ValueError as exc:
+            assert "exist" in str(exc), exc
+        conn.close()
+    print("PASS: test_record_graduation_graduated_rejects_nonexistent_script_path")
+
+
 def test_record_graduation_graduated_round_trip():
     with tempfile.TemporaryDirectory() as d:
         scratch_db = os.path.join(d, "scratch.sqlite")
@@ -320,7 +377,7 @@ def test_record_graduation_graduated_round_trip():
         gid = sbr.record_capability_graduation(
             conn, "UMR-test-0005", "AGENT-test-0005", "built a fixed-rule calculator",
             "graduated", "purely deterministic once inputs are structured, no judgment needed",
-            capability_id=cap_id, script_path="some_new_script.py",
+            capability_id=cap_id, script_path="scripts/superboss-register.py",
             metadata={"registered_by_task": "task-test"},
         )
         conn.commit()
@@ -333,7 +390,7 @@ def test_record_graduation_graduated_round_trip():
         assert row["agent_id"] == "AGENT-test-0005"
         assert row["decision"] == "graduated"
         assert row["capability_id"] == cap_id
-        assert row["script_path"] == "some_new_script.py"
+        assert row["script_path"] == "scripts/superboss-register.py"
         assert json.loads(row["metadata_json"]) == {"registered_by_task": "task-test"}
         conn.close()
     print("PASS: test_record_graduation_graduated_round_trip")
@@ -381,7 +438,7 @@ def test_cli_record_graduation_and_list_end_to_end():
                 umr_id="UMR-test-cli-0001", agent_id="AGENT-test-cli-0001",
                 task_summary="built a CLI-registered script", decision="graduated",
                 reason="deterministic once inputs are structured",
-                capability_id=cap_id, script_path="cli_graduated_script.py", metadata=None,
+                capability_id=cap_id, script_path="scripts/superboss-register.py", metadata=None,
             )
             captured = io.StringIO()
             old_stdout = sys.stdout

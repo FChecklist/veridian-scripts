@@ -1753,6 +1753,46 @@ def _safe_parse_iso(value):
         return None
 
 
+def _task_yaml_for_umr_row(task_docs, row):
+    """Real task.yaml lookup for one umr_tasks row -- two real, ordered paths,
+    not one, per a real gap found while live-re-verifying this fix against
+    the current 24h owner_dispatch_gateway set: a plain source_trigger=
+    'owner_dispatch_gateway' row's own task_identity is a synthetic
+    'owner-task-<ts>-<pid>' string that was NEVER itself a TASKS_DIR
+    directory name (confirmed live: 261 of 277 real such rows checked this
+    cycle have no task.yaml under either path at all -- a real, honest
+    'no evidence' outcome, not a bug). The real remediation/progress record
+    for such a row, when one exists, lives in a SEPARATE, later-created
+    'adopted-reconcile-umr-<umr_id>-...' task (confirmed live for 16 of
+    those 277 real rows) -- e.g. the real task.yaml this exact fix's own
+    live re-verification found: task-20260806-072312-adopted-reconcile-umr-
+    20260806-042531-be9c--pr11, which explicitly reconciles umr_id
+    UMR-20260806-042531-be9c in its own directory name and title.
+
+      1. Direct: task_docs.get(row['task_identity']) -- the common case for
+         a directly-dispatched worker task whose own task_identity IS its
+         real TASKS_DIR directory name.
+      2. Fallback: any task.yaml whose own real directory name contains
+         'reconcile-umr-<row's own umr_id, lowercased>' -- if more than one
+         (a real re-attempt history), the most recently created_at wins.
+
+    Returns the doc, or None if neither path finds one (falls through to
+    the original unconditional 'failed' behavior, unchanged)."""
+    doc = task_docs.get(row["task_identity"])
+    if doc is not None:
+        return doc
+    umr_suffix = row["umr_id"][4:] if row["umr_id"].upper().startswith("UMR-") else row["umr_id"]
+    needle = f"reconcile-umr-{umr_suffix}".lower()
+    candidates = [
+        (tid, d) for tid, d in task_docs.items()
+        if needle in tid.lower() or needle in (d.get("id") or "").lower()
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[1].get("created_at") or "", reverse=True)
+    return candidates[0][1]
+
+
 def _forward_progress_decision(doc):
     """Real, evidence-based decision for a NULL-heartbeat, systemctl-confirmed
     -inactive row that HAS a real task.yaml (the caller already handles the
@@ -1941,12 +1981,17 @@ def backfill_null_heartbeats(now=None, execute=False, email=None):
             })
             continue
 
-        doc = task_docs.get(row["task_identity"])
+        doc = _task_yaml_for_umr_row(task_docs, row)
         if doc is not None:
             decided_status, evidence = _forward_progress_decision(doc)
         else:
             decided_status = "failed"
-            evidence = {"cross_check": "no task.yaml found under TASKS_DIR for this task_identity -- default failed retained"}
+            evidence = {
+                "cross_check": (
+                    "no task.yaml found under TASKS_DIR for this task_identity, nor any "
+                    "'adopted-reconcile-umr-<id>' task referencing this umr_id -- default failed retained"
+                )
+            }
 
         base_note = (
             f"one-time backfill reconciliation (Stage 1, {now.isoformat()}): unit_name={unit!r} "

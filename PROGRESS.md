@@ -30,14 +30,41 @@ block to the top of superboss-register.py.
   and `/opt/veridian/scripts` HEAD is `6890c32` (PR #95's own merge commit) --
   not stale, not just "present in the repo checkout."
 
+## Item 1 -- PR #98/#100 race condition (found and resolved)
+
+After adopting #98's branch into the review pipeline, a **second** collision
+surfaced: some concurrent process independently closed **#98** at
+2026-08-06T03:29:24Z, commenting "Closing as superseded by #100... went
+further... credit to both independent investigations" -- but I had *also*
+just closed **#100** in favor of #98 a few minutes earlier. Net effect for a
+window: **both** PRs were closed and item 1's real fix was not on `main` at
+all, a genuine regression caused by two independent actors each deferring to
+the other without a shared lock. Caught this via the background Monitor
+(state flip to `PR98=[CLOSED null]`), independently confirmed via
+`gh pr view`, and resolved by reopening **#100** (the one the other process
+had implicitly chosen to keep, and the more thorough of the two writeups --
+documents the fleet-wide 27-task evidence and the circuit-breaker
+signature bug that #98 didn't). Left #98 closed. Checkpointed the now-stale
+`task-20260806-checkpoint-pr98-adoption` to `blocked` so dispatch-tick's
+sweep doesn't waste a supervisor review cycle on a closed PR.
+**Current, confirmed-stable state: exactly one open PR (#100) carries item
+1's fix.** Real lesson for next time: closing "my" PR in favor of a sibling's
+without first getting the sibling to also stand down is itself a race --
+should have commented "deferring to X" and left BOTH open until one side
+confirmed, not closed unilaterally.
+
 ## Remaining
 
-- [ ] Item 1 (follow-through) -- confirm PR #98 actually gets reviewed +
-      merged (adoption task created, not yet swept/reviewed as of this write)
+- [ ] Item 1 (follow-through) -- PR #100 (fix landed on this task's own
+      branch) still needs real independent review + merge. Will happen via
+      this task's normal end-of-work supervisor review (kept on this
+      branch deliberately, see below) rather than forcing a review mid-task.
 - [ ] Item 2 -- a concurrent task (task-20260806-031857-extend-superboss...,
       confirmed genuinely distinct from this one, see below) is already doing
-      this. Monitoring, not redispatching a 3rd duplicate. Will independently
-      verify its actual diff once it completes -- not done yet.
+      this, thoroughly and with its own independent verification. Its PR
+      just opened (#103). Monitoring + will independently verify the actual
+      diff once it's reviewed/merged -- not done yet, not redispatching a 3rd
+      duplicate.
 - [ ] Item 5 -- add canonical-script comment header to superboss-register.py
       (SPEC explicitly sequences this AFTER 1-4 are genuinely done; items 1
       and 2 aren't yet, so deliberately not done yet)

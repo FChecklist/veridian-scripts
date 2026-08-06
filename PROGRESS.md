@@ -43,10 +43,44 @@ concrete claim in the SPEC (two did not match live state, documented there plain
       `fix/ocid063-handoff-envelope-pytest-vt-fixture`, not introduced by this task).
 - [x] Independent verification doc: `PM_CYCLE_PRECHECK_VERIFICATION_2026-08-06.md`.
 
+## Real live evidence (PR https://github.com/FChecklist/veridian-scripts/pull/114)
+
+- **Bonus real bug found and fixed**: `generate_wiring_registry.py`'s `SOFTWARE_CATALOG` constant was
+  wrongly using `resolve_doc_path()` (meant for hand-maintained planning docs, prefers the git mirror)
+  instead of the hardcoded-real-path convention its 3 sibling machine-generated catalogs use right
+  above it. Since `generate_software_catalog.py` always writes straight to the real
+  `/opt/veridian/ai-os/SOFTWARE_CATALOG.yaml` and never to the mirror, the mirror copy
+  (`/opt/veridian/repos/claude-control/ai-os/SOFTWARE_CATALOG.yaml`) was silently stuck at **40
+  scripts, dated 2026-07-24** -- over 2 weeks stale -- and every prior real
+  `generate_wiring_registry.py` run on this server (which never runs from inside a `veridian-scripts`
+  git checkout) silently backfilled `wiring_registry` from that stale copy instead of live reality.
+  Fixed by hardcoding the real path, matching its siblings.
+- Ran `generate_software_catalog.py` for real against the live server: **101 -> 122 real scripts**
+  cataloged (confirms the `.sh`/`.mjs` fix), **56/122 got a real `originating_umr` tag**, 3/122 got a
+  real `script_version` tag, all mechanically recovered, none invented.
+- Ran the narrow, scoped backfill (`build_scripts_and_cron()` + `upsert_live_wiring_registry()` only --
+  not the full `generate()` pipeline, to avoid touching the other ~8,300 unrelated live rows) for real
+  against the live production DB: **124 real `entity_type='script'` rows**, e.g.
+  `script-superboss_register_py` -> `originating_umr='UMR-20260806-031211-64de'`,
+  `script-generate_wiring_registry_py` -> `originating_umr='task-20260725-032718'`,
+  `script-worker_entrypoint_sh` -> `originating_umr='UMR-20260801-153900-9100'` (real per-file regex
+  recovery, live-verified).
+- Self-registered `pm_cycle_precheck.py` (not yet deployed to `/opt/veridian/scripts`, so the catalog
+  scan above correctly couldn't see it) via `register-entity` directly:
+  `verification_status='PATH_MISSING'`, `originating_umr='task-20260806-035541'`,
+  `metadata.not_yet_deployed_pending_pr=114` -- honest, not fabricated as already-deployed.
+- **Real sample invocation** of `pm_cycle_precheck.py` against the live production DB:
+  `python3 pm_cycle_precheck.py --search-term "pm_cycle_precheck" --pr-numbers "114,109"` --
+  correctly found PR #114 `[OPEN]` / PR #109 `[MERGED]` via live `gh pr view`, correctly flagged the
+  zero-dup precheck (`found=1 verdict=STOP`, matching its own just-created registry row), and passed
+  all 3 real OCID-068 regression checks (resolver present, 69/69 canonical rows, all 7 guardrail PRs
+  still ancestors of `origin/main`) in one invocation, one SSH round trip. Full output in this task's
+  own transcript.
+
 ## Remaining
 
-- [ ] Open PR, get it merged.
+- [ ] Get PR #114 merged.
 - [ ] Full-catalog `generate_wiring_registry.py` rebuild (all entity types, not just scripts) is
-      deliberately OUT of scope for this task -- it touches ~7,800 unrelated rows and risks racing
+      deliberately OUT of scope for this task -- it touches ~8,300 unrelated rows and risks racing
       concurrent sibling tasks writing to the same shared production DB. Left for its own routine cron
       run; this task only ran the narrow, scoped script-only backfill described above.

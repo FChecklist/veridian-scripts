@@ -48,6 +48,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TMUX_SESSION="${DISPATCH_TMUX_SESSION:-claude}"
+LOCKS_DIR="${VERIDIAN_DISPATCH_LOCK_DIR:-/opt/veridian/ai-os/locks}"
+mkdir -p "$LOCKS_DIR"
+TMUX_RELAY_LOCK="$LOCKS_DIR/dispatch-owner-task-tmux-relay-${TMUX_SESSION}.lock"
 
 RELAY=1
 ARGS=()
@@ -113,17 +116,36 @@ echo "DISPATCHED: umr_id=$UMR_ID instruction_id=$INSTRUCTION_ID work_item_id=$WO
 
 # 5. Relay into the live interactive tmux session -- same call, no separate
 #    raw tmux send-keys step for anyone (or anything) to skip past.
+#
+# UMR-20260806-094226-8617 (real root cause of the input-line-sticking
+# finding): two concurrent dispatch-owner-task.sh invocations targeting the
+# same tmux session had no mutual exclusion around their send-keys calls --
+# this session has directly observed multiple near-simultaneous duplicate
+# dispatches (owner_dispatch_gateway bursts within milliseconds of each
+# other) this same day, and without a lock their literal `-l` text sends
+# could genuinely interleave in the target pane's input buffer, leaving a
+# garbled/unsubmitted line that only a manual Enter would clear -- never
+# fixed at the root before this. Real flock on a per-session lock file
+# serializes the has-session-check + both send-keys calls as one atomic
+# unit across concurrent invocations, same real per-open-file-description
+# discipline superboss-register.py's own _write_lock() already documents.
 if [ "$RELAY" -eq 1 ]; then
+  exec 9>"$TMUX_RELAY_LOCK"
+  flock -x 9
   if tmux has-session -t "$TMUX_SESSION" 2>/dev/null; then
     tmux send-keys -t "$TMUX_SESSION" -l "[${UMR_ID}] ${PROMPT}"
     sleep 1
     tmux send-keys -t "$TMUX_SESSION" Enter
+    flock -u 9
+    exec 9>&-
     echo "RELAYED into tmux session '$TMUX_SESSION'"
     # 6. Real relay genuinely succeeded -- record it on the umr_tasks row this
     #    same call minted, so it stops sitting at status='queued' forever.
     python3 superboss-register.py mark-umr-dispatched --umr-id "$UMR_ID" >/dev/null
     echo "MARKED DISPATCHED: umr_id=$UMR_ID (ts_dispatched written)"
   else
+    flock -u 9
+    exec 9>&-
     echo "WARNING: tmux session '$TMUX_SESSION' not found -- task is registered (umr_id=$UMR_ID) but NOT yet delivered. Recreate the session and relay manually, or re-run once it exists." >&2
     # 6. Real relay genuinely failed -- record a real 'failed' status with a
     #    real reason instead of silently leaving the row at 'queued' forever.

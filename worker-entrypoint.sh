@@ -529,9 +529,26 @@ GATE_ATTEMPT=0
 GATE_PASSED=0
 while [ "$GATE_ATTEMPT" -lt 3 ]; do
   echo "=== quality gate attempt $GATE_ATTEMPT ===" >> "$TASK_DIR/worker.log"
-  if bash /opt/veridian/scripts/quality-gate.sh "$WORKSPACE" "$TASK_DIR/quality-gate-$GATE_ATTEMPT.json" >> "$TASK_DIR/worker.log" 2>&1; then
+  bash /opt/veridian/scripts/quality-gate.sh "$WORKSPACE" "$TASK_DIR/quality-gate-$GATE_ATTEMPT.json" >> "$TASK_DIR/worker.log" 2>&1
+  GATE_RC=$?
+  if [ "$GATE_RC" -eq 0 ]; then
     GATE_PASSED=1
     break
+  fi
+  if [ "$GATE_RC" -eq 75 ]; then
+    # UMR-20260806-123316-cf9f: quality-gate.sh's own build step lost the
+    # host-wide build lock race (short 20s wait) and has ALREADY requeued
+    # this task's umr_tasks row (reason=build_lock_contended, via the
+    # canonical superboss-register.py CLI) and left a resume marker for the
+    # next attempt to pick up already-passed gates -- this is this worker's
+    # own cue to exit cleanly right now so the systemd slot genuinely frees
+    # up, NOT a real gate failure. Must not fall through to the auto-fix
+    # loop below (that would misdiagnose lock contention as a code defect
+    # and burn a real auto-fix attempt on nothing real to fix) and must not
+    # mark this task blocked -- the row is already back at status=queued for
+    # the real dispatcher to pick back up on its own schedule.
+    echo "quality gate exited $GATE_RC (build_lock_contended, already requeued via superboss-register.py) -- exiting worker cleanly, no auto-fix attempt, no blocked marking" >> "$TASK_DIR/worker.log"
+    exit 0
   fi
   GATE_ATTEMPT=$((GATE_ATTEMPT + 1))
   if [ "$GATE_ATTEMPT" -ge 3 ]; then

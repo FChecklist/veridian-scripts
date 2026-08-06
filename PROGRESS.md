@@ -41,6 +41,11 @@ recurring false-premise pattern -- see memory)
   from the evidence-scanning text (still available in the row's own `reason`
   column and any other metadata key); added a regression test reproducing this
   exact shape. Full diff + before/after dry-run counts in the PR.
+- The immediately-preceding merge commit (sibling task
+  `task-20260806-155334-independently-review-then-merge-pr-150`) independently
+  reconfirmed, via its own unrelated PR-review SPEC, that this same governing
+  UMR `UMR-20260806-071025-1d28` is `status=failed` -- corroborates the finding
+  above from a second, independent angle.
 
 ## Completed
 - [x] Verified SPEC numbers independently against live `umr_tasks` (see above).

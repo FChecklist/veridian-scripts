@@ -299,6 +299,49 @@ def test_blocked_status_with_branch_tip_postdating_creation_marks_running():
         print("PASS: test_blocked_status_with_branch_tip_postdating_creation_marks_running")
 
 
+def test_blocked_status_branch_evidence_missing_created_at_stays_failed():
+    """Independent-review blocking finding, now fixed: a real, verifiable
+    branch tip commit is NOT enough on its own -- if this task's own
+    created_at is missing/unparseable, there is nothing to postdate-compare
+    it against, so the claim is unverifiable and must stay 'failed', not
+    silently fall through to 'running'."""
+    with tempfile.TemporaryDirectory() as d:
+        tip_commit_date = datetime.datetime(2026, 8, 6, 7, 30, 0, tzinfo=datetime.timezone.utc)
+        doc = (
+            "status: blocked\n"
+            "repo: veridian-scripts\n"
+            "branch: worker/task-x\n"
+            # deliberately no created_at field at all
+        )
+        fake_run = _fake_run_factory(systemctl_active=False, gh_commit_date=_iso(tip_commit_date))
+        report, final_row = _run_backfill(d, task_yaml_text=doc, fake_run=fake_run)
+        assert final_row["status"] == "failed", final_row
+        entry = report["examined"][0]
+        assert "created_at missing" in entry["evidence"]["cross_check"], entry
+        print("PASS: test_blocked_status_branch_evidence_missing_created_at_stays_failed")
+
+
+def test_referenced_pr_in_different_repo_is_not_trusted():
+    """A PR URL naming a DIFFERENT repo than this task's own top-level
+    `repo` field must not be looked up/trusted -- treated as no real
+    reference at all, same as if no PR were referenced."""
+    with tempfile.TemporaryDirectory() as d:
+        doc = (
+            "status: blocked\n"
+            "repo: veridian-scripts\n"
+            "adopted_pr_url: https://github.com/FChecklist/some-other-repo/pull/55\n"
+        )
+        fake_run = _fake_run_factory(
+            systemctl_active=False,
+            gh_pr_state={"state": "MERGED", "mergedAt": "2026-08-05T12:00:00Z", "mergeCommit": {"oid": "x"}, "url": "x"},
+        )
+        report, final_row = _run_backfill(d, task_yaml_text=doc, fake_run=fake_run)
+        assert final_row["status"] == "failed", final_row
+        entry = report["examined"][0]
+        assert "pr_number" not in entry["evidence"], entry
+        print("PASS: test_referenced_pr_in_different_repo_is_not_trusted")
+
+
 def test_blocked_status_with_branch_tip_predating_creation_stays_failed():
     """Real, live-confirmed case #3 (2-of-9): the exact real failure mode
     independent review caught -- a claimed 'blocked, real progress' branch

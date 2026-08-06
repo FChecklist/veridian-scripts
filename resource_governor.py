@@ -1642,7 +1642,7 @@ def _external_ai_mark_complete(session_id):
         return False
 
 
-_TASK_YAML_PR_URL_RE = re.compile(r"/pull/(\d+)")
+_TASK_YAML_PR_URL_RE = re.compile(r"github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)")
 
 # Root-cause fix, UMR-20260806-082352-7b1b (child of Owner directive
 # UMR-20260806-081403-ebd3): backfill_null_heartbeats()'s systemd-dispatched
@@ -1666,23 +1666,42 @@ _TASK_YAML_PR_URL_RE = re.compile(r"/pull/(\d+)")
 def _pr_number_from_task_yaml(doc):
     """Real PR number referenced by this task.yaml doc, if any -- checked
     only in the two real, structured places a task.yaml actually records a
-    PR it opened/adopted (the explicit adopted_pr_url field, and any
-    '.../pull/NNN' URL inside a real checkpoint's own note text), never a
-    loose title-text guess like _referenced_pr_number() above uses for the
-    (much lower-stakes) duplicate-dispatch guard. Returns None if no such
-    real reference exists. Never raises -- a malformed checkpoints shape
-    just yields no match."""
-    url = doc.get("adopted_pr_url")
-    if url:
-        m = _TASK_YAML_PR_URL_RE.search(url)
-        if m:
-            return m.group(1)
+    PR it opened/adopted (the explicit adopted_pr_url field, and any real
+    github.com/<owner>/<repo>/pull/NNN URL inside a real checkpoint's own
+    note text), never a loose title-text guess like _referenced_pr_number()
+    above uses for the (much lower-stakes) duplicate-dispatch guard.
+
+    Independent review finding (real): the URL's own owner/repo segments
+    are extracted and cross-checked against this same doc's own top-level
+    `repo` field -- a referenced PR whose URL names a DIFFERENT repo than
+    this task's own `repo` is real evidence of a mismatch (a copy/paste
+    error, or a genuinely unrelated PR), not something to silently trust
+    and look up under the WRONG repo; such a mismatch is treated as no real
+    reference at all (same fail-toward-'no evidence' philosophy as every
+    other branch here).
+
+    Returns the PR number (str), or None if no real same-repo reference
+    exists. Never raises -- a malformed checkpoints shape just yields no
+    match."""
+    own_repo = (doc.get("repo") or "").strip().lower()
+
+    def _same_repo_pr_number(url):
+        m = _TASK_YAML_PR_URL_RE.search(url or "")
+        if not m:
+            return None
+        url_repo = m.group(2).strip().lower()
+        if own_repo and url_repo != own_repo:
+            return None
+        return m.group(3)
+
+    pr_number = _same_repo_pr_number(doc.get("adopted_pr_url"))
+    if pr_number:
+        return pr_number
     for cp in (doc.get("checkpoints") or []):
         note = cp.get("note") if isinstance(cp, dict) else None
-        if note:
-            m = _TASK_YAML_PR_URL_RE.search(note)
-            if m:
-                return m.group(1)
+        pr_number = _same_repo_pr_number(note)
+        if pr_number:
+            return pr_number
     return None
 
 
@@ -1847,7 +1866,20 @@ def _forward_progress_decision(doc):
         if tip_date is None:
             detail["cross_check"] = f"branch {branch!r} tip commit date unverifiable via `gh api` -- default failed retained"
             return "failed", detail
-        if created_at and tip_date < created_at:
+        # Independent review finding (blocking, real): created_at missing or
+        # unparseable must fail toward 'failed' the exact same way tip_date
+        # being unverifiable does above -- `if created_at and ...` alone
+        # short-circuits past the postdate check on a falsy created_at and
+        # silently falls through to 'running' without ever having verified
+        # anything, exactly the "ambiguous claim believed anyway" failure
+        # mode this whole function exists to prevent.
+        if created_at is None:
+            detail["cross_check"] = (
+                f"task.yaml created_at missing/unparseable ({doc.get('created_at')!r}) -- cannot verify branch "
+                f"{branch!r}'s real tip commit postdates task creation -- default failed retained"
+            )
+            return "failed", detail
+        if tip_date < created_at:
             detail["cross_check"] = (
                 f"branch {branch!r} real tip commit ({tip_date.isoformat()}) predates this task's own real "
                 f"created_at ({created_at.isoformat()}) -- claimed task.yaml progress does not hold up, genuinely failed"

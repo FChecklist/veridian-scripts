@@ -1,0 +1,39 @@
+{
+  "capability_name": "agent_work_briefing",
+  "inputs": [
+    {"key": "umr_id", "label": "Real UMR id real work is being briefed for / completed under", "type": "text"},
+    {"key": "scope_term", "label": "Real file path or keyword describing this UMR's scope, repeatable", "type": "text", "optional": true},
+    {"key": "intent_text", "label": "Free-text description of the work, used for the capability_registry lookup", "type": "text"},
+    {"key": "entry_text", "label": "Real work entry appended to this UMR's own ai_agent_registry memory row", "type": "text"},
+    {"key": "umr_status", "label": "Real terminal umr_tasks status to write (completed/failed/killed), omit to leave untouched", "type": "text", "optional": true},
+    {"key": "gtm_category_index", "label": "Real gtm_certification_categories category_index, only when relevant", "type": "number", "optional": true},
+    {"key": "new_entity_record_file", "label": "Path to a JSON entity_record_schema file for a genuinely new wiring_registry entity, search-first deduped automatically", "type": "text", "optional": true}
+  ],
+  "business_rules": [
+    {"leaf_key": "agent_work_briefing", "phase": "process", "mechanism_path": "scripts/agent_work_briefing.py", "registered": false}
+  ],
+  "workflow": null,
+  "automation": null,
+  "documents": [],
+  "reports": null,
+  "apis": [
+    "/opt/veridian/scripts/agent_work_briefing.py"
+  ],
+  "ui_screens": null,
+  "permissions": "server-local shell execution only, dispatch-mechanism-internal (reads wiring_registry/capability_registry/ai_agent_registry, writes ai_agent_registry/umr_tasks/gtm_certification_categories/wiring_registry rows in the one existing superboss-register.sqlite), no tenant/org scoping applicable",
+  "ai_required": false,
+  "confidence": 1.0,
+  "version": "1.0",
+  "owner": "VERIDIAN platform ops tooling (/opt/veridian/scripts)",
+  "metadata": {
+    "registered_by_task": "task-20260806-165903-correction--wire-the-new-ai-agent-id-tab",
+    "corrects_and_extends": "UMR-20260806-121332-6ba4 (ai_agent_registry.py, 1 UMR = 1 agent_id) -- this task's own prompt.txt is the direct correction/extension SPEC; no umr_tasks row for this task's own dispatch was found live at build time (searched by task identity substring, none matched), so this metadata cites the task id it was actually built under rather than fabricating a umr_id",
+    "reuses_directly": [
+      "superboss-register.py: lookup_entity, lookup_capability, register_entity_row, cmd_mark_umr_terminal, _connect, _ensure_wiring_registry_table",
+      "ai_agent_registry.py: cmd_lookup_agent, cmd_record_work (CAP-20260806-164355-6f47, this UMR's own correction)",
+      "gtm_write_category_result.py: the one canonical gtm_certification_categories writer every gtm_check_*.py script already calls"
+    ],
+    "checked_for_duplicate": "list-capabilities (13 existing rows at build time, none named agent_work_briefing/briefing/wiring-registry-query) and lookup-capability --intent-text 'deterministic pre-work briefing wiring_registry capability_registry ai_agent_registry' both showed zero matches before building; wiring_query.py was found and considered but only combines wiring_registry+knowledge_engine keyword lookup, does not touch capability_registry or ai_agent_registry or implement any write-back, so it is reused for its lookup_entity-equivalent pattern (not superseded) rather than extended in place",
+    "wiring_registry_dedup_guarantee": "record-completion's new_entity_record_file path always does an exact entity_id lookup against the live table before ever calling register_entity_row -- a repeat call with the same entity_id is a verified no-op (see test_agent_work_briefing.py checks 6-7)"
+  }
+}

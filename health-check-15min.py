@@ -433,8 +433,25 @@ def check_db_integrity_and_backup():
             if ok:
                 backup_path = os.path.join(SQLITE_BACKUP_DIR, f"{name}.{today}.bak")
                 if not os.path.isfile(backup_path):
-                    with open(db_path, "rb") as src, open(backup_path, "wb") as dst:
-                        dst.write(src.read())
+                    # UMR-20260806-075605-f9da real root-cause fix: a plain
+                    # read()/write() file copy is NOT safe against a live,
+                    # concurrently-written SQLite DB (confirmed live this
+                    # session -- a raw copy taken while ~10 workers were
+                    # writing produced a structurally corrupted .bak file,
+                    # "invalid page number"/"wrong # of entries in index",
+                    # even though the source integrity_check just above
+                    # passed cleanly). sqlite3's own online backup API
+                    # (Connection.backup()) is the standard safe method --
+                    # it takes a transactionally consistent snapshot under
+                    # concurrent writers, same mechanism `.backup`/VACUUM
+                    # INTO use internally.
+                    backup_src = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                    backup_dst = sqlite3.connect(backup_path)
+                    try:
+                        backup_src.backup(backup_dst)
+                    finally:
+                        backup_dst.close()
+                        backup_src.close()
                 cutoff = datetime.now(timezone.utc) - timedelta(days=SQLITE_BACKUP_RETENTION_DAYS)
                 for fn in os.listdir(SQLITE_BACKUP_DIR):
                     if not fn.startswith(name + "."):

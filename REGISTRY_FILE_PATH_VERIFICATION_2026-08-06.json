@@ -1,0 +1,582 @@
+{
+  "capability_registry": {
+    "total_checked": 16,
+    "pass": 14,
+    "not_a_disk_path": 0,
+    "fail": 2,
+    "failing_rows": [
+      {
+        "table": "capability_registry",
+        "id": "CAP-20260806-182313-9028",
+        "name": "task_precedent_search",
+        "status": "FAIL",
+        "path": "search-task-precedent",
+        "resolved_path": "/opt/veridian/search-task-precedent",
+        "all_candidates": [
+          {
+            "path": "search-task-precedent",
+            "resolved_path": "/opt/veridian/search-task-precedent",
+            "exists": false
+          },
+          {
+            "path": "superboss-register.py",
+            "resolved_path": "/opt/veridian/superboss-register.py",
+            "exists": false
+          }
+        ]
+      },
+      {
+        "table": "capability_registry",
+        "id": "CAP-20260806-182326-0e3e",
+        "name": "capability_graduation_recording",
+        "status": "FAIL",
+        "path": "record-graduation",
+        "resolved_path": "/opt/veridian/record-graduation",
+        "all_candidates": [
+          {
+            "path": "record-graduation",
+            "resolved_path": "/opt/veridian/record-graduation",
+            "exists": false
+          },
+          {
+            "path": "list-graduations",
+            "resolved_path": "/opt/veridian/list-graduations",
+            "exists": false
+          },
+          {
+            "path": "superboss-register.py",
+            "resolved_path": "/opt/veridian/superboss-register.py",
+            "exists": false
+          }
+        ]
+      }
+    ]
+  },
+  "wiring_registry": {
+    "total_checked": 7928,
+    "pass": 7117,
+    "not_a_disk_path": 747,
+    "fail": 64,
+    "failing_rows": [
+      {
+        "table": "wiring_registry",
+        "id": "script-module_queue_dispatcher_py",
+        "name": "script",
+        "status": "FAIL",
+        "path": "/opt/veridian/scripts/module-queue-dispatcher.py",
+        "resolved_path": "/opt/veridian/scripts/module-queue-dispatcher.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "script-queue_dispatcher_py",
+        "name": "script",
+        "status": "FAIL",
+        "path": "/opt/veridian/scripts/queue-dispatcher.py",
+        "resolved_path": "/opt/veridian/scripts/queue-dispatcher.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260723-181947-5660",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/EXECUTION_RULES_AUDIT_2026-07-23.yaml",
+        "resolved_path": "/opt/veridian/ai-os/EXECUTION_RULES_AUDIT_2026-07-23.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260723-181947-e77d",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/MASTER_GAP_AUDIT_2026-07-23.yaml",
+        "resolved_path": "/opt/veridian/ai-os/MASTER_GAP_AUDIT_2026-07-23.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-034921-e7bf",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/repos/veda-advisors/.vercel/project.json",
+        "resolved_path": "/opt/veridian/repos/veda-advisors/.vercel/project.json"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-071822-bbd1",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/VARIABLE_DICTIONARY_2026-07-24.yaml",
+        "resolved_path": "/opt/veridian/ai-os/VARIABLE_DICTIONARY_2026-07-24.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-071822-683d",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/TERMINOLOGY_GUARDRAIL_2026-07-24.py",
+        "resolved_path": "/opt/veridian/ai-os/TERMINOLOGY_GUARDRAIL_2026-07-24.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-120559-e4e4",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/generate_route_replays.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/generate_route_replays.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-122654-c92a",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/validate_dependency_graph.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/validate_dependency_graph.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-140814-c153",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/scripts/module-queue-dispatcher.py",
+        "resolved_path": "/opt/veridian/scripts/module-queue-dispatcher.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-140814-dc41",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/scripts/queue-dispatcher.py",
+        "resolved_path": "/opt/veridian/scripts/queue-dispatcher.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-142253-81ae",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/ARCHITECTURE_BOUNDED_CONTEXT_MAP_2026-07-24.yaml",
+        "resolved_path": "/opt/veridian/ai-os/ARCHITECTURE_BOUNDED_CONTEXT_MAP_2026-07-24.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-142254-f119",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/dependency-cruiser/ddd-bounded-context.config.cjs",
+        "resolved_path": "/opt/veridian/ai-os/dependency-cruiser/ddd-bounded-context.config.cjs"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-142254-2b2c",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/dependency-cruiser/clean-architecture-dependency-rule.config.cjs",
+        "resolved_path": "/opt/veridian/ai-os/dependency-cruiser/clean-architecture-dependency-rule.config.cjs"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-142254-9639",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/dependency-cruiser/enterprise-architecture-layers.config.cjs",
+        "resolved_path": "/opt/veridian/ai-os/dependency-cruiser/enterprise-architecture-layers.config.cjs"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-142254-869f",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/audit_pipeline_architecture.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/audit_pipeline_architecture.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-142254-acea",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/ENTERPRISE_ARCHITECTURE_DRIFT_REVIEW_2026-07-24.yaml",
+        "resolved_path": "/opt/veridian/ai-os/ENTERPRISE_ARCHITECTURE_DRIFT_REVIEW_2026-07-24.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-142254-16b8",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/register_enterprise_architecture_drift_findings.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/register_enterprise_architecture_drift_findings.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-142448-7814",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/CHATGPT_PROMPT_SCHEMA_2026-07-24.yaml",
+        "resolved_path": "/opt/veridian/ai-os/CHATGPT_PROMPT_SCHEMA_2026-07-24.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-142500-477c",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/CHATGPT_PROMPTLIB_BLOCKER_2026-07-24.yaml",
+        "resolved_path": "/opt/veridian/ai-os/CHATGPT_PROMPTLIB_BLOCKER_2026-07-24.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-142612-6020",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/CHATGPT_AUDIT_RECORD_SCHEMA_2026-07-24.yaml",
+        "resolved_path": "/opt/veridian/ai-os/CHATGPT_AUDIT_RECORD_SCHEMA_2026-07-24.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-142612-48ff",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/CHATGPT_AUDIT_MASTER_CATALOGUE_2026-07-24.yaml",
+        "resolved_path": "/opt/veridian/ai-os/CHATGPT_AUDIT_MASTER_CATALOGUE_2026-07-24.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-142612-656e",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/CHATGPT_AUDIT_BLOCKER_2026-07-24.yaml",
+        "resolved_path": "/opt/veridian/ai-os/CHATGPT_AUDIT_BLOCKER_2026-07-24.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-143900-2c35",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/PHASE6_INTENT_CONTEXT_PLANNING_LEARNING_2026-07-24.yaml",
+        "resolved_path": "/opt/veridian/ai-os/PHASE6_INTENT_CONTEXT_PLANNING_LEARNING_2026-07-24.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-145307-7679",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/UI_COMPOSITION_ANALYTICS_ENGINE_EVALUATION_2026-07-24.yaml",
+        "resolved_path": "/opt/veridian/ai-os/UI_COMPOSITION_ANALYTICS_ENGINE_EVALUATION_2026-07-24.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-184352-a192",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/DDD_SEMANTIC_REVIEW_2026-07-24.yaml",
+        "resolved_path": "/opt/veridian/ai-os/DDD_SEMANTIC_REVIEW_2026-07-24.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-184352-e64e",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/UX_HEURISTIC_REVIEW_2026-07-24.yaml",
+        "resolved_path": "/opt/veridian/ai-os/UX_HEURISTIC_REVIEW_2026-07-24.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-184352-a287",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/WORKFLOW_LOGIC_REVIEW_2026-07-24.yaml",
+        "resolved_path": "/opt/veridian/ai-os/WORKFLOW_LOGIC_REVIEW_2026-07-24.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-184352-93e2",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/AI_GOVERNANCE_REVIEW_2026-07-24.yaml",
+        "resolved_path": "/opt/veridian/ai-os/AI_GOVERNANCE_REVIEW_2026-07-24.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-184352-8961",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/register_ddd_semantic_findings.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/register_ddd_semantic_findings.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-184352-1d54",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/register_ux_heuristic_findings.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/register_ux_heuristic_findings.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-184352-2311",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/register_workflow_logic_findings.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/register_workflow_logic_findings.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-184352-4fa8",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/register_ai_governance_findings.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/register_ai_governance_findings.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-184353-bbd7",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/close_phase5_ai_review.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/close_phase5_ai_review.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-220809-a1d6",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/auditor_engine_events.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/auditor_engine_events.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-220809-e379",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/pgaudit/ENABLE_PGAUDIT_2026-07-24.sql",
+        "resolved_path": "/opt/veridian/ai-os/pgaudit/ENABLE_PGAUDIT_2026-07-24.sql"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-220809-dff1",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/audit_pipeline_security.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/audit_pipeline_security.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-220809-c07e",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/audit_pipeline_api_contract.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/audit_pipeline_api_contract.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-220809-bd02",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/audit_pipeline_data_model.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/audit_pipeline_data_model.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-220809-3b61",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/audit_pipeline_documentation.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/audit_pipeline_documentation.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-220809-b381",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/audit_pipeline_integration.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/audit_pipeline_integration.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-220809-c3a3",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/audit_pipeline_metadata.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/audit_pipeline_metadata.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-220809-9e55",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/audit_pipeline_product_quality.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/audit_pipeline_product_quality.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-220809-bbc1",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/audit_pipeline_workflow_transitions.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/audit_pipeline_workflow_transitions.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-220809-1405",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/audit_pipeline_ai_governance.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/audit_pipeline_ai_governance.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260724-230741-fb1a",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/verify_route_trace.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/verify_route_trace.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260725-054119-28b3",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/PROMPT_GATEWAY_2026-07-25.yaml",
+        "resolved_path": "/opt/veridian/ai-os/PROMPT_GATEWAY_2026-07-25.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260725-055635-db07",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/BROWSER_AUTOMATION_PROFILE_2026-07-25.yaml",
+        "resolved_path": "/opt/veridian/ai-os/BROWSER_AUTOMATION_PROFILE_2026-07-25.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260725-060803-7acc",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/audit_pipeline_master_orchestrator.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/audit_pipeline_master_orchestrator.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260725-060803-52ad",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os-scripts/generate_auditor_engine_master_report.py",
+        "resolved_path": "/opt/veridian/ai-os-scripts/generate_auditor_engine_master_report.py"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260725-065023-091b",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/MODULE_GAP_AUDIT_2026-07-25.yaml",
+        "resolved_path": "/opt/veridian/ai-os/MODULE_GAP_AUDIT_2026-07-25.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260725-065033-17be",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/MODULE_GAP_AUDIT_MODULE_LIST_2026-07-25.yaml",
+        "resolved_path": "/opt/veridian/ai-os/MODULE_GAP_AUDIT_MODULE_LIST_2026-07-25.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260725-082240-fd6a",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/OWNER_ENGINE_MANDATORY_GATE_IMPLEMENTATION_2026-07-25.yaml",
+        "resolved_path": "/opt/veridian/ai-os/OWNER_ENGINE_MANDATORY_GATE_IMPLEMENTATION_2026-07-25.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260725-082343-20ad",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/OWNER_ENGINE_MACHINE_LANGUAGE_CONTRACT_2026-07-25.yaml",
+        "resolved_path": "/opt/veridian/ai-os/OWNER_ENGINE_MACHINE_LANGUAGE_CONTRACT_2026-07-25.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260725-101604-54e8",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/repos/compliance-tracker/src/lib/utils/request-ip.ts",
+        "resolved_path": "/opt/veridian/repos/compliance-tracker/src/lib/utils/request-ip.ts"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260726-042256-a59a",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/OWNER_DIRECTIVES/STANDING_OPERATING_PROTOCOL_2026-07-26.yaml",
+        "resolved_path": "/opt/veridian/ai-os/OWNER_DIRECTIVES/STANDING_OPERATING_PROTOCOL_2026-07-26.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260726-043419-b539",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/OWNER_DIRECTIVES/OWNER_ASSISTANT_RUNBOOK_2026-07-26.yaml",
+        "resolved_path": "/opt/veridian/ai-os/OWNER_DIRECTIVES/OWNER_ASSISTANT_RUNBOOK_2026-07-26.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260726-044614-8bac",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/OWNER_DIRECTIVES/TASK_LIFECYCLE_STATE_MACHINE_2026-07-26.yaml",
+        "resolved_path": "/opt/veridian/ai-os/OWNER_DIRECTIVES/TASK_LIFECYCLE_STATE_MACHINE_2026-07-26.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "governance_doc-KE-20260723-181947-5660",
+        "name": "governance_doc",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/EXECUTION_RULES_AUDIT_2026-07-23.yaml",
+        "resolved_path": "/opt/veridian/ai-os/EXECUTION_RULES_AUDIT_2026-07-23.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "governance_doc-KE-20260723-181947-e77d",
+        "name": "governance_doc",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/MASTER_GAP_AUDIT_2026-07-23.yaml",
+        "resolved_path": "/opt/veridian/ai-os/MASTER_GAP_AUDIT_2026-07-23.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "governance_doc-KE-20260726-042256-a59a",
+        "name": "governance_doc",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/OWNER_DIRECTIVES/STANDING_OPERATING_PROTOCOL_2026-07-26.yaml",
+        "resolved_path": "/opt/veridian/ai-os/OWNER_DIRECTIVES/STANDING_OPERATING_PROTOCOL_2026-07-26.yaml"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260727-071611-3ed0",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/repos/claude-control/ai-os/PHASE5_BROWSER_EXECUTION_INCREMENT1_2026-07-27.md",
+        "resolved_path": "/opt/veridian/repos/claude-control/ai-os/PHASE5_BROWSER_EXECUTION_INCREMENT1_2026-07-27.md"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260727-095935-3e46",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/ai-os/VERIDIAN_V2_DSPY_TECH_DECISION_2026-07-27.md",
+        "resolved_path": "/opt/veridian/ai-os/VERIDIAN_V2_DSPY_TECH_DECISION_2026-07-27.md"
+      },
+      {
+        "table": "wiring_registry",
+        "id": "file-ke-KE-20260729-181834-91c6",
+        "name": "file",
+        "status": "FAIL",
+        "path": "/opt/veridian/https://claude.ai/code/artifact/e49a7658-a266-45db-90d2-8ccd3f328a34",
+        "resolved_path": "/opt/veridian/https://claude.ai/code/artifact/e49a7658-a266-45db-90d2-8ccd3f328a34"
+      }
+    ]
+  },
+  "ai_agent_registry": {
+    "total_checked": 0,
+    "pass": 0,
+    "not_a_disk_path": 0,
+    "fail": 0,
+    "failing_rows": []
+  }
+}

@@ -18,6 +18,18 @@ import urllib.error
 import urllib.request
 import yaml
 
+# Real disk recurrence fix (UMR-20260806-082230-54b8, parent
+# UMR-20260806-071025-1d28): self-prunes a task's own workspace/node_modules
+# the instant ITS OWN checkpoint call lands a terminal status -- see the
+# call site in cmd_checkpoint below and prune_task_node_modules.py's own
+# docstring for the full root-cause writeup. Import failure is non-fatal
+# (same fail-open discipline as _auto_log_task_event/_sync_to_app below) --
+# a missing/broken prune helper must never be the reason a checkpoint fails.
+try:
+    import prune_task_node_modules
+except ImportError:
+    prune_task_node_modules = None
+
 AI_OS = "/opt/veridian/ai-os"
 CONTROLLER = f"{AI_OS}/CONTROLLER.yaml"
 CONTROLLER_LOCK = f"{AI_OS}/.controller.lock"
@@ -917,6 +929,21 @@ def cmd_checkpoint(args):
             checkpoint["rejected_paths"] = rejected_paths
         task.setdefault("checkpoints", []).append(checkpoint)
         save_task(args.task_id, task)
+    # Real disk recurrence fix (UMR-20260806-082230-54b8): the moment THIS
+    # task's own status has just landed on a terminal value, prune its own
+    # workspace/node_modules right here -- deliberately outside the
+    # task_lock block above (a filesystem rmtree has no business holding
+    # the yaml lock). Best-effort: a prune failure is printed, never raised,
+    # so it can never turn a successful checkpoint into a failed one.
+    if prune_task_node_modules is not None and task["status"] in prune_task_node_modules.TERMINAL_STATES:
+        try:
+            prune_result = prune_task_node_modules.prune_one(task["task_dir"], status=task["status"])
+            if prune_result.get("action") == "deleted":
+                print(f"node_modules pruned for {args.task_id}: {prune_result.get('bytes', 0)} bytes reclaimed")
+            elif prune_result.get("action") == "error":
+                print(f"WARNING: node_modules prune failed for {args.task_id} (non-fatal): {prune_result.get('error')}")
+        except Exception as e:
+            print(f"WARNING: node_modules prune raised for {args.task_id} (non-fatal): {e}")
     sync_controller_entry(task)
     _auto_log_task_event("checkpoint", task, extra_note=args.note or f"files_modified={len(task.get('files_modified', []))}")
     _sync_to_app(task, extra_note=args.note or "")

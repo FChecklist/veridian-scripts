@@ -50,10 +50,18 @@ drift only -- no code conflict) instead of landing.
       just noise. Doing so anyway to "show work" would itself violate the
       anti-fabrication principle this whole schema exists to enforce
 
+- [x] Pushed this branch, opened this task's own PR (#135) documenting the above
+- [x] Closed the stale, unmerged PR #68 (`worker/task-20260805-161237-...`) as
+      superseded by #135 -- it recorded a real, correct backfill, but the DB it
+      describes is the same live DB already re-verified above; leaving two open PRs
+      both claiming to "close the gap" that no longer exists would itself be a
+      false/duplicate record
+
 ## Remaining
-- [ ] Close the stale, unmerged PR #68 (`worker/task-20260805-161237-...`) as
-      superseded -- it recorded a real, correct backfill, but the DB it describes is
-      the same live DB already re-verified above; leaving two open PRs both claiming
-      to "close the gap" that no longer exists would itself be a false/duplicate
-      record
-- [ ] Push this branch, open this task's own PR documenting the above
+- [ ] None outstanding for this task's scope -- the live database already satisfies
+      the SPEC's full requirement (all 69 canonical OCID rows accounted for, 61
+      real-UMR OCIDs fully covered, 8 no-UMR OCIDs honestly excluded, all seven rule
+      booleans real and non-null, mechanism-not-existed-yet cases honestly false with
+      explanation). If new OCID/UMR pairs are added to `ocid_canonical_registry` in
+      the future, `audit_ocid_compliance.py --apply` (already merged, unchanged)
+      remains the one real write path to extend coverage to them.

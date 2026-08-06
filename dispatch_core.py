@@ -125,10 +125,19 @@ def _read_meminfo_bytes():
     return info
 
 
-def has_resource_headroom():
+def has_resource_headroom_detail():
     """Real-time veto, independent of CONCURRENCY_CAP/running_worker_count():
-    True only if current real memory/swap/load headroom is enough to safely
-    absorb one more worker-class (~2-3GB) task, checked fresh on every call.
+    (ok, detail) where ok is True only if current real memory/swap/load
+    headroom is enough to safely absorb one more worker-class (~2-3GB) task,
+    checked fresh on every call (no cached/prior-tick snapshot -- every value
+    below is read from /proc at call time). `detail` always carries the real
+    check name plus the exact real numbers involved (never just True/False),
+    so a caller logging a "deferred"/"frozen" outcome can say WHICH real
+    metric tripped instead of a generic "no free slot" message -- added
+    2026-08-06 (UMR-20260806-101839-688e) after the previous bool-only
+    contract made a real load-average veto indistinguishable in the tick log
+    from a genuinely exhausted CONCURRENCY_CAP slot count.
+
     This is what lets has_free_slot() refuse a new dispatch even when the
     slot count is still under the fixed cap -- see the module-level comment
     above for why the cap alone (fixed or dynamic) doesn't catch this."""
@@ -142,31 +151,53 @@ def has_resource_headroom():
     swap_used_pct = (1 - (swap_free / swap_total)) if swap_total else 0.0
 
     # HARD CEILING -- Owner's own number, never cross.
-    if mem_used_pct >= HARD_CEILING_UTILIZATION_PCT or swap_used_pct >= HARD_CEILING_UTILIZATION_PCT:
-        return False
+    if mem_used_pct >= HARD_CEILING_UTILIZATION_PCT:
+        return False, {"check": "mem_hard_ceiling", "mem_used_pct": mem_used_pct,
+                        "threshold_pct": HARD_CEILING_UTILIZATION_PCT}
+    if swap_used_pct >= HARD_CEILING_UTILIZATION_PCT:
+        return False, {"check": "swap_hard_ceiling", "swap_used_pct": swap_used_pct,
+                        "threshold_pct": HARD_CEILING_UTILIZATION_PCT}
 
     # BACKOFF threshold -- meaningfully below the hard ceiling, tripped
     # first so a build/compile spike on an already-running worker still has
     # real room before 0.99.
-    if mem_used_pct >= BACKOFF_UTILIZATION_PCT or swap_used_pct >= BACKOFF_UTILIZATION_PCT:
-        return False
+    if mem_used_pct >= BACKOFF_UTILIZATION_PCT:
+        return False, {"check": "mem_backoff", "mem_used_pct": mem_used_pct,
+                        "threshold_pct": BACKOFF_UTILIZATION_PCT}
+    if swap_used_pct >= BACKOFF_UTILIZATION_PCT:
+        return False, {"check": "swap_backoff", "swap_used_pct": swap_used_pct,
+                        "threshold_pct": BACKOFF_UTILIZATION_PCT}
 
     # Real headroom to the backoff threshold must fit at least one more
     # worker's own memory budget, not just be nonzero.
     mem_used_bytes = mem_total - mem_available
     mem_headroom_bytes = (mem_total * BACKOFF_UTILIZATION_PCT) - mem_used_bytes
     if mem_headroom_bytes < PER_WORKER_MEMORY_BUDGET_BYTES:
-        return False
+        return False, {"check": "mem_headroom_budget", "mem_headroom_bytes": mem_headroom_bytes,
+                        "required_bytes": PER_WORKER_MEMORY_BUDGET_BYTES}
 
     cpu_count = os.cpu_count() or 1
     try:
         load1, _, _ = os.getloadavg()
     except OSError:
-        return False  # fail safe: refuse rather than assume idle if unreadable
-    if load1 >= cpu_count * BACKOFF_UTILIZATION_PCT:
-        return False
+        # fail safe: refuse rather than assume idle if unreadable
+        return False, {"check": "load1_unreadable"}
+    load_threshold = cpu_count * BACKOFF_UTILIZATION_PCT
+    if load1 >= load_threshold:
+        return False, {"check": "load1_backoff", "load1": load1, "cpu_count": cpu_count,
+                        "threshold": load_threshold}
 
-    return True
+    return True, {"check": "ok"}
+
+
+def has_resource_headroom():
+    """True only if current real memory/swap/load headroom is enough to
+    safely absorb one more worker-class task. Thin bool wrapper around
+    has_resource_headroom_detail() -- kept for the existing call sites/tests
+    that only ever needed the boolean; use the _detail() variant when the
+    real reason matters (e.g. tick-log diagnostics)."""
+    ok, _ = has_resource_headroom_detail()
+    return ok
 
 # Both unit templates this box actually spawns from a dispatch path (see KNOWN_CONTEXT
 # item 2 in this task's spec): veridian-worker@ (queue-dispatcher.py/module-queue-
@@ -212,6 +243,27 @@ def running_worker_count():
     return total
 
 
+def has_free_slot_detail(cap=None):
+    """(ok, detail) real-reason variant of has_free_slot() -- see that
+    function's docstring for the two conditions checked. `detail` names
+    which of the two independent gates actually failed
+    ("cap_exhausted" vs whatever has_resource_headroom_detail() reports),
+    with the real numbers involved, so a "deferred" tick-log entry can say
+    the true reason instead of always blaming "no free concurrency slot"
+    even when the real cap has slots free and a resource veto is what
+    actually blocked it (added 2026-08-06, UMR-20260806-101839-688e --
+    this exact confusion cost real diagnostic time: running_worker_count()
+    was 0/5 while every real tick logged "no free concurrency slot")."""
+    cap = CONCURRENCY_CAP if cap is None else cap
+    running = running_worker_count()
+    if running >= cap:
+        return False, {"check": "cap_exhausted", "running_worker_count": running, "cap": cap}
+    ok, headroom_detail = has_resource_headroom_detail()
+    if not ok:
+        return False, headroom_detail
+    return True, {"check": "ok", "running_worker_count": running, "cap": cap}
+
+
 def has_free_slot(cap=None):
     """True if a real spawn is currently allowed. Two independent conditions
     must BOTH pass: the fixed CONCURRENCY_CAP slot count, and
@@ -223,9 +275,13 @@ def has_free_slot(cap=None):
     never before/after -- checking outside the lock reintroduces the exact
     TOCTOU race this module exists to close. Pass an explicit cap only to
     override CONCURRENCY_CAP for tests -- has_resource_headroom() is not
-    overridable, it always reads real host state."""
-    cap = CONCURRENCY_CAP if cap is None else cap
-    return running_worker_count() < cap and has_resource_headroom()
+    overridable, it always reads real host state.
+
+    Thin bool wrapper around has_free_slot_detail() -- kept for the many
+    existing `if not dispatch_core.has_free_slot():` call sites; use the
+    _detail() variant when the real reason matters."""
+    ok, _ = has_free_slot_detail(cap=cap)
+    return ok
 
 
 def task_status_sync():

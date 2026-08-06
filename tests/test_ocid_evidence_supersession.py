@@ -57,6 +57,14 @@ class _FakeDispatchCoreAlwaysFreeSlot:
     def has_free_slot(self):
         return True
 
+    def has_free_slot_detail(self):
+        # Real fix (UMR-20260806-101839-688e): _dispatch_one_inner() now
+        # calls has_free_slot_detail() (real-reason variant) instead of the
+        # bool-only has_free_slot() -- this fake must offer both so it stays
+        # a drop-in dispatch_core replacement regardless of which one the
+        # real code calls.
+        return True, {"check": "ok"}
+
     @contextlib.contextmanager
     def acquire_dispatch_lock(self):
         yield

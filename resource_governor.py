@@ -1265,9 +1265,24 @@ def _dispatch_one_inner(dry_run=False, now=None):
             conn.close()
             return {"action": "idle", "detail": "queue empty", "metrics": metrics}
 
-        if not dc.has_free_slot():
+        slot_ok, slot_detail = dc.has_free_slot_detail()
+        if not slot_ok:
             conn.close()
-            return {"action": "deferred", "detail": "no free concurrency slot under dispatch_core's shared cap",
+            # Real fix (UMR-20260806-101839-688e): the old fixed detail
+            # string ("no free concurrency slot under dispatch_core's shared
+            # cap") was printed for EVERY has_free_slot() failure, including
+            # a resource-headroom veto (e.g. real load average over
+            # threshold) with running_worker_count() at 0/5 -- live-
+            # reproduced on this box: real tick log showed exactly that
+            # misleading string every single tick while 5 real slots sat
+            # idle. slot_detail now names the real check that actually
+            # failed (cap_exhausted / mem_backoff / swap_backoff /
+            # load1_backoff / mem_hard_ceiling / swap_hard_ceiling /
+            # mem_headroom_budget / load1_unreadable) plus the real numbers,
+            # so this is diagnosable from the tick log alone going forward.
+            return {"action": "deferred",
+                     "detail": f"no free dispatch slot -- real gate: {slot_detail}",
+                     "slot_detail": slot_detail,
                      "umr_id": row["umr_id"], "metrics": metrics}
 
         if dry_run:
@@ -1466,10 +1481,35 @@ def flag_stale_queued_tasks(now=None):
     return flagged
 
 
+# Real fix (UMR-20260806-101839-688e, dispatch-throughput-stall follow-up):
+# run_tick()'s dispatch loop used to stop the ENTIRE tick after the first
+# dispatch_one() call whose action wasn't literally "dispatched" -- but two
+# of those non-"dispatched" actions (REJECTED_DUPLICATE_PR_ACTIONS,
+# ROW_RESOLVED_NON_DISPATCH_ACTIONS below) already write a real TERMINAL
+# status on the row that produced them (see rejected_duplicate_pr /
+# superseded_by_ocid_evidence handling in _dispatch_one_inner) -- that row
+# is no longer 'queued', so next_queued_task() would pick a genuinely
+# DIFFERENT row on the next call. Stopping the tick there wasted real,
+# available dispatch capacity every time the top-ranked row happened to be
+# a duplicate/superseded one: the other real queued rows never even got a
+# next_queued_task() lookup that tick. Only a real row-INDEPENDENT block
+# (frozen/deferred/emergency_stopped/superboss_unavailable) or an empty
+# queue (idle) should stop the loop -- retrying those mid-tick cannot
+# succeed since nothing about which row was picked changes the outcome.
+ROW_RESOLVED_NON_DISPATCH_ACTIONS = frozenset({
+    "dispatched", "rejected_duplicate_pr", "superseded_by_ocid_evidence",
+})
+
+
 def run_tick(max_dispatches=None, now=None):
     """One full governor pass: stuck-task scan, stale-queued-age safeguard,
     then priority-ordered dispatch until the queue is empty, a slot/metric
-    limit stops it, or max_dispatches is reached."""
+    limit stops it, or max_dispatches is reached.
+
+    The loop keeps going past any outcome that already resolved the picked
+    row to a real terminal (non-'queued') status -- see
+    ROW_RESOLVED_NON_DISPATCH_ACTIONS's docstring above -- and only stops on
+    a genuinely row-independent block or an empty queue."""
     results = {
         "stuck_task_actions": scan_stuck_tasks(now=now),
         "stale_queued_flagged": flag_stale_queued_tasks(now=now),
@@ -1478,7 +1518,7 @@ def run_tick(max_dispatches=None, now=None):
     while max_dispatches is None or len(results["dispatches"]) < max_dispatches:
         r = dispatch_one(now=now)
         results["dispatches"].append(r)
-        if r["action"] != "dispatched":
+        if r["action"] not in ROW_RESOLVED_NON_DISPATCH_ACTIONS:
             break
     return results
 

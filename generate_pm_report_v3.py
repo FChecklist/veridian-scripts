@@ -3,6 +3,17 @@
 
 UMR-20260805-181636-32f2 (parent UMR-20260802-165606-4413, OCID-020).
 
+Standing directive this script exists to satisfy: UMR-20260806-042531-be9c
+(real Owner standing directive, confirmed live in umr_tasks,
+source_trigger=owner_dispatch_gateway, ts_submitted=2026-08-06T04:25:31Z --
+first principle: every real decision point in the ten-minute PM report is
+software-script-first, real deterministic/boolean/close-ended, zero manual
+work by any AI agent or the PM, backed by real database validation -- see
+the original report generator, UMR-20260805-181636-32f2, and its five-
+section deterministic extension, UMR-20260806-041307-0bfd). Citation kept
+here, next to this script's other real UMR citations, so a future update
+finds it at the source, not only in SKILL.md or a chat log.
+
 Replaces the AI-reasoned-every-10-minutes PM report generator that was a
 real contributing factor to hitting the Owner's weekly Claude Code usage
 limit this session. This script makes ZERO AI/LLM calls of any kind -- every

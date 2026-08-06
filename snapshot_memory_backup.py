@@ -31,15 +31,27 @@ alternative, specifically to avoid introducing a second, competing
 retention convention alongside prune_memory_backups.py's own real --keep
 default. HARD CAP: at most KEEP_DEFAULT (3, same literal default as
 prune_memory_backups.py's --keep) ad-hoc snapshots THIS helper has EVER
-written for the current real UTC day, counted in total. Once that many
-already exist for today, this call refuses -- exits non-zero, writes
-nothing -- rather than silently keeping going forever. A new UTC day resets
-the count to zero; prune_memory_backups.py (run separately, on its own
-schedule) is what eventually reclaims yesterday's-and-older ad-hoc
+written for the current real UTC day, counted in total. A new UTC day
+resets the count to zero; prune_memory_backups.py (run separately, on its
+own schedule) is what eventually reclaims yesterday's-and-older ad-hoc
 snapshots via its own real verified-newest-N policy across the whole
 directory -- this script's own per-day cap and that script's own
 across-the-board retention are two different real safeguards, not the same
 one written twice.
+
+NEVER SILENTLY REFUSE ON CAP (PM addendum recorded directly on
+pm_decisions_pending row id=89's own closed_note at original proposal-89
+approval time -- re-verified directly against that row, not just cited,
+before this was written): a caller about to make a real structural change
+must never come away believing it is protected when the cap silently
+wasn't honored. So once the cap IS reached, this helper never just no-ops
+-- it does exactly one of two things: (a) if any of today's already-written
+snapshots still passes a real, fresh integrity_check right now, that file
+is reused and its real path reported back (decision=
+'reused_existing_due_to_cap', exit 0 -- real protection genuinely still
+exists); (b) if none of them verify, that is a real failure -- exit
+non-zero with a loud, real error (DAILY_CAP_REACHED_NO_VERIFIED_BACKUP_AVAILABLE),
+never a quiet pass-through.
 
 SKIP-IF-A-RECENT-VERIFIED-BACKUP-EXISTS: before writing anything, if the
 MOST RECENT today's-date ad-hoc snapshot was written within the last
@@ -71,13 +83,16 @@ leaving a silently-corrupt "backup" behind for prune_memory_backups.py (or
 a real recovery attempt) to trip over later.
 
 Usage:
-    snapshot_memory_backup.py                    # take a real ad-hoc snapshot (or real no-op if today's cap/skip conditions apply)
+    snapshot_memory_backup.py                    # take a real ad-hoc snapshot (or real skip/reuse if today's cap/recency conditions apply)
     snapshot_memory_backup.py --reason "why"      # real free-text note recorded in the JSON report only (never part of the cap/skip logic)
     snapshot_memory_backup.py --live-db PATH --backups-dir DIR   # override paths (testing)
 
-Exit codes: 0 real snapshot written OR real no-op (skip/cap), 1 live DB
-failed integrity_check (refused, nothing touched) or the fresh copy itself
-failed verification, 2 bad arguments.
+Exit codes: 0 real snapshot written, real recency-window skip, or a real
+cap-hit reuse of an existing verified backup (decision field tells you
+which); 1 live DB failed integrity_check (refused, nothing touched), the
+fresh copy itself failed verification, or the daily cap was reached with no
+existing verified backup left to reuse (a real, loud failure, never a
+silent pass-through); 2 bad arguments.
 """
 import argparse
 import json
@@ -188,14 +203,46 @@ def run(live_db, backups_dir, keep, reason, now=None, recent_window_seconds=RECE
     # (verified or not -- an unverified one still occupies a real cap slot;
     # it is prune_memory_backups.py's job, not this helper's, to ever delete
     # one).
+    #
+    # NEVER SILENTLY REFUSE (PM addendum on the original proposal 89
+    # approval, pm_decisions_pending row id=89's own closed_note, re-verified
+    # directly against that row before writing this): a caller hitting this
+    # cap is about to make a real structural change and must never come away
+    # believing it is protected when it silently isn't. So hitting the cap
+    # does exactly one of two things, never a bare no-op: (a) if any of
+    # today's existing snapshots still passes a real, fresh integrity_check
+    # right now, reuse it -- report its real path back as the real backup
+    # this call stands behind (decision='reused_existing_due_to_cap', exit
+    # 0, real protection genuinely exists); (b) if NONE of them verify (every
+    # today's slot is corrupt/stale), this is a real failure -- exit
+    # non-zero with a real, loud error, never a quiet pass-through.
     if len(todays) >= keep:
-        report["decision"] = "refused_daily_cap_reached"
+        reusable = None
+        for fname in reversed(todays):  # newest first
+            full = os.path.join(backups_dir, fname)
+            if _pmb.real_integrity_check(full):
+                reusable = full
+                break
         report["todays_adhoc_count"] = len(todays)
         report["todays_adhoc_files"] = todays
+        if reusable is not None:
+            report["decision"] = "reused_existing_due_to_cap"
+            report["backup_path"] = reusable
+            report["message"] = (
+                f"Daily cap of {keep} ad-hoc snapshots already reached for today (UTC "
+                f"{_today_utc_compact(now)}) -- no new snapshot written, but an existing "
+                f"one still passes a real, fresh integrity_check and is reused/reported: "
+                f"{reusable}. Real protection exists; this is not a silent no-op."
+            )
+            return report
+        report["error"] = "DAILY_CAP_REACHED_NO_VERIFIED_BACKUP_AVAILABLE"
         report["message"] = (
-            f"Refusing to write a new ad-hoc snapshot: {len(todays)} already exist for "
-            f"today (UTC {_today_utc_compact(now)}), at or above the hard cap of {keep}. "
-            "Run prune_memory_backups.py, or wait for the next UTC day, before taking another."
+            f"Refusing to write a new ad-hoc snapshot: {len(todays)} already exist for today "
+            f"(UTC {_today_utc_compact(now)}), at or above the hard cap of {keep} -- AND none of "
+            "them pass a fresh integrity_check right now, so there is no existing backup to "
+            "reuse either. Failing loudly rather than passing silently: run "
+            "prune_memory_backups.py to clear the corrupt slot(s), or wait for the next UTC day, "
+            "before relying on this helper again."
         )
         return report
 

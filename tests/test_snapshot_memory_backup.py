@@ -83,11 +83,12 @@ def test_refuses_when_live_db_fails_integrity_check():
         assert not os.path.isdir(backups_dir) or os.listdir(backups_dir) == []
 
 
-def test_hard_cap_refuses_a_4th_same_day_snapshot():
+def test_hard_cap_reuses_an_existing_verified_backup_on_a_4th_same_day_call():
     """Three real, distinct, verified snapshots spaced well outside the
     recency window (recent_window_seconds=0 disables that check entirely
     for this test, isolating the hard-cap logic) -- the 4th same-UTC-day
-    call is refused."""
+    call does NOT silently no-op: it reuses and reports the newest still-
+    verified existing snapshot (PM addendum: never silently refuse)."""
     m = _load_module()
     with tempfile.TemporaryDirectory() as d:
         backups_dir = os.path.join(d, "backups")
@@ -106,14 +107,42 @@ def test_hard_cap_refuses_a_4th_same_day_snapshot():
 
         report4 = m.run(live_db, backups_dir, keep=3, reason=None, now=now + timedelta(hours=4),
                          recent_window_seconds=0)
-        assert report4["decision"] == "refused_daily_cap_reached", report4
+        assert report4["decision"] == "reused_existing_due_to_cap", report4
         assert report4["todays_adhoc_count"] == 3
+        assert report4["backup_path"] == written[-1]  # newest still-verified one
         assert "error" not in report4
+        # No 4th file was actually written.
+        assert len(os.listdir(backups_dir)) == 3
 
         # A new UTC day resets the count to zero.
         next_day = now + timedelta(days=1)
         report5 = m.run(live_db, backups_dir, keep=3, reason=None, now=next_day, recent_window_seconds=0)
         assert report5["decision"] == "written", report5
+
+
+def test_hard_cap_fails_loudly_when_no_todays_backup_verifies():
+    """If the cap is reached but EVERY today's slot is corrupt, this must be
+    a real, loud failure (non-zero exit, real error) -- never a silent
+    pass-through that leaves a caller believing it is protected."""
+    m = _load_module()
+    with tempfile.TemporaryDirectory() as d:
+        backups_dir = os.path.join(d, "backups")
+        os.makedirs(backups_dir, exist_ok=True)
+        live_db = os.path.join(d, "superboss-register.sqlite")
+        _make_valid_db(live_db)
+        now = datetime(2026, 8, 6, 12, 0, 0, tzinfo=timezone.utc)
+
+        for i in range(3):
+            fname = f"superboss-register.sqlite.adhoc-pre-change-20260806T0{i}0000Z.bak"
+            path = os.path.join(backups_dir, fname)
+            _make_corrupt_file(path)
+            ts = (now - timedelta(hours=3 - i)).timestamp()
+            os.utime(path, (ts, ts))
+
+        report = m.run(live_db, backups_dir, keep=3, reason=None, now=now, recent_window_seconds=0)
+        assert report["error"] == "DAILY_CAP_REACHED_NO_VERIFIED_BACKUP_AVAILABLE", report
+        assert "decision" not in report
+        assert report["todays_adhoc_count"] == 3
 
 
 def test_skip_when_a_recent_verified_backup_already_exists():

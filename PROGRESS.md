@@ -1,69 +1,86 @@
-# PROGRESS -- task-20260806-163350-owner-explicit-go-ahead--build-the-real
+# PROGRESS -- task-20260806-165903-correction--wire-the-new-ai-agent-id-tab
+
+SPEC (`prompt.txt`): direct correction/extension to UMR-20260806-121332-6ba4
+(`ai_agent_registry.py`, 1 UMR = 1 agent_id). Build the deterministic pre-work
+briefing + post-work write-back layer it describes, reusing existing
+infrastructure only, never recreating it.
 
 ## Completed
-- [x] Independently verified item 1 (UMR-20260806-065104-c69a status) instead of applying the
-      SPEC's claim on narration. Finding: **the SPEC's premise is false, current status.**
-      - `task.yaml` reachable via this row's own `unit_name` (task-20260806-070019-register-real-umr-for-pm-self-audit-and)
-        does say `status: blocked`, but that checkpoint is from 2026-08-06T07:19Z, citing PR #132 as
-        "Superboss-approved... but the merge itself FAILED... needs manual attention".
-      - Live `gh pr view 132` right now shows `state=CLOSED`, `mergedAt=null`. It was closed at
-        2026-08-06T12:49:44Z (hours after that stale task.yaml snapshot) with an explicit human/AI
-        comment: this PR was one of 4 near-identical duplicate dispatches
-        (UMR-20260806-065104-c69a/-844e/-4432/-598e) for the same PM self-audit citation, which had
-        already landed on `main` via commit `11fa45e`. Closed as a genuine duplicate, not merged.
-      - Ran the canonical `reconcile_owner_dispatch_status.py --umr-id UMR-20260806-065104-c69a`
-        (report mode) against the live DB just now: real systemd inactive + real PR #132 state=CLOSED
-        (closed without merging) -> bucket `STALE_LABEL_TERMINAL`, `new_status='failed'` -- i.e. the
-        canonical script's own live, evidence-based classification **already equals** the current
-        `umr_tasks.status='failed'`. There is no false status to correct, and `'blocked'` is not even
-        a legal value in `umr_tasks.status`'s CHECK constraint.
-      - Conclusion: the SPEC's "this is the same reconciliation mislabeling bug" claim was based on a
-        stale task.yaml snapshot that predates PR #132's closure. **No DB write applied** -- writing
-        anything here now would either be a factually wrong relabel or a no-op; the canonical script
-        was run in report-only mode only, exactly to establish this, never with `--apply`.
-- [x] Independently investigated item 2 (AI agent ID registry) before writing any code, per this
-      session's own standing false-premise-verification practice. Finding: **already built, by a
-      concurrent sibling task, under a real Owner correction to this exact same directive.**
-      - Began implementing the SPEC's literal design (agent scoped by a human-readable "class of
-        work" role_label) directly in `superboss-register.py`: new `ai_agent_registry` table,
-        `get_or_create_ai_agent()`/`record_ai_agent_learning()`, CLI subcommands.
-      - Before committing, ran a smoke test against what was intended to be an isolated scratch DB.
-        `resolve_superboss_db_path()` falls back to the **live** DB when `SUPERBOSS_REGISTER_DB` names
-        a not-yet-existing file, so the test connected to the real, live
-        `/opt/veridian/ai-os/memory/superboss-register.sqlite` -- and failed with
-        `IntegrityError: NOT NULL constraint failed: ai_agent_registry.umr_id`.
-      - That error revealed the live DB **already has** an `ai_agent_registry` table -- with a
-        different, real schema (`agent_id PK, umr_id UNIQUE NOT NULL, role_label, memory_file_path,
-        created_at, last_used_at, total_tasks_handled, metadata_json`). Verified zero rows were
-        actually written (the failed INSERT never committed) -- confirmed via direct query, no live
-        data was touched.
-      - Traced it to commit `5f36209` on branch `worker/task-20260806-163355-correction--ai-agent-id-scoped-one-per-u`
-        (PR #194 on FChecklist/veridian-scripts, currently OPEN/pending_review, not yet merged to
-        `main`, but its DDL already applied live): `ai_agent_registry.py`, built by the sibling task
-        for **UMR-20260806-121332-6ba4**, "Direct correction ... to UMR-20260806-121252-3207's own
-        original build spec, per real Owner clarification received after that UMR dispatched" --
-        the Owner replaced the SPEC's fuzzy "class of work" scoping with a deterministic one:
-        `agent_id` is a pure zero-judgment transform of `umr_id` ("UMR-" -> "AGENT-"), `umr_id`
-        UNIQUE-constrained, so one real UMR maps to exactly one real agent_id, never a fuzzy
-        task-class match. That module already implements `ensure-agent`, `record-work`,
-        `lookup-agent`, `list-agents`, and `check-before-dispatch` (capability_registry first, then
-        this UMR's own agent_id), has its own passing standalone test suite, and is already
-        registered in `capability_registry` (CAP-20260806-164355-6f47).
-      - This task's own SPEC (UMR-20260806-121252-3207) is confirmed to be the **pre-correction**
-        version -- both worker tasks were dispatched from the same PM cycle roughly simultaneously
-        (task dirs created 5 seconds apart), and the correction landed on the live DB/sibling branch
-        while this task was already running.
-      - **Reverted** my own `superboss-register.py` edits (`git checkout -- superboss-register.py`)
-        rather than land a second, competing, role_label-scoped implementation against a table whose
-        real, live schema is already the corrected umr_id-scoped one -- building it anyway would be
-        exactly the duplicate-work failure mode this codebase's Hard Rule 2 (zero duplication) and
-        this session's own false-premise-verification practice both exist to prevent.
+- [x] Verified the SPEC's premises independently before writing anything (per this
+      session's own standing false-premise-verification practice). Real, confirmed:
+      - `wiring_registry` is real and live: 8562 rows (SPEC said ~8447; grown since --
+        the system is live, expected drift), across the exact entity types named
+        (function 5028, file 1978, dispatch_event 634, supabase_table 444, ai_role 195,
+        script 151, cron_job 72, engine 20, gateway 10, governance_doc 10, github_repo 7,
+        route 6, browser_component 4, vercel_project 3).
+      - `capability_registry` is real and live: 13 rows (SPEC said 12; the 13th,
+        `ai_agent_registry`, is UMR-20260806-121332-6ba4's own registration).
+      - The "new UMR scoped agent_id table" is `ai_agent_registry`, already live in the
+        DB (0 rows -- its own test run cleaned up after itself) but **not yet on
+        `main`**: it exists only on branch `worker/task-20260806-163355-...`
+        (PR #194, OPEN/unmerged, `mergeable=CONFLICTING`). Cherry-picked commit
+        `5f36209` onto this branch (conflict only in `PROGRESS.md`, resolved keeping
+        this branch's own content; `ai_agent_registry.py` / `test_ai_agent_registry.py`
+        / `ai_agent_registry_capability_record.json` applied cleanly, byte-identical to
+        that branch) so this task can actually import and reuse it directly, per the
+        SPEC's own "never recreate any of it, cite it and reuse it directly."
+      - Confirmed via this branch's own already-merged history (PR #195, a sibling task
+        `task-20260806-163350-owner-explicit-go-ahead--build-the-real`) that it
+        independently investigated this exact same directive tree and found PR #194's
+        work already covers UMR-20260806-121332-6ba4 itself, explicitly deferring
+        "live wiring of check-before-dispatch into the actual dispatch chokepoint" as
+        future work -- confirming this task (title: "wire the new ai agent id tab") is
+        that real, non-duplicate next step, not a re-do.
+- [x] Built `agent_work_briefing.py` -- the real deterministic briefing + write-back
+      layer, composing three existing pieces only (never reimplementing their query/
+      write logic):
+      - `assemble-briefing`: queries `wiring_registry` (via `superboss-register.py`'s
+        own `lookup_entity()` for path/entity_type/source_ref, PLUS a direct
+        `relationships LIKE` scan added here since `wiring_registry_fts` does not
+        index that column -- the SPEC explicitly names both fields), `capability_registry`
+        (via `lookup_capability()`, same reuse pattern `ai_agent_registry.py`'s own
+        `check-before-dispatch` already established), and `ai_agent_registry` (via
+        `cmd_lookup_agent`, this exact UMR's own prior history). Returns one JSON
+        object with explicit booleans (`has_matches`/`has_match`/`has_prior_history`)
+        and a `close_ended_facts` array of concrete, non-vague statements.
+      - `record-completion`: writes back through `ai_agent_registry.py`'s own
+        `cmd_record_work` (agent's own memory row), `superboss-register.py`'s own
+        `cmd_mark_umr_terminal` (the real system of record, `umr_tasks`),
+        `gtm_write_category_result.py` (the one canonical writer every `gtm_check_*.py`
+        script already calls, invoked the same subprocess way, only when a real
+        `--gtm-category-index` is given -- "where relevant", never unconditional), and
+        `superboss-register.py`'s own `register_entity_row()` for a genuinely new
+        `wiring_registry` entity -- gated by an exact `entity_id` search-first check,
+        confirmed a real no-op on a repeat call (never a duplicate row).
+- [x] `test_agent_work_briefing.py` -- standalone test against an isolated temp DB
+      (same convention as `test_ai_agent_registry.py`), all green: honest all-empty
+      briefing for an unknown UMR/scope, real `path`-matched AND real
+      `relationships`-only-matched `wiring_registry` rows both surfaced, real
+      `capability_registry` match surfaced, prior `ai_agent_registry` history
+      surfaced only once it exists, `umr_tasks`/`gtm_certification_categories` rows
+      genuinely updated in the DB (verified by direct query, not just the CLI's own
+      stdout), and the search-first `wiring_registry` dedup verified both by the
+      command's own reported `written: false` and by a direct `COUNT(*)=1` check.
+      Also re-ran `test_ai_agent_registry.py` (still green) and confirmed via direct
+      query that none of this left any stray rows in the LIVE db.
+      - Bootstrap note for future test authors: `_ensure_umr_table`'s fast path
+        skips all migration once umr_id + 5 specific columns are present --
+        `test_ai_agent_registry.py`'s own minimal stub relies on that skip, but a test
+        that asserts against `umr_tasks.status` (this one does) must bootstrap the
+        REAL, full column set instead, or the fast path leaves `status` missing.
+- [x] Registered `agent_work_briefing.py` itself in the live `capability_registry`
+      (`CAP-20260806-170938-a2c0`) via the existing `register-capability` CLI --
+      zero-duplication check first (`list-capabilities`: 13 existing rows, none
+      matching; `lookup-capability --intent-text "..."`: only an unrelated
+      `capability_registry_dedup` FTS near-hit, not a real match).
 
 ## Remaining
-- [ ] Not this task's to pick up right now: PR #194 (the real, corrected `ai_agent_registry.py`) is
-      still open/pending_review -- once it merges, its own commit message notes one real gap still
-      unaddressed: "live wiring of check-before-dispatch into the actual dispatch chokepoint" (i.e.
-      an actual call site inside the real dispatch path, not just a standalone CLI). Left for a
-      future task once PR #194 lands, to avoid racing/duplicating against code still under review.
-- [ ] No further action on UMR-20260806-065104-c69a -- its current `status='failed'` is correct per
-      live evidence; nothing to fix.
+- [ ] Live-wire `assemble-briefing` into the actual dispatch chokepoint
+      (`worker-entrypoint.sh`, the script that starts every real `claude -p` AI agent
+      invocation) so the briefing is generated automatically before an agent starts,
+      and add a `record-completion` instruction to the agent's own prompt/protocol
+      (mirroring how `PROGRESS.md` maintenance is already instructed there) so
+      write-back actually happens at the end of real work -- additive, best-effort,
+      never blocking real dispatch on a failure, matching this codebase's own
+      established convention for purely-additive traceability writes
+      (`insert_ocid_artifact_link`'s own docstring). Next step.

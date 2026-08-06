@@ -398,5 +398,468 @@ def test_pm_decisions_pending_degrades_gracefully_without_decision_type_column(t
     assert proposals == []
 
 
+# ---------------------------------------------------------------------------
+# Sections 9-13 (UMR-20260806-041307-0bfd) -- real unit test coverage of the
+# deterministic rule/arithmetic logic in each of the 5 new capabilities.
+# Live-server dependencies (subprocess/gh/systemctl) are mocked; the actual
+# rule logic under test is real.
+# ---------------------------------------------------------------------------
+
+# --- Section 9: DB validation fold-in --------------------------------------
+def test_prior_failing_ocids_no_prior_row():
+    fail_set, available = pm._prior_failing_ocids(None)
+    assert fail_set == set()
+    assert available is False
+
+
+def test_prior_failing_ocids_no_report_json():
+    fail_set, available = pm._prior_failing_ocids({"id": 1})
+    assert fail_set == set()
+    assert available is False
+
+
+def test_prior_failing_ocids_predates_section():
+    prior_row = {"report_json": json.dumps({"umr": "UMR-x"})}
+    fail_set, available = pm._prior_failing_ocids(prior_row)
+    assert fail_set == set()
+    assert available is False
+
+
+def test_prior_failing_ocids_real_baseline():
+    prior_row = {"report_json": json.dumps({
+        "ocid_compliance_audit_section": {"failing_ocids": ["OCID-001", "OCID-002"]}
+    })}
+    fail_set, available = pm._prior_failing_ocids(prior_row)
+    assert fail_set == {"OCID-001", "OCID-002"}
+    assert available is True
+
+
+def test_get_ocid_compliance_audit_section_parses_real_shaped_json(monkeypatch):
+    fake_stdout = json.dumps({
+        "mode": "report", "read_only": True,
+        "rows": [
+            {"ocid_number": "OCID-001", "audit_passed": True},
+            {"ocid_number": "OCID-002", "audit_passed": False},
+            {"ocid_number": "OCID-003", "audit_passed": False},
+        ],
+    })
+    monkeypatch.setattr(pm, "run_cmd", lambda argv, timeout=30: (0, fake_stdout, ""))
+    prior_row = {"report_json": json.dumps({
+        "ocid_compliance_audit_section": {"failing_ocids": ["OCID-002"]}
+    })}
+    result = pm.get_ocid_compliance_audit_section(prior_row)
+    assert result["audit_passed_count"] == 1
+    assert result["audit_failed_count"] == 2
+    assert result["failing_ocids"] == ["OCID-002", "OCID-003"]
+    assert result["prior_baseline_available"] is True
+    assert result["newly_failing_ocids"] == ["OCID-003"]
+
+
+def test_get_ocid_compliance_audit_section_subprocess_failure(monkeypatch):
+    monkeypatch.setattr(pm, "run_cmd", lambda argv, timeout=30: (1, "", "boom"))
+    result = pm.get_ocid_compliance_audit_section(None)
+    assert result["error"] == "boom"
+
+
+# --- Section 10: 10-report trend analysis -----------------------------------
+def test_compute_trend_for_series_insufficient_data():
+    assert pm.compute_trend_for_series([])["trend"] == "insufficient_data"
+    assert pm.compute_trend_for_series([5.0])["trend"] == "insufficient_data"
+
+
+def test_compute_trend_for_series_stable_within_tolerance():
+    # first half avg 10, second half avg 10.3 -> 3% change, under 5% tolerance
+    result = pm.compute_trend_for_series([10, 10, 10.3, 10.3])
+    assert result["first_half_avg"] == 10.0
+    assert result["second_half_avg"] == 10.3
+    assert abs(result["pct_change"] - 3.0) < 0.01
+
+
+def test_compute_trend_for_series_real_directional_change():
+    # first half avg 10, second half avg 20 -> +100%, well beyond tolerance
+    result = pm.compute_trend_for_series([10, 10, 20, 20])
+    assert result["pct_change"] == 100.0
+
+
+def test_apply_metric_semantics_higher_is_better_up_is_improving():
+    raw = {"trend_raw_direction": "up", "rows_used": 4}
+    result = pm._apply_metric_semantics("swap_free_pct", dict(raw))
+    assert result["trend"] == "improving"
+
+
+def test_apply_metric_semantics_higher_is_better_down_is_degrading():
+    raw = {"trend_raw_direction": "down", "rows_used": 4}
+    result = pm._apply_metric_semantics("gtm_pass_count", dict(raw))
+    assert result["trend"] == "degrading"
+
+
+def test_apply_metric_semantics_lower_is_better_up_is_degrading():
+    raw = {"trend_raw_direction": "up", "rows_used": 4}
+    result = pm._apply_metric_semantics("load_1min", dict(raw))
+    assert result["trend"] == "degrading"
+
+
+def test_apply_metric_semantics_lower_is_better_down_is_improving():
+    raw = {"trend_raw_direction": "down", "rows_used": 4}
+    result = pm._apply_metric_semantics("load_1min", dict(raw))
+    assert result["trend"] == "improving"
+
+
+def test_apply_metric_semantics_stable_passthrough():
+    raw = {"trend_raw_direction": "stable", "rows_used": 4}
+    result = pm._apply_metric_semantics("load_1min", dict(raw))
+    assert result["trend"] == "stable"
+
+
+def test_get_trend_analysis_honest_row_count_under_window(tmp_path):
+    db_path = str(tmp_path / "snap.sqlite")
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE pm_report_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, swap_free_pct REAL,
+            load_1min REAL, gtm_pass_count INTEGER
+        );
+        """
+    )
+    # Only 3 real rows -- fewer than TREND_WINDOW_SIZE (10). Must be reported
+    # honestly, never padded/fabricated up to 10.
+    for i, swap in enumerate([50.0, 40.0, 30.0]):
+        conn.execute(
+            "INSERT INTO pm_report_snapshots (ts, swap_free_pct, load_1min, gtm_pass_count) VALUES (?, ?, ?, ?)",
+            (f"t{i}", swap, 1.0, 5),
+        )
+    conn.commit()
+    conn.close()
+    fake_sbr = _make_fake_sbr_module(db_path)
+    result = pm.get_trend_analysis(fake_sbr)
+    assert result["rows_used"] == 3
+    assert result["metrics"]["swap_free_pct"]["trend"] == "degrading"  # 50 -> 30, dropping
+
+
+def test_render_report_text_survives_per_metric_insufficient_data(monkeypatch):
+    """Regression test for a real bug caught by independent supervisor
+    review (task-20260806-042916, PR #115): render_report_text checked
+    `m.get("trend") is None` to detect the insufficient-data case, but
+    compute_trend_for_series's insufficient-data dict shape carries
+    `"trend": "insufficient_data"` (a string, never None) and omits
+    first_half_avg/second_half_avg/pct_change -- so the old check fell into
+    the else branch and raised KeyError whenever any one of the 3 tracked
+    metrics had fewer than 2 non-null values in its window. A realistic
+    near-term production scenario (e.g. shortly after this section first
+    ships, or a metric column that is briefly NULL), not a contrived edge
+    case.
+
+    Calls the REAL render_report_text() end-to-end (not just the backend
+    helpers) against a minimal-but-real report dict shaped exactly like one
+    metric hitting insufficient_data, proving the fixed check
+    (`m.get("trend") == "insufficient_data"`) never dereferences the
+    missing keys."""
+    report = {
+        "generated_at": "t", "umr": "UMR-x", "parent_umr": "UMR-y", "ocid": "OCID-020",
+        "script_version": pm.SCRIPT_VERSION,
+        "header_status": {
+            "ram_swap": {}, "load_average": {}, "dispatch_tick": {}, "parallel_workers": {},
+            "stuck_tasks": {}, "tmux": {}, "emergency_stop": {}, "db_integrity": {},
+        },
+        "ocid_020_gtm_section": {"categories": []},
+        "ocid_canonical_registry_section": {},
+        "umr_tasks_section": {},
+        "gtm_readiness": {"bucket": "x", "reason": "x", "is_placeholder": True},
+        "implementation_summary": {"prior_snapshot_found": False, "deltas": {}},
+        "open_issues": [],
+        "pm_decisions_pending": [],
+        "owner_proposals_pending": [],
+        "ocid_compliance_audit_section": {"error": "not exercised in this test"},
+        "trend_analysis_section": {
+            "error": None,
+            "rows_used": 1,
+            "window_size_requested": 10,
+            "stable_tolerance_pct": 5.0,
+            "metrics": {
+                # Exactly the real shape compute_trend_for_series() produces
+                # for <2 non-null values -- no first_half_avg/second_half_avg/
+                # pct_change keys present.
+                "swap_free_pct": {"trend": "insufficient_data", "rows_used": 1},
+                "load_1min": {"trend": "insufficient_data", "rows_used": 1},
+                "gtm_pass_count": {"trend": "insufficient_data", "rows_used": 1},
+            },
+        },
+        "stall_detection_section": {"error": None, "stuck_task_threshold_minutes": 30.0, "tasks": []},
+        "collision_detection_section": {
+            "collision_detected": False, "tracked_repos": [], "checked_unit_globs": [],
+            "all_pr_collision_pairs": [], "all_worker_collision_pairs": [],
+            "pr_file_collisions": {"by_repo": {}, "errors": []},
+            "worker_umr_collisions": {"errors": []},
+        },
+        "instruction_quality_section": {"error": None, "total_checked": 0, "pass_count": 0, "failing": []},
+    }
+    text = pm.render_report_text(report)  # must not raise
+    assert "insufficient_data" in text
+    assert "10. 10-REPORT TREND ANALYSIS" in text
+
+
+def test_get_trend_analysis_zero_rows(tmp_path):
+    db_path = str(tmp_path / "empty_snap.sqlite")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE pm_report_snapshots (id INTEGER PRIMARY KEY, ts TEXT, swap_free_pct REAL, "
+        "load_1min REAL, gtm_pass_count INTEGER)"
+    )
+    conn.commit()
+    conn.close()
+    fake_sbr = _make_fake_sbr_module(db_path)
+    result = pm.get_trend_analysis(fake_sbr)
+    assert result["rows_used"] == 0
+    assert result["metrics"] == {}
+
+
+# --- Section 11: deterministic stall detection ------------------------------
+def test_get_stuck_tasks_detail_real_field_names(tmp_path, monkeypatch):
+    heartbeat_path = tmp_path / "STUCK_TASKS_HEARTBEAT.json"
+    heartbeat_path.write_text(json.dumps({
+        "generated_at": "2026-08-06T00:00:00+00:00",
+        "stuck_task_threshold_minutes": 30.0,
+        "stuck_tasks": [
+            {"task_id": "task-a", "blocked_since": "t0", "blocked_minutes": 45.5,
+             "last_note": "waiting on review"},
+            {"task_id": "task-b", "blocked_since": "t1", "blocked_minutes": 120.0,
+             "last_note": "quality gate failing"},
+        ],
+    }))
+    monkeypatch.setattr(pm, "STUCK_TASKS_HEARTBEAT_PATH", str(heartbeat_path))
+    result = pm.get_stuck_tasks_detail()
+    assert result["error"] is None
+    assert result["stuck_task_threshold_minutes"] == 30.0
+    assert len(result["tasks"]) == 2
+    assert result["tasks"][0] == {"task_id": "task-a", "blocked_minutes": 45.5, "last_note": "waiting on review"}
+    assert result["tasks"][1]["task_id"] == "task-b"
+
+
+def test_get_stuck_tasks_detail_missing_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm, "STUCK_TASKS_HEARTBEAT_PATH", str(tmp_path / "does_not_exist.json"))
+    result = pm.get_stuck_tasks_detail()
+    assert result["error"] is not None
+    assert result["tasks"] == []
+
+
+def test_get_stuck_tasks_and_detail_reuse_same_source(tmp_path, monkeypatch):
+    """Section 1 summary and Section 11 detail must agree on real
+    stuck_task_count from the same real file -- proves shared parsing."""
+    heartbeat_path = tmp_path / "STUCK_TASKS_HEARTBEAT.json"
+    heartbeat_path.write_text(json.dumps({
+        "generated_at": "t", "stuck_task_threshold_minutes": 30.0,
+        "stuck_tasks": [{"task_id": "x", "blocked_minutes": 1.0, "last_note": "n"}],
+    }))
+    monkeypatch.setattr(pm, "STUCK_TASKS_HEARTBEAT_PATH", str(heartbeat_path))
+    summary = pm.get_stuck_tasks()
+    detail = pm.get_stuck_tasks_detail()
+    assert summary["stuck_task_count"] == len(detail["tasks"]) == 1
+
+
+# --- Section 12: deterministic collision detection --------------------------
+def test_parse_running_collision_unit_names():
+    stdout = (
+        "  UNIT LOAD ACTIVE SUB DESCRIPTION\n"
+        "  veridian-worker@task-a.service loaded active running foo\n"
+        "  veridian-supervisor@task-b.service loaded active running bar\n"
+        "\n2 loaded units listed.\n"
+    )
+    names = pm.parse_running_collision_unit_names(stdout)
+    assert names == ["veridian-worker@task-a.service", "veridian-supervisor@task-b.service"]
+
+
+def test_extract_umr_ids():
+    text = "relates to UMR-20260805-181636-32f2 and also UMR-20260802-165606-4413, see UMR-20260805-181636-32f2 again"
+    assert pm.extract_umr_ids(text) == {"UMR-20260805-181636-32f2", "UMR-20260802-165606-4413"}
+
+
+def test_detect_pr_file_collisions_real_overlap(monkeypatch):
+    def fake_run_cmd(argv, timeout=30):
+        if argv[:3] == ["gh", "pr", "list"]:
+            return 0, json.dumps([{"number": 1, "title": "A"}, {"number": 2, "title": "B"}]), ""
+        if argv[:3] == ["gh", "pr", "diff"]:
+            pr_num = argv[3]
+            if pr_num == "1":
+                return 0, "shared_file.py\nonly_in_1.py\n", ""
+            if pr_num == "2":
+                return 0, "shared_file.py\nonly_in_2.py\n", ""
+        return 1, "", "unmocked"
+    monkeypatch.setattr(pm, "run_cmd", fake_run_cmd)
+    result = pm.detect_pr_file_collisions(repos=("fake-repo",))
+    collisions = result["by_repo"]["fake-repo"]["collisions"]
+    assert len(collisions) == 1
+    assert collisions[0]["shared_files"] == ["shared_file.py"]
+
+
+def test_detect_pr_file_collisions_no_overlap(monkeypatch):
+    def fake_run_cmd(argv, timeout=30):
+        if argv[:3] == ["gh", "pr", "list"]:
+            return 0, json.dumps([{"number": 1, "title": "A"}, {"number": 2, "title": "B"}]), ""
+        if argv[:3] == ["gh", "pr", "diff"]:
+            pr_num = argv[3]
+            return (0, "only_in_1.py\n", "") if pr_num == "1" else (0, "only_in_2.py\n", "")
+        return 1, "", "unmocked"
+    monkeypatch.setattr(pm, "run_cmd", fake_run_cmd)
+    result = pm.detect_pr_file_collisions(repos=("fake-repo",))
+    assert result["by_repo"]["fake-repo"]["collisions"] == []
+
+
+def test_detect_worker_umr_collisions_real_overlap(tmp_path, monkeypatch):
+    unit_a_dir = tmp_path / "unit_a"
+    unit_b_dir = tmp_path / "unit_b"
+    unit_a_dir.mkdir()
+    unit_b_dir.mkdir()
+    (unit_a_dir / "prompt.txt").write_text("relates to UMR-20260805-181636-32f2")
+    (unit_b_dir / "prompt.txt").write_text("also relates to UMR-20260805-181636-32f2 and UMR-x-only-in-b")
+
+    monkeypatch.setattr(pm, "get_running_collision_units",
+                         lambda: ["veridian-worker@a.service", "veridian-worker@b.service"])
+
+    def fake_wd(unit_name):
+        return str(unit_a_dir) if "a.service" in unit_name else str(unit_b_dir)
+    monkeypatch.setattr(pm, "get_unit_working_directory", fake_wd)
+
+    result = pm.detect_worker_umr_collisions()
+    assert len(result["collisions"]) == 1
+    assert result["collisions"][0]["shared_umrs"] == ["UMR-20260805-181636-32f2"]
+
+
+def test_detect_worker_umr_collisions_no_overlap(tmp_path, monkeypatch):
+    unit_a_dir = tmp_path / "unit_a"
+    unit_b_dir = tmp_path / "unit_b"
+    unit_a_dir.mkdir()
+    unit_b_dir.mkdir()
+    (unit_a_dir / "prompt.txt").write_text("relates to UMR-20260805-181636-32f2")
+    (unit_b_dir / "prompt.txt").write_text("relates to UMR-20260802-165606-4413")
+
+    monkeypatch.setattr(pm, "get_running_collision_units",
+                         lambda: ["veridian-worker@a.service", "veridian-worker@b.service"])
+    monkeypatch.setattr(pm, "get_unit_working_directory",
+                         lambda u: str(unit_a_dir) if "a.service" in u else str(unit_b_dir))
+
+    result = pm.detect_worker_umr_collisions()
+    assert result["collisions"] == []
+
+
+def test_get_collision_detection_section_combines_both_sources(monkeypatch):
+    monkeypatch.setattr(pm, "detect_pr_file_collisions", lambda repos=None: {
+        "by_repo": {"r": {"open_pr_count": 2, "collisions": [{"repo": "r", "pr_a": 1, "pr_b": 2,
+                                                                "pr_a_title": "x", "pr_b_title": "y",
+                                                                "shared_files": ["f.py"]}]}},
+        "errors": [],
+    })
+    monkeypatch.setattr(pm, "detect_worker_umr_collisions", lambda: {
+        "checked_units": [], "collisions": [], "errors": [],
+    })
+    result = pm.get_collision_detection_section()
+    assert result["collision_detected"] is True
+    assert len(result["all_pr_collision_pairs"]) == 1
+    assert result["all_worker_collision_pairs"] == []
+
+
+def test_get_collision_detection_section_no_collision(monkeypatch):
+    monkeypatch.setattr(pm, "detect_pr_file_collisions", lambda repos=None: {"by_repo": {}, "errors": []})
+    monkeypatch.setattr(pm, "detect_worker_umr_collisions", lambda: {
+        "checked_units": [], "collisions": [], "errors": [],
+    })
+    result = pm.get_collision_detection_section()
+    assert result["collision_detected"] is False
+
+
+# --- Section 13: deterministic instruction quality check --------------------
+def test_extract_prompt_text_present():
+    assert pm.extract_prompt_text(json.dumps({"prompt": "do the thing"})) == "do the thing"
+
+
+def test_extract_prompt_text_missing_key():
+    assert pm.extract_prompt_text(json.dumps({"action": "resume"})) is None
+
+
+def test_extract_prompt_text_unparseable():
+    assert pm.extract_prompt_text("not json") is None
+    assert pm.extract_prompt_text(None) is None
+    assert pm.extract_prompt_text("") is None
+
+
+def test_check_instruction_quality_all_pass():
+    text = ("Real directive citing UMR-20260805-181636-32f2. Extend generate_pm_report_v3.py "
+            "and confirm PR #110 merges.")
+    result = pm.check_instruction_quality(text)
+    assert result["passed"] is True
+    assert result["rule_a_umr_citation_present"] is True
+    assert result["rule_b_vague_verbs_absent"] is True
+    assert result["rule_c_concrete_completion_present"] is True
+    assert result["reasons"] == []
+
+
+def test_check_instruction_quality_fails_no_umr_citation():
+    text = "Extend generate_pm_report_v3.py and confirm PR #110 merges."
+    result = pm.check_instruction_quality(text)
+    assert result["passed"] is False
+    assert result["rule_a_umr_citation_present"] is False
+
+
+def test_check_instruction_quality_fails_vague_verb():
+    text = "UMR-20260805-181636-32f2: please look into generate_pm_report_v3.py."
+    result = pm.check_instruction_quality(text)
+    assert result["passed"] is False
+    assert result["rule_b_vague_verbs_absent"] is False
+    assert "look into" in result["reasons"][0]
+
+
+def test_check_instruction_quality_fails_no_concrete_completion():
+    text = "UMR-20260805-181636-32f2: please handle the situation well."
+    result = pm.check_instruction_quality(text)
+    assert result["passed"] is False
+    assert result["rule_c_concrete_completion_present"] is False
+
+
+def test_check_instruction_quality_empty_prompt():
+    result = pm.check_instruction_quality(None)
+    assert result["passed"] is False
+    assert "no string 'prompt' field" in result["reasons"][0]
+
+
+def test_check_instruction_quality_pr_reference_satisfies_rule_c_without_file_path():
+    text = "UMR-20260805-181636-32f2: confirm pull request #42 is merged before reporting done."
+    result = pm.check_instruction_quality(text)
+    assert result["rule_c_concrete_completion_present"] is True
+
+
+def test_get_instruction_quality_section_counts_and_lists_failures(tmp_path):
+    db_path = str(tmp_path / "umr.sqlite")
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE umr_tasks (umr_id TEXT PRIMARY KEY, ts_submitted TEXT, inputs_json TEXT)")
+    good_prompt = json.dumps({"prompt": "UMR-20260805-181636-32f2: extend generate_pm_report_v3.py, cite PR #110."})
+    bad_prompt = json.dumps({"prompt": "please look into the general situation"})
+    conn.execute("INSERT INTO umr_tasks VALUES ('UMR-good', '2026-08-06T00:00:02', ?)", (good_prompt,))
+    conn.execute("INSERT INTO umr_tasks VALUES ('UMR-bad', '2026-08-06T00:00:01', ?)", (bad_prompt,))
+    conn.commit()
+    conn.close()
+    fake_sbr = _make_fake_sbr_module(db_path)
+    result = pm.get_instruction_quality_section(fake_sbr)
+    assert result["total_checked"] == 2
+    assert result["pass_count"] == 1
+    assert len(result["failing"]) == 1
+    assert result["failing"][0]["umr_id"] == "UMR-bad"
+
+
+def test_get_instruction_quality_section_honest_denominator_under_20(tmp_path):
+    """Only 3 real rows exist -- denominator must honestly be 3, not 20."""
+    db_path = str(tmp_path / "umr_small.sqlite")
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE umr_tasks (umr_id TEXT PRIMARY KEY, ts_submitted TEXT, inputs_json TEXT)")
+    for i in range(3):
+        p = json.dumps({"prompt": f"UMR-20260805-181636-32f2: task {i}, see PR #{i}."})
+        conn.execute("INSERT INTO umr_tasks VALUES (?, ?, ?)", (f"UMR-{i}", f"t{i}", p))
+    conn.commit()
+    conn.close()
+    fake_sbr = _make_fake_sbr_module(db_path)
+    result = pm.get_instruction_quality_section(fake_sbr)
+    assert result["total_checked"] == 3
+    assert result["pass_count"] == 3
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

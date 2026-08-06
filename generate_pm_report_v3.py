@@ -2,6 +2,7 @@
 """generate_pm_report_v3.py -- real, pure, deterministic PM report generator.
 
 UMR-20260805-181636-32f2 (parent UMR-20260802-165606-4413, OCID-020).
+Standing directive this script exists to satisfy: UMR-20260806-042531-be9c (real deterministic/boolean/close-ended PM decisioning, zero manual AI/PM work -- see Sections 9-13, UMR-20260806-041307-0bfd).
 
 Replaces the AI-reasoned-every-10-minutes PM report generator that was a
 real contributing factor to hitting the Owner's weekly Claude Code usage
@@ -107,6 +108,104 @@ Usage:
                   file writes (still runs and prints the full report to
                   stdout). Used by the test suite; also usable for a dry-run
                   on a live box.
+
+-------------------------------------------------------------------------
+SCRIPT_VERSION 3.1.0 (UMR-20260806-041307-0bfd, parent UMR-20260805-181636-32f2,
+grandparent UMR-20260802-165606-4413/OCID-020) -- adds five new deterministic
+sections (9-13 below) so the PM's own tokens go to judgment/dispatch/audit and
+never to manual searching/checking, extending the same zero-AI-calls
+discipline this whole file is built on. Every new section is, like the eight
+above it, either a direct real read (a subprocess, a file, a SQL query) or a
+pure function of those reads -- no new AI/LLM call anywhere.
+
+  9.  DATABASE VALIDATION FOLD-IN -- shells out to the real, already-working
+      `audit_ocid_compliance.py --report` (never touches its underlying
+      audit logic directly), parses its real structured JSON stdout, folds a
+      real pass/fail count + a real newly-failing-OCID list into this
+      report. "Newly failing" is defined deterministically as: OCIDs with
+      audit_passed=false in this run that were NOT already audit_passed=false
+      in the immediately prior pm_report_snapshots row's own stored
+      report_json (this script's own established prior-snapshot mechanism,
+      see get_prior_snapshot() / Section 5). No prior row (or a prior row
+      predating this section) means no real baseline exists yet --
+      prior_baseline_available=False, newly_failing_ocids=[] honestly rather
+      than a fabricated diff against nothing.
+  10. 10-REPORT TREND ANALYSIS -- pure arithmetic over the real last (up to)
+      10 pm_report_snapshots rows for swap_free_pct, load_1min and
+      gtm_pass_count. Trend direction is computed by splitting the queried
+      rows (oldest to newest) into a first half and a second half
+      (values[:n//2] / values[n//2:] -- e.g. 10 rows -> 5 and 5; 7 rows -> 3
+      and 4), averaging each half, and comparing:
+        pct_change = (second_half_avg - first_half_avg) / abs(first_half_avg) * 100
+        (0.0 when first_half_avg == 0 and second_half_avg == 0; treated as a
+        real, non-zero directional change -- not "stable" -- when
+        first_half_avg == 0 but second_half_avg != 0, since a % change is
+        undefined there and calling it "stable" would hide a real move away
+        from zero.)
+      |pct_change| <= TREND_STABLE_TOLERANCE_PCT (5.0, this task's own
+      documented choice, same spirit as SWAP_FREE_PCT_WARN_THRESHOLD above)
+      => "stable". Otherwise the direction maps to improving/degrading per
+      metric: swap_free_pct and gtm_pass_count are "higher is better" (an
+      increase beyond tolerance is "improving"); load_1min is "lower is
+      better" (an increase beyond tolerance is "degrading"). Fewer than 2 real
+      rows for a given metric => "insufficient_data", never a fabricated
+      trend. The real row count actually used is always reported honestly,
+      including when it is under 10.
+  11. DETERMINISTIC STALL DETECTION -- reuses the exact same
+      STUCK_TASKS_HEARTBEAT.json read/parse this script's own Section 1
+      (get_stuck_tasks(), now backed by the shared
+      _load_stuck_tasks_heartbeat_doc() helper) already does, and the file's
+      own real stuck_task_threshold_minutes value -- no new parsing
+      invented. Folds one real line per real stuck task (task_id,
+      blocked_minutes, last_note -- the heartbeat file's own real field
+      names, confirmed by inspecting the live file before writing this,
+      not guessed).
+  12. DETERMINISTIC COLLISION DETECTION -- read-only, zero AI judgment on
+      whether an overlap "really" is a collision, pure set-intersection over
+      two independent real sources:
+        (a) for every real open PR in every real tracked repo, pairwise
+            compares each PR's real `gh pr diff <N> --name-only` changed-file
+            set against every other open PR's set IN THE SAME REPO.
+        (b) for every real currently-running veridian-worker@*/
+            veridian-supervisor@* unit, pairwise compares the set of
+            UMR-YYYYMMDD-HHMMSS-xxxx ids found (via regex) in that unit's
+            real WorkingDirectory's prompt.txt against every other running
+            unit's set.
+      Emits COLLISION_DETECTED=YES/NO with the specific pair(s) named on
+      YES. Tracked-repo list: this file found no single pre-existing
+      canonical "tracked repos" constant to reuse -- resource_governor.py's
+      own duplicate-PR guard (GH_PR_CHECK_REPOS) defaults to
+      "compliance-tracker,projexa" and status-remediation-tick.py's
+      TRACKED_REPOS is ["claude-control", "compliance-tracker", "projexa"]
+      -- three different established scripts, three different real subsets,
+      each serving that script's own distinct purpose. Rather than reusing
+      either verbatim (neither is really "the" tracked-repo list for THIS
+      section's purpose) or inventing a third unrelated set, this section
+      uses COLLISION_TRACKED_REPOS = ("compliance-tracker", "veridian-scripts")
+      -- the two repos this task's own directive named explicitly, both real,
+      both env-overridable like every other path/constant in this file.
+  13. DETERMINISTIC INSTRUCTION QUALITY CHECK -- queries the real last 20
+      umr_tasks rows (ORDER BY ts_submitted DESC) and applies one fixed rule
+      to each row's real inputs_json.prompt text (rows with no string
+      "prompt" key fail outright, real and documented, not silently
+      skipped):
+        (a) a real UMR-YYYYMMDD-HHMMSS-xxxx citation is present anywhere
+            (regex).
+        (b) none of the fixed vague-verb substrings "look into", "improve",
+            "consider", "explore" appear (case-insensitive).
+        (c) a real concrete completion condition is present, defined as a
+            purely structural, fixed regex check: either a file-path-looking
+            token with a known extension (.py/.md/.yaml/.yml/.json/.sh/
+            .sqlite[3]/.txt/.js/.ts/.toml/.cfg/.ini) OR a "PR #<N>" /
+            "pull request #<N>" reference appears anywhere in the text. This
+            is deliberately structural rather than a phrase-list, to avoid
+            an arbitrary/biased "sounds concrete" judgment call.
+      A row passes only if all three hold. Reports
+      DETERMINISTIC_INSTRUCTION_COUNT=<pass_count>/<real_rows_checked> (the
+      denominator is the real umr_tasks row count actually returned, honestly
+      reported even when fewer than 20 real rows exist) plus every failing
+      row's real umr_id and the specific rule(s) it failed.
+-------------------------------------------------------------------------
 """
 import argparse
 import importlib.util
@@ -154,6 +253,43 @@ SWAP_FREE_PCT_WARN_THRESHOLD = 10.0
 LOAD_1MIN_WARN_THRESHOLD = 25.0
 
 REPORT_FORMAT_VERSION = "pm-report-v3-placeholder-gtm-score"
+
+# UMR-20260806-041307-0bfd: this script's own version constant. Bumped on
+# every real functional change; see the module docstring's SCRIPT_VERSION
+# block for what changed at each bump.
+SCRIPT_VERSION = "3.1.0"
+
+# ---------------------------------------------------------------------------
+# Section 9-13 constants (UMR-20260806-041307-0bfd) -- see module docstring
+# for full documentation of what each of these controls and why this exact
+# value was chosen.
+# ---------------------------------------------------------------------------
+AUDIT_OCID_COMPLIANCE_PY_PATH = os.environ.get(
+    "VERIDIAN_AUDIT_OCID_COMPLIANCE_PY", f"{SCRIPTS}/audit_ocid_compliance.py")
+
+TREND_WINDOW_SIZE = 10
+TREND_STABLE_TOLERANCE_PCT = 5.0
+TREND_METRICS = ("swap_free_pct", "load_1min", "gtm_pass_count")
+# "higher is better" metrics: an increase beyond tolerance is "improving".
+# Any metric not listed here is treated as "lower is better" (load_1min).
+TREND_HIGHER_IS_BETTER = {"swap_free_pct", "gtm_pass_count"}
+
+GH_ORG = os.environ.get("VERIDIAN_GH_ORG", "FChecklist")
+COLLISION_TRACKED_REPOS = tuple(
+    r.strip() for r in os.environ.get(
+        "VERIDIAN_PM_REPORT_COLLISION_REPOS", "compliance-tracker,veridian-scripts"
+    ).split(",") if r.strip()
+)
+WORKER_COLLISION_UNIT_GLOBS = ("veridian-worker@*", "veridian-supervisor@*")
+
+UMR_CITATION_RE = re.compile(r"UMR-\d{8}-\d{6}-[0-9a-f]{4}")
+VAGUE_VERB_PHRASES = ("look into", "improve", "consider", "explore")
+CONCRETE_COMPLETION_FILE_PATH_RE = re.compile(
+    r"\b[\w][\w\-./]*\.(?:py|md|ya?ml|json|sh|sqlite3?|txt|js|ts|toml|cfg|ini)\b",
+    re.IGNORECASE,
+)
+CONCRETE_COMPLETION_PR_REF_RE = re.compile(
+    r"\bPR\s*#?\d+\b|\bpull request\s*#?\d+\b", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -284,18 +420,57 @@ def get_worker_count():
     return {"parallel_worker_count": parse_worker_count(out), "raw_stdout": out.strip()}
 
 
-def get_stuck_tasks():
+def _load_stuck_tasks_heartbeat_doc():
+    """Shared real read/parse of STUCK_TASKS_HEARTBEAT.json -- the ONE place
+    this file opens/parses that JSON file. get_stuck_tasks() (Section 1
+    summary) and get_stuck_tasks_detail() (Section 11, UMR-20260806-041307-0bfd)
+    both call this rather than each re-opening the file, per this task's own
+    "reuse the same parsing, don't reinvent" instruction. Returns
+    (doc_or_None, error_or_None)."""
     try:
         with open(STUCK_TASKS_HEARTBEAT_PATH) as f:
-            doc = json.load(f)
+            return json.load(f), None
     except (OSError, json.JSONDecodeError) as e:
-        return {"stuck_task_count": None, "error": f"could not read/parse {STUCK_TASKS_HEARTBEAT_PATH}: {e}"}
+        return None, f"could not read/parse {STUCK_TASKS_HEARTBEAT_PATH}: {e}"
+
+
+def get_stuck_tasks():
+    doc, err = _load_stuck_tasks_heartbeat_doc()
+    if err:
+        return {"stuck_task_count": None, "error": err}
     stuck = doc.get("stuck_tasks")
     return {
         "stuck_task_count": len(stuck) if isinstance(stuck, list) else None,
         "heartbeat_generated_at": doc.get("generated_at"),
         "stuck_task_threshold_minutes": doc.get("stuck_task_threshold_minutes"),
         "real_task_counts": doc.get("real_task_counts"),
+    }
+
+
+def get_stuck_tasks_detail():
+    """Section 11 (UMR-20260806-041307-0bfd) data source. Reuses
+    _load_stuck_tasks_heartbeat_doc() (same parsing as get_stuck_tasks()
+    above) and pulls out one real line's worth of fields per real stuck
+    task -- task_id, blocked_minutes, last_note -- using the heartbeat
+    file's own real field names (confirmed by inspecting the live file
+    before writing this function, not guessed)."""
+    doc, err = _load_stuck_tasks_heartbeat_doc()
+    if err:
+        return {"error": err, "stuck_task_threshold_minutes": None, "tasks": []}
+    stuck = doc.get("stuck_tasks")
+    tasks = []
+    if isinstance(stuck, list):
+        for t in stuck:
+            if isinstance(t, dict):
+                tasks.append({
+                    "task_id": t.get("task_id"),
+                    "blocked_minutes": t.get("blocked_minutes"),
+                    "last_note": t.get("last_note"),
+                })
+    return {
+        "error": None,
+        "stuck_task_threshold_minutes": doc.get("stuck_task_threshold_minutes"),
+        "tasks": tasks,
     }
 
 
@@ -645,6 +820,397 @@ def get_owner_proposals_pending(sbr):
 
 
 # ---------------------------------------------------------------------------
+# Section 9 (UMR-20260806-041307-0bfd): database validation fold-in --
+# shells out to the real, already-working audit_ocid_compliance.py --report,
+# never invokes the underlying audit logic directly. See module docstring
+# for the "newly failing" definition.
+# ---------------------------------------------------------------------------
+def _prior_failing_ocids(prior_snapshot_row):
+    """Pure function: pulls the prior run's own failing_ocids list back out
+    of pm_report_snapshots.report_json (this script's own established
+    full-report-JSON storage, see write_snapshot_row()). Returns
+    (set_of_ocid_numbers, baseline_available_bool). No prior row, no
+    report_json, unparseable JSON, or a report_json predating this section
+    -> ({}, False), never a fabricated baseline."""
+    if not prior_snapshot_row:
+        return set(), False
+    raw = prior_snapshot_row.get("report_json")
+    if not raw:
+        return set(), False
+    try:
+        prior_report = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return set(), False
+    section = prior_report.get("ocid_compliance_audit_section")
+    if not isinstance(section, dict) or "failing_ocids" not in section:
+        return set(), False
+    return set(section.get("failing_ocids") or []), True
+
+
+def get_ocid_compliance_audit_section(prior_snapshot_row):
+    code, out, err = run_cmd(["python3", AUDIT_OCID_COMPLIANCE_PY_PATH, "--report"], timeout=60)
+    if code != 0:
+        return {"error": err.strip() or f"exit {code}", "raw_stdout": out.strip()[:2000]}
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError as e:
+        return {"error": f"could not parse audit_ocid_compliance.py --report JSON: {e}",
+                "raw_stdout": out.strip()[:2000]}
+
+    rows = data.get("rows", [])
+    passed_count = sum(1 for r in rows if r.get("audit_passed") is True)
+    failed_count = sum(1 for r in rows if r.get("audit_passed") is False)
+    current_fail_set = {r.get("ocid_number") for r in rows if r.get("audit_passed") is False}
+    prior_fail_set, baseline_available = _prior_failing_ocids(prior_snapshot_row)
+    newly_failing = sorted(current_fail_set - prior_fail_set) if baseline_available else []
+
+    return {
+        "subcommand": ["python3", AUDIT_OCID_COMPLIANCE_PY_PATH, "--report"],
+        "mode": data.get("mode"),
+        "read_only": data.get("read_only"),
+        "total_rows": len(rows),
+        "audit_passed_count": passed_count,
+        "audit_failed_count": failed_count,
+        "failing_ocids": sorted(o for o in current_fail_set if o is not None),
+        "prior_baseline_available": baseline_available,
+        "newly_failing_ocids": newly_failing,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Section 10 (UMR-20260806-041307-0bfd): 10-report trend analysis -- pure
+# arithmetic over the real last (up to) TREND_WINDOW_SIZE pm_report_snapshots
+# rows. See module docstring for the exact first-half/second-half/tolerance
+# definition of improving/degrading/stable.
+# ---------------------------------------------------------------------------
+def get_recent_snapshots(sbr, limit=TREND_WINDOW_SIZE):
+    try:
+        conn = sbr._connect()
+        rows = conn.execute(
+            "SELECT * FROM pm_report_snapshots ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        return None, str(e)
+    # Reverse to chronological (oldest-first) order -- first-half/second-half
+    # split below is meaningless unless the rows are time-ordered.
+    return [dict(r) for r in reversed(rows)], None
+
+
+def compute_trend_for_series(values):
+    """Pure function: real first-half-average vs second-half-average
+    comparison. `values` must already be in chronological (oldest-first)
+    order with None entries removed by the caller."""
+    n = len(values)
+    if n < 2:
+        return {"trend": "insufficient_data", "rows_used": n}
+    half = n // 2
+    first_half = values[:half]
+    second_half = values[half:]
+    first_avg = sum(first_half) / len(first_half)
+    second_avg = sum(second_half) / len(second_half)
+    if first_avg == 0:
+        pct_change = 0.0 if second_avg == 0 else float("inf") if second_avg > 0 else float("-inf")
+    else:
+        pct_change = (second_avg - first_avg) / abs(first_avg) * 100.0
+
+    if first_avg == 0 and second_avg == 0:
+        trend = "stable"
+    elif abs(pct_change) <= TREND_STABLE_TOLERANCE_PCT:
+        trend = "stable"
+    else:
+        trend = "up" if pct_change > 0 else "down"
+    return {
+        "trend_raw_direction": trend,
+        "rows_used": n,
+        "first_half_avg": round(first_avg, 4),
+        "second_half_avg": round(second_avg, 4),
+        "pct_change": (round(pct_change, 2) if pct_change not in (float("inf"), float("-inf")) else pct_change),
+    }
+
+
+def _apply_metric_semantics(metric, raw_result):
+    if raw_result.get("trend_raw_direction") is None:
+        return raw_result  # insufficient_data, nothing to map
+    direction = raw_result.pop("trend_raw_direction")
+    if direction == "stable":
+        trend = "stable"
+    else:
+        higher_is_better = metric in TREND_HIGHER_IS_BETTER
+        going_up = direction == "up"
+        trend = ("improving" if going_up else "degrading") if higher_is_better \
+            else ("degrading" if going_up else "improving")
+    raw_result["trend"] = trend
+    return raw_result
+
+
+def get_trend_analysis(sbr):
+    snapshots, err = get_recent_snapshots(sbr, TREND_WINDOW_SIZE)
+    if err:
+        return {"error": err, "rows_used": 0, "metrics": {}}
+    if not snapshots:
+        return {"error": None, "rows_used": 0, "note": "no pm_report_snapshots rows exist yet", "metrics": {}}
+
+    metrics = {}
+    for metric in TREND_METRICS:
+        values = [s[metric] for s in snapshots if s.get(metric) is not None]
+        result = compute_trend_for_series(values)
+        metrics[metric] = _apply_metric_semantics(metric, result)
+
+    return {
+        "error": None,
+        "rows_used": len(snapshots),
+        "window_size_requested": TREND_WINDOW_SIZE,
+        "stable_tolerance_pct": TREND_STABLE_TOLERANCE_PCT,
+        "metrics": metrics,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Section 12 (UMR-20260806-041307-0bfd): deterministic collision detection.
+# Two independent, read-only, pure-overlap checks -- see module docstring.
+# ---------------------------------------------------------------------------
+def get_open_pr_list(repo):
+    code, out, err = run_cmd(
+        ["gh", "pr", "list", "--repo", f"{GH_ORG}/{repo}", "--state", "open",
+         "--json", "number,title", "--limit", "200"],
+        timeout=30,
+    )
+    if code != 0:
+        return None, err.strip() or f"exit {code}"
+    try:
+        return json.loads(out), None
+    except json.JSONDecodeError as e:
+        return None, f"could not parse gh pr list JSON: {e}"
+
+
+def get_pr_changed_files(repo, pr_number):
+    code, out, err = run_cmd(
+        ["gh", "pr", "diff", str(pr_number), "--repo", f"{GH_ORG}/{repo}", "--name-only"],
+        timeout=30,
+    )
+    if code != 0:
+        return None, err.strip() or f"exit {code}"
+    return {line.strip() for line in out.splitlines() if line.strip()}, None
+
+
+def detect_pr_file_collisions(repos=COLLISION_TRACKED_REPOS):
+    by_repo = {}
+    errors = []
+    for repo in repos:
+        prs, err = get_open_pr_list(repo)
+        if err:
+            errors.append({"repo": repo, "error": err})
+            continue
+        pr_files = {}
+        for pr in prs:
+            n = pr["number"]
+            files, ferr = get_pr_changed_files(repo, n)
+            if ferr:
+                errors.append({"repo": repo, "pr": n, "error": ferr})
+                continue
+            pr_files[n] = {"title": pr.get("title"), "files": files}
+        pr_nums = sorted(pr_files.keys())
+        collisions = []
+        for i in range(len(pr_nums)):
+            for j in range(i + 1, len(pr_nums)):
+                a, b = pr_nums[i], pr_nums[j]
+                shared = pr_files[a]["files"] & pr_files[b]["files"]
+                if shared:
+                    collisions.append({
+                        "repo": repo, "pr_a": a, "pr_b": b,
+                        "pr_a_title": pr_files[a]["title"], "pr_b_title": pr_files[b]["title"],
+                        "shared_files": sorted(shared),
+                    })
+        by_repo[repo] = {"open_pr_count": len(pr_files), "collisions": collisions}
+    return {"by_repo": by_repo, "errors": errors}
+
+
+def parse_running_collision_unit_names(stdout):
+    """Pure function: extracts real veridian-worker@*/veridian-supervisor@*
+    unit names from `systemctl --user list-units <glob> --state=running`
+    table output. Deterministic regex on the exact unit-name shape, same
+    "don't fuzzy-match" spirit as parse_worker_count()."""
+    return re.findall(r"^\s*((?:veridian-worker|veridian-supervisor)@\S+\.service)\s", stdout, re.MULTILINE)
+
+
+def get_running_collision_units():
+    names = []
+    for glob in WORKER_COLLISION_UNIT_GLOBS:
+        code, out, err = run_cmd(["systemctl", "--user", "list-units", glob, "--state=running"])
+        if code == 0:
+            names.extend(parse_running_collision_unit_names(out))
+    return sorted(set(names))
+
+
+def get_unit_working_directory(unit_name):
+    code, out, err = run_cmd(["systemctl", "--user", "show", unit_name, "-p", "WorkingDirectory"])
+    if code != 0:
+        return None
+    m = re.search(r"^WorkingDirectory=(.*)$", out, re.MULTILINE)
+    wd = m.group(1).strip() if m else ""
+    return wd or None
+
+
+def extract_umr_ids(text):
+    """Pure function over real text -- no fuzzy matching, exact
+    UMR-YYYYMMDD-HHMMSS-xxxx pattern only."""
+    return set(UMR_CITATION_RE.findall(text or ""))
+
+
+def get_unit_prompt_umrs(unit_name):
+    wd = get_unit_working_directory(unit_name)
+    if not wd:
+        return None, f"could not determine real WorkingDirectory for {unit_name}"
+    prompt_path = os.path.join(wd, "prompt.txt")
+    try:
+        with open(prompt_path) as f:
+            text = f.read()
+    except OSError as e:
+        return None, f"could not read {prompt_path}: {e}"
+    return extract_umr_ids(text), None
+
+
+def detect_worker_umr_collisions():
+    units = get_running_collision_units()
+    unit_umrs = {}
+    errors = []
+    for u in units:
+        umrs, err = get_unit_prompt_umrs(u)
+        if err:
+            errors.append({"unit": u, "error": err})
+            continue
+        if umrs:
+            unit_umrs[u] = umrs
+    unit_list = sorted(unit_umrs.keys())
+    collisions = []
+    for i in range(len(unit_list)):
+        for j in range(i + 1, len(unit_list)):
+            a, b = unit_list[i], unit_list[j]
+            shared = unit_umrs[a] & unit_umrs[b]
+            if shared:
+                collisions.append({"unit_a": a, "unit_b": b, "shared_umrs": sorted(shared)})
+    return {"checked_units": unit_list, "collisions": collisions, "errors": errors}
+
+
+def get_collision_detection_section():
+    pr_result = detect_pr_file_collisions()
+    worker_result = detect_worker_umr_collisions()
+    pr_collision_pairs = [
+        c for repo_data in pr_result["by_repo"].values() for c in repo_data["collisions"]
+    ]
+    worker_collision_pairs = worker_result["collisions"]
+    return {
+        "collision_detected": bool(pr_collision_pairs or worker_collision_pairs),
+        "tracked_repos": list(COLLISION_TRACKED_REPOS),
+        "checked_unit_globs": list(WORKER_COLLISION_UNIT_GLOBS),
+        "pr_file_collisions": pr_result,
+        "worker_umr_collisions": worker_result,
+        "all_pr_collision_pairs": pr_collision_pairs,
+        "all_worker_collision_pairs": worker_collision_pairs,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Section 13 (UMR-20260806-041307-0bfd): deterministic instruction-quality
+# check over the real last 20 umr_tasks rows. See module docstring for the
+# exact fixed rule (a)/(b)/(c) definitions.
+# ---------------------------------------------------------------------------
+def get_last_n_umr_tasks(sbr, n=20):
+    try:
+        conn = sbr._connect()
+        rows = conn.execute(
+            "SELECT umr_id, ts_submitted, inputs_json FROM umr_tasks "
+            "ORDER BY ts_submitted DESC LIMIT ?", (n,)
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        return None, str(e)
+    return [dict(r) for r in rows], None
+
+
+def extract_prompt_text(inputs_json_text):
+    """Pure function: pulls inputs_json.prompt back out as a string, or None
+    if it is missing/not a string/unparseable. Never raises."""
+    if not inputs_json_text:
+        return None
+    try:
+        parsed = json.loads(inputs_json_text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    prompt = parsed.get("prompt")
+    return prompt if isinstance(prompt, str) else None
+
+
+def check_instruction_quality(prompt_text):
+    """Fixed, deterministic 3-rule check -- see module docstring Section 13
+    for the exact definition of each rule. Zero AI/LLM judgment: every rule
+    is a regex/substring check over real text."""
+    if not prompt_text:
+        return {
+            "passed": False,
+            "rule_a_umr_citation_present": False,
+            "rule_b_vague_verbs_absent": False,
+            "rule_c_concrete_completion_present": False,
+            "reasons": ["no string 'prompt' field found in this row's inputs_json"],
+        }
+
+    reasons = []
+    rule_a = bool(UMR_CITATION_RE.search(prompt_text))
+    if not rule_a:
+        reasons.append("no UMR-YYYYMMDD-HHMMSS-xxxx citation found in prompt text")
+
+    lowered = prompt_text.lower()
+    found_vague = [v for v in VAGUE_VERB_PHRASES if v in lowered]
+    rule_b = not found_vague
+    if not rule_b:
+        reasons.append(f"vague open-ended verb(s) present: {', '.join(found_vague)}")
+
+    rule_c = bool(
+        CONCRETE_COMPLETION_FILE_PATH_RE.search(prompt_text)
+        or CONCRETE_COMPLETION_PR_REF_RE.search(prompt_text)
+    )
+    if not rule_c:
+        reasons.append(
+            "no concrete completion signal found (no file-path-looking token with a "
+            "known extension, and no 'PR #<N>'/'pull request #<N>' reference)"
+        )
+
+    return {
+        "passed": rule_a and rule_b and rule_c,
+        "rule_a_umr_citation_present": rule_a,
+        "rule_b_vague_verbs_absent": rule_b,
+        "rule_c_concrete_completion_present": rule_c,
+        "reasons": reasons,
+    }
+
+
+def get_instruction_quality_section(sbr):
+    rows, err = get_last_n_umr_tasks(sbr, 20)
+    if err:
+        return {"error": err, "total_checked": 0, "pass_count": 0, "results": [], "failing": []}
+
+    results = []
+    pass_count = 0
+    for r in rows:
+        prompt_text = extract_prompt_text(r.get("inputs_json"))
+        check = check_instruction_quality(prompt_text)
+        if check["passed"]:
+            pass_count += 1
+        results.append({"umr_id": r["umr_id"], "ts_submitted": r["ts_submitted"], **check})
+
+    return {
+        "error": None,
+        "total_checked": len(rows),
+        "pass_count": pass_count,
+        "results": results,
+        "failing": [r for r in results if not r["passed"]],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Assembly + rendering
 # ---------------------------------------------------------------------------
 def build_report(sbr):
@@ -697,8 +1263,16 @@ def build_report(sbr):
     decisions = get_pm_decisions_pending(sbr)
     owner_proposals = get_owner_proposals_pending(sbr)
 
+    # Sections 9-13 (UMR-20260806-041307-0bfd) -- see module docstring.
+    ocid_compliance_audit_section = get_ocid_compliance_audit_section(prior)
+    trend_analysis_section = get_trend_analysis(sbr)
+    stall_detection_section = get_stuck_tasks_detail()
+    collision_detection_section = get_collision_detection_section()
+    instruction_quality_section = get_instruction_quality_section(sbr)
+
     report = {
         "report_format_version": REPORT_FORMAT_VERSION,
+        "script_version": SCRIPT_VERSION,
         "generated_at": _now_iso(),
         "umr": "UMR-20260805-181636-32f2",
         "parent_umr": "UMR-20260802-165606-4413",
@@ -726,10 +1300,16 @@ def build_report(sbr):
         "open_issues": open_issues,
         "pm_decisions_pending": decisions,
         "owner_proposals_pending": owner_proposals,
+        "ocid_compliance_audit_section": ocid_compliance_audit_section,
+        "trend_analysis_section": trend_analysis_section,
+        "stall_detection_section": stall_detection_section,
+        "collision_detection_section": collision_detection_section,
+        "instruction_quality_section": instruction_quality_section,
         "current_flat_fields": current_flat,
         "thresholds": {
             "SWAP_FREE_PCT_WARN_THRESHOLD": SWAP_FREE_PCT_WARN_THRESHOLD,
             "LOAD_1MIN_WARN_THRESHOLD": LOAD_1MIN_WARN_THRESHOLD,
+            "TREND_STABLE_TOLERANCE_PCT": TREND_STABLE_TOLERANCE_PCT,
         },
     }
     return report
@@ -745,6 +1325,7 @@ def render_report_text(report):
         lines.append("=" * 78)
 
     lines.append(f"PM REPORT v3 (real, pure, deterministic -- zero AI/LLM calls)")
+    lines.append(f"script_version: {report.get('script_version', SCRIPT_VERSION)}")
     lines.append(f"generated_at: {report['generated_at']}")
     lines.append(f"umr: {report['umr']}  parent_umr: {report['parent_umr']}  ocid: {report['ocid']}")
 
@@ -844,6 +1425,91 @@ def render_report_text(report):
             lines.append(f"  #{pr['id']} [{pr['opened_ts']}] child_umr={pr['child_umr']}")
             lines.append(f"      issue: {pr['issue']}")
             lines.append(f"      proposed: {pr['proposal']}")
+
+    h("9. DATABASE VALIDATION FOLD-IN (audit_ocid_compliance.py --report, "
+      "shelled out to real, not re-derived)")
+    audit = report["ocid_compliance_audit_section"]
+    if audit.get("error"):
+        lines.append(f"ERROR running/parsing audit_ocid_compliance.py --report: {audit['error']}")
+    else:
+        lines.append(f"audit rows: {audit['total_rows']}  "
+                      f"audit_passed=true: {audit['audit_passed_count']}  "
+                      f"audit_passed=false: {audit['audit_failed_count']}")
+        lines.append(f"prior_baseline_available: {audit['prior_baseline_available']}")
+        if audit["prior_baseline_available"]:
+            if audit["newly_failing_ocids"]:
+                lines.append(f"NEWLY FAILING OCIDs (real, vs prior report): {audit['newly_failing_ocids']}")
+            else:
+                lines.append("NEWLY FAILING OCIDs (real, vs prior report): none")
+        else:
+            lines.append("NEWLY FAILING OCIDs: n/a (no prior report_json baseline to diff against yet)")
+        if audit["failing_ocids"]:
+            lines.append(f"All currently audit_passed=false OCIDs: {audit['failing_ocids']}")
+
+    h("10. 10-REPORT TREND ANALYSIS (pure arithmetic, first-half vs second-half average)")
+    trend = report["trend_analysis_section"]
+    if trend.get("error"):
+        lines.append(f"ERROR computing trend analysis: {trend['error']}")
+    elif trend["rows_used"] == 0:
+        lines.append(f"No pm_report_snapshots rows available -- {trend.get('note', 'no trend computed')}.")
+    else:
+        lines.append(f"rows_used: {trend['rows_used']} (window requested: {trend['window_size_requested']}, "
+                      f"stable tolerance: +/-{trend['stable_tolerance_pct']}%)")
+        for metric, m in trend["metrics"].items():
+            if m.get("trend") == "insufficient_data":
+                lines.append(f"  {metric:<18s} insufficient_data (rows_used={m.get('rows_used')})")
+            else:
+                lines.append(f"  {metric:<18s} trend={m['trend']:<10s} "
+                              f"first_half_avg={m['first_half_avg']} second_half_avg={m['second_half_avg']} "
+                              f"pct_change={m['pct_change']}")
+
+    h("11. DETERMINISTIC STALL DETECTION (STUCK_TASKS_HEARTBEAT.json, real per-task lines)")
+    stall = report["stall_detection_section"]
+    if stall.get("error"):
+        lines.append(f"ERROR reading STUCK_TASKS_HEARTBEAT.json: {stall['error']}")
+    else:
+        lines.append(f"stuck_task_threshold_minutes: {stall['stuck_task_threshold_minutes']}  "
+                      f"stuck_task_count: {len(stall['tasks'])}")
+        for t in stall["tasks"]:
+            lines.append(f"  task_id={t['task_id']} blocked_minutes={t['blocked_minutes']} "
+                          f"last_note={t['last_note']}")
+
+    h("12. DETERMINISTIC COLLISION DETECTION (real PR file-overlap + real worker/supervisor UMR-chain overlap)")
+    collision = report["collision_detection_section"]
+    lines.append(f"COLLISION_DETECTED={'YES' if collision['collision_detected'] else 'NO'}")
+    lines.append(f"tracked_repos: {collision['tracked_repos']}  "
+                  f"checked_unit_globs: {collision['checked_unit_globs']}")
+    if collision["all_pr_collision_pairs"]:
+        for c in collision["all_pr_collision_pairs"]:
+            lines.append(f"  [PR COLLISION] {c['repo']}: "
+                          f"PR #{c['pr_a']} ({c['pr_a_title']}) <-> PR #{c['pr_b']} ({c['pr_b_title']}) "
+                          f"shared files: {c['shared_files']}")
+    if collision["all_worker_collision_pairs"]:
+        for c in collision["all_worker_collision_pairs"]:
+            lines.append(f"  [WORKER/SUPERVISOR UMR COLLISION] {c['unit_a']} <-> {c['unit_b']} "
+                          f"shared UMRs: {c['shared_umrs']}")
+    if not collision["all_pr_collision_pairs"] and not collision["all_worker_collision_pairs"]:
+        lines.append("  No real pairwise overlap found.")
+    for repo, repo_data in collision["pr_file_collisions"]["by_repo"].items():
+        lines.append(f"  ({repo}: {repo_data['open_pr_count']} open PR(s) checked)")
+    if collision["pr_file_collisions"]["errors"]:
+        lines.append(f"  PR-check errors: {collision['pr_file_collisions']['errors']}")
+    if collision["worker_umr_collisions"]["errors"]:
+        lines.append(f"  Worker-unit-check errors: {collision['worker_umr_collisions']['errors']}")
+
+    h("13. DETERMINISTIC INSTRUCTION QUALITY CHECK (last 20 real umr_tasks rows, fixed rule-based)")
+    iq = report["instruction_quality_section"]
+    if iq.get("error"):
+        lines.append(f"ERROR reading umr_tasks: {iq['error']}")
+    else:
+        lines.append(f"DETERMINISTIC_INSTRUCTION_COUNT={iq['pass_count']}/{iq['total_checked']}")
+        if iq["failing"]:
+            lines.append("Failing rows:")
+            for f in iq["failing"]:
+                lines.append(f"  umr_id={f['umr_id']} ts_submitted={f['ts_submitted']} "
+                              f"reasons={f['reasons']}")
+        else:
+            lines.append("No failing rows among those checked.")
 
     lines.append("")
     lines.append("=" * 78)

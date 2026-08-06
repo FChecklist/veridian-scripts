@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real tests for pm_cycle_precheck.py (UMR-20260806-035541, Owner directive
+"""Real tests for pm_cycle_precheck.py (task-20260806-035541, Owner directive
 "real PM cycle scope" -- item 3's new full-cycle gather script). Every test
 uses a real, isolated, temp-file SQLite database seeded with the real
 schema -- never the live production database. DB_PATH is resolved once at

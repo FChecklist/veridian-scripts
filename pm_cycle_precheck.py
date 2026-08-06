@@ -2,7 +2,7 @@
 """pm_cycle_precheck.py -- one real, read-only invocation covering an entire
 PM cycle's data-gathering pass, so the PM's own real tokens go to real
 thinking/decisions, never to real manual searching/checking across many
-separate SSH round trips. UMR-20260806-035541 (Owner directive, "real PM
+separate SSH round trips. task-20260806-035541 (Owner directive, "real PM
 cycle scope"), extending UMR-20260805-181636-32f2 (the real
 generate_pm_report_v3.py report-generator chain) and
 UMR-20260805-185000-e94f (the real deterministic-script-consolidation

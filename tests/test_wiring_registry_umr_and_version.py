@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Real tests for wiring_registry's originating_umr/script_version columns
-(UMR-20260806-035541, Owner directive "real PM cycle script registry" --
+(task-20260806-035541, Owner directive "real PM cycle script registry" --
 item 1's script-registry extension + item 2's UMR backfill). Every test uses
 a real, isolated, temp-file SQLite database -- never the live production
 database.

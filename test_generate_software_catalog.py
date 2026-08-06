@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Real tests for generate_software_catalog.py's 2026-08-06 extension
-(UMR-20260806-035541, Owner directive "real PM cycle script registry" --
+(task-20260806-035541, Owner directive "real PM cycle script registry" --
 item 2's backfill): *.sh/*.mjs inclusion (previously silently excluded) and
 the new, honestly-recovered-only originating_umr/script_version fields.
 """

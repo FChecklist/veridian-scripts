@@ -698,6 +698,7 @@ def _migrate_schema(conn):
     _migrate_instructions_content_hash(conn)
     _migrate_capability_registry_utm(conn)
     _migrate_wiring_registry_umr_and_version(conn)
+    _ensure_external_agent_dispatch_table(conn)
 
 
 def _migrate_wiring_registry_content_hash(conn):
@@ -2935,7 +2936,20 @@ def _ensure_umr_table(conn):
     ).fetchone()
     if row is not None:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(umr_tasks)").fetchall()}
-        if {"last_heartbeat", "tenant_id", "utm_source"} <= cols:
+        # UMR-20260806-095416-b6f0: "external_agent_eligible" added to this
+        # fast-path gate set alongside the pre-existing three -- the whole
+        # point of this fast path (see docstring above) is to skip re-running
+        # every migration function under high-concurrency read/write load
+        # once the schema is fully migrated, but that only holds once EVERY
+        # real migration's own columns are included here. Forgetting to add
+        # a newly migrated column to this set silently strands that
+        # migration: _migrate_umr_tasks_external_agent_columns() would never
+        # run again on a DB that already satisfied the OLD three-column
+        # check (a real bug caught while building this task against the
+        # real, live, already-migrated production DB -- confirmed via a
+        # direct PRAGMA table_info() readback showing the new columns
+        # missing even though _ensure_umr_table() had just run).
+        if {"last_heartbeat", "tenant_id", "utm_source", "external_agent_eligible"} <= cols:
             return
     status_sql = ",".join("'" + s + "'" for s in UMR_STATUSES)
     conn.execute(f"""CREATE TABLE IF NOT EXISTS umr_tasks (
@@ -2982,6 +2996,7 @@ def _ensure_umr_table(conn):
     _migrate_umr_last_heartbeat(conn)
     _migrate_umr_tenant_id(conn)
     _migrate_umr_utm(conn)
+    _migrate_umr_tasks_external_agent_columns(conn)
 
 
 def _ensure_ocid_artifact_links_table(conn):
@@ -4293,6 +4308,182 @@ def _migrate_umr_tenant_id(conn):
     conn.commit()
 
 
+def _migrate_umr_tasks_external_agent_columns(conn):
+    """Real Owner directive UMR-20260806-095416-b6f0: fourth real worker
+    channel -- a fully manual human-paste bridge to chat.z.ai, alongside the
+    existing systemd `veridian-worker@*` units and the interactive tmux
+    session. NEVER any browser automation against chat.z.ai (hard
+    Terms-of-Service constraint): the Owner personally copies the rendered
+    prompt out and pastes the reply back in, every time, no exception.
+
+    Additive ALTER TABLE ADD COLUMN migration for umr_tasks, same
+    PRAGMA-table_info-then-ALTER pattern as _migrate_umr_tenant_id/
+    _migrate_pm_decisions_pending_owner_proposal_columns above -- no CHECK
+    constraint, no full-table rebuild, safe to run on a pre-existing DB with
+    real rows already in it (this migrates the real, live, 1.8GB
+    superboss-register.sqlite, not a fresh fixture).
+
+    Columns:
+      external_agent_eligible        INTEGER NOT NULL DEFAULT 0 (boolean) --
+        never hand-set true by anything except mark_external_agent_eligible()
+        below, which runs check_external_agent_eligibility() first and
+        refuses to set this to 1 for a row that does not really pass every
+        real rule. Existing rows default to 0 (not eligible) -- correct,
+        since eligibility is opt-in per-task, never assumed.
+      external_agent_task_type       TEXT, restricted at the APPLICATION
+        layer (not a DB CHECK constraint -- see
+        EXTERNAL_AGENT_ALLOWED_TASK_TYPES below and
+        check_external_agent_eligibility()) to exactly: isolated_bugfix,
+        doc_update, single_file_refactor, test_addition_only.
+      blast_radius                   TEXT -- must equal the literal string
+        'isolated' for a row to ever be eligible (see
+        check_external_agent_eligibility()); the column itself stays a
+        plain nullable TEXT (no CHECK) since a real caller may legitimately
+        record a wider blast_radius on an INeligible row for audit purposes.
+      requires_multi_file_context     INTEGER NOT NULL DEFAULT 0 (boolean) --
+        must be 0/false for a row to ever be eligible.
+      files_touched                  TEXT, JSON array of exact repo-relative
+        paths (json.dumps'd list of str) -- NOT NULL DEFAULT '[]' so every
+        row has a real, parseable value even before this feature ever
+        touches it.
+      external_agent_status          TEXT, nullable. NULL = never dispatched
+        to this channel. Real state machine (see module docstring above
+        get_next_external_agent_task()): NULL -> 'dispatched' -> either
+        'pr_open' (real success terminal state -- a real PR is open,
+        pending real human review, NEVER auto-merged) or 'requeued' (real
+        first-strike failure, eligible for exactly one more real dispatch)
+        or 'fallen_back_internal' (real second-strike terminal state --
+        external_agent_eligible is also forced back to 0 at that point, and
+        the row falls back to the normal internal worker pool; a real
+        reason is always recorded in umr_tasks.reason).
+      external_agent_reject_count    INTEGER NOT NULL DEFAULT 0 -- real
+        two-strike counter (expiry counts as a reject); permanently
+        excluded from further external-agent dispatch once this reaches 2
+        (see get_next_external_agent_task()'s own WHERE clause).
+      external_agent_dispatch_count  INTEGER NOT NULL DEFAULT 0 -- real
+        count of every real dispatch attempt ever made for this row
+        (dispatched/requeued-redispatched both increment it), purely
+        informational/audit -- the real gate against a 3rd attempt is
+        external_agent_reject_count < 2, not this counter.
+
+    acceptance-criteria / repro-steps are deliberately NOT new dedicated
+    columns here: per this file's own STORAGE FORMAT convention (top-of-file
+    module docstring -- "typed columns + a JSON metadata blob"), those two
+    free-text fields live inside the existing metadata_json column under a
+    real "external_agent" sub-object (see mark_external_agent_eligible()),
+    exactly like every other free-text elaboration on a umr_tasks row
+    already does -- adding two more dedicated top-level TEXT columns for
+    what is fundamentally prose would be a second, parallel convention for
+    the same kind of data this table already has a real place for."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(umr_tasks)").fetchall()}
+    if "external_agent_eligible" not in cols:
+        conn.execute("ALTER TABLE umr_tasks ADD COLUMN external_agent_eligible INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    if "external_agent_task_type" not in cols:
+        conn.execute("ALTER TABLE umr_tasks ADD COLUMN external_agent_task_type TEXT")
+        conn.commit()
+    if "blast_radius" not in cols:
+        conn.execute("ALTER TABLE umr_tasks ADD COLUMN blast_radius TEXT")
+        conn.commit()
+    if "requires_multi_file_context" not in cols:
+        conn.execute("ALTER TABLE umr_tasks ADD COLUMN requires_multi_file_context INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    if "files_touched" not in cols:
+        conn.execute("ALTER TABLE umr_tasks ADD COLUMN files_touched TEXT NOT NULL DEFAULT '[]'")
+        conn.commit()
+    if "external_agent_status" not in cols:
+        conn.execute("ALTER TABLE umr_tasks ADD COLUMN external_agent_status TEXT")
+        conn.commit()
+    if "external_agent_reject_count" not in cols:
+        conn.execute("ALTER TABLE umr_tasks ADD COLUMN external_agent_reject_count INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    if "external_agent_dispatch_count" not in cols:
+        conn.execute("ALTER TABLE umr_tasks ADD COLUMN external_agent_dispatch_count INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    # Partial index (same reasoning as idx_umr_tasks_tenant_id above): almost
+    # every real row will never be external_agent_eligible, so a partial
+    # index over just the eligible rows costs near-nothing today and makes
+    # get_next_external_agent_task()'s own SELECT a real index seek once
+    # this feature is in real use.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_umr_tasks_external_agent_eligible "
+        "ON umr_tasks(external_agent_eligible, external_agent_status) "
+        "WHERE external_agent_eligible = 1"
+    )
+    conn.commit()
+
+
+def _ensure_external_agent_dispatch_table(conn):
+    """Real Owner directive UMR-20260806-095416-b6f0. New, additive,
+    append-only child table: one row per real chat.z.ai dispatch ATTEMPT
+    (never reused across attempts -- a requeued-after-reject row gets a
+    brand-new dispatch_id and a brand-new row on its next real dispatch, so
+    the full real history of every real attempt against a given umr_id is
+    always fully reconstructable, never overwritten). Same idempotent
+    CREATE TABLE IF NOT EXISTS + standalone-callable convention as
+    _ensure_ocid_artifact_links_table/_ensure_umr_table above. dispatch_id is
+    a real, sortable, timestamp-prefixed id minted via _new_id('EAD') (same
+    scheme as every other id in this file -- see the module docstring's ID
+    SCHEMES section).
+
+    umr_id is a real FOREIGN KEY into umr_tasks (see
+    _ensure_ocid_artifact_links_table's own docstring for why SQLite only
+    enforces this with `PRAGMA foreign_keys=ON`, which _connect() does not
+    set -- documented, not silently assumed, same as that table).
+
+    provider defaults to 'chat.z.ai' (the one real provider this channel
+    exists for today) but is a real column, not a hardcoded constant,
+    because a future second manual-paste provider should extend this same
+    table rather than force a parallel one.
+
+    status is the real per-attempt lifecycle: dispatched -> submitted (a
+    real paste-back was received and parsed) -> accepted (real PR opened) or
+    rejected (real validation/gate/apply failure) -- or dispatched -> expired
+    (the real 24h window closed with no paste-back at all, set only by
+    expire_external_agent_dispatches()). Plain nullable TEXT, restricted at
+    the application layer (same convention as external_agent_task_type on
+    umr_tasks), not a DB CHECK constraint, since a mid-implementation status
+    vocabulary tweak should never require a schema migration.
+
+    prompt_sha256/result_sha256 are real integrity fingerprints of the exact
+    prompt text handed to the Owner and the exact reply text pasted back --
+    so a later audit can confirm byte-for-byte what was actually sent/
+    received without needing to keep re-reading the (potentially large)
+    prompt_path/result_raw_path files themselves.
+
+    gate_report_path records the real path to the exact, unmodified
+    quality-gate.sh JSON output for this attempt (see
+    submit_external_agent_result()) -- the same real quality gate every
+    other real worker channel in this codebase runs, zero special-casing."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS external_agent_dispatch (
+        dispatch_id TEXT PRIMARY KEY,
+        umr_id TEXT NOT NULL REFERENCES umr_tasks(umr_id),
+        provider TEXT NOT NULL DEFAULT 'chat.z.ai',
+        prompt_sha256 TEXT NOT NULL,
+        prompt_path TEXT NOT NULL,
+        status TEXT NOT NULL,
+        dispatched_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        submitted_at TEXT,
+        result_raw_path TEXT,
+        result_sha256 TEXT,
+        branch_name TEXT,
+        worktree_path TEXT,
+        gate_report_path TEXT,
+        pr_number INTEGER,
+        pr_url TEXT,
+        reject_reason TEXT,
+        reviewed_by TEXT
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_external_agent_dispatch_umr ON external_agent_dispatch(umr_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_external_agent_dispatch_status ON external_agent_dispatch(status)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_external_agent_dispatch_expiry "
+        "ON external_agent_dispatch(status, expires_at) WHERE status = 'dispatched'"
+    )
+    conn.commit()
+
+
 def _derive_umr_utm_fields(record):
     """Real, deterministic UTM field derivation for one umr_tasks row (Phase 6,
     task-umr-tasks-utm-correlation-phase6-2026-07-29 -- closes the one real
@@ -5259,7 +5450,11 @@ def update_umr_task(conn, umr_id, **fields):
     as keyword args are touched. json_fields are dicts that get json.dumps'd
     automatically before the UPDATE. Does NOT commit, same convention as
     upsert_umr_task()."""
-    json_fields = {"outputs", "metric_snapshot", "metadata"}
+    # files_touched (UMR-20260806-095416-b6f0, external-agent channel): a
+    # real Python list in, JSON TEXT column out -- same auto-serialize
+    # convention as outputs/metric_snapshot/metadata below, added here so
+    # mark_external_agent_eligible() never hand-serializes it either.
+    json_fields = {"outputs", "metric_snapshot", "metadata", "files_touched"}
     column_map = {"metric_snapshot": "metric_snapshot_json", "outputs": "outputs_json", "metadata": "metadata_json"}
     if not fields:
         return
@@ -5884,6 +6079,832 @@ def cmd_mark_umr_terminal(args):
                        "ts_completed": ts_completed}, indent=2, default=str))
 
 
+EXTERNAL_AGENT_ALLOWED_TASK_TYPES = (
+    "isolated_bugfix", "doc_update", "single_file_refactor", "test_addition_only",
+)
+
+# resource_governor.py:66 -- `TIER_MIN, TIER_MAX = 0, 4` -- and
+# resource_governor.py:2361 -- `ap.add_argument("--tier", ... help="0
+# (highest) .. 4 (lowest)")` -- confirmed directly against that file's own
+# real code before hardcoding this (per UMR-20260806-095416-b6f0's own
+# explicit instruction not to assume): tier 0 is the highest-severity/most
+# critical tier, so the two most critical tiers are 0 and 1. A umr_tasks row
+# at either tier can never be external-agent eligible, full stop.
+EXTERNAL_AGENT_EXCLUDED_TIERS = (0, 1)
+
+# Real two-strike rule (UMR-20260806-095416-b6f0 §6): at most 2 real
+# dispatch attempts total ever happen for one umr_id via this channel --
+# the original attempt plus exactly one requeued retry. A 3rd is never
+# issued; get_next_external_agent_task()'s own SELECT enforces this via
+# `external_agent_reject_count < EXTERNAL_AGENT_MAX_ATTEMPTS`, and
+# _external_agent_apply_reject()/expire_external_agent_dispatches() both
+# force external_agent_eligible back to 0 the instant reject_count reaches
+# this value, permanently falling the row back to the normal internal
+# worker pool.
+EXTERNAL_AGENT_MAX_ATTEMPTS = 2
+
+EXTERNAL_AGENT_DISPATCH_TTL_HOURS = 24
+
+EXTERNAL_AGENT_PROVIDER = "chat.z.ai"
+
+# Real, deterministic secret/credential/sensitive-path exclusion
+# (UMR-20260806-095416-b6f0 §3): zero overlap allowed between
+# files_touched and any path matching these patterns, checked against the
+# full real repo-relative path, case-insensitive. `migrations?` covers both
+# `migration`/`migrations` as either a path segment or filename fragment;
+# same for the rest -- deliberately broad substring matches (not anchored
+# to exact path segments) since a real secret/credential/auth-adjacent file
+# is exactly the class of thing that must never be handed to an external,
+# unauthenticated-to-this-repo human-mediated channel, and a false-positive
+# exclusion here (an eligible task wrongly rejected) is a real, acceptable,
+# far cheaper cost than a false negative (a real secret ever leaving this
+# repo through this channel).
+_EXTERNAL_AGENT_FORBIDDEN_PATH_RE = re.compile(
+    r"(secret|credential|password|token|\.env\b|env\.|migrations?[/\\]|"
+    r"(^|[/\\])auth([/\\._-]|$)|(^|[/\\])rbac([/\\._-]|$)|\.github[/\\]workflows)",
+    re.IGNORECASE,
+)
+
+
+def _is_external_agent_doc_path(path):
+    """Real markdown/docs-path check for the doc_update task type's real
+    up-to-3-files allowance (UMR-20260806-095416-b6f0 §3): a `.md`/`.rst`
+    file anywhere, OR any file (any extension) that actually lives under a
+    real `docs/` path -- matches this repo's own real convention of mixing
+    `.md` docs at the repo root (README-dispatch-consolidation.md,
+    PROGRESS.md, the OCID_*.md files) with occasional non-.md docs content
+    under a docs/ directory elsewhere in the platform."""
+    p = path.lower().replace("\\", "/")
+    return p.endswith((".md", ".rst")) or p.startswith("docs/") or "/docs/" in p
+
+
+def check_external_agent_eligibility(*, task_type, files_touched, blast_radius,
+                                      requires_multi_file_context, acceptance_criteria,
+                                      repro_steps, tier):
+    """Real, pure, deterministic eligibility check (UMR-20260806-095416-b6f0
+    §3) -- takes plain values, touches no DB, so it is fully unit-testable
+    (see tests/test_external_agent_dispatch.py) independent of
+    mark_external_agent_eligible()'s DB-row plumbing below. A task is
+    eligible only if EVERY one of these real rules holds; returns
+    (eligible: bool, reasons: list[str]) -- reasons is always the real,
+    complete list of every rule that failed (never short-circuits on the
+    first failure), so a caller/human always sees the whole real picture in
+    one pass rather than fixing one issue at a time by trial and error.
+
+      1. task_type is one of EXTERNAL_AGENT_ALLOWED_TASK_TYPES.
+      2. files_touched has at least 1 real entry, and at most 1 -- EXCEPT
+         doc_update, which allows up to 3, and only if every one of those
+         (up to 3) is a real markdown/docs-path file (_is_external_agent_doc_path).
+      3. Zero overlap between files_touched and
+         _EXTERNAL_AGENT_FORBIDDEN_PATH_RE.
+      4. acceptance_criteria is a real, non-empty (post-strip) string.
+      5. For isolated_bugfix specifically: repro_steps is also a real,
+         non-empty (post-strip) string.
+      6. requires_multi_file_context is falsy.
+      7. blast_radius is exactly the literal string 'isolated'.
+      8. tier is not in EXTERNAL_AGENT_EXCLUDED_TIERS (the two most critical
+         tiers, 0 and 1 -- confirmed against resource_governor.py's own real
+         tier scale, see that constant's own comment above)."""
+    reasons = []
+    if task_type not in EXTERNAL_AGENT_ALLOWED_TASK_TYPES:
+        reasons.append(
+            f"external_agent_task_type {task_type!r} is not one of the 4 real allowed values "
+            f"{EXTERNAL_AGENT_ALLOWED_TASK_TYPES}"
+        )
+    files = list(files_touched or [])
+    if len(files) < 1:
+        reasons.append("files_touched is empty -- a real eligible task must name at least one real file")
+    max_files = 3 if task_type == "doc_update" else 1
+    if len(files) > max_files:
+        reasons.append(
+            f"files_touched has {len(files)} real entries, more than the max of {max_files} "
+            f"allowed for task_type {task_type!r}"
+        )
+    if task_type == "doc_update":
+        non_doc = [f for f in files if not _is_external_agent_doc_path(f)]
+        if non_doc:
+            reasons.append(
+                f"doc_update allows only markdown/docs-path files -- found non-doc entries: {non_doc}"
+            )
+    forbidden_hits = [f for f in files if _EXTERNAL_AGENT_FORBIDDEN_PATH_RE.search(f)]
+    if forbidden_hits:
+        reasons.append(
+            f"files_touched contains path(s) matching the real secret/credential/auth/rbac/"
+            f"migrations/.github-workflows exclusion pattern: {forbidden_hits}"
+        )
+    if not (acceptance_criteria and str(acceptance_criteria).strip()):
+        reasons.append("acceptance_criteria is empty -- a real, non-empty acceptance-criteria field is required")
+    if task_type == "isolated_bugfix" and not (repro_steps and str(repro_steps).strip()):
+        reasons.append("repro_steps is empty -- required specifically for task_type='isolated_bugfix'")
+    if requires_multi_file_context:
+        reasons.append("requires_multi_file_context is true -- must be 0/false to be eligible")
+    if blast_radius != "isolated":
+        reasons.append(f"blast_radius {blast_radius!r} != 'isolated'")
+    if tier in EXTERNAL_AGENT_EXCLUDED_TIERS:
+        reasons.append(
+            f"tier {tier} is one of the two most critical tiers {EXTERNAL_AGENT_EXCLUDED_TIERS} "
+            f"(resource_governor.py: 0=highest)"
+        )
+    return (len(reasons) == 0, reasons)
+
+
+def mark_external_agent_eligible(conn, umr_id, *, task_type, blast_radius, requires_multi_file_context,
+                                  files_touched, acceptance_criteria, repro_steps=None):
+    """Real write path (and the ONLY real write path) that ever sets
+    umr_tasks.external_agent_eligible=1 (UMR-20260806-095416-b6f0 §9) --
+    always runs check_external_agent_eligibility() first and raises
+    ValueError (never silently marks a non-eligible row) if any real rule
+    fails. Caller owns conn/transaction/commit, same convention as
+    update_umr_task()/upsert_umr_task() above -- this function itself never
+    commits.
+
+    acceptance_criteria/repro_steps are stored inside the row's existing
+    metadata_json under a real "external_agent" sub-object (see
+    _migrate_umr_tasks_external_agent_columns()'s own docstring for why
+    these two are deliberately not separate columns) -- this REPLACES any
+    prior "external_agent" sub-object on the row (not a merge), since a
+    real re-mark is always a real, complete redeclaration of eligibility,
+    never a partial patch."""
+    row = conn.execute("SELECT * FROM umr_tasks WHERE umr_id=?", (umr_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"no real umr_tasks row for umr_id={umr_id!r}")
+    eligible, reasons = check_external_agent_eligibility(
+        task_type=task_type, files_touched=files_touched, blast_radius=blast_radius,
+        requires_multi_file_context=requires_multi_file_context, acceptance_criteria=acceptance_criteria,
+        repro_steps=repro_steps, tier=row["tier"],
+    )
+    if not eligible:
+        raise ValueError(f"umr_id={umr_id!r} is NOT really eligible for the external-agent channel: {reasons}")
+    metadata = json.loads(row["metadata_json"] or "{}")
+    metadata["external_agent"] = {"acceptance_criteria": acceptance_criteria, "repro_steps": repro_steps}
+    update_umr_task(
+        conn, umr_id,
+        external_agent_eligible=1, external_agent_task_type=task_type, blast_radius=blast_radius,
+        requires_multi_file_context=1 if requires_multi_file_context else 0,
+        files_touched=list(files_touched), metadata=metadata,
+    )
+    return {"umr_id": umr_id, "eligible": True, "reasons": []}
+
+
+# Real, fixed, documented prompt template (UMR-20260806-095416-b6f0 §4). The
+# Owner copies everything render_external_agent_prompt() returns into
+# chat.z.ai by hand and pastes chat.z.ai's reply back by hand -- NEVER any
+# browser automation against chat.z.ai, a hard Terms-of-Service constraint,
+# not a style preference. The two identifying lines
+# ("DISPATCH_ID: <id>" / "UMR_ID: <id>") are deliberately literal, exact,
+# line-anchored, and grep-able -- parse_external_agent_reply() below parses
+# them with an anchored regex, not a fuzzy search, so a reply that doesn't
+# open with them exactly is rejected rather than misparsed.
+_EXTERNAL_AGENT_PROMPT_TEMPLATE = """\
+=== EXTERNAL AGENT DISPATCH (chat.z.ai manual-paste bridge) ===
+DISPATCH_ID: {dispatch_id}
+UMR_ID: {umr_id}
+=== END IDENTIFYING LINES -- copy everything below this line into chat.z.ai, then paste chat.z.ai's reply back verbatim (nothing added, nothing removed) ===
+
+You are acting as an external contract engineer with NO direct access to
+this private repository. Below is the exact, complete, real, current
+content of every file you are allowed to touch. Do not assume any other
+file's content. Do not ask for repository access. Do not browse the web for
+this repository.
+
+TASK TYPE: {task_type}
+FILES YOU MAY TOUCH (exactly these paths, no others): {files_list}
+FILES_TOUCHED_JSON: {files_json}
+
+ACCEPTANCE CRITERIA:
+{acceptance_criteria}
+
+REPRO STEPS:
+{repro_steps}
+
+CURRENT FILE CONTENTS:
+{file_content_blocks}
+REQUIRED REPLY FORMAT -- your reply is parsed by a program, not read by a
+human first, so follow this EXACTLY:
+  Line 1 (exact, verbatim): DISPATCH_ID: {dispatch_id}
+  Line 2 (exact, verbatim): UMR_ID: {umr_id}
+  Then exactly ONE fenced diff block, opened with ```diff and closed with
+  ```, containing a real, valid unified diff (git-apply-compatible) that
+  touches ONLY the file(s) listed above.
+  Nothing else of substance: no other prose, no other code block, no
+  commentary before or after the diff fence.
+
+Do not touch any file not listed above. Do not add, move, delete, or rename
+any file not listed above. Do not include secrets, credentials, or any
+change unrelated to the acceptance criteria above.
+=== END OF TASK ===
+"""
+
+
+def render_external_agent_prompt(*, dispatch_id, umr_id, task_type, files_touched,
+                                  acceptance_criteria, repro_steps, file_contents):
+    """Renders the real, fixed prompt template above. `file_contents` is a
+    dict of {real repo-relative path: real file text or None (file does not
+    yet exist -- a real, honest signal for a task that creates a new file,
+    never silently blanked)}."""
+    blocks = []
+    for path in files_touched:
+        content = file_contents.get(path)
+        if content is None:
+            body = "(this file does not exist yet in the repository -- this is a real new-file task)"
+        else:
+            body = content
+        blocks.append(f"--- BEGIN FILE: {path} ---\n{body}\n--- END FILE: {path} ---")
+    return _EXTERNAL_AGENT_PROMPT_TEMPLATE.format(
+        dispatch_id=dispatch_id, umr_id=umr_id, task_type=task_type,
+        files_list=", ".join(files_touched), files_json=json.dumps(list(files_touched)),
+        acceptance_criteria=acceptance_criteria or "(none recorded)",
+        repro_steps=repro_steps or "(not applicable to this task_type)",
+        file_content_blocks="\n\n".join(blocks),
+    )
+
+
+def parse_external_agent_reply(text):
+    """Real, strict parser for the Owner's pasted-back chat.z.ai reply
+    (UMR-20260806-095416-b6f0 §4/§6). Returns (parsed: dict|None,
+    error: str|None) -- exactly one of the two is real/non-None. `parsed`
+    is {"dispatch_id": str, "umr_id": str, "diff_text": str} on success.
+
+    Real, strict requirements (any violation is a real reject, never a
+    best-effort recovery):
+      - the first two real non-blank lines must be exactly
+        'DISPATCH_ID: <id>' then 'UMR_ID: <id>' (line-anchored, no leading
+        text tolerated on either line);
+      - everything after those two lines must contain EXACTLY one fenced
+        code block, opened with the literal ```diff and closed with ```;
+      - nothing else of substance (only whitespace) may appear before or
+        after that single fenced block."""
+    lines = text.splitlines()
+    idx = 0
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+    if idx + 1 >= len(lines):
+        return None, "reply is too short -- expected a DISPATCH_ID line and a UMR_ID line, followed by a fenced diff block"
+    m1 = re.match(r"^DISPATCH_ID:\s*(\S+)\s*$", lines[idx].strip())
+    if not m1:
+        return None, f"line {idx + 1} must be exactly 'DISPATCH_ID: <id>', got {lines[idx]!r}"
+    m2 = re.match(r"^UMR_ID:\s*(\S+)\s*$", lines[idx + 1].strip())
+    if not m2:
+        return None, f"line {idx + 2} must be exactly 'UMR_ID: <id>', got {lines[idx + 1]!r}"
+    dispatch_id = m1.group(1)
+    umr_id = m2.group(1)
+    rest = "\n".join(lines[idx + 2:])
+    fences = list(re.finditer(r"^```(\S*)\s*$", rest, re.MULTILINE))
+    if len(fences) != 2:
+        return None, f"expected exactly one fenced diff block (2 ``` fence lines), found {len(fences)} fence line(s)"
+    open_fence, close_fence = fences
+    open_tag = open_fence.group(1).strip()
+    if open_tag != "diff":
+        return None, f"the fenced block must be opened with ```diff exactly, got ```{open_tag!r}"
+    before = rest[:open_fence.start()].strip()
+    after = rest[close_fence.end():].strip()
+    if before or after:
+        return None, "reply must contain nothing else of substance outside the single fenced ```diff block"
+    diff_text = rest[open_fence.end():close_fence.start()].strip("\n")
+    if not diff_text.strip():
+        return None, "the fenced ```diff block is empty"
+    return {"dispatch_id": dispatch_id, "umr_id": umr_id, "diff_text": diff_text}, None
+
+
+def _extract_diff_paths(diff_text):
+    """Real, best-effort-but-conservative extraction of every real file path
+    a unified diff touches, used both to validate the real allow-list
+    before ever applying anything AND (via `git status --porcelain` after a
+    real apply) as defense-in-depth against a diff that lies about its own
+    header paths. Prefers real `diff --git a/X b/Y` headers (git's own real
+    format); falls back to `+++`/`---` headers only when no `diff --git`
+    header exists at all (a minimal single-file unified diff)."""
+    paths = set()
+    for m in re.finditer(r"^diff --git a/(.+?) b/(.+?)\s*$", diff_text, re.MULTILINE):
+        paths.add(m.group(1))
+        paths.add(m.group(2))
+    if not paths:
+        for m in re.finditer(r"^\+\+\+ (?:b/)?(.+?)\s*$", diff_text, re.MULTILINE):
+            if m.group(1) != "/dev/null":
+                paths.add(m.group(1))
+        for m in re.finditer(r"^--- (?:a/)?(.+?)\s*$", diff_text, re.MULTILINE):
+            if m.group(1) != "/dev/null":
+                paths.add(m.group(1))
+    return paths
+
+
+def _extract_files_allowlist_from_prompt(prompt_path):
+    """Real cross-check read: recovers the real files-touched allow-list
+    exactly as it was embedded (FILES_TOUCHED_JSON: [...]) in the real
+    prompt file at real dispatch time, independent of umr_tasks.files_touched's
+    CURRENT value -- so submit_external_agent_result() validates against the
+    real allow-list 'computed at dispatch time' per UMR-20260806-095416-b6f0
+    §6, not merely today's value (nothing in this codebase mutates
+    files_touched between dispatch and submit today, but this makes that a
+    checked property, not an assumed one). Returns None (skip the
+    cross-check, real umr_tasks.files_touched alone remains authoritative)
+    if the prompt file is missing/unreadable or the marker line can't be
+    found/parsed -- never raises."""
+    try:
+        with open(prompt_path, "r") as f:
+            text = f.read()
+    except OSError:
+        return None
+    m = re.search(r"^FILES_TOUCHED_JSON:\s*(\[.*\])\s*$", text, re.MULTILINE)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(1))
+    except (ValueError, TypeError):
+        return None
+
+
+def _default_external_agent_runner(cmd, cwd):
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+
+
+def _git_default_branch(repo_root, git_run):
+    r = git_run(["git", "symbolic-ref", "refs/remotes/origin/HEAD"], repo_root)
+    if r.returncode == 0 and r.stdout.strip():
+        return r.stdout.strip().rsplit("/", 1)[-1]
+    return "main"
+
+
+def _git_worktree_cleanup(repo_root, worktree_path, git_run):
+    """Safe to call unconditionally once a real commit exists in the
+    worktree's branch: `git worktree remove` only deletes the working-tree
+    checkout directory, never the branch ref or its commits -- those live in
+    the shared repo's own refs (same repo the worktree was added from), so
+    they stay real and inspectable (`git show <branch>`) even after this
+    runs. Keeps ai-os/external_agent/worktrees/ from accumulating one stale
+    directory per real dispatch attempt forever."""
+    git_run(["git", "worktree", "remove", "--force", worktree_path], repo_root)
+
+
+def _gh_repo_slug(repo_root, git_run):
+    r = git_run(["git", "remote", "get-url", "origin"], repo_root)
+    url = (r.stdout or "").strip()
+    m = re.search(r"github\.com[:/]+([^/]+/[^/]+?)(?:\.git)?$", url)
+    return m.group(1) if m else None
+
+
+def _extract_pr_number(pr_url):
+    if not pr_url:
+        return None
+    m = re.search(r"/pull/(\d+)", pr_url)
+    return int(m.group(1)) if m else None
+
+
+def _external_agent_apply_reject(conn, disp, task, now, reason):
+    """Real two-strike bookkeeping shared by submit_external_agent_result()
+    (a real validation/apply/gate/PR failure) and
+    expire_external_agent_dispatches() (a real 24h timeout with no
+    paste-back at all) -- both are real 'this attempt failed' events for the
+    exact same real state machine. Does NOT commit -- caller owns the
+    transaction, same convention as update_umr_task() etc."""
+    conn.execute(
+        "UPDATE external_agent_dispatch SET status='rejected', reject_reason=?, submitted_at=? "
+        "WHERE dispatch_id=?",
+        (reason, now, disp["dispatch_id"]),
+    )
+    new_count = task["external_agent_reject_count"] + 1
+    if new_count < EXTERNAL_AGENT_MAX_ATTEMPTS:
+        update_umr_task(conn, task["umr_id"], external_agent_reject_count=new_count,
+                         external_agent_status="requeued")
+        outcome = "rejected_requeued"
+    else:
+        fallback_reason = (
+            f"external-agent two-strike limit reached ({new_count} rejects, real dispatch "
+            f"{disp['dispatch_id']}) -- permanent fallback to the normal internal worker pool. "
+            f"Last reject reason: {reason}"
+        )
+        update_umr_task(conn, task["umr_id"], external_agent_reject_count=new_count,
+                         external_agent_status="fallen_back_internal", external_agent_eligible=0,
+                         reason=fallback_reason)
+        outcome = "rejected_fallback_to_internal"
+    return {"outcome": outcome, "dispatch_id": disp["dispatch_id"], "umr_id": task["umr_id"],
+            "reason": reason, "reject_count": new_count}
+
+
+def get_next_external_agent_task(conn, *, artifacts_root, repo_root, now=None):
+    """Real CLI command `get-next-external-agent-task`'s core logic
+    (UMR-20260806-095416-b6f0 §5). Selects ONE real eligible umr_tasks row.
+    Caller (cmd_get_next_external_agent_task) wraps this whole call in
+    `with _write_lock():` -- the SAME cross-process serialization
+    mechanism every other real write path in this file uses (see
+    _write_lock()'s own docstring) -- so two concurrent real callers can
+    never both select and dispatch the same real row: the second caller
+    always blocks until the first's SELECT+INSERT+UPDATE+commit has fully
+    landed, then re-runs its own SELECT against the now-updated real state.
+
+    Deliberately does NOT read or write umr_tasks.status (the general
+    systemctl-worker/dispatch-tick lifecycle column) -- external_agent_status
+    is a real, fully separate state machine for this real, fully separate
+    channel; touching `status` here would falsely signal to
+    resource_governor.py/health-check-15min.py/dispatch-tick.py that a real
+    systemd worker unit is running, when none is.
+
+    Returns None if no real row is currently eligible+available. Otherwise
+    returns a dict with the real dispatch_id/prompt_text/prompt_path/
+    expires_at/umr_id. Does NOT commit -- caller owns the transaction."""
+    now = now or _now_iso()
+    row = conn.execute(
+        "SELECT * FROM umr_tasks WHERE external_agent_eligible=1 "
+        "AND (external_agent_status IS NULL OR external_agent_status='requeued') "
+        "AND external_agent_reject_count < ? "
+        "ORDER BY tier ASC, ts_submitted ASC LIMIT 1",
+        (EXTERNAL_AGENT_MAX_ATTEMPTS,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    dispatch_id = _new_id("EAD")
+    metadata = json.loads(row["metadata_json"] or "{}")
+    ext_meta = metadata.get("external_agent") or {}
+    files_touched = json.loads(row["files_touched"] or "[]")
+    file_contents = {}
+    for rel_path in files_touched:
+        abs_path = os.path.join(repo_root, rel_path)
+        if os.path.isfile(abs_path):
+            with open(abs_path, "r", errors="replace") as f:
+                file_contents[rel_path] = f.read()
+        else:
+            file_contents[rel_path] = None
+
+    prompt_text = render_external_agent_prompt(
+        dispatch_id=dispatch_id, umr_id=row["umr_id"], task_type=row["external_agent_task_type"],
+        files_touched=files_touched, acceptance_criteria=ext_meta.get("acceptance_criteria") or "",
+        repro_steps=ext_meta.get("repro_steps") or "", file_contents=file_contents,
+    )
+    prompt_dir = os.path.join(artifacts_root, "prompts")
+    os.makedirs(prompt_dir, exist_ok=True)
+    prompt_path = os.path.join(prompt_dir, f"{dispatch_id}.txt")
+    with open(prompt_path, "w") as f:
+        f.write(prompt_text)
+    prompt_sha256 = hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
+
+    dispatched_at = now
+    expires_at = (datetime.fromisoformat(now) + timedelta(hours=EXTERNAL_AGENT_DISPATCH_TTL_HOURS)).isoformat()
+
+    conn.execute(
+        "INSERT INTO external_agent_dispatch (dispatch_id, umr_id, provider, prompt_sha256, prompt_path, "
+        "status, dispatched_at, expires_at) VALUES (?,?,?,?,?,?,?,?)",
+        (dispatch_id, row["umr_id"], EXTERNAL_AGENT_PROVIDER, prompt_sha256, prompt_path,
+         "dispatched", dispatched_at, expires_at),
+    )
+    update_umr_task(
+        conn, row["umr_id"],
+        external_agent_status="dispatched",
+        external_agent_dispatch_count=row["external_agent_dispatch_count"] + 1,
+    )
+    return {
+        "dispatch_id": dispatch_id, "umr_id": row["umr_id"], "prompt_text": prompt_text,
+        "prompt_path": prompt_path, "expires_at": expires_at, "dispatched_at": dispatched_at,
+    }
+
+
+def submit_external_agent_result(conn, *, reply_text, artifacts_root, repo_root, now=None,
+                                  reviewed_by=None, push=True, git_run=None, gh_run=None):
+    """Real CLI command `submit-external-agent-result`'s core logic
+    (UMR-20260806-095416-b6f0 §6). `git_run`/`gh_run` default to real
+    subprocess calls (_default_external_agent_runner); tests inject fakes so
+    they never depend on real network/gh-auth while still exercising real
+    `git` against a real scratch repo for the worktree-never-main safety
+    property. Does NOT commit -- caller owns the transaction, same
+    convention as every other real write function in this file."""
+    now = now or _now_iso()
+    git_run = git_run or _default_external_agent_runner
+    gh_run = gh_run or _default_external_agent_runner
+
+    parsed, err = parse_external_agent_reply(reply_text)
+    if err:
+        return {"outcome": "error", "reason": f"reply parse failed: {err}"}
+
+    dispatch_id = parsed["dispatch_id"]
+    disp = conn.execute("SELECT * FROM external_agent_dispatch WHERE dispatch_id=?", (dispatch_id,)).fetchone()
+    if disp is None:
+        return {"outcome": "error", "reason": f"no real external_agent_dispatch row for dispatch_id={dispatch_id!r}"}
+    if disp["status"] != "dispatched":
+        return {"outcome": "error",
+                 "reason": f"dispatch {dispatch_id} is not in status='dispatched' (found {disp['status']!r}) "
+                            f"-- refusing to double-process the same real attempt"}
+
+    task = conn.execute("SELECT * FROM umr_tasks WHERE umr_id=?", (disp["umr_id"],)).fetchone()
+    if task is None:
+        return {"outcome": "error", "reason": f"umr_tasks row {disp['umr_id']!r} not found"}
+
+    if parsed["umr_id"] != disp["umr_id"]:
+        return _external_agent_apply_reject(
+            conn, disp, task, now,
+            reason=f"UMR_ID mismatch: dispatch {dispatch_id} really belongs to {disp['umr_id']!r}, "
+                   f"reply named {parsed['umr_id']!r}",
+        )
+
+    if disp["expires_at"] and now > disp["expires_at"]:
+        return _external_agent_apply_reject(
+            conn, disp, task, now,
+            reason=f"dispatch {dispatch_id} expired at {disp['expires_at']} (submitted at {now})",
+        )
+
+    allowlist = set(json.loads(task["files_touched"] or "[]"))
+    prompt_allowlist = _extract_files_allowlist_from_prompt(disp["prompt_path"])
+    if prompt_allowlist is not None and set(prompt_allowlist) != allowlist:
+        return _external_agent_apply_reject(
+            conn, disp, task, now,
+            reason=f"files_touched allow-list drifted between real dispatch and real submit for "
+                   f"{dispatch_id}: prompt-time={sorted(prompt_allowlist)} current={sorted(allowlist)}",
+        )
+
+    diff_text = parsed["diff_text"]
+    diff_paths = _extract_diff_paths(diff_text)
+    if not diff_paths:
+        return _external_agent_apply_reject(
+            conn, disp, task, now,
+            reason="diff contains no recognizable file path headers ('diff --git'/'+++'/'---')",
+        )
+    unsafe = sorted(p for p in diff_paths if p.startswith("/") or ".." in p.split("/"))
+    if unsafe:
+        return _external_agent_apply_reject(
+            conn, disp, task, now, reason=f"diff touches unsafe/absolute/traversal path(s): {unsafe}",
+        )
+    out_of_scope = sorted(p for p in diff_paths if p not in allowlist)
+    if out_of_scope:
+        return _external_agent_apply_reject(
+            conn, disp, task, now,
+            reason=f"diff touches path(s) outside the real allow-list computed at dispatch time: "
+                   f"{out_of_scope} (allowed: {sorted(allowlist)})",
+        )
+
+    # --- apply ONLY to a fresh real git worktree, never main directly ---
+    branch_name = f"external-agent/{dispatch_id}"
+    worktree_path = os.path.join(artifacts_root, "worktrees", dispatch_id)
+    os.makedirs(os.path.dirname(worktree_path), exist_ok=True)
+    default_branch = _git_default_branch(repo_root, git_run)
+
+    r = git_run(["git", "worktree", "add", "-b", branch_name, worktree_path, f"origin/{default_branch}"], repo_root)
+    if r.returncode != 0:
+        return _external_agent_apply_reject(
+            conn, disp, task, now, reason=f"git worktree add failed: {(r.stderr or '').strip()[:2000]}",
+        )
+
+    patch_path = os.path.join(artifacts_root, "patches", f"{dispatch_id}.patch")
+    os.makedirs(os.path.dirname(patch_path), exist_ok=True)
+    with open(patch_path, "w") as f:
+        f.write(diff_text + "\n")
+
+    check_r = git_run(["git", "apply", "--check", patch_path], worktree_path)
+    if check_r.returncode != 0:
+        _git_worktree_cleanup(repo_root, worktree_path, git_run)
+        return _external_agent_apply_reject(
+            conn, disp, task, now, reason=f"diff failed 'git apply --check': {(check_r.stderr or '').strip()[:2000]}",
+        )
+    apply_r = git_run(["git", "apply", patch_path], worktree_path)
+    if apply_r.returncode != 0:
+        _git_worktree_cleanup(repo_root, worktree_path, git_run)
+        return _external_agent_apply_reject(
+            conn, disp, task, now, reason=f"diff failed to apply: {(apply_r.stderr or '').strip()[:2000]}",
+        )
+
+    status_r = git_run(["git", "status", "--porcelain"], worktree_path)
+    changed_paths = {line[3:].strip() for line in (status_r.stdout or "").splitlines() if line.strip()}
+    sneaky = sorted(p for p in changed_paths if p not in allowlist)
+    if sneaky:
+        _git_worktree_cleanup(repo_root, worktree_path, git_run)
+        return _external_agent_apply_reject(
+            conn, disp, task, now, reason=f"applied diff changed real path(s) outside the allow-list: {sneaky}",
+        )
+
+    git_run(["git", "add", "-A"], worktree_path)
+    commit_msg = (
+        f"external-agent(chat.z.ai): {task['task_identity']}\n\n"
+        f"DISPATCH_ID: {dispatch_id}\nUMR_ID: {task['umr_id']}\n"
+        f"Real Owner directive: UMR-20260806-095416-b6f0"
+    )
+    commit_r = git_run(["git", "commit", "-m", commit_msg], worktree_path)
+    if commit_r.returncode != 0:
+        _git_worktree_cleanup(repo_root, worktree_path, git_run)
+        return _external_agent_apply_reject(
+            conn, disp, task, now,
+            reason=f"git commit failed (empty diff / no real change?): {(commit_r.stderr or '').strip()[:2000]}",
+        )
+
+    # --- real, existing, unmodified quality-gate pipeline -- zero special-casing ---
+    gate_report_path = os.path.join(artifacts_root, "gate-reports", f"{dispatch_id}.json")
+    os.makedirs(os.path.dirname(gate_report_path), exist_ok=True)
+    quality_gate_sh = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quality-gate.sh")
+    gate_r = git_run(["bash", quality_gate_sh, worktree_path, gate_report_path], repo_root)
+    conn.execute(
+        "UPDATE external_agent_dispatch SET branch_name=?, worktree_path=?, gate_report_path=?, submitted_at=? "
+        "WHERE dispatch_id=?",
+        (branch_name, worktree_path, gate_report_path, now, dispatch_id),
+    )
+    if gate_r.returncode != 0:
+        _git_worktree_cleanup(repo_root, worktree_path, git_run)
+        return _external_agent_apply_reject(
+            conn, disp, task, now, reason=f"real quality-gate.sh FAILED (see {gate_report_path})",
+        )
+
+    # --- push + open a real PR, tagged with external-agent provenance -- NEVER auto-merged ---
+    if push:
+        push_r = git_run(["git", "push", "origin", branch_name], repo_root)
+        if push_r.returncode != 0:
+            _git_worktree_cleanup(repo_root, worktree_path, git_run)
+            return _external_agent_apply_reject(
+                conn, disp, task, now, reason=f"git push failed: {(push_r.stderr or '').strip()[:2000]}",
+            )
+
+    pr_title = f"external-agent(chat.z.ai): {task['task_identity']}"
+    pr_body = (
+        "**EXTERNAL AGENT PR -- chat.z.ai manual-paste bridge**\n\n"
+        "Provenance: this real change was produced by a human copy/paste round trip to "
+        "chat.z.ai (never browser automation -- hard Terms-of-Service constraint), applied "
+        "to a fresh real git worktree (never main directly), and passed the real, "
+        "unmodified quality-gate.sh pipeline.\n\n"
+        f"DISPATCH_ID: {dispatch_id}\nUMR_ID: {task['umr_id']}\n"
+        "Real Owner directive: UMR-20260806-095416-b6f0\n\n"
+        "**NEVER AUTO-MERGE THIS PR.** It requires real human review before merge, "
+        "regardless of what the normal internal-worker auto-merge pipeline does for other PRs.\n"
+    )
+    repo_slug = _gh_repo_slug(repo_root, git_run)
+    pr_cmd = ["gh", "pr", "create", "--base", default_branch, "--head", branch_name,
+              "--title", pr_title, "--body", pr_body, "--label", "external-agent-review-required"]
+    if repo_slug:
+        pr_cmd[2:2] = ["--repo", repo_slug]
+    pr_r = gh_run(pr_cmd, repo_root)
+    if pr_r.returncode != 0:
+        # Real, best-effort retry without --label (a missing/unrecognized label must
+        # never block a real, otherwise-successful PR from opening for real human review).
+        pr_cmd_no_label = [c for c in pr_cmd if c not in ("--label", "external-agent-review-required")]
+        pr_r = gh_run(pr_cmd_no_label, repo_root)
+    if pr_r.returncode != 0:
+        return _external_agent_apply_reject(
+            conn, disp, task, now, reason=f"gh pr create failed: {(pr_r.stderr or '').strip()[:2000]}",
+        )
+
+    pr_url = (pr_r.stdout or "").strip().splitlines()[-1] if (pr_r.stdout or "").strip() else None
+    pr_number = _extract_pr_number(pr_url)
+    conn.execute(
+        "UPDATE external_agent_dispatch SET status='accepted', pr_number=?, pr_url=?, reviewed_by=? "
+        "WHERE dispatch_id=?",
+        (pr_number, pr_url, reviewed_by, dispatch_id),
+    )
+    update_umr_task(conn, task["umr_id"], external_agent_status="pr_open")
+    return {
+        "outcome": "accepted", "dispatch_id": dispatch_id, "umr_id": task["umr_id"],
+        "pr_url": pr_url, "pr_number": pr_number, "branch_name": branch_name,
+        "gate_report_path": gate_report_path,
+    }
+
+
+def expire_external_agent_dispatches(conn, now=None):
+    """Real CLI command `expire-external-agent-dispatches`'s core logic
+    (UMR-20260806-095416-b6f0 §7). Pure bookkeeping, zero reasoning/
+    judgment: every real `external_agent_dispatch` row still in
+    status='dispatched' whose expires_at has passed is mechanically marked
+    'expired', and its umr_tasks row gets exactly the same real two-strike
+    treatment as any other real failure (_external_agent_apply_reject) --
+    never a 3rd real dispatch. Idempotent (the `WHERE status='dispatched'`
+    guard means an already-processed row is never touched twice) and
+    side-effect-free beyond marking rows (no git/gh calls at all) -- real,
+    safe to run on a real schedule (cron/systemd timer). Does NOT commit --
+    caller owns the transaction."""
+    now = now or _now_iso()
+    rows = conn.execute(
+        "SELECT * FROM external_agent_dispatch WHERE status='dispatched' AND expires_at < ?",
+        (now,),
+    ).fetchall()
+    results = []
+    for disp in rows:
+        task = conn.execute("SELECT * FROM umr_tasks WHERE umr_id=?", (disp["umr_id"],)).fetchone()
+        if task is None:
+            conn.execute(
+                "UPDATE external_agent_dispatch SET status='expired', submitted_at=? "
+                "WHERE dispatch_id=? AND status='dispatched'",
+                (now, disp["dispatch_id"]),
+            )
+            results.append({"dispatch_id": disp["dispatch_id"], "umr_id": disp["umr_id"],
+                             "outcome": "expired_orphaned_no_umr_row"})
+            continue
+        conn.execute(
+            "UPDATE external_agent_dispatch SET status='expired', submitted_at=? "
+            "WHERE dispatch_id=? AND status='dispatched'",
+            (now, disp["dispatch_id"]),
+        )
+        result = _external_agent_apply_reject(
+            conn, disp, task, now,
+            reason=f"dispatch {disp['dispatch_id']} expired (real {EXTERNAL_AGENT_DISPATCH_TTL_HOURS}h "
+                   f"window, expires_at={disp['expires_at']}) with no real paste-back received",
+        )
+        # _external_agent_apply_reject() already set external_agent_dispatch.status='rejected' --
+        # this real expiry sweep's own outcome is 'expired' regardless, so overwrite that one
+        # field back for an accurate real audit trail (the row's terminal status here really is
+        # 'expired', a distinct real reason from a rejected-on-submit row).
+        conn.execute(
+            "UPDATE external_agent_dispatch SET status='expired' WHERE dispatch_id=?",
+            (disp["dispatch_id"],),
+        )
+        result["dispatch_status"] = "expired"
+        results.append(result)
+    return results
+
+
+def cmd_get_next_external_agent_task(args):
+    """Usage:
+      python3 superboss-register.py get-next-external-agent-task \\
+          [--artifacts-root PATH] [--repo-root PATH]
+    Prints a JSON header, then the real rendered prompt text -- the Owner
+    copies everything from the "COPY EVERYTHING BELOW" marker onward into
+    chat.z.ai by hand. NEVER any browser automation against chat.z.ai."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_umr_table(conn)
+    _ensure_external_agent_dispatch_table(conn)
+    artifacts_root = args.artifacts_root or EXTERNAL_AGENT_ARTIFACTS_ROOT
+    repo_root = args.repo_root or EXTERNAL_AGENT_REPO_ROOT
+    with _write_lock():
+        result = get_next_external_agent_task(conn, artifacts_root=artifacts_root, repo_root=repo_root)
+        if result is not None:
+            conn.commit()
+    conn.close()
+    if result is None:
+        print(json.dumps({"ok": True, "dispatched": False,
+                           "message": "no real eligible external-agent task available right now"}, indent=2))
+        return
+    print(json.dumps({"ok": True, "dispatched": True, "dispatch_id": result["dispatch_id"],
+                       "umr_id": result["umr_id"], "prompt_path": result["prompt_path"],
+                       "expires_at": result["expires_at"]}, indent=2))
+    print("\n" + "=" * 78)
+    print("COPY EVERYTHING BELOW THIS LINE INTO chat.z.ai BY HAND "
+          "(never browser-automate this -- hard ToS constraint):")
+    print("=" * 78 + "\n")
+    print(result["prompt_text"])
+
+
+def cmd_submit_external_agent_result(args):
+    """Usage:
+      python3 superboss-register.py submit-external-agent-result \\
+          --reply-file PATH [--reviewed-by NAME] [--no-push] \\
+          [--artifacts-root PATH] [--repo-root PATH]
+    --reply-file is a real file holding exactly what the Owner pasted back
+    from chat.z.ai, byte for byte."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_umr_table(conn)
+    _ensure_external_agent_dispatch_table(conn)
+    with open(args.reply_file, "r") as f:
+        reply_text = f.read()
+    artifacts_root = args.artifacts_root or EXTERNAL_AGENT_ARTIFACTS_ROOT
+    repo_root = args.repo_root or EXTERNAL_AGENT_REPO_ROOT
+    with _write_lock():
+        result = submit_external_agent_result(
+            conn, reply_text=reply_text, artifacts_root=artifacts_root, repo_root=repo_root,
+            reviewed_by=args.reviewed_by, push=not args.no_push,
+        )
+        conn.commit()
+    conn.close()
+    print(json.dumps(result, indent=2, default=str))
+
+
+def cmd_expire_external_agent_dispatches(args):
+    """Usage: python3 superboss-register.py expire-external-agent-dispatches
+    Pure bookkeeping, zero reasoning/judgment -- safe on a real cron/systemd
+    timer schedule."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_umr_table(conn)
+    _ensure_external_agent_dispatch_table(conn)
+    with _write_lock():
+        results = expire_external_agent_dispatches(conn)
+        conn.commit()
+    conn.close()
+    print(json.dumps({"ok": True, "expired_count": len(results), "results": results}, indent=2, default=str))
+
+
+def cmd_mark_external_agent_eligible(args):
+    """Usage:
+      python3 superboss-register.py mark-external-agent-eligible \\
+          --umr-id UMR-... --task-type {isolated_bugfix,doc_update,single_file_refactor,test_addition_only} \\
+          --blast-radius isolated --files-touched-json '["path/one.md"]' \\
+          --acceptance-criteria "..." [--repro-steps "..."] [--requires-multi-file-context]"""
+    init_db_silent()
+    conn = _connect()
+    _ensure_umr_table(conn)
+    files_touched = json.loads(args.files_touched_json)
+    with _write_lock():
+        result = mark_external_agent_eligible(
+            conn, args.umr_id, task_type=args.task_type, blast_radius=args.blast_radius,
+            requires_multi_file_context=args.requires_multi_file_context,
+            files_touched=files_touched, acceptance_criteria=args.acceptance_criteria,
+            repro_steps=args.repro_steps,
+        )
+        conn.commit()
+    conn.close()
+    print(json.dumps(result, indent=2, default=str))
+
+
+# Real, env-overridable defaults (same convention as DB_PATH's own
+# SUPERBOSS_REGISTER_DB env override above) -- tests point these at real
+# scratch directories/repos instead of the real, live
+# /opt/veridian/ai-os/external_agent and this real repo checkout.
+EXTERNAL_AGENT_ARTIFACTS_ROOT = os.environ.get("EXTERNAL_AGENT_ARTIFACTS_ROOT", "/opt/veridian/ai-os/external_agent")
+EXTERNAL_AGENT_REPO_ROOT = os.environ.get("EXTERNAL_AGENT_REPO_ROOT", os.path.dirname(os.path.abspath(__file__)))
+
+
 def init_db_silent():
     if not os.path.exists(DB_PATH):
         conn = _connect()
@@ -6204,6 +7225,52 @@ if __name__ == "__main__":
     p_markterm.add_argument("--status", required=True, choices=["completed", "failed", "killed"])
     p_markterm.add_argument("--reason", default=None)
 
+    # Real Owner directive UMR-20260806-095416-b6f0: fourth real worker
+    # channel, a fully manual human-paste bridge to chat.z.ai. NEVER any
+    # browser automation against chat.z.ai (hard ToS constraint).
+    p_eaelig = sub.add_parser("mark-external-agent-eligible",
+                               help="UMR-20260806-095416-b6f0: mark one real umr_tasks row "
+                                    "external_agent_eligible=1 via the real eligibility function "
+                                    "-- refuses (raises) if the row does not really pass every rule")
+    p_eaelig.add_argument("--umr-id", dest="umr_id", required=True)
+    p_eaelig.add_argument("--task-type", dest="task_type", required=True,
+                           choices=list(EXTERNAL_AGENT_ALLOWED_TASK_TYPES))
+    p_eaelig.add_argument("--blast-radius", dest="blast_radius", required=True)
+    p_eaelig.add_argument("--files-touched-json", dest="files_touched_json", required=True,
+                           help="JSON array of exact repo-relative paths, e.g. '[\"README.md\"]'")
+    p_eaelig.add_argument("--acceptance-criteria", dest="acceptance_criteria", required=True)
+    p_eaelig.add_argument("--repro-steps", dest="repro_steps", default=None,
+                           help="required (by the real eligibility function) for task-type isolated_bugfix")
+    p_eaelig.add_argument("--requires-multi-file-context", dest="requires_multi_file_context",
+                           action="store_true", default=False)
+
+    p_eanext = sub.add_parser("get-next-external-agent-task",
+                               help="UMR-20260806-095416-b6f0: select+dispatch one real eligible "
+                                    "task to the chat.z.ai manual-paste bridge, print the real "
+                                    "prompt for the Owner to copy out by hand")
+    p_eanext.add_argument("--artifacts-root", dest="artifacts_root", default=None)
+    p_eanext.add_argument("--repo-root", dest="repo_root", default=None)
+
+    p_easubmit = sub.add_parser("submit-external-agent-result",
+                                 help="UMR-20260806-095416-b6f0: parse the Owner's real pasted-back "
+                                      "chat.z.ai reply, apply to a fresh worktree (never main), run "
+                                      "the real unmodified quality-gate.sh, open a real PR (never "
+                                      "auto-merged) on success, real two-strike reject/requeue/"
+                                      "fallback otherwise")
+    p_easubmit.add_argument("--reply-file", dest="reply_file", required=True,
+                             help="path to a real file holding exactly what the Owner pasted back, verbatim")
+    p_easubmit.add_argument("--reviewed-by", dest="reviewed_by", default=None)
+    p_easubmit.add_argument("--no-push", dest="no_push", action="store_true", default=False,
+                             help="skip the real 'git push' step (real tests only)")
+    p_easubmit.add_argument("--artifacts-root", dest="artifacts_root", default=None)
+    p_easubmit.add_argument("--repo-root", dest="repo_root", default=None)
+
+    p_eaexpire = sub.add_parser("expire-external-agent-dispatches",
+                                 help="UMR-20260806-095416-b6f0: pure bookkeeping -- mark every real "
+                                      "external_agent_dispatch row past its real 24h expires_at as "
+                                      "expired and apply the real two-strike rule; idempotent, "
+                                      "safe on a real cron/systemd-timer schedule")
+
     args = p.parse_args()
     if args.cmd == "init":
         with _write_lock():
@@ -6313,3 +7380,11 @@ if __name__ == "__main__":
         cmd_mark_umr_dispatched(args)
     elif args.cmd == "mark-umr-terminal":
         cmd_mark_umr_terminal(args)
+    elif args.cmd == "mark-external-agent-eligible":
+        cmd_mark_external_agent_eligible(args)
+    elif args.cmd == "get-next-external-agent-task":
+        cmd_get_next_external_agent_task(args)
+    elif args.cmd == "submit-external-agent-result":
+        cmd_submit_external_agent_result(args)
+    elif args.cmd == "expire-external-agent-dispatches":
+        cmd_expire_external_agent_dispatches(args)

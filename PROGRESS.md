@@ -76,8 +76,10 @@ SOP that this one script is the canonical read/write surface for
       `tests/test_ocid_artifact_links.py`.
 - [x] `python3 -m py_compile superboss-register.py` clean.
 
+- [x] Committed (`d69a40b`), pushed
+      `worker/task-20260806-031857-extend-superboss-register-py-with-pm-dec`,
+      opened real PR: https://github.com/FChecklist/veridian-scripts/pull/103
+
 ## Remaining
 
-- [ ] Commit + push, open real PR against `FChecklist/veridian-scripts`
-      `main`.
 - [ ] Independent review before merge.

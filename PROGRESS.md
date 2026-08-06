@@ -41,6 +41,9 @@ Governing UMR: UMR-20260806-071025-1d28. Subject: PM approval of proposal 62.
       `ts_completed` timestamps (see SPEC_VERIFICATION doc for the full reasoning).
 - [x] Documented full evidence in `SPEC_VERIFICATION_2026-08-06T234542Z.md`.
 
+- [x] Committed (`a847612`) + pushed branch, opened PR #232:
+      https://github.com/FChecklist/veridian-scripts/pull/232
+
 ## Remaining
-- [ ] Commit + push this branch, open PR for the one real, additive change
-      (`tests/test_build_lock_spin_bound.py`) plus this documentation.
+- [ ] None. Task complete: SPEC premise verified stale and documented; the one real gap
+      (spin-bound test) closed and shipped in PR #232.

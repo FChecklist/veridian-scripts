@@ -588,9 +588,11 @@ def test_render_report_text_survives_per_metric_insufficient_data(monkeypatch):
         "stall_detection_section": {"error": None, "stuck_task_threshold_minutes": 30.0, "tasks": []},
         "collision_detection_section": {
             "collision_detected": False, "tracked_repos": [], "checked_unit_globs": [],
-            "all_pr_collision_pairs": [], "all_worker_collision_pairs": [],
-            "pr_file_collisions": {"by_repo": {}, "errors": []},
-            "worker_umr_collisions": {"errors": []},
+            "file_overlap_max_age_hours": 48, "file_overlap_excluded_files": [],
+            "total_candidate_count": 0, "primary_candidate_count": 0, "secondary_candidate_count": 0,
+            "capped": False, "shown_count": 0, "shown_collisions": [],
+            "by_repo_citation": {}, "by_repo_file": {},
+            "worker_umr_collisions": {"errors": []}, "errors": [],
         },
         "instruction_quality_section": {"error": None, "total_checked": 0, "pass_count": 0, "failing": []},
     }
@@ -657,7 +659,9 @@ def test_get_stuck_tasks_and_detail_reuse_same_source(tmp_path, monkeypatch):
     assert summary["stuck_task_count"] == len(detail["tasks"]) == 1
 
 
-# --- Section 12: deterministic collision detection --------------------------
+# --- Section 12: deterministic collision detection (redefined by
+# UMR-20260806-043900-8c48 -- primary same-UMR/task-identity citation match,
+# narrowed+excluded-list secondary file-overlap, hard output cap) ----------
 def test_parse_running_collision_unit_names():
     stdout = (
         "  UNIT LOAD ACTIVE SUB DESCRIPTION\n"
@@ -674,35 +678,140 @@ def test_extract_umr_ids():
     assert pm.extract_umr_ids(text) == {"UMR-20260805-181636-32f2", "UMR-20260802-165606-4413"}
 
 
-def test_detect_pr_file_collisions_real_overlap(monkeypatch):
-    def fake_run_cmd(argv, timeout=30):
-        if argv[:3] == ["gh", "pr", "list"]:
-            return 0, json.dumps([{"number": 1, "title": "A"}, {"number": 2, "title": "B"}]), ""
-        if argv[:3] == ["gh", "pr", "diff"]:
-            pr_num = argv[3]
-            if pr_num == "1":
-                return 0, "shared_file.py\nonly_in_1.py\n", ""
-            if pr_num == "2":
-                return 0, "shared_file.py\nonly_in_2.py\n", ""
-        return 1, "", "unmocked"
-    monkeypatch.setattr(pm, "run_cmd", fake_run_cmd)
-    result = pm.detect_pr_file_collisions(repos=("fake-repo",))
-    collisions = result["by_repo"]["fake-repo"]["collisions"]
-    assert len(collisions) == 1
-    assert collisions[0]["shared_files"] == ["shared_file.py"]
+def test_extract_citation_tokens_umr_and_task_identity():
+    text = "cites UMR-20260805-181636-32f2 and also task-20260806-035541-owner-directive--build-a-real"
+    tokens = pm.extract_citation_tokens(text)
+    assert "UMR-20260805-181636-32f2" in tokens
+    assert "task-20260806-035541-owner-directive--build-a-real" in tokens
 
 
-def test_detect_pr_file_collisions_no_overlap(monkeypatch):
-    def fake_run_cmd(argv, timeout=30):
-        if argv[:3] == ["gh", "pr", "list"]:
-            return 0, json.dumps([{"number": 1, "title": "A"}, {"number": 2, "title": "B"}]), ""
-        if argv[:3] == ["gh", "pr", "diff"]:
-            pr_num = argv[3]
-            return (0, "only_in_1.py\n", "") if pr_num == "1" else (0, "only_in_2.py\n", "")
-        return 1, "", "unmocked"
-    monkeypatch.setattr(pm, "run_cmd", fake_run_cmd)
-    result = pm.detect_pr_file_collisions(repos=("fake-repo",))
-    assert result["by_repo"]["fake-repo"]["collisions"] == []
+def test_extract_citation_tokens_empty_text():
+    assert pm.extract_citation_tokens(None) == set()
+    assert pm.extract_citation_tokens("") == set()
+    assert pm.extract_citation_tokens("nothing to cite here") == set()
+
+
+def test_pr_is_recent_within_window():
+    now = pm.datetime.now(pm.timezone.utc)
+    cutoff = now - pm.timedelta(hours=48)
+    recent_pr = {"createdAt": now.isoformat()}
+    assert pm._pr_is_recent(recent_pr, cutoff) is True
+
+
+def test_pr_is_recent_outside_window():
+    now = pm.datetime.now(pm.timezone.utc)
+    cutoff = now - pm.timedelta(hours=48)
+    old_pr = {"createdAt": (now - pm.timedelta(hours=200)).isoformat()}
+    assert pm._pr_is_recent(old_pr, cutoff) is False
+
+
+def test_pr_is_recent_missing_or_unparseable_createdat_treated_as_not_recent():
+    now = pm.datetime.now(pm.timezone.utc)
+    cutoff = now - pm.timedelta(hours=48)
+    assert pm._pr_is_recent({}, cutoff) is False
+    assert pm._pr_is_recent({"createdAt": None}, cutoff) is False
+    assert pm._pr_is_recent({"createdAt": "not-a-date"}, cutoff) is False
+
+
+def test_detect_pr_citation_collisions_matches_shared_umr():
+    """PRIMARY signal (UMR-20260806-043900-8c48): two PRs citing the same
+    real UMR in title/body/branch -- no shared file involved at all."""
+    prs = [
+        {"number": 98, "title": "fix: item 2", "body": "relates to UMR-20260806-030048-5d7a",
+         "headRefName": "worker/task-a"},
+        {"number": 100, "title": "fix: item 2 (v2)", "body": "also UMR-20260806-030048-5d7a",
+         "headRefName": "worker/task-b"},
+        {"number": 200, "title": "unrelated", "body": "UMR-20260101-000000-ffff",
+         "headRefName": "worker/task-c"},
+    ]
+    result = pm.detect_pr_citation_collisions("fake-repo", prs)
+    assert len(result["collisions"]) == 1
+    c = result["collisions"][0]
+    assert c["kind"] == "pr_citation"
+    assert {c["pr_a"], c["pr_b"]} == {98, 100}
+    assert c["shared_citations"] == ["UMR-20260806-030048-5d7a"]
+
+
+def test_detect_pr_citation_collisions_no_shared_citation():
+    prs = [
+        {"number": 1, "title": "a", "body": "UMR-20260101-000000-aaaa", "headRefName": "x"},
+        {"number": 2, "title": "b", "body": "UMR-20260101-000000-bbbb", "headRefName": "y"},
+    ]
+    result = pm.detect_pr_citation_collisions("fake-repo", prs)
+    assert result["collisions"] == []
+
+
+def test_detect_pr_citation_collisions_matches_task_identity_no_umr():
+    prs = [
+        {"number": 1, "title": "x", "body": "", "headRefName": "worker/task-20260806-035541-owner-directive--build"},
+        {"number": 2, "title": "y", "body": "resumes task-20260806-035541-owner-directive--build", "headRefName": "z"},
+    ]
+    result = pm.detect_pr_citation_collisions("fake-repo", prs)
+    assert len(result["collisions"]) == 1
+    assert "task-20260806-035541-owner-directive--build" in result["collisions"][0]["shared_citations"]
+
+
+def test_detect_pr_file_collisions_excludes_known_common_files(monkeypatch):
+    """SECONDARY signal (UMR-20260806-043900-8c48): a shared PROGRESS.md/
+    package.json touch alone must NOT trigger a collision -- this is the
+    exact real false-positive pattern that flooded the report."""
+    now = pm.datetime.now(pm.timezone.utc)
+    prs = [
+        {"number": 1, "title": "A", "createdAt": now.isoformat()},
+        {"number": 2, "title": "B", "createdAt": now.isoformat()},
+    ]
+
+    def fake_get_pr_changed_files(repo, pr_number):
+        if pr_number == 1:
+            return {"PROGRESS.md", "package.json"}, None
+        return {"PROGRESS.md", "package.json"}, None
+    monkeypatch.setattr(pm, "get_pr_changed_files", fake_get_pr_changed_files)
+
+    result = pm.detect_pr_file_collisions("fake-repo", prs)
+    assert result["collisions"] == []
+
+
+def test_detect_pr_file_collisions_real_code_overlap_still_flags(monkeypatch):
+    now = pm.datetime.now(pm.timezone.utc)
+    prs = [
+        {"number": 1, "title": "A", "createdAt": now.isoformat()},
+        {"number": 2, "title": "B", "createdAt": now.isoformat()},
+    ]
+
+    def fake_get_pr_changed_files(repo, pr_number):
+        if pr_number == 1:
+            return {"PROGRESS.md", "real_module.py"}, None
+        return {"PROGRESS.md", "real_module.py"}, None
+    monkeypatch.setattr(pm, "get_pr_changed_files", fake_get_pr_changed_files)
+
+    result = pm.detect_pr_file_collisions("fake-repo", prs)
+    assert len(result["collisions"]) == 1
+    # PROGRESS.md excluded, real_module.py is the real signal that remains.
+    assert result["collisions"][0]["shared_files"] == ["real_module.py"]
+
+
+def test_detect_pr_file_collisions_ignores_old_prs(monkeypatch):
+    """SECONDARY signal narrowing (UMR-20260806-043900-8c48): a PR opened
+    outside the 48h window is excluded from file-overlap checking entirely,
+    even with a real non-excluded shared file -- this is exactly the
+    historical-backlog flood the fix closes."""
+    now = pm.datetime.now(pm.timezone.utc)
+    old = now - pm.timedelta(hours=500)
+    prs = [
+        {"number": 1, "title": "A", "createdAt": old.isoformat()},
+        {"number": 2, "title": "B", "createdAt": old.isoformat()},
+    ]
+    calls = []
+
+    def fake_get_pr_changed_files(repo, pr_number):
+        calls.append(pr_number)
+        return {"real_module.py"}, None
+    monkeypatch.setattr(pm, "get_pr_changed_files", fake_get_pr_changed_files)
+
+    result = pm.detect_pr_file_collisions("fake-repo", prs)
+    assert result["recent_pr_count"] == 0
+    assert result["collisions"] == []
+    assert calls == []  # never even fetched diffs for out-of-window PRs
 
 
 def test_detect_worker_umr_collisions_real_overlap(tmp_path, monkeypatch):
@@ -722,7 +831,8 @@ def test_detect_worker_umr_collisions_real_overlap(tmp_path, monkeypatch):
 
     result = pm.detect_worker_umr_collisions()
     assert len(result["collisions"]) == 1
-    assert result["collisions"][0]["shared_umrs"] == ["UMR-20260805-181636-32f2"]
+    assert result["collisions"][0]["kind"] == "worker_citation"
+    assert result["collisions"][0]["shared_citations"] == ["UMR-20260805-181636-32f2"]
 
 
 def test_detect_worker_umr_collisions_no_overlap(tmp_path, monkeypatch):
@@ -742,29 +852,105 @@ def test_detect_worker_umr_collisions_no_overlap(tmp_path, monkeypatch):
     assert result["collisions"] == []
 
 
-def test_get_collision_detection_section_combines_both_sources(monkeypatch):
-    monkeypatch.setattr(pm, "detect_pr_file_collisions", lambda repos=None: {
-        "by_repo": {"r": {"open_pr_count": 2, "collisions": [{"repo": "r", "pr_a": 1, "pr_b": 2,
-                                                                "pr_a_title": "x", "pr_b_title": "y",
-                                                                "shared_files": ["f.py"]}]}},
-        "errors": [],
-    })
+def test_rank_collision_candidates_primary_before_secondary():
+    candidates = [
+        {"kind": "pr_file", "id": "file1"},
+        {"kind": "pr_citation", "id": "cite1"},
+        {"kind": "pr_file", "id": "file2"},
+        {"kind": "worker_citation", "id": "cite2"},
+    ]
+    ranked = pm._rank_collision_candidates(candidates)
+    assert [c["kind"] for c in ranked] == ["pr_citation", "worker_citation", "pr_file", "pr_file"]
+
+
+def test_cap_collision_candidates_under_trigger_not_capped():
+    ranked = [{"kind": "pr_citation", "id": i} for i in range(5)]
+    capped, shown = pm._cap_collision_candidates(ranked, trigger=200, top_k=50)
+    assert capped is False
+    assert shown == ranked
+
+
+def test_cap_collision_candidates_over_trigger_shows_top_k():
+    """HARD CAP (UMR-20260806-043900-8c48): the exact real safety net that
+    keeps Section 12 well under a few hundred lines even if the
+    primary/secondary redefinition somehow still let something noisy
+    through."""
+    ranked = [{"kind": "pr_citation", "id": i} for i in range(300)]
+    capped, shown = pm._cap_collision_candidates(ranked, trigger=200, top_k=50)
+    assert capped is True
+    assert len(shown) == 50
+    assert shown == ranked[:50]
+
+
+def test_get_collision_detection_section_combines_primary_and_secondary(monkeypatch, tmp_path):
+    """End-to-end (mocked gh/systemctl) proof that PRIMARY (citation match)
+    and SECONDARY (recent, exclude-list-filtered file overlap) both surface
+    as real candidates, and that a PROGRESS.md-only overlap does NOT."""
+    monkeypatch.setattr(pm, "COLLISION_TRACKED_REPOS", ("fake-repo",))
+    now = pm.datetime.now(pm.timezone.utc)
+
+    def fake_get_open_pr_list(repo):
+        return [
+            {"number": 1, "title": "fix", "body": "UMR-20260806-030048-5d7a",
+             "headRefName": "a", "createdAt": now.isoformat()},
+            {"number": 2, "title": "fix v2", "body": "UMR-20260806-030048-5d7a",
+             "headRefName": "b", "createdAt": now.isoformat()},
+            {"number": 3, "title": "unrelated", "body": "", "headRefName": "c", "createdAt": now.isoformat()},
+        ], None
+    monkeypatch.setattr(pm, "get_open_pr_list", fake_get_open_pr_list)
+
+    def fake_get_pr_changed_files(repo, pr_number):
+        if pr_number in (1, 2):
+            return {"PROGRESS.md"}, None  # excluded -- must not create a secondary collision
+        return {"real_shared_module.py"}, None
+    monkeypatch.setattr(pm, "get_pr_changed_files", fake_get_pr_changed_files)
     monkeypatch.setattr(pm, "detect_worker_umr_collisions", lambda: {
         "checked_units": [], "collisions": [], "errors": [],
     })
+
     result = pm.get_collision_detection_section()
     assert result["collision_detected"] is True
-    assert len(result["all_pr_collision_pairs"]) == 1
-    assert result["all_worker_collision_pairs"] == []
+    assert result["primary_candidate_count"] == 1
+    assert result["secondary_candidate_count"] == 0  # PROGRESS.md-only overlap correctly excluded
+    assert result["shown_collisions"][0]["kind"] == "pr_citation"
+    assert result["capped"] is False
 
 
 def test_get_collision_detection_section_no_collision(monkeypatch):
-    monkeypatch.setattr(pm, "detect_pr_file_collisions", lambda repos=None: {"by_repo": {}, "errors": []})
+    monkeypatch.setattr(pm, "COLLISION_TRACKED_REPOS", ("fake-repo",))
+    monkeypatch.setattr(pm, "get_open_pr_list", lambda repo: ([], None))
     monkeypatch.setattr(pm, "detect_worker_umr_collisions", lambda: {
         "checked_units": [], "collisions": [], "errors": [],
     })
     result = pm.get_collision_detection_section()
     assert result["collision_detected"] is False
+    assert result["total_candidate_count"] == 0
+
+
+def test_get_collision_detection_section_applies_hard_cap(monkeypatch):
+    """Real end-to-end proof the hard cap actually bounds Section 12's
+    output size -- the concrete requirement from UMR-20260806-043900-8c48
+    (report must be back to a reasonable length)."""
+    monkeypatch.setattr(pm, "COLLISION_TRACKED_REPOS", ("fake-repo",))
+    now = pm.datetime.now(pm.timezone.utc)
+    # 60 PRs all citing the exact same UMR -> C(60,2) = 1770 primary
+    # candidates, well over COLLISION_CANDIDATE_CAP_TRIGGER (200).
+    prs = [
+        {"number": i, "title": f"pr {i}", "body": "UMR-20260806-030048-5d7a",
+         "headRefName": f"branch-{i}", "createdAt": now.isoformat()}
+        for i in range(60)
+    ]
+    monkeypatch.setattr(pm, "get_open_pr_list", lambda repo: (prs, None))
+    monkeypatch.setattr(pm, "get_pr_changed_files", lambda repo, n: (set(), None))
+    monkeypatch.setattr(pm, "detect_worker_umr_collisions", lambda: {
+        "checked_units": [], "collisions": [], "errors": [],
+    })
+
+    result = pm.get_collision_detection_section()
+    assert result["total_candidate_count"] > pm.COLLISION_CANDIDATE_CAP_TRIGGER
+    assert result["capped"] is True
+    assert result["shown_count"] == pm.COLLISION_TOP_K
+    assert len(result["shown_collisions"]) == pm.COLLISION_TOP_K
 
 
 # --- Section 13: deterministic instruction quality check --------------------

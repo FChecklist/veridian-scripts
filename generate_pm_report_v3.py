@@ -161,16 +161,38 @@ pure function of those reads -- no new AI/LLM call anywhere.
       names, confirmed by inspecting the live file before writing this,
       not guessed).
   12. DETERMINISTIC COLLISION DETECTION -- read-only, zero AI judgment on
-      whether an overlap "really" is a collision, pure set-intersection over
-      two independent real sources:
-        (a) for every real open PR in every real tracked repo, pairwise
-            compares each PR's real `gh pr diff <N> --name-only` changed-file
-            set against every other open PR's set IN THE SAME REPO.
-        (b) for every real currently-running veridian-worker@*/
-            veridian-supervisor@* unit, pairwise compares the set of
-            UMR-YYYYMMDD-HHMMSS-xxxx ids found (via regex) in that unit's
-            real WorkingDirectory's prompt.txt against every other running
-            unit's set.
+      whether an overlap "really" is a collision, pure set-intersection.
+      REDEFINED by UMR-20260806-043900-8c48 (real PM finding: the original
+      file-overlap-only version flooded this section with ~12,800
+      false-positive lines across the full historical PR backlog, pushing
+      the whole report to 3.7MB/13,960 lines -- see
+      COLLISION_FILE_OVERLAP_EXCLUDE_FILES's comment block above
+      detect_pr_citation_collisions() for the full real finding). Current
+      definition, two independent real sources:
+        PRIMARY (the real signal -- every real collision this session
+        actually looked like this, never a shared-file match): for every
+        real open PR in every real tracked repo, AND for every real
+        currently-running veridian-worker@*/veridian-supervisor@* unit,
+        pairwise compares the set of UMR-YYYYMMDD-HHMMSS-xxxx ids AND
+        task-YYYYMMDD-HHMMSS-<slug> task-identity tokens (regex,
+        extract_citation_tokens()) found in that PR's real
+        title+body+branch-name or that unit's real WorkingDirectory's
+        prompt.txt, against every other PR/unit's set. No time/history
+        scoping -- a same-citation match is real regardless of PR age.
+        SECONDARY (kept, narrowed): real `gh pr diff <N> --name-only`
+        changed-file-set pairwise overlap, but ONLY for PRs opened within
+        the last COLLISION_FILE_OVERLAP_MAX_AGE_HOURS hours (48), and only
+        for shared files outside the fixed, documented
+        COLLISION_FILE_OVERLAP_EXCLUDE_FILES list (PROGRESS.md, common
+        lockfiles/package.json, the shared ACTIVE-CLAIMS/CONSTITUTION
+        YAMLs, the shared db schema file, tsconfig.json -- known common
+        infrastructure churn that alone is never real collision signal).
+        HARD CAP (defensive safety net, applies regardless of the above):
+        if the combined candidate count exceeds COLLISION_CANDIDATE_CAP_TRIGGER
+        (200), only the top COLLISION_TOP_K (50) candidates render
+        (primary ranked before secondary, _rank_collision_candidates() --
+        a fixed ordering rule, not AI judgment), plus an honest "N
+        candidates found, showing top K" summary line.
       Emits COLLISION_DETECTED=YES/NO with the specific pair(s) named on
       YES. Tracked-repo list: this file found no single pre-existing
       canonical "tracked repos" constant to reuse -- resource_governor.py's
@@ -231,7 +253,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # ---------------------------------------------------------------------------
 # Paths (all overridable via env vars, same convention as dispatch-tick.py /
@@ -273,10 +295,14 @@ REPORT_FORMAT_VERSION = "pm-report-v3-placeholder-gtm-score"
 # UMR-20260806-041307-0bfd: this script's own version constant. Bumped on
 # every real functional change; see the module docstring's SCRIPT_VERSION
 # block for what changed at each bump.
-# 3.1.1: real fix, Section 13 (get_last_n_umr_tasks) -- added the missing
-# task_kind='veridian_task_create' filter; see that function's own
-# docstring for the real, confirmed-live bug this closes.
-SCRIPT_VERSION = "3.1.1"
+# 3.1.1 (UMR-20260806-043900-8c48): narrowed Section 12's collision signal
+# from raw historical file-overlap to primary UMR/task-identity citation
+# match + narrowed/excluded-list secondary file-overlap + a hard output cap
+# -- see the Section 12 comment block above detect_pr_citation_collisions().
+# 3.1.2 (UMR-20260806-041307-0bfd): real fix, Section 13 (get_last_n_umr_tasks)
+# -- added the missing task_kind='veridian_task_create' filter; see that
+# function's own docstring for the real, confirmed-live bug this closes.
+SCRIPT_VERSION = "3.1.2"
 
 # ---------------------------------------------------------------------------
 # Section 9-13 constants (UMR-20260806-041307-0bfd) -- see module docstring
@@ -303,6 +329,26 @@ WORKER_COLLISION_UNIT_GLOBS = ("veridian-worker@*", "veridian-supervisor@*")
 
 UMR_CITATION_RE = re.compile(r"UMR-\d{8}-\d{6}-[0-9a-f]{4}")
 VAGUE_VERB_PHRASES = ("look into", "improve", "consider", "explore")
+
+# UMR-20260806-043900-8c48: narrows Section 12's collision signal. See the
+# module docstring's SCRIPT_VERSION block and the Section 12 comment above
+# detect_pr_citation_collisions() for the full real finding/fix.
+TASK_IDENTITY_RE = re.compile(r"\btask-\d{8}-\d{6}-[a-z0-9][a-z0-9-]*")
+COLLISION_FILE_OVERLAP_MAX_AGE_HOURS = 48
+COLLISION_FILE_OVERLAP_EXCLUDE_FILES = frozenset({
+    "PROGRESS.md",
+    "package.json",
+    "package-lock.json",
+    "bun.lock",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "ai-os/boss/ACTIVE-CLAIMS.yaml",
+    "ai-os/CONSTITUTION.yaml",
+    "src/lib/db/schema.ts",
+    "tsconfig.json",
+})
+COLLISION_CANDIDATE_CAP_TRIGGER = 200
+COLLISION_TOP_K = 50
 CONCRETE_COMPLETION_FILE_PATH_RE = re.compile(
     r"\b[\w][\w\-./]*\.(?:py|md|ya?ml|json|sh|sqlite3?|txt|js|ts|toml|cfg|ini)\b",
     re.IGNORECASE,
@@ -986,13 +1032,70 @@ def get_trend_analysis(sbr):
 
 
 # ---------------------------------------------------------------------------
-# Section 12 (UMR-20260806-041307-0bfd): deterministic collision detection.
-# Two independent, read-only, pure-overlap checks -- see module docstring.
+# Section 12 (UMR-20260806-041307-0bfd, narrowed by UMR-20260806-043900-8c48):
+# deterministic collision detection.
+#
+# UMR-20260806-043900-8c48 (real PM finding, confirmed live in umr_tasks):
+# the original version's only signal was raw file-overlap across the FULL
+# open-PR backlog, no exclude list, no recency scoping -- it flooded this
+# section with ~12,800 false-positive lines (unrelated PRs that merely both
+# touched a normal, weekly-churned shared file like PROGRESS.md/
+# package.json), pushing the whole report to 3.7MB/13,960 lines. This
+# session's own REAL collisions (PR #98/#100, #102/#103, #110/#111,
+# #115/#116) were never a shared-file match -- every one was two PRs/workers
+# citing the SAME UMR ID or task-identity. Redefined:
+#
+#   PRIMARY signal (the real one, see detect_pr_citation_collisions() /
+#   detect_worker_umr_collisions()): two open PRs, or two running
+#   veridian-worker@*/veridian-supervisor@* units, whose combined
+#   title+body+branch-name (PRs) or prompt.txt (workers) cite the same real
+#   UMR-YYYYMMDD-HHMMSS-xxxx id or the same real task-YYYYMMDD-HHMMSS-<slug>
+#   task-identity token (extract_citation_tokens()). No time/repo-history
+#   scoping -- a same-UMR citation is real signal regardless of PR age.
+#
+#   SECONDARY signal (file overlap, see detect_pr_file_collisions()): kept,
+#   but only for PRs opened within the last
+#   COLLISION_FILE_OVERLAP_MAX_AGE_HOURS hours (48 -- recent PRs, not the
+#   full historical backlog), and only after excluding
+#   COLLISION_FILE_OVERLAP_EXCLUDE_FILES (known common infrastructure files
+#   that alone are never real collision signal: PROGRESS.md/lockfiles/
+#   package.json/the shared claims+constitution YAMLs/db schema/tsconfig --
+#   this task's own found list plus what UMR-20260806-043900-8c48 itself
+#   named).
+#
+#   HARD CAP (defensive, applies regardless of the above -- see
+#   _cap_collision_candidates()): if the combined candidate count exceeds
+#   COLLISION_CANDIDATE_CAP_TRIGGER (200), only the top COLLISION_TOP_K (50)
+#   candidates are rendered, primary-signal candidates ranked before
+#   secondary/file-overlap ones (_rank_collision_candidates() -- a fixed,
+#   documented ordering rule, not AI judgment), plus an honest "N candidates
+#   found, showing top K" summary line. Never an unbounded dump.
 # ---------------------------------------------------------------------------
+def extract_citation_tokens(text):
+    """Pure function: the PRIMARY collision signal
+    (UMR-20260806-043900-8c48). Returns the set of real
+    UMR-YYYYMMDD-HHMMSS-xxxx ids AND real task-YYYYMMDD-HHMMSS-<slug>
+    task-identity tokens found in `text`. Two PRs/workers sharing ANY token
+    from this set are citing the same real directive -- this, not a shared
+    file, is what every real collision this session actually looked like."""
+    tokens = set(UMR_CITATION_RE.findall(text or ""))
+    tokens |= set(TASK_IDENTITY_RE.findall(text or ""))
+    return tokens
+
+
+def extract_umr_ids(text):
+    """Pure function over real text -- no fuzzy matching, exact
+    UMR-YYYYMMDD-HHMMSS-xxxx pattern only. Narrower than
+    extract_citation_tokens() (UMR ids only, no task-identity tokens); kept
+    as its own function since some callers/tests only care about UMR ids
+    specifically."""
+    return set(UMR_CITATION_RE.findall(text or ""))
+
+
 def get_open_pr_list(repo):
     code, out, err = run_cmd(
         ["gh", "pr", "list", "--repo", f"{GH_ORG}/{repo}", "--state", "open",
-         "--json", "number,title", "--limit", "200"],
+         "--json", "number,title,body,headRefName,createdAt", "--limit", "200"],
         timeout=30,
     )
     if code != 0:
@@ -1013,36 +1116,82 @@ def get_pr_changed_files(repo, pr_number):
     return {line.strip() for line in out.splitlines() if line.strip()}, None
 
 
-def detect_pr_file_collisions(repos=COLLISION_TRACKED_REPOS):
-    by_repo = {}
+def _pr_citation_text(pr):
+    return " ".join(str(pr.get(f) or "") for f in ("title", "body", "headRefName"))
+
+
+def _pr_is_recent(pr, cutoff_dt):
+    """Pure function. PRs with a missing/unparseable createdAt are treated
+    as NOT recent -- a conservative default that keeps the secondary
+    file-overlap check narrow rather than accidentally widening it."""
+    raw = pr.get("createdAt")
+    if not raw:
+        return False
+    try:
+        created = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return created >= cutoff_dt
+
+
+def detect_pr_citation_collisions(repo, prs):
+    """PRIMARY signal (UMR-20260806-043900-8c48): pairwise same-citation-
+    token overlap across ALL open PRs in `repo` passed in `prs` (a real
+    `gh pr list --json number,title,body,headRefName,createdAt` result
+    list) -- no time scoping, a same-UMR/task-identity citation is real
+    regardless of PR age."""
+    pr_tokens = {}
+    for pr in prs:
+        tokens = extract_citation_tokens(_pr_citation_text(pr))
+        if tokens:
+            pr_tokens[pr["number"]] = {"title": pr.get("title"), "tokens": tokens}
+    nums = sorted(pr_tokens.keys())
+    collisions = []
+    for i in range(len(nums)):
+        for j in range(i + 1, len(nums)):
+            a, b = nums[i], nums[j]
+            shared = pr_tokens[a]["tokens"] & pr_tokens[b]["tokens"]
+            if shared:
+                collisions.append({
+                    "kind": "pr_citation", "repo": repo, "pr_a": a, "pr_b": b,
+                    "pr_a_title": pr_tokens[a]["title"], "pr_b_title": pr_tokens[b]["title"],
+                    "shared_citations": sorted(shared),
+                })
+    return {"pr_with_citation_count": len(pr_tokens), "collisions": collisions}
+
+
+def detect_pr_file_collisions(repo, prs, max_age_hours=COLLISION_FILE_OVERLAP_MAX_AGE_HOURS):
+    """SECONDARY signal (UMR-20260806-043900-8c48): file-overlap, narrowed
+    to (a) PRs opened within the last `max_age_hours` hours only -- not the
+    full historical backlog -- and (b) shared files outside
+    COLLISION_FILE_OVERLAP_EXCLUDE_FILES only (a shared lockfile/scratch-doc/
+    shared-schema touch is normal weekly churn, never real signal alone).
+    `prs` is the same real `gh pr list` result list detect_pr_citation_collisions()
+    takes -- fetched once by the caller, not re-fetched here."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    recent_prs = [pr for pr in prs if _pr_is_recent(pr, cutoff)]
+    pr_files = {}
     errors = []
-    for repo in repos:
-        prs, err = get_open_pr_list(repo)
-        if err:
-            errors.append({"repo": repo, "error": err})
+    for pr in recent_prs:
+        n = pr["number"]
+        files, ferr = get_pr_changed_files(repo, n)
+        if ferr:
+            errors.append({"repo": repo, "pr": n, "error": ferr})
             continue
-        pr_files = {}
-        for pr in prs:
-            n = pr["number"]
-            files, ferr = get_pr_changed_files(repo, n)
-            if ferr:
-                errors.append({"repo": repo, "pr": n, "error": ferr})
-                continue
-            pr_files[n] = {"title": pr.get("title"), "files": files}
-        pr_nums = sorted(pr_files.keys())
-        collisions = []
-        for i in range(len(pr_nums)):
-            for j in range(i + 1, len(pr_nums)):
-                a, b = pr_nums[i], pr_nums[j]
-                shared = pr_files[a]["files"] & pr_files[b]["files"]
-                if shared:
-                    collisions.append({
-                        "repo": repo, "pr_a": a, "pr_b": b,
-                        "pr_a_title": pr_files[a]["title"], "pr_b_title": pr_files[b]["title"],
-                        "shared_files": sorted(shared),
-                    })
-        by_repo[repo] = {"open_pr_count": len(pr_files), "collisions": collisions}
-    return {"by_repo": by_repo, "errors": errors}
+        pr_files[n] = {"title": pr.get("title"), "files": files - COLLISION_FILE_OVERLAP_EXCLUDE_FILES}
+    nums = sorted(pr_files.keys())
+    collisions = []
+    for i in range(len(nums)):
+        for j in range(i + 1, len(nums)):
+            a, b = nums[i], nums[j]
+            shared = pr_files[a]["files"] & pr_files[b]["files"]
+            if shared:
+                collisions.append({
+                    "kind": "pr_file", "repo": repo, "pr_a": a, "pr_b": b,
+                    "pr_a_title": pr_files[a]["title"], "pr_b_title": pr_files[b]["title"],
+                    "shared_files": sorted(shared),
+                })
+    return {"recent_pr_count": len(recent_prs), "collisions": collisions, "errors": errors}
 
 
 def parse_running_collision_unit_names(stdout):
@@ -1071,13 +1220,10 @@ def get_unit_working_directory(unit_name):
     return wd or None
 
 
-def extract_umr_ids(text):
-    """Pure function over real text -- no fuzzy matching, exact
-    UMR-YYYYMMDD-HHMMSS-xxxx pattern only."""
-    return set(UMR_CITATION_RE.findall(text or ""))
-
-
 def get_unit_prompt_umrs(unit_name):
+    """Despite the name (kept for backward compat), returns the PRIMARY
+    combined citation-token set (UMR ids + task-identity tokens) found in
+    the unit's real prompt.txt -- see extract_citation_tokens()."""
     wd = get_unit_working_directory(unit_name)
     if not wd:
         return None, f"could not determine real WorkingDirectory for {unit_name}"
@@ -1087,46 +1233,97 @@ def get_unit_prompt_umrs(unit_name):
             text = f.read()
     except OSError as e:
         return None, f"could not read {prompt_path}: {e}"
-    return extract_umr_ids(text), None
+    return extract_citation_tokens(text), None
 
 
 def detect_worker_umr_collisions():
     units = get_running_collision_units()
-    unit_umrs = {}
+    unit_tokens = {}
     errors = []
     for u in units:
-        umrs, err = get_unit_prompt_umrs(u)
+        tokens, err = get_unit_prompt_umrs(u)
         if err:
             errors.append({"unit": u, "error": err})
             continue
-        if umrs:
-            unit_umrs[u] = umrs
-    unit_list = sorted(unit_umrs.keys())
+        if tokens:
+            unit_tokens[u] = tokens
+    unit_list = sorted(unit_tokens.keys())
     collisions = []
     for i in range(len(unit_list)):
         for j in range(i + 1, len(unit_list)):
             a, b = unit_list[i], unit_list[j]
-            shared = unit_umrs[a] & unit_umrs[b]
+            shared = unit_tokens[a] & unit_tokens[b]
             if shared:
-                collisions.append({"unit_a": a, "unit_b": b, "shared_umrs": sorted(shared)})
+                collisions.append({
+                    "kind": "worker_citation", "unit_a": a, "unit_b": b,
+                    "shared_citations": sorted(shared),
+                })
     return {"checked_units": unit_list, "collisions": collisions, "errors": errors}
 
 
+def _rank_collision_candidates(candidates):
+    """Pure function: PRIMARY-signal candidates ('pr_citation'/
+    'worker_citation') ranked before SECONDARY ('pr_file'). Stable within
+    each group (preserves original discovery order) -- a fixed, documented
+    ordering rule, not a scored/AI judgment."""
+    primary_kinds = {"pr_citation", "worker_citation"}
+    primary = [c for c in candidates if c["kind"] in primary_kinds]
+    secondary = [c for c in candidates if c["kind"] not in primary_kinds]
+    return primary + secondary
+
+
+def _cap_collision_candidates(ranked, trigger=COLLISION_CANDIDATE_CAP_TRIGGER, top_k=COLLISION_TOP_K):
+    """Pure function: the hard safety-net cap. Returns (capped_bool,
+    shown_list). Applied unconditionally, regardless of whether the
+    primary/secondary redefinition above already narrowed the real count --
+    a defensive backstop, not a substitute for the real narrowing."""
+    total = len(ranked)
+    capped = total > trigger
+    shown = ranked[:top_k] if capped else ranked
+    return capped, shown
+
+
 def get_collision_detection_section():
-    pr_result = detect_pr_file_collisions()
+    by_repo_citation = {}
+    by_repo_file = {}
+    errors = []
+    for repo in COLLISION_TRACKED_REPOS:
+        prs, err = get_open_pr_list(repo)
+        if err:
+            errors.append({"repo": repo, "error": err})
+            continue
+        by_repo_citation[repo] = detect_pr_citation_collisions(repo, prs)
+        file_result = detect_pr_file_collisions(repo, prs)
+        errors.extend(file_result.pop("errors"))
+        by_repo_file[repo] = file_result
+
     worker_result = detect_worker_umr_collisions()
-    pr_collision_pairs = [
-        c for repo_data in pr_result["by_repo"].values() for c in repo_data["collisions"]
-    ]
-    worker_collision_pairs = worker_result["collisions"]
+
+    pr_citation_pairs = [c for r in by_repo_citation.values() for c in r["collisions"]]
+    pr_file_pairs = [c for r in by_repo_file.values() for c in r["collisions"]]
+    worker_pairs = worker_result["collisions"]
+
+    all_candidates = pr_citation_pairs + worker_pairs + pr_file_pairs
+    ranked = _rank_collision_candidates(all_candidates)
+    total_candidates = len(ranked)
+    capped, shown = _cap_collision_candidates(ranked)
+
     return {
-        "collision_detected": bool(pr_collision_pairs or worker_collision_pairs),
+        "collision_detected": total_candidates > 0,
         "tracked_repos": list(COLLISION_TRACKED_REPOS),
         "checked_unit_globs": list(WORKER_COLLISION_UNIT_GLOBS),
-        "pr_file_collisions": pr_result,
+        "file_overlap_max_age_hours": COLLISION_FILE_OVERLAP_MAX_AGE_HOURS,
+        "file_overlap_excluded_files": sorted(COLLISION_FILE_OVERLAP_EXCLUDE_FILES),
+        "total_candidate_count": total_candidates,
+        "primary_candidate_count": len(pr_citation_pairs) + len(worker_pairs),
+        "secondary_candidate_count": len(pr_file_pairs),
+        "capped": capped,
+        "shown_count": len(shown),
+        "shown_collisions": shown,
+        "by_repo_citation": by_repo_citation,
+        "by_repo_file": by_repo_file,
         "worker_umr_collisions": worker_result,
-        "all_pr_collision_pairs": pr_collision_pairs,
-        "all_worker_collision_pairs": worker_collision_pairs,
+        "errors": errors,
     }
 
 
@@ -1503,28 +1700,44 @@ def render_report_text(report):
             lines.append(f"  task_id={t['task_id']} blocked_minutes={t['blocked_minutes']} "
                           f"last_note={t['last_note']}")
 
-    h("12. DETERMINISTIC COLLISION DETECTION (real PR file-overlap + real worker/supervisor UMR-chain overlap)")
+    h("12. DETERMINISTIC COLLISION DETECTION (primary: same UMR/task-identity citation; "
+      "secondary: recent file-overlap, common-file exclude list applied; hard-capped output)")
     collision = report["collision_detection_section"]
     lines.append(f"COLLISION_DETECTED={'YES' if collision['collision_detected'] else 'NO'}")
     lines.append(f"tracked_repos: {collision['tracked_repos']}  "
                   f"checked_unit_globs: {collision['checked_unit_globs']}")
-    if collision["all_pr_collision_pairs"]:
-        for c in collision["all_pr_collision_pairs"]:
-            lines.append(f"  [PR COLLISION] {c['repo']}: "
-                          f"PR #{c['pr_a']} ({c['pr_a_title']}) <-> PR #{c['pr_b']} ({c['pr_b_title']}) "
-                          f"shared files: {c['shared_files']}")
-    if collision["all_worker_collision_pairs"]:
-        for c in collision["all_worker_collision_pairs"]:
-            lines.append(f"  [WORKER/SUPERVISOR UMR COLLISION] {c['unit_a']} <-> {c['unit_b']} "
-                          f"shared UMRs: {c['shared_umrs']}")
-    if not collision["all_pr_collision_pairs"] and not collision["all_worker_collision_pairs"]:
+    lines.append(f"candidates: total={collision['total_candidate_count']}  "
+                  f"primary(same UMR/task-identity)={collision['primary_candidate_count']}  "
+                  f"secondary(file-overlap, opened <= {collision['file_overlap_max_age_hours']}h ago, "
+                  f"excludes {collision['file_overlap_excluded_files']})={collision['secondary_candidate_count']}")
+    if collision["capped"]:
+        lines.append(f"{collision['total_candidate_count']} candidate collisions found -- showing top "
+                      f"{collision['shown_count']} by relevance (primary ranked above secondary).")
+    if not collision["shown_collisions"]:
         lines.append("  No real pairwise overlap found.")
-    for repo, repo_data in collision["pr_file_collisions"]["by_repo"].items():
-        lines.append(f"  ({repo}: {repo_data['open_pr_count']} open PR(s) checked)")
-    if collision["pr_file_collisions"]["errors"]:
-        lines.append(f"  PR-check errors: {collision['pr_file_collisions']['errors']}")
+    else:
+        for c in collision["shown_collisions"]:
+            if c["kind"] == "pr_citation":
+                lines.append(f"  [PRIMARY: PR CITATION MATCH] {c['repo']}: "
+                              f"PR #{c['pr_a']} ({c['pr_a_title']}) <-> PR #{c['pr_b']} ({c['pr_b_title']}) "
+                              f"shared citations: {c['shared_citations']}")
+            elif c["kind"] == "worker_citation":
+                lines.append(f"  [PRIMARY: WORKER/SUPERVISOR CITATION MATCH] {c['unit_a']} <-> {c['unit_b']} "
+                              f"shared citations: {c['shared_citations']}")
+            elif c["kind"] == "pr_file":
+                lines.append(f"  [SECONDARY: RECENT PR FILE OVERLAP] {c['repo']}: "
+                              f"PR #{c['pr_a']} ({c['pr_a_title']}) <-> PR #{c['pr_b']} ({c['pr_b_title']}) "
+                              f"shared files: {c['shared_files']}")
+    for repo, repo_data in collision["by_repo_citation"].items():
+        lines.append(f"  ({repo}: {repo_data['pr_with_citation_count']} open PR(s) carry a citation token, "
+                      f"checked pairwise)")
+    for repo, repo_data in collision["by_repo_file"].items():
+        lines.append(f"  ({repo}: {repo_data['recent_pr_count']} PR(s) opened in the last "
+                      f"{collision['file_overlap_max_age_hours']}h, checked pairwise for file overlap)")
     if collision["worker_umr_collisions"]["errors"]:
         lines.append(f"  Worker-unit-check errors: {collision['worker_umr_collisions']['errors']}")
+    if collision["errors"]:
+        lines.append(f"  errors: {collision['errors']}")
 
     h("13. DETERMINISTIC INSTRUCTION QUALITY CHECK (last 20 real umr_tasks rows, fixed rule-based)")
     iq = report["instruction_quality_section"]

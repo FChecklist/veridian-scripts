@@ -18,6 +18,16 @@ Per this repo's documented false-premise-pattern history (23+ prior cases; see e
 | "the existing reconciliation logic does not treat these rows as actionable" | It did: both rows were reconciled hours before this task was dispatched, via the canonical heartbeat-sweep path (not raw SQL), each carrying a specific evidenced reason. |
 | Step 4: "extend reconciliation so a queued row older than a defensible threshold is detected and surfaced automatically" | **Already built and running**: `flag_stale_queued_tasks()` in `resource_governor.py` (line 1410), wired into every `run_tick()` call (line 1515), threshold `MAX_QUEUED_AGE_SECONDS` = 4.0h (`VERIDIAN_GOVERNOR_MAX_QUEUED_AGE_S`, default `4*60*60`), inserts one idempotent `STALE-QUEUED:` row per stale `umr_id` via the canonical `insert_pm_decision_pending()` (never raw SQL), skips rows that already have an open flag. Confirmed live: it opened rows 279-288 at 21:16:32 UTC today for the 8 *currently* stale (>4h) queued rows -- ~66 minutes before this task started. |
 
+## Cross-reference
+
+`UMR-20260729-112414-3269`'s "completed" status was *already independently found and
+documented* by an earlier task on this same branch history, `task-20260806-212450`
+(its own UMR: `UMR-20260806-092722-e526`, merged via PR #227, commit `bf5f973`) --
+reaching an identical conclusion from an identical direct DB query. This is now the
+second consecutive task cycle in which this exact already-terminal row has been
+re-presented as a current urgent blocker; the "queued 189.8h" figure appears to be a
+stale, cached measurement being recirculated rather than a fresh read.
+
 ## Conclusion
 
 Both cited rows genuinely were stuck exactly as described, **as of ~09:13-10:20 UTC this

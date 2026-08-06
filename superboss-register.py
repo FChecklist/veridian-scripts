@@ -55,6 +55,7 @@ pm_report_snapshots, and every other table in this file. Real raw SQL against th
 from outside this script (a one-off sqlite3.connect() in another script, an ad hoc
 migration, a bare INSERT/UPDATE) is NOT the standard procedure -- extend the function
 library here instead (see insert_pm_decision_pending()/resolve_pm_decision_pending()/
+insert_owner_proposal()/decide_owner_proposal()/record_owner_proposal_completion()/
 record_ocid_master_standard_audit_event()/insert_ocid_artifact_link()/update_umr_task()
 for the established convention: module-level _connect()/_write_lock(), caller-owned
 commit, an idempotent _ensure_<table>_table() at the top of anything that creates
@@ -5403,7 +5404,22 @@ def _ensure_pm_decisions_pending_table(conn):
     here. Per the Owner's standing SOP (exactly one canonical read/write
     surface for superboss-register.sqlite), insert_pm_decision_pending()
     and resolve_pm_decision_pending() below are the only real write path
-    into this table."""
+    into this table.
+
+    Owner directive, standing mandate (task-20260806-034817, cites
+    UMR-20260805-185000-e94f -- the same parent this table's own
+    Deterministic PM Reporting Contract V3 work traces back to): the real
+    AI-proposes/PM-decides/AI-completes child-UMR proposal gate for novel
+    findings outside already-approved scope extends this same table rather
+    than a second parallel one -- see PROGRESS.md for the honest
+    extend-vs-new-table reasoning. decision_type distinguishes the two real
+    row shapes this table now carries: 'pm_decision' (this function's
+    original, unchanged shape -- insert_pm_decision_pending()/
+    resolve_pm_decision_pending()) vs 'owner_proposal' (new --
+    insert_owner_proposal()/decide_owner_proposal()/
+    record_owner_proposal_completion() below). See
+    _migrate_pm_decisions_pending_owner_proposal_columns() for the additive
+    column migration."""
     conn.execute("""CREATE TABLE IF NOT EXISTS pm_decisions_pending (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         opened_ts TEXT NOT NULL,
@@ -5417,6 +5433,48 @@ def _ensure_pm_decisions_pending_table(conn):
         closed_by TEXT,
         closed_note TEXT
     )""")
+    conn.commit()
+    _migrate_pm_decisions_pending_owner_proposal_columns(conn)
+
+
+def _migrate_pm_decisions_pending_owner_proposal_columns(conn):
+    """Additive ALTER TABLE ADD COLUMN for pm_decisions_pending's Owner/AI
+    child-UMR proposal lifecycle (task-20260806-034817, cites
+    UMR-20260805-185000-e94f) -- same "check PRAGMA table_info, ALTER if
+    missing, no full-table rebuild" pattern as _migrate_umr_tenant_id/
+    _migrate_umr_last_heartbeat above. Reuses the existing table rather than
+    a second parallel one; see _ensure_pm_decisions_pending_table's own
+    docstring above and PROGRESS.md for the honest extend-vs-new-table
+    reasoning.
+
+    decision_type TEXT NOT NULL DEFAULT 'pm_decision': every real row
+    written before today is a real PM-decision row (the only real writer
+    until this task), so the constant DEFAULT backfills existing rows
+    correctly, not a placeholder guess. New 'owner_proposal' rows are only
+    ever written by insert_owner_proposal() below.
+
+    completed_ts/artifact_path/commit_sha/evidence: the third real lifecycle
+    phase (open -> approved/redirected/held -> completed). Plain nullable
+    TEXT, no DEFAULT -- record_owner_proposal_completion() below is the one
+    real write path that ever populates them, once AI has actually
+    implemented an approved proposal. They stay NULL for every real
+    'pm_decision' row and for every 'owner_proposal' row not yet completed,
+    by construction, same "NULL means genuinely not-yet, not a data-quality
+    gap" convention _migrate_umr_tenant_id documents for tenant_id."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(pm_decisions_pending)").fetchall()}
+    if "decision_type" not in cols:
+        conn.execute(
+            "ALTER TABLE pm_decisions_pending ADD COLUMN decision_type TEXT NOT NULL DEFAULT 'pm_decision'"
+        )
+        conn.commit()
+    for col in ("completed_ts", "artifact_path", "commit_sha", "evidence"):
+        if col not in cols:
+            conn.execute(f"ALTER TABLE pm_decisions_pending ADD COLUMN {col} TEXT")
+    conn.commit()
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pm_decisions_pending_decision_type "
+        "ON pm_decisions_pending(decision_type, status)"
+    )
     conn.commit()
 
 
@@ -5449,7 +5507,7 @@ def insert_pm_decision_pending(conn, title, detail, *, options=None,
 
 
 def resolve_pm_decision_pending(conn, decision_id, *, closed_by, closed_note=None,
-                                 status="resolved"):
+                                 status="resolved", require_decision_type=None):
     """Closes one real, currently-open pm_decisions_pending row -- the real
     counterpart to insert_pm_decision_pending() above, and (per the Owner's
     standing SOP that this script is the one canonical read/write surface
@@ -5463,11 +5521,137 @@ def resolve_pm_decision_pending(conn, decision_id, *, closed_by, closed_note=Non
     having to re-query the row themselves. Caller owns conn/transaction/
     commit, same convention as insert_pm_decision_pending() above -- this
     function itself never commits. Returns True if a real open row was
-    found and closed, False otherwise (already closed, or no such id)."""
+    found and closed, False otherwise (already closed, or no such id).
+
+    `require_decision_type` (added for decide_owner_proposal() below,
+    task-20260806-034817): when given, also gates the UPDATE on
+    decision_type=<that value>, so a caller for one real decision_type
+    (e.g. 'owner_proposal') can never accidentally resolve a row of the
+    other real decision_type ('pm_decision') by numeric id collision.
+    Default None preserves this function's original, unmodified behavior
+    for every existing 'pm_decision' caller -- zero behavior change there."""
+    sql = ("UPDATE pm_decisions_pending SET status=?, closed_ts=?, closed_by=?, closed_note=? "
+           "WHERE id=? AND status='open'")
+    params = [status, _now_iso(), closed_by, closed_note, decision_id]
+    if require_decision_type is not None:
+        sql += " AND decision_type=?"
+        params.append(require_decision_type)
+    cur = conn.execute(sql, params)
+    return cur.rowcount > 0
+
+
+_OWNER_PROPOSAL_DECISIONS = ("approved", "redirected", "held")
+
+
+def insert_owner_proposal(conn, issue, proposal, *, child_umr=None):
+    """Opens one real Owner/AI child-UMR proposal row -- deposit half of the
+    Owner's standing mandate (task-20260806-034817, cites
+    UMR-20260805-185000-e94f): "thinking is by the Project Manager,
+    execution is by AI agents, AI agents do not think for themselves" for
+    real novel findings outside already-approved scope (not retroactive to
+    already-authorized broad-category work in flight, e.g. the GTM script
+    build -- that authorization already covers its own scope).
+
+    `issue` is a real, plain-text statement of exactly what the issue is;
+    `proposal` is a real, plain-text statement of exactly what AI proposes
+    -- nothing implemented yet at this point, by design. Stored in this
+    table's existing title/detail columns respectively (see
+    _ensure_pm_decisions_pending_table's docstring for why this reuses
+    pm_decisions_pending rather than a second parallel table).
+
+    `child_umr` is the real UMR id this proposal is filed under -- minted
+    here via _new_id("UMR") (same real ID-minting convention
+    upsert_umr_task() already uses) when the caller doesn't already have
+    one, so every real proposal always has one, never a placeholder. Stored
+    in this table's existing related_umr column. Note this does NOT insert
+    a row into umr_tasks itself -- the child UMR here identifies this real
+    proposal/decision/completion record, not a dispatched worker task; a
+    caller that also needs a real umr_tasks row for this child UMR (e.g. to
+    actually dispatch the approved work) creates one separately via
+    upsert_umr_task(), passing this same id as umr_id so the two stay
+    correlated by construction.
+
+    Row opens as decision_type='owner_proposal', status='open' -- the same
+    real "open means awaiting a decision" convention insert_pm_decision_pending()
+    already established, so decide_owner_proposal() below can reuse
+    resolve_pm_decision_pending()'s existing `WHERE status='open'` guard
+    verbatim rather than inventing a second one. Caller owns
+    conn/transaction/commit, same convention as insert_pm_decision_pending()
+    above -- this function itself never commits. Returns (decision_id,
+    child_umr)."""
+    child_umr = child_umr or _new_id("UMR")
     cur = conn.execute(
-        "UPDATE pm_decisions_pending SET status=?, closed_ts=?, closed_by=?, closed_note=? "
-        "WHERE id=? AND status='open'",
-        (status, _now_iso(), closed_by, closed_note, decision_id),
+        "INSERT INTO pm_decisions_pending "
+        "(opened_ts, title, detail, related_umr, status, decision_type) "
+        "VALUES (?, ?, ?, ?, 'open', 'owner_proposal')",
+        (_now_iso(), issue, proposal, child_umr),
+    )
+    return cur.lastrowid, child_umr
+
+
+def decide_owner_proposal(conn, decision_id, *, decision, closed_by, closed_note=None):
+    """Records the PM's real decision on one real, currently-open
+    owner_proposal row -- decision half of the Owner's standing mandate
+    (task-20260806-034817): approve, redirect, or hold, citing the
+    proposal's own child UMR (already on the row via related_umr from
+    insert_owner_proposal() above, so callers don't have to pass it again
+    here -- `decision_id` alone identifies the one real row).
+
+    Thin, validating wrapper over resolve_pm_decision_pending() above
+    (zero duplication of the actual UPDATE) -- `decision` becomes that
+    row's terminal `status`, restricted to exactly the 3 real real-world PM
+    actions the Owner's directive names (approve/redirect/hold); anything
+    else raises ValueError before touching the database, same
+    fail-fast-on-bad-input convention run_ocid_compliance_audit() uses
+    for its own rule inputs. `require_decision_type='owner_proposal'`
+    ensures this can only ever close a real proposal row, never a plain
+    pm_decision row that happens to share a numeric id.
+
+    'held' is a real terminal status here (removes the row from
+    get_owner_proposals_pending()'s "awaiting PM decision" list), not a
+    real pause-and-return-to-open -- a second decide_owner_proposal() call
+    on an already-closed row is not possible by design (same idempotency
+    guarantee resolve_pm_decision_pending() gives every other real
+    decision); re-filing via a new insert_owner_proposal() is the real,
+    explicit path if the Owner/PM wants to revive a held proposal later.
+    Returns True if a real open proposal was
+    found and closed, False otherwise (already decided, unknown id, or not
+    actually an owner_proposal row)."""
+    if decision not in _OWNER_PROPOSAL_DECISIONS:
+        raise ValueError(
+            f"decision must be one of {_OWNER_PROPOSAL_DECISIONS!r}, got {decision!r}"
+        )
+    return resolve_pm_decision_pending(
+        conn, decision_id, closed_by=closed_by, closed_note=closed_note,
+        status=decision, require_decision_type="owner_proposal",
+    )
+
+
+def record_owner_proposal_completion(conn, decision_id, *, artifact_path, commit_sha, evidence):
+    """Records real completion evidence back onto the same real child-UMR
+    proposal row -- completion half of the Owner's standing mandate
+    (task-20260806-034817): "a real function for AI to record real
+    completion once implemented, the real artifact, real file path, real
+    commit, real evidence, back onto the same real child UMR row."
+
+    Only ever fires on a real owner_proposal row the PM has already
+    real-approved (`WHERE decision_type='owner_proposal' AND
+    status='approved'`) -- a redirected or held proposal, or one still
+    open awaiting a PM decision, cannot be marked complete, since nothing
+    was ever authorized to implement in that state. Idempotent by the same
+    explicit pre-update status guard resolve_pm_decision_pending() uses:
+    calling this a second time on an already-'completed' row is a real
+    no-op, never a silent overwrite of the first real
+    artifact_path/commit_sha/evidence -- callers learn that via this
+    function's own return value (False). Caller owns
+    conn/transaction/commit, same convention as every other write function
+    in this file -- this function itself never commits. Returns True if a
+    real approved row was found and marked completed, False otherwise."""
+    cur = conn.execute(
+        "UPDATE pm_decisions_pending SET status='completed', completed_ts=?, "
+        "artifact_path=?, commit_sha=?, evidence=? "
+        "WHERE id=? AND decision_type='owner_proposal' AND status='approved'",
+        (_now_iso(), artifact_path, commit_sha, evidence, decision_id),
     )
     return cur.rowcount > 0
 
@@ -5514,6 +5698,64 @@ def cmd_resolve_pm_decision_pending(args):
     conn.close()
     print(json.dumps({"id": args.decision_id, "resolved": resolved}, indent=2, default=str))
     if not resolved:
+        sys.exit(1)
+
+
+def cmd_insert_owner_proposal(args):
+    """CLI entry point over insert_owner_proposal() -- see that function's
+    own docstring. --child-umr is optional (a real one is minted here via
+    _new_id("UMR") when omitted, same as the function default)."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_pm_decisions_pending_table(conn)
+    with _write_lock():
+        decision_id, child_umr = insert_owner_proposal(
+            conn, args.issue, args.proposal, child_umr=args.child_umr,
+        )
+        conn.commit()
+    conn.close()
+    print(json.dumps({"id": decision_id, "child_umr": child_umr}, indent=2, default=str))
+
+
+def cmd_decide_owner_proposal(args):
+    """CLI entry point over decide_owner_proposal() -- see that function's
+    own docstring. Exits non-zero (after still printing the real JSON
+    result) when --id did not name a real, currently-open owner_proposal
+    row, same "print then sys.exit(1) on a real refusal/no-op" convention
+    as cmd_resolve_pm_decision_pending above."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_pm_decisions_pending_table(conn)
+    with _write_lock():
+        decided = decide_owner_proposal(
+            conn, args.decision_id, decision=args.decision,
+            closed_by=args.closed_by, closed_note=args.closed_note,
+        )
+        conn.commit()
+    conn.close()
+    print(json.dumps({"id": args.decision_id, "decision": args.decision, "decided": decided},
+                      indent=2, default=str))
+    if not decided:
+        sys.exit(1)
+
+
+def cmd_record_owner_proposal_completion(args):
+    """CLI entry point over record_owner_proposal_completion() -- see that
+    function's own docstring. Exits non-zero (after still printing the real
+    JSON result) when --id did not name a real, currently-approved
+    owner_proposal row."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_pm_decisions_pending_table(conn)
+    with _write_lock():
+        recorded = record_owner_proposal_completion(
+            conn, args.decision_id, artifact_path=args.artifact_path,
+            commit_sha=args.commit_sha, evidence=args.evidence,
+        )
+        conn.commit()
+    conn.close()
+    print(json.dumps({"id": args.decision_id, "recorded": recorded}, indent=2, default=str))
+    if not recorded:
         sys.exit(1)
 
 
@@ -5790,6 +6032,35 @@ if __name__ == "__main__":
     p_respm.add_argument("--status", default="resolved",
                           help="terminal status to record (default: resolved)")
 
+    p_insprop = sub.add_parser("insert-owner-proposal",
+                                help="Owner standing mandate (task-20260806-034817, cites "
+                                     "UMR-20260805-185000-e94f): deposit one real child-UMR "
+                                     "proposal for real novel findings outside already-approved "
+                                     "scope -- AI states the issue and what it proposes, nothing "
+                                     "implemented yet")
+    p_insprop.add_argument("--issue", required=True, help="exactly what the real issue is")
+    p_insprop.add_argument("--proposal", required=True, help="exactly what AI proposes")
+    p_insprop.add_argument("--child-umr", dest="child_umr", default=None,
+                            help="real child UMR id (minted via _new_id('UMR') if omitted)")
+
+    p_decprop = sub.add_parser("decide-owner-proposal",
+                                help="Owner standing mandate: PM approves, redirects, or holds "
+                                     "one real, currently-open owner-proposal row, citing its "
+                                     "child UMR")
+    p_decprop.add_argument("--id", dest="decision_id", type=int, required=True)
+    p_decprop.add_argument("--decision", required=True, choices=list(_OWNER_PROPOSAL_DECISIONS))
+    p_decprop.add_argument("--closed-by", dest="closed_by", required=True)
+    p_decprop.add_argument("--closed-note", dest="closed_note", default=None)
+
+    p_compprop = sub.add_parser("record-owner-proposal-completion",
+                                 help="Owner standing mandate: AI records real completion "
+                                      "(artifact, file path, commit, evidence) back onto the "
+                                      "same real, PM-approved child-UMR proposal row")
+    p_compprop.add_argument("--id", dest="decision_id", type=int, required=True)
+    p_compprop.add_argument("--artifact-path", dest="artifact_path", required=True)
+    p_compprop.add_argument("--commit-sha", dest="commit_sha", required=True)
+    p_compprop.add_argument("--evidence", required=True)
+
     args = p.parse_args()
     if args.cmd == "init":
         with _write_lock():
@@ -5889,3 +6160,9 @@ if __name__ == "__main__":
         cmd_insert_pm_decision_pending(args)
     elif args.cmd == "resolve-pm-decision-pending":
         cmd_resolve_pm_decision_pending(args)
+    elif args.cmd == "insert-owner-proposal":
+        cmd_insert_owner_proposal(args)
+    elif args.cmd == "decide-owner-proposal":
+        cmd_decide_owner_proposal(args)
+    elif args.cmd == "record-owner-proposal-completion":
+        cmd_record_owner_proposal_completion(args)

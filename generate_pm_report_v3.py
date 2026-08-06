@@ -579,12 +579,63 @@ def build_open_issues(gtm_section, db_integrity, ram_swap, load_avg):
 # ---------------------------------------------------------------------------
 # Section 7: PM decisions pending -- read-only, verbatim
 # ---------------------------------------------------------------------------
+def _pm_decisions_pending_has_decision_type(conn):
+    """True once pm_decisions_pending carries the Owner standing-mandate
+    decision_type column (task-20260806-034817, cites
+    UMR-20260805-185000-e94f -- see superboss-register.py's
+    _migrate_pm_decisions_pending_owner_proposal_columns() for the write
+    side). Checked live via PRAGMA table_info rather than assumed, so this
+    read-only script degrades gracefully (never raises) against a DB that
+    predates that migration -- same defensive spirit as this script's own
+    db_integrity check never assuming a clean database."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(pm_decisions_pending)").fetchall()}
+    return "decision_type" in cols
+
+
 def get_pm_decisions_pending(sbr):
     try:
         conn = sbr._connect()
+        # Once decision_type exists, exclude 'owner_proposal' rows -- those
+        # surface separately in get_owner_proposals_pending() (Section 8)
+        # below, same table, same 'status=open means awaiting a decision'
+        # convention, but a distinct real workflow the Owner's standing
+        # mandate keeps visually separate in the report. On a DB that
+        # predates decision_type, no filter is applied (there are no
+        # owner_proposal rows to exclude yet), preserving this function's
+        # original behavior exactly.
+        type_filter = " AND decision_type = 'pm_decision'" if _pm_decisions_pending_has_decision_type(conn) else ""
         rows = conn.execute(
             "SELECT id, opened_ts, title, detail, options_json, recommended_option, "
-            "related_umr, status FROM pm_decisions_pending WHERE status = 'open' "
+            f"related_umr, status FROM pm_decisions_pending WHERE status = 'open'{type_filter} "
+            "ORDER BY id"
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        return {"error": str(e)}
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Section 8: Owner/AI child-UMR proposals pending -- read-only, verbatim
+#
+# Owner standing mandate (task-20260806-034817, cites
+# UMR-20260805-185000-e94f): "thinking is by the Project Manager, execution
+# is by AI agents" for real novel findings outside already-approved scope.
+# Same real table (pm_decisions_pending), same read-only-section pattern as
+# Section 7 above -- this is the report-side half of
+# superboss-register.py's insert_owner_proposal()/decide_owner_proposal()/
+# record_owner_proposal_completion(), so the PM sees real pending proposals
+# every real report cycle without a separate real query of their own.
+# ---------------------------------------------------------------------------
+def get_owner_proposals_pending(sbr):
+    try:
+        conn = sbr._connect()
+        if not _pm_decisions_pending_has_decision_type(conn):
+            conn.close()
+            return []  # DB predates the Owner-proposal columns -- no real rows can exist yet
+        rows = conn.execute(
+            "SELECT id, opened_ts, title AS issue, detail AS proposal, related_umr AS child_umr, "
+            "status FROM pm_decisions_pending WHERE status = 'open' AND decision_type = 'owner_proposal' "
             "ORDER BY id"
         ).fetchall()
         conn.close()
@@ -644,6 +695,7 @@ def build_report(sbr):
 
     open_issues = build_open_issues(gtm_section, db_integrity, ram_swap, load_avg)
     decisions = get_pm_decisions_pending(sbr)
+    owner_proposals = get_owner_proposals_pending(sbr)
 
     report = {
         "report_format_version": REPORT_FORMAT_VERSION,
@@ -673,6 +725,7 @@ def build_report(sbr):
         },
         "open_issues": open_issues,
         "pm_decisions_pending": decisions,
+        "owner_proposals_pending": owner_proposals,
         "current_flat_fields": current_flat,
         "thresholds": {
             "SWAP_FREE_PCT_WARN_THRESHOLD": SWAP_FREE_PCT_WARN_THRESHOLD,
@@ -778,6 +831,19 @@ def render_report_text(report):
             lines.append(f"      detail: {d['detail']}")
             lines.append(f"      recommended_option: {d['recommended_option']}")
             lines.append(f"      related_umr: {d['related_umr']}")
+
+    h("8. AI PROPOSALS AWAITING PM DECISION (read-only from pm_decisions_pending, "
+      "decision_type='owner_proposal')")
+    proposals = report["owner_proposals_pending"]
+    if isinstance(proposals, dict) and "error" in proposals:
+        lines.append(f"ERROR reading owner proposals: {proposals['error']}")
+    elif not proposals:
+        lines.append("None open.")
+    else:
+        for pr in proposals:
+            lines.append(f"  #{pr['id']} [{pr['opened_ts']}] child_umr={pr['child_umr']}")
+            lines.append(f"      issue: {pr['issue']}")
+            lines.append(f"      proposed: {pr['proposal']}")
 
     lines.append("")
     lines.append("=" * 78)

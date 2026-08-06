@@ -8,9 +8,49 @@ WORKSPACE="$1"
 OUT="$2"
 cd "$WORKSPACE"
 
+# UMR-20260806-123316-cf9f (proposal 62, child UMR-20260806-121247-a93a):
+# TASK_DIR/TASK_ID are derived from $OUT rather than passed as new args or
+# relying on worker-entrypoint.sh exporting them (it does not) --
+# worker-entrypoint.sh always calls this script with
+# OUT="$TASK_DIR/quality-gate-$GATE_ATTEMPT.json" and
+# TASK_DIR="/opt/veridian/ai-os/tasks/$TASK_ID", so both are 100% recoverable
+# from $OUT alone.
+TASK_DIR="$(dirname "$OUT")"
+TASK_ID="$(basename "$TASK_DIR")"
+BUILD_LOCK_CONTENDED_EXIT_CODE=75
+
 RESULTS_FILE=$(mktemp)
 echo "{}" > "$RESULTS_FILE"
 OVERALL=0
+
+# Mandatory resume behavior (UMR-20260806-123316-cf9f design point 3): a task
+# requeued after losing the build-lock race (see the build gate below) must
+# resume into the SAME gate-result state it had before losing the lock, not
+# re-run lint/install/test from scratch -- otherwise every lock loss
+# redundantly re-runs those steps and net throughput falls instead of rises.
+# This marker is written by the build gate immediately before it requeues
+# (see below) and is a real per-task file under the task's own persistent
+# TASK_DIR, so it survives the systemd unit going inactive and being
+# restarted fresh by the next dispatch tick.
+RESUME_MARKER="$TASK_DIR/.quality-gate-lock-resume.json"
+if [ -f "$RESUME_MARKER" ]; then
+  echo "[quality-gate.sh] resuming after a prior build_lock_contended requeue: seeding gate results from $RESUME_MARKER -- already-passed gates below will be skipped, not re-run"
+  cp "$RESUME_MARKER" "$RESULTS_FILE"
+  rm -f "$RESUME_MARKER"
+fi
+
+# True if $RESULTS_FILE already has a passed=true entry for gate $1 (from the
+# resume marker above) -- used by run_gate and the install/build steps to
+# skip real re-execution of a step that already genuinely passed before this
+# task lost the build lock and got requeued.
+already_passed() {
+  python3 - "$RESULTS_FILE" "$1" <<'PYEOF'
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+sys.exit(0 if d.get(sys.argv[2], {}).get("passed") else 1)
+PYEOF
+}
 
 # Root-caused 2026-07-27 (task-20260727-043407 RCA against
 # task-20260727-034439's watchdog "periodic checkpoint" stall signature):
@@ -45,6 +85,10 @@ GATE_STEP_TIMEOUT_SECONDS="${GATE_STEP_TIMEOUT_SECONDS:-900}"
 run_gate() {
   local name="$1"; shift
   local cmd="$*"
+  if already_passed "$name"; then
+    echo "[quality-gate.sh] gate '$name' already passed in a prior attempt (build_lock_contended resume) -- skipping re-run"
+    return
+  fi
   local logfile
   logfile=$(mktemp)
   timeout -k 30 "$GATE_STEP_TIMEOUT_SECONDS" bash -c "$cmd" > "$logfile" 2>&1
@@ -113,9 +157,23 @@ if [ -f package.json ]; then
   fi
   echo "Detected Node project (package manager: $PKG_MGR)"
 
-  if ! [ -d node_modules ]; then
+  if already_passed install; then
+    echo "[quality-gate.sh] install already completed in a prior attempt (build_lock_contended resume) -- skipping re-run"
+  elif ! [ -d node_modules ]; then
     echo "--- installing deps ---"
     timeout -k 30 "$GATE_STEP_TIMEOUT_SECONDS" $PKG_MGR install 2>&1 | tail -20
+    INSTALL_CODE=${PIPESTATUS[0]}
+    NAME=install CODE="$INSTALL_CODE" RESULTS_FILE="$RESULTS_FILE" python3 <<'PYEOF'
+import json, os
+name = os.environ["NAME"]
+code = int(os.environ["CODE"])
+results_file = os.environ["RESULTS_FILE"]
+with open(results_file) as f:
+    r = json.load(f)
+r[name] = {"ran": True, "passed": code == 0, "exit_code": code}
+with open(results_file, "w") as f:
+    json.dump(r, f)
+PYEOF
   fi
 
   if grep -q '"lint"' package.json; then
@@ -159,8 +217,132 @@ if [ -f package.json ]; then
     # its turn. An explicit BUILD_LOCK_WAIT_SECONDS override is opt-in only,
     # for a specific dispatch batch known to need more queueing headroom, not
     # a change to the default this incident's original fix established.
-    BUILD_LOCK_WAIT_SECONDS="${BUILD_LOCK_WAIT_SECONDS:-700}"
-    run_gate build "flock -w $BUILD_LOCK_WAIT_SECONDS /tmp/veridian-quality-gate-build.lock -c '$PKG_MGR run build'"
+    #
+    # UMR-20260806-123316-cf9f (proposal 62, child UMR-20260806-121247-a93a)
+    # superseded the ${BUILD_LOCK_WAIT_SECONDS:-700}-then-block-here shape
+    # above: live kernel wchan inspection proved all 5 systemd worker slots
+    # were routinely serializing on this one lock (4 of 5 genuinely blocked
+    # in locks_lock_inode_wai for 582-1376s in one sample, chronic not a
+    # blip), i.e. effective concurrency was 1, not the configured ceiling of
+    # 5 -- a long in-process wait just made every OTHER queued worker slot
+    # sit idle instead of picking up different, unblocked work. Also: this
+    # host's systemd --user manager has BUILD_LOCK_WAIT_SECONDS=1700/
+    # GATE_STEP_TIMEOUT_SECONDS=1800 set in its own global in-memory
+    # environment (confirmed via live /proc/<pid>/environ on
+    # worker-entrypoint.sh's PID and its full descendant chain; origin:
+    # systemctl --user show-environment on manager PID 1023, no file/unit
+    # anywhere sets it, undocumented -- see UMR-20260806-123316-cf9f
+    # completion evidence for the full trail). Because bash's ${VAR:-default}
+    # only applies when VAR is genuinely unset, a plain default-value edit to
+    # BUILD_LOCK_WAIT_SECONDS here would have done nothing real -- the
+    # deliberate fix below is a fixed, hardcoded 20s short wait with NO
+    # ${...:-...} env-var indirection at all for this specific value, so it
+    # can never be silently overridden by that (or any future) global
+    # systemd-manager-level environment value. Same reasoning applies to the
+    # 700s starvation-guard fallback inside acquire_build_lock_fd below.
+    #
+    # New shape: try for a short, fixed BUILD_LOCK_SHORT_WAIT_SECONDS. If
+    # that fails, do NOT block here at all -- cleanly give the slot back
+    # (requeue this task's own umr_tasks row via the canonical
+    # superboss-register.py CLI, reason=build_lock_contended, structurally
+    # distinct from dispatch-tick.py's resume_interrupted_workers_tick()
+    # crash-recovery path -- see requeue-build-lock-contended's own
+    # docstring) and exit so the systemd slot is genuinely free for a
+    # DIFFERENT queued task immediately, instead of one slot sitting idle in
+    # a long flock wait while 4 others do the same. The build command, its
+    # exit code, and pass/fail semantics for a build that actually RUNS are
+    # completely unchanged; only what happens while WAITING for the lock is
+    # different. A per-task consecutive-loss counter (persisted in TASK_DIR
+    # so it survives the requeue) falls back to one real long wait (the
+    # original 700s) on the 4th consecutive loss, to guarantee eventual
+    # forward progress and prevent starvation.
+    BUILD_LOCK_FILE="/tmp/veridian-quality-gate-build.lock"
+    BUILD_LOCK_SHORT_WAIT_SECONDS=20
+    BUILD_LOCK_LONG_WAIT_SECONDS=700
+    BUILD_LOCK_LOSS_COUNT_FILE="$TASK_DIR/.build-lock-loss-count"
+
+    # Returns 0 with the lock held open on fd 9 (caller runs the build, then
+    # must `flock -u 9; exec 9>&-`), 1 if genuinely not acquired within the
+    # short wait (caller must requeue, never internally retry), 2 if not
+    # acquired even after the long-wait starvation-guard fallback (caller
+    # treats this as a real gate failure, same as before this fix existed).
+    acquire_build_lock_fd() {
+      exec 9>"$BUILD_LOCK_FILE"
+      if flock -w "$BUILD_LOCK_SHORT_WAIT_SECONDS" 9; then
+        rm -f "$BUILD_LOCK_LOSS_COUNT_FILE"
+        return 0
+      fi
+      local loss_count=0
+      [ -f "$BUILD_LOCK_LOSS_COUNT_FILE" ] && loss_count=$(cat "$BUILD_LOCK_LOSS_COUNT_FILE" 2>/dev/null || echo 0)
+      loss_count=$((loss_count + 1))
+      if [ "$loss_count" -ge 4 ]; then
+        echo "[quality-gate.sh] build lock: ${loss_count}th consecutive contention -- falling back to a single ${BUILD_LOCK_LONG_WAIT_SECONDS}s wait (starvation guard) instead of requeuing again"
+        if flock -w "$BUILD_LOCK_LONG_WAIT_SECONDS" 9; then
+          rm -f "$BUILD_LOCK_LOSS_COUNT_FILE"
+          return 0
+        fi
+        echo "$loss_count" > "$BUILD_LOCK_LOSS_COUNT_FILE"
+        exec 9>&-
+        return 2
+      fi
+      echo "$loss_count" > "$BUILD_LOCK_LOSS_COUNT_FILE"
+      exec 9>&-
+      return 1
+    }
+
+    if already_passed build; then
+      echo "[quality-gate.sh] gate 'build' already passed in a prior attempt (build_lock_contended resume) -- skipping re-run"
+    else
+      acquire_build_lock_fd
+      BUILD_LOCK_RC=$?
+      if [ "$BUILD_LOCK_RC" -eq 0 ]; then
+        run_gate build "$PKG_MGR run build"
+        flock -u 9
+        exec 9>&-
+      elif [ "$BUILD_LOCK_RC" -eq 1 ]; then
+        cp "$RESULTS_FILE" "$RESUME_MARKER"
+        UNIT_NAME="veridian-worker@${TASK_ID}.service"
+        if python3 /opt/veridian/scripts/superboss-register.py requeue-build-lock-contended \
+            --task-identity "$TASK_ID" --unit-name "$UNIT_NAME"; then
+          echo "[quality-gate.sh] build lock contended after ${BUILD_LOCK_SHORT_WAIT_SECONDS}s wait -- task requeued (reason=build_lock_contended), exiting cleanly so this systemd slot frees up for a different task"
+          rm -f "$RESULTS_FILE"
+          exit "$BUILD_LOCK_CONTENDED_EXIT_CODE"
+        else
+          echo "[quality-gate.sh] build lock contended but the requeue CLI call itself failed -- NOT silently dropping this: falling through to a normal gate failure instead"
+          rm -f "$RESUME_MARKER"
+          OVERALL=1
+          NAME=build CODE=1 RESULTS_FILE="$RESULTS_FILE" python3 <<'PYEOF'
+import json, os
+name = os.environ["NAME"]
+results_file = os.environ["RESULTS_FILE"]
+with open(results_file) as f:
+    r = json.load(f)
+r[name] = {"ran": True, "passed": False, "exit_code": 1,
+           "output_tail": "build lock contended and the requeue-build-lock-contended CLI call itself failed; see worker.log"}
+with open(results_file, "w") as f:
+    json.dump(r, f)
+PYEOF
+        fi
+      else
+        # BUILD_LOCK_RC == 2: genuine long-wait exhaustion after 3 prior
+        # requeues -- a real capacity failure, not contention-churn. Record
+        # it exactly like any other failed gate (same shape run_gate itself
+        # writes) so it flows into the existing auto-fix-then-blocked
+        # pipeline instead of being requeued a 5th time.
+        OVERALL=1
+        NAME=build CODE=1 RESULTS_FILE="$RESULTS_FILE" python3 <<'PYEOF'
+import json, os
+name = os.environ["NAME"]
+results_file = os.environ["RESULTS_FILE"]
+with open(results_file) as f:
+    r = json.load(f)
+r[name] = {"ran": False, "passed": False, "exit_code": 1,
+           "output_tail": f"build lock not acquired even after the {os.environ.get('BUILD_LOCK_LONG_WAIT_SECONDS', '700')}s starvation-guard fallback wait (4th+ consecutive contention) -- real capacity failure, not requeued again"}
+with open(results_file, "w") as f:
+    json.dump(r, f)
+PYEOF
+      fi
+    fi
   fi
   if grep -q '"test"' package.json; then
     run_gate test "$PKG_MGR test -- --run 2>/dev/null || $PKG_MGR test"

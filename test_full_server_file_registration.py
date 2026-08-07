@@ -545,26 +545,23 @@ def test_completion_check_reports_real_breakdown_of_null_hash_remainder(sut, tmp
 # run, so it never touches any hardcoded live path).
 # ---------------------------------------------------------------------------
 
-def test_init_db_fresh_db_is_missing_vector_columns_bug(tmp_path):
-    """GENUINE BUG (in superboss-register.py, reused as a dependency of
-    full_server_file_registration.py, not in either of this task's 3
-    assigned scripts): a brand-new DB created via `superboss-register.py
-    init` is left WITHOUT wiring_registry.vector_json/vector_updated_ts,
-    even though init_db() -> _migrate_schema() -> _migrate_wiring_registry_vector()
-    is supposed to guarantee both columns exist on every DB, fresh or old.
-    Root cause: _migrate_schema() calls _migrate_wiring_registry_entity_types()
-    BEFORE _migrate_wiring_registry_vector() (see superboss-register.py's own
-    _migrate_schema(), lines ~741-754); entity_types migration rebuilds
-    wiring_registry via its own separate CREATE TABLE (the
-    `wiring_registry__migrate` rename-and-rebuild path) that never got updated
-    to include vector_json/vector_updated_ts, and nothing re-checks for those
-    two columns after that rebuild. Net effect: the FIRST real write any
-    caller makes via register_entity_row() against a freshly-initialized DB
-    raises `sqlite3.OperationalError: no such column: vector_json` (this is
-    exactly what a bare `full_server_file_registration.py` run against a
-    truly brand-new DB would hit). The real, long-lived production DB is
-    unaffected only because it was already migrated in place before this
-    entity_types-rebuild-vs-vector-migration ordering bug was introduced."""
+def test_init_db_fresh_db_has_vector_columns(tmp_path):
+    """Regression test for a bug that WAS reproducible when this file was
+    first written (2026-08-07, commit 59bd6f6): a brand-new DB created via
+    `superboss-register.py init` was left WITHOUT
+    wiring_registry.vector_json/vector_updated_ts, because
+    _migrate_schema() called _migrate_wiring_registry_entity_types() (whose
+    own rename-and-rebuild CREATE TABLE omitted those two columns) before
+    _migrate_wiring_registry_vector() ever ran, and nothing re-checked for
+    them after that rebuild. Verified fixed upstream as of this test run:
+    _migrate_wiring_registry_entity_types() now calls
+    _migrate_wiring_registry_vector(conn) itself (superboss-register.py,
+    inside _migrate_wiring_registry_entity_types(), immediately before its
+    rebuild), so a fresh `init` now carries both columns straight away. This
+    test now guards against that ordering regressing again; the `sut`
+    fixture's own extra _migrate_wiring_registry_vector() call above is kept
+    as a harmless no-op belt-and-braces for the other tests in this file
+    rather than removed, since a fresh DB already has the columns either way."""
     db_path = str(tmp_path / "bug_repro.sqlite")
     _bootstrap_and_point_env_at_tmp_db(db_path)
     env = dict(os.environ)
@@ -575,11 +572,10 @@ def test_init_db_fresh_db_is_missing_vector_columns_bug(tmp_path):
     conn = sqlite3.connect(db_path)
     cols = {row[1] for row in conn.execute("PRAGMA table_info(wiring_registry)").fetchall()}
     conn.close()
-    # Documents the real, currently-reproducible bug: this SHOULD be an empty
-    # set (both columns present) on a real, correctly-migrated DB, but isn't.
-    assert {"vector_json", "vector_updated_ts"} - cols == {"vector_json", "vector_updated_ts"}, (
-        "if this assertion starts failing, the real bug has been fixed upstream "
-        "in superboss-register.py and the fixture workaround above can be removed"
+    # Both columns must be present on a fresh, correctly-migrated DB.
+    assert {"vector_json", "vector_updated_ts"} <= cols, (
+        "wiring_registry is missing vector_json/vector_updated_ts on a fresh init -- "
+        "the ordering bug documented above has regressed"
     )
 
 

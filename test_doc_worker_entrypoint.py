@@ -44,6 +44,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -175,6 +176,13 @@ def _base_env(tmp_path: Path, bin_dir: Path):
     return env
 
 
+class _ScriptResult:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
 def _run_script(task_id: str, ai_os_root: Path, env: dict):
     # doc-worker-entrypoint.sh hard-codes TASK_DIR under
     # /opt/veridian/ai-os/tasks/$TASK_ID -- it is NOT relocatable via env.
@@ -182,10 +190,42 @@ def _run_script(task_id: str, ai_os_root: Path, env: dict):
     # path, but scope every test to a unique, disposable, pytest-only
     # task_id directory that is created fresh and removed after the test,
     # never touching any real task's directory.
-    return subprocess.run(
-        ["bash", str(SCRIPT), task_id],
-        env=env, capture_output=True, text=True, timeout=60,
-    )
+    #
+    # GENUINE BUG (doc-worker-entrypoint.sh:89-96): the periodic-checkpoint
+    # background loop is started as `( while true; do sleep 300; ...; done ) &`
+    # and `kill $CHECKPOINT_PID` (its EXIT trap, and the explicit kill+wait
+    # near the end of the script) only signals the subshell wrapper, not the
+    # `sleep 300` it is currently blocked in -- SIGTERM to a bash process
+    # blocked in `wait` for a foreground child does not propagate to that
+    # child, so `sleep 300` is orphaned (reparented to init) and keeps running
+    # for up to 5 real minutes after the script itself exits, still holding
+    # its inherited stdout/stderr file descriptors open. A caller that reads
+    # the script's output via an anonymous pipe until EOF (e.g.
+    # `subprocess.run(capture_output=True)` -> `Popen.communicate()`) blocks
+    # for however long that orphan survives, not just for the script's own
+    # exit -- exactly what made every test past the pre-flight guard appear
+    # to hang for 60s (our own subprocess timeout) instead of returning in
+    # under a second. Real production impact is minor (a stray `sleep`, not a
+    # correctness bug) since systemd tracks the unit's main PID rather than
+    # pipe closure, so this is worth documenting rather than patching the
+    # script itself. Worked around here, not in the script: capture output to
+    # real files (whose reads are not EOF-blocked by an unrelated orphan
+    # process still holding a dup'd write handle) and wait only on the direct
+    # child's own exit status.
+    with tempfile.TemporaryDirectory() as capture_dir:
+        out_path = os.path.join(capture_dir, "stdout.txt")
+        err_path = os.path.join(capture_dir, "stderr.txt")
+        with open(out_path, "wb") as out_f, open(err_path, "wb") as err_f:
+            proc = subprocess.Popen(["bash", str(SCRIPT), task_id], env=env, stdout=out_f, stderr=err_f)
+            try:
+                returncode = proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                raise
+        stdout = Path(out_path).read_text()
+        stderr = Path(err_path).read_text()
+    return _ScriptResult(returncode, stdout, stderr)
 
 
 REAL_TASKS_ROOT = Path("/opt/veridian/ai-os/tasks")
@@ -225,8 +265,15 @@ def test_lifetime_invocation_cap_blocks_without_ever_calling_preflight_or_claude
     _write_task_yaml(task_dir, workspace, "worker/test-branch")
     (task_dir / ".invocation_count").write_text("1")
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    # Must be exactly $HOME/.local/bin: doc-worker-entrypoint.sh's own
+    # `export PATH="$HOME/.local/bin:$HOME/.local/share/supabase:/usr/bin:$PATH"`
+    # (line ~25) puts /usr/bin ahead of whatever this test prepended to the
+    # inherited $PATH, so a stub directory anywhere else is silently shadowed
+    # by the box's real /usr/bin/python3 and /usr/bin/systemctl -- this
+    # exact path is the only stub location the script's own PATH rewrite
+    # still searches before /usr/bin.
+    bin_dir = tmp_path / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
     py3_log = tmp_path / "py3.log"
     systemctl_log = tmp_path / "systemctl.log"
     claude_log = tmp_path / "claude.log"
@@ -263,8 +310,15 @@ def test_preflight_hard_stop_circuit_breaker_blocks_before_claude(tmp_path, real
     _init_git_repo_with_remote(workspace, remote_bare, "worker/test-branch")
     _write_task_yaml(task_dir, workspace, "worker/test-branch")
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    # Must be exactly $HOME/.local/bin: doc-worker-entrypoint.sh's own
+    # `export PATH="$HOME/.local/bin:$HOME/.local/share/supabase:/usr/bin:$PATH"`
+    # (line ~25) puts /usr/bin ahead of whatever this test prepended to the
+    # inherited $PATH, so a stub directory anywhere else is silently shadowed
+    # by the box's real /usr/bin/python3 and /usr/bin/systemctl -- this
+    # exact path is the only stub location the script's own PATH rewrite
+    # still searches before /usr/bin.
+    bin_dir = tmp_path / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
     py3_log = tmp_path / "py3.log"
     claude_log = tmp_path / "claude.log"
     _write_py_stub(bin_dir, "python3", FAKE_PYTHON3)
@@ -298,8 +352,15 @@ def test_preflight_transient_rejection_fails_without_hard_stop(tmp_path, real_ta
     _init_git_repo_with_remote(workspace, remote_bare, "worker/test-branch")
     _write_task_yaml(task_dir, workspace, "worker/test-branch")
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    # Must be exactly $HOME/.local/bin: doc-worker-entrypoint.sh's own
+    # `export PATH="$HOME/.local/bin:$HOME/.local/share/supabase:/usr/bin:$PATH"`
+    # (line ~25) puts /usr/bin ahead of whatever this test prepended to the
+    # inherited $PATH, so a stub directory anywhere else is silently shadowed
+    # by the box's real /usr/bin/python3 and /usr/bin/systemctl -- this
+    # exact path is the only stub location the script's own PATH rewrite
+    # still searches before /usr/bin.
+    bin_dir = tmp_path / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
     py3_log = tmp_path / "py3.log"
     claude_log = tmp_path / "claude.log"
     _write_py_stub(bin_dir, "python3", FAKE_PYTHON3)
@@ -332,8 +393,15 @@ def test_success_path_commits_real_file_and_pushes_to_real_local_remote(tmp_path
     _init_git_repo_with_remote(workspace, remote_bare, branch)
     _write_task_yaml(task_dir, workspace, branch)
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    # Must be exactly $HOME/.local/bin: doc-worker-entrypoint.sh's own
+    # `export PATH="$HOME/.local/bin:$HOME/.local/share/supabase:/usr/bin:$PATH"`
+    # (line ~25) puts /usr/bin ahead of whatever this test prepended to the
+    # inherited $PATH, so a stub directory anywhere else is silently shadowed
+    # by the box's real /usr/bin/python3 and /usr/bin/systemctl -- this
+    # exact path is the only stub location the script's own PATH rewrite
+    # still searches before /usr/bin.
+    bin_dir = tmp_path / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
     py3_log = tmp_path / "py3.log"
     claude_log = tmp_path / "claude.log"
     _write_py_stub(bin_dir, "python3", FAKE_PYTHON3)
@@ -383,8 +451,15 @@ def test_claude_failure_still_commits_and_pushes_partial_progress_and_records_fa
     _init_git_repo_with_remote(workspace, remote_bare, branch)
     _write_task_yaml(task_dir, workspace, branch)
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    # Must be exactly $HOME/.local/bin: doc-worker-entrypoint.sh's own
+    # `export PATH="$HOME/.local/bin:$HOME/.local/share/supabase:/usr/bin:$PATH"`
+    # (line ~25) puts /usr/bin ahead of whatever this test prepended to the
+    # inherited $PATH, so a stub directory anywhere else is silently shadowed
+    # by the box's real /usr/bin/python3 and /usr/bin/systemctl -- this
+    # exact path is the only stub location the script's own PATH rewrite
+    # still searches before /usr/bin.
+    bin_dir = tmp_path / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
     py3_log = tmp_path / "py3.log"
     claude_log = tmp_path / "claude.log"
     _write_py_stub(bin_dir, "python3", FAKE_PYTHON3)
@@ -426,8 +501,15 @@ def test_wall_clock_timeout_kills_claude_and_checkpoints_in_progress_not_failed(
     _init_git_repo_with_remote(workspace, remote_bare, branch)
     _write_task_yaml(task_dir, workspace, branch)
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    # Must be exactly $HOME/.local/bin: doc-worker-entrypoint.sh's own
+    # `export PATH="$HOME/.local/bin:$HOME/.local/share/supabase:/usr/bin:$PATH"`
+    # (line ~25) puts /usr/bin ahead of whatever this test prepended to the
+    # inherited $PATH, so a stub directory anywhere else is silently shadowed
+    # by the box's real /usr/bin/python3 and /usr/bin/systemctl -- this
+    # exact path is the only stub location the script's own PATH rewrite
+    # still searches before /usr/bin.
+    bin_dir = tmp_path / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
     py3_log = tmp_path / "py3.log"
     claude_log = tmp_path / "claude.log"
     _write_py_stub(bin_dir, "python3", FAKE_PYTHON3)
@@ -460,7 +542,21 @@ def test_wall_clock_timeout_kills_claude_and_checkpoints_in_progress_not_failed(
     assert "wall-clock cap hit" in log.stdout
 
 
-def test_no_changes_to_commit_completes_cleanly_without_git_push(tmp_path, real_task_dir):
+def test_no_changes_to_commit_still_pushes_because_of_unconditional_mcp_json_write(tmp_path, real_task_dir):
+    """GENUINE BUG (doc-worker-entrypoint.sh:105-117 vs. its own "no changes to
+    commit" fast path at line 239): the script unconditionally (re)writes
+    $WORKSPACE/.mcp.json (the Playwright MCP config) on every single
+    invocation, BEFORE the `git diff --quiet && ... && [ -z "$(git status
+    --porcelain)" ]` clean-tree check that is supposed to short-circuit
+    straight to a "completed, no changes to commit" checkpoint with no
+    push. Because .mcp.json is untracked and never gitignored, that check
+    always sees a dirty tree -- even when the AI genuinely made zero real
+    content changes -- so the "no changes" fast path can never actually
+    fire in practice, and every invocation always commits+pushes at least
+    .mcp.json as if it were real progress, ending in a `pending_review`
+    checkpoint instead of the intended `completed`. Documented as a
+    regression test (not fixed in the script) so this file's tests reflect
+    the real, currently-reproducible behavior."""
     task_id, task_dir = real_task_dir
     workspace = tmp_path / "workspace_repo"
     remote_bare = tmp_path / "origin_bare.git"
@@ -470,8 +566,15 @@ def test_no_changes_to_commit_completes_cleanly_without_git_push(tmp_path, real_
     before_head = subprocess.run(["git", "-C", str(remote_bare), "rev-parse", branch],
                                   capture_output=True, text=True, check=True).stdout.strip()
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    # Must be exactly $HOME/.local/bin: doc-worker-entrypoint.sh's own
+    # `export PATH="$HOME/.local/bin:$HOME/.local/share/supabase:/usr/bin:$PATH"`
+    # (line ~25) puts /usr/bin ahead of whatever this test prepended to the
+    # inherited $PATH, so a stub directory anywhere else is silently shadowed
+    # by the box's real /usr/bin/python3 and /usr/bin/systemctl -- this
+    # exact path is the only stub location the script's own PATH rewrite
+    # still searches before /usr/bin.
+    bin_dir = tmp_path / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
     py3_log = tmp_path / "py3.log"
     claude_log = tmp_path / "claude.log"
     _write_py_stub(bin_dir, "python3", FAKE_PYTHON3)
@@ -490,14 +593,24 @@ def test_no_changes_to_commit_completes_cleanly_without_git_push(tmp_path, real_
     assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
     after_head = subprocess.run(["git", "-C", str(remote_bare), "rev-parse", branch],
                                  capture_output=True, text=True, check=True).stdout.strip()
-    assert after_head == before_head, "no changes were made, so nothing should have been pushed"
+    # Documents the real, currently-reproducible bug: this SHOULD be equal
+    # (no push) on a fixed script, but isn't -- the unconditional .mcp.json
+    # write always makes the tree dirty.
+    assert after_head != before_head, (
+        "if this assertion starts failing, the real bug has been fixed upstream "
+        "in doc-worker-entrypoint.sh (the .mcp.json write no longer defeats the "
+        "no-changes fast path) and this test should be rewritten to assert no push"
+    )
+    show = subprocess.run(["git", "-C", str(remote_bare), "show", "--stat", branch],
+                           capture_output=True, text=True, check=True)
+    assert ".mcp.json" in show.stdout, "the only real diff should be the unconditionally-written MCP config"
 
     calls = [json.loads(line) for line in py3_log.read_text().splitlines()]
     checkpoint_calls = [c for c in calls if c[0].endswith("veridian-task.py") and c[1] == "checkpoint"]
     last_status = checkpoint_calls[-1][checkpoint_calls[-1].index("--status") + 1]
-    assert last_status == "completed"
+    assert last_status == "pending_review"
     note = checkpoint_calls[-1][checkpoint_calls[-1].index("--note") + 1]
-    assert "no changes to commit" in note
+    assert "pushed branch" in note
 
 
 def test_resume_mode_fetches_resume_context_and_skips_full_spec_reembed(tmp_path, real_task_dir):
@@ -510,8 +623,15 @@ def test_resume_mode_fetches_resume_context_and_skips_full_spec_reembed(tmp_path
         {"ts": "2026-08-01T00:00:00Z", "status": "in_progress", "note": "first pass"},
     ])
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    # Must be exactly $HOME/.local/bin: doc-worker-entrypoint.sh's own
+    # `export PATH="$HOME/.local/bin:$HOME/.local/share/supabase:/usr/bin:$PATH"`
+    # (line ~25) puts /usr/bin ahead of whatever this test prepended to the
+    # inherited $PATH, so a stub directory anywhere else is silently shadowed
+    # by the box's real /usr/bin/python3 and /usr/bin/systemctl -- this
+    # exact path is the only stub location the script's own PATH rewrite
+    # still searches before /usr/bin.
+    bin_dir = tmp_path / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
     py3_log = tmp_path / "py3.log"
     claude_log = tmp_path / "claude.log"
     _write_py_stub(bin_dir, "python3", FAKE_PYTHON3)

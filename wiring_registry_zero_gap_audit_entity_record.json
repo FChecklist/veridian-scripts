@@ -1,0 +1,23 @@
+{
+  "entity_id": "script-wiring_registry_zero_gap_audit_py",
+  "entity_type": "script",
+  "source_system": "server",
+  "path": "/opt/veridian/scripts/wiring_registry_zero_gap_audit.py",
+  "relationships": [
+    {
+      "target_entity_id": null,
+      "relationship_type": "ke:audits",
+      "evidence": "Real, deterministic 6-point audit (zero_gap/zero_duplication/field_integrity/relationship_coverage/external_coverage/total_entity_count) of the wiring_registry table itself, built under UMR-20260806-141055-1fec."
+    }
+  ],
+  "last_verified_ts": "2026-08-07T08:36:00Z",
+  "verification_status": "VERIFIED_MATCH",
+  "source_ref": ["UMR-20260806-141055-1fec", "CAP-20260807-083605-5297"],
+  "metadata": {
+    "purpose": "Deterministic ALL_CLEAR/false-with-evidence audit of superboss-register.sqlite's wiring_registry table, required by UMR-20260806-141055-1fec's governing SPEC before that UMR's downstream task (task-20260806-193955) could genuinely close.",
+    "capability_id": "CAP-20260807-083605-5297",
+    "originating_umr": "UMR-20260806-141055-1fec"
+  },
+  "originating_umr": "UMR-20260806-141055-1fec",
+  "script_version": null
+}

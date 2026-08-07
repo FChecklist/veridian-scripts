@@ -908,6 +908,62 @@ def cmd_checkpoint(args):
             except subprocess.CalledProcessError:
                 pass
 
+        if args.status == "completed":
+            # Real fix (UMR-20260806-141055-1fec / UMR-20260807-074739-dde3):
+            # root-caused against task-20260806-193955, whose task.yaml read
+            # `status: completed` at its top level while its own last
+            # checkpoint's remaining_steps still opened with "**BLOCKED on
+            # gate**..." -- i.e. it was auto-approved/merged and stamped
+            # completed without its own self-declared blocker ever being
+            # resolved. The existing pending_review guard above only checks
+            # WORKFLOW ORDER (a pending_review checkpoint exists somewhere in
+            # history), never WHETHER the work remaining_steps describes
+            # actually finished.
+            #
+            # A blanket "remaining_steps must be empty at completion" rule was
+            # deliberately NOT used here: a live audit of this platform's own
+            # 433 real completed task.yaml files found 233 with remaining_steps
+            # unchanged from their immediately-preceding checkpoint (69/73 of
+            # the most recent alone are non-empty) -- that field is this
+            # codebase's own established, legitimate convention for a closing
+            # note ("None -- ...") or an explicitly out-of-scope/handed-off
+            # item, not a strict progress ledger; blocking on non-emptiness
+            # alone would break the vast majority of real, correct completions.
+            #
+            # The narrow, mechanically real signal that isolates the actual
+            # defect (verified against that same 433-task corpus: matches
+            # exactly 4, 3 of which are legitimate externally-blocked
+            # hand-offs -- e.g. "blocked on a human with GitHub web-UI access"
+            # -- that a human should look at anyway, same "reject loudly, save
+            # nothing" posture as every other guard in this function): the
+            # FINAL checkpoint's own remaining_steps still leads with an
+            # unresolved "BLOCKED" marker that is IDENTICAL to the immediately
+            # preceding checkpoint's leading item -- a self-declared blocker
+            # that was still open one checkpoint ago and was never actually
+            # lifted before this task tried to close as completed.
+            final_remaining = task.get("remaining_steps") or []
+            prior_checkpoints = task.get("checkpoints", [])
+            prev_remaining = prior_checkpoints[-1].get("remaining_steps") or [] if prior_checkpoints else []
+
+            def _leads_with_unresolved_blocker(steps):
+                if not steps:
+                    return False
+                first = str(steps[0]).strip().lstrip("*# ").upper()
+                return first.startswith("BLOCKED")
+
+            if _leads_with_unresolved_blocker(final_remaining) and prev_remaining and final_remaining[0] == prev_remaining[0]:
+                print(
+                    f"ERROR: refusing to checkpoint {args.task_id} as 'completed' -- "
+                    "its own remaining_steps still leads with an unresolved blocker "
+                    f"unchanged from the immediately preceding checkpoint: {final_remaining[0]!r}. "
+                    "A genuinely-blocked task may still complete (e.g. a conclusive "
+                    "externally-blocked investigation), but PROGRESS.md's Remaining "
+                    "section must say so explicitly (e.g. 'None -- blocked externally "
+                    "by <X>, see finding above') rather than leaving the raw BLOCKED "
+                    "marker in place unresolved."
+                )
+                sys.exit(1)
+
         checkpoint = {
             "at": task["last_checkpoint_at"],
             "status": task["status"],

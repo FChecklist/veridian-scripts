@@ -1,0 +1,242 @@
+{
+  "umr_id": "UMR-20260806-141055-1fec",
+  "db_path": "/opt/veridian/ai-os/memory/superboss-register.sqlite",
+  "ALL_CLEAR": false,
+  "failing_checks": [
+    "zero_gap",
+    "relationship_coverage"
+  ],
+  "checks": [
+    {
+      "check": "zero_gap",
+      "real_canonical_file_count": 58651,
+      "registered_file_or_script_path_count": 17699,
+      "missing_count": 41201,
+      "passing": false,
+      "top_missing_directories_sample": [
+        [
+          "/opt/veridian/ai-os/tasks",
+          21920
+        ],
+        [
+          "/opt/veridian/repos/compliance-tracker",
+          3885
+        ],
+        [
+          "/opt/veridian/repos/veridian-ai-os",
+          3846
+        ],
+        [
+          "/opt/veridian/repos/compliance-tracker-ocid020-cat23-wt",
+          2785
+        ],
+        [
+          "/opt/veridian/repos/compliance-tracker-pr906-wt",
+          2773
+        ],
+        [
+          "/opt/veridian/repos/compliance-tracker-projexa-records-wt",
+          2645
+        ],
+        [
+          "/opt/veridian/repos/projexa-ocid020-wt",
+          645
+        ],
+        [
+          "/opt/veridian/repos/veda-advisors",
+          632
+        ],
+        [
+          "/opt/veridian/repos/claude-control",
+          407
+        ],
+        [
+          "/opt/veridian/repos/veridian-scripts-worker-exit0-wt",
+          270
+        ],
+        [
+          "/opt/veridian/repos/veridian-scripts-loadstress-wt",
+          246
+        ],
+        [
+          "/opt/veridian/repos/veridian-scripts",
+          229
+        ],
+        [
+          "/opt/veridian/repos/veridian-scripts-ocid020-cat23-wt",
+          225
+        ],
+        [
+          "/opt/veridian/scripts/__pycache__",
+          98
+        ],
+        [
+          "/opt/veridian/scripts/tests",
+          75
+        ],
+        [
+          "/opt/veridian/ai-os/scripts-backup-20260806T155830Z",
+          66
+        ],
+        [
+          "/opt/veridian/repos/projexa",
+          58
+        ],
+        [
+          "/opt/veridian/ai-os/memory",
+          49
+        ],
+        [
+          "/opt/veridian/scripts/prompt_gateway",
+          41
+        ],
+        [
+          "/opt/veridian/ai-os/locks",
+          7
+        ],
+        [
+          "/opt/veridian/ai-os/reports",
+          7
+        ],
+        [
+          "/opt/veridian/scripts/systemd",
+          7
+        ],
+        [
+          "/opt/veridian/ai-os/audit198",
+          6
+        ],
+        [
+          "/opt/veridian/scripts/owner_engine_convergence",
+          5
+        ],
+        [
+          "/opt/veridian/ai-os/logs",
+          4
+        ]
+      ],
+      "sample_missing_paths": [
+        "/opt/veridian/ai-os/.gap_queue.lock",
+        "/opt/veridian/ai-os/.health-check-15min.lock",
+        "/opt/veridian/ai-os/.module_queues.lock",
+        "/opt/veridian/ai-os/.repo-cache/compliance-tracker/mini-services/.gitkeep",
+        "/opt/veridian/ai-os/DISABLED_WORKER_UNITS_BACKUP_2026-08-01/symlink_targets.txt",
+        "/opt/veridian/ai-os/SYSTEM_DIAGRAM.md",
+        "/opt/veridian/ai-os/audit198/category-checkers.mjs",
+        "/opt/veridian/ai-os/audit198/constitution-index.mjs",
+        "/opt/veridian/ai-os/audit198/evidence-engine.mjs",
+        "/opt/veridian/ai-os/audit198/results/audit198-results.json",
+        "/opt/veridian/ai-os/audit198/results/audit198-summary.md",
+        "/opt/veridian/ai-os/audit198/rules-taxonomy.mjs",
+        "/opt/veridian/ai-os/locks/dispatch-owner-task-tmux-relay-claude.lock",
+        "/opt/veridian/ai-os/locks/dispatch-owner-task-tmux-relay-fake-claude-session.lock",
+        "/opt/veridian/ai-os/locks/dispatch-owner-task-tmux-relay-fake-session-that-does-not-exist.lock",
+        "/opt/veridian/ai-os/locks/dispatch-owner-task-tmux-relay-umr088f-proof-throwaway.lock",
+        "/opt/veridian/ai-os/locks/resource-governor-emergency-state.json.lock",
+        "/opt/veridian/ai-os/locks/resource-governor-metric-state.json.lock",
+        "/opt/veridian/ai-os/locks/worker-spawn.lock",
+        "/opt/veridian/ai-os/logs/cost-usage-60min.log.indexed_line"
+      ],
+      "why_nonzero": "wiring_registry's 'file' entity_type is populated by generate_wiring_registry.py's Registry.get_or_create_file(), which only creates a row when a path is CITED by another already-scanned source (capability workflow/apis paths, knowledge_engine tags, MASTER_INDEX.yaml canonical_dirs, route/engine exists_as entries, script/cron registration) -- confirmed by direct read of generate_wiring_registry.py, never called from a bare os.walk over every file under repos/ai-os/scripts/shared. This is the same reference-driven-not-exhaustive-mirror design already documented for the 20-row curated 'engine' entity_type vs the 27 *-engine.ts files physically on disk. A literal recursive-filesystem-vs-registry diff is therefore expected to be non-zero by design, not a corruption or a missed-registration bug -- closing this gap for real would require either (a) redefining 'canonical' to mean 'cited by a source', or (b) a deliberate design decision to make file registration exhaustive (a new, larger UMR scope, not a bug fix to this one)."
+    },
+    {
+      "check": "zero_duplication",
+      "rows_with_content_hash": 15717,
+      "duplicate_content_hash_groups": 0,
+      "passing": true,
+      "groups_sample": []
+    },
+    {
+      "check": "field_integrity",
+      "required_fields": [
+        "entity_type",
+        "source_system",
+        "verification_status",
+        "last_verified_ts",
+        "source_ref"
+      ],
+      "rows_failing_any_required_field": 0,
+      "passing": true,
+      "by_field_null_or_empty_count": {
+        "entity_type": 0,
+        "source_system": 0,
+        "verification_status": 0,
+        "last_verified_ts": 0,
+        "source_ref": 0
+      },
+      "sample_failing_entity_ids": []
+    },
+    {
+      "check": "relationship_coverage",
+      "non_root_entity_types_checked": [
+        "file",
+        "script",
+        "function",
+        "route"
+      ],
+      "rows_without_relationships": 2011,
+      "passing": false,
+      "by_entity_type": {
+        "file": 1855,
+        "function": 5,
+        "script": 151
+      },
+      "sample_entity_ids": [
+        "file-5fd9ca4c5a6b",
+        "file-0e7d8c18dcac",
+        "file-3d5cbfced750",
+        "file-34097e420795",
+        "file-1ac5034e4cb1",
+        "file-7c1243122f19",
+        "file-1a5d2783d2bb",
+        "file-376583fafdf3",
+        "file-1b2aa0c30310",
+        "file-ab94b270ff8a",
+        "file-751bcdab1136",
+        "file-2a7c72f20ffd",
+        "file-a115349a9b90",
+        "file-0ac6b466aa20",
+        "file-02aa62739654",
+        "file-76744ff94fda",
+        "file-03974c56f9da",
+        "file-5e5d20f5d178",
+        "file-7b5559d733ae",
+        "file-ecc60ac36bdd"
+      ]
+    },
+    {
+      "check": "external_coverage",
+      "wiring_registry_counts": {
+        "github_repo": 15,
+        "vercel_project": 3,
+        "supabase_table": 444
+      },
+      "gh_cross_check": {
+        "gh_repo_list_count": 15,
+        "registered_github_repo_count": 15,
+        "gh_repos_not_registered": [
+          "zai-sap-reports-queue"
+        ]
+      },
+      "gh_error": null,
+      "passing": true
+    }
+  ],
+  "total_entity_count": 24326,
+  "total_entity_count_by_type": {
+    "file": 17662,
+    "function": 5028,
+    "dispatch_event": 703,
+    "supabase_table": 444,
+    "ai_role": 195,
+    "script": 154,
+    "cron_job": 72,
+    "engine": 20,
+    "github_repo": 15,
+    "gateway": 10,
+    "governance_doc": 10,
+    "route": 6,
+    "browser_component": 4,
+    "vercel_project": 3
+  }
+}

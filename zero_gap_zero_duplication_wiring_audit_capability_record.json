@@ -1,0 +1,31 @@
+{
+  "capability_name": "zero_gap_zero_duplication_wiring_audit",
+  "inputs": [
+    { "key": "db", "label": "Path to superboss-register.sqlite", "type": "text", "optional": true }
+  ],
+  "business_rules": [],
+  "workflow": null,
+  "automation": null,
+  "documents": null,
+  "reports": null,
+  "apis": [
+    "scripts/wiring_registry_zero_gap_audit.py"
+  ],
+  "ui_screens": null,
+  "permissions": "server-local, read-only SQLite connection (mode=ro) + a real filesystem walk of /opt/veridian; no writes to any table.",
+  "ai_required": false,
+  "confidence": 1.0,
+  "version": "1.0",
+  "owner": "VERIDIAN platform ops tooling (/opt/veridian/scripts), UMR-20260806-141055-1fec",
+  "metadata_json": {
+    "checked_for_duplicate": "lookup-capability --intent-text 'zero-gap zero-duplication field-integrity relationship-coverage external-coverage audit' (0 matches), list-capabilities (grepped for audit/gap/duplic/coverage -- closest matches were document_duplicate_detection, pruned_code_search, capability_registry_dedup, task_oa, none of which implement this 6-point wiring_registry audit), wiring_query.py term search for zero_gap/external_coverage (0 hits), find_code.sh over scripts/ for zero_gap|ZERO GAP|external_coverage|relationship_coverage (0 hits) -- all before building this.",
+    "umr_id": "UMR-20260806-141055-1fec",
+    "real_run_evidence": {
+      "ALL_CLEAR": false,
+      "failing_checks": ["zero_gap", "relationship_coverage"],
+      "passing_checks": ["zero_duplication", "field_integrity", "external_coverage"],
+      "total_entity_count": 24326,
+      "note": "Full real JSON output committed at ZERO_GAP_ZERO_DUPLICATION_AUDIT_EVIDENCE_UMR-20260806-141055-1fec.json in this same PR and posted verbatim as a completion note on umr_tasks for UMR-20260806-141055-1fec."
+    }
+  }
+}

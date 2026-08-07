@@ -30,6 +30,56 @@ Read-only against the live DB throughout (sqlite3 URI mode=ro). Writes only
 its own JSON evidence file + generated markdown checklist in this task
 workspace.
 
+DETERMINISM (added by UMR-20260806-182453-702a, PM correction task
+task-20260806-205209-pm-correction-the-checklist-metric-oscil): the Scripts
+section's own N/M reading was found to OSCILLATE across real runs seconds
+apart (47/148, then 45/150, then back to 47/148) with no corresponding real
+platform change. Root cause, confirmed live: `/opt/veridian/scripts` is a
+shared checkout that multiple concurrent sessions write uncommitted/in-flight
+.py files directly into (confirmed at investigation time: untracked
+full_server_file_registration.py, session_metadata_sync.py,
+sweep_awaiting_approval.py -- each traced to a real in-flight PR against this
+repo), and the old `_list_scripts()`/`_list_test_files()` did a raw
+`glob.glob()` over that live, moving directory, then ran pytest against
+whatever files happened to be on disk at that instant. Fix: every script/test
+inventoried and every pytest run below now comes from a `git archive`
+snapshot of this repo's own real HEAD commit, extracted into an isolated temp
+dir before any listing/grep/test-run happens -- never the live working tree.
+Two runs against the same HEAD (no new commit landed in between) now produce
+byte-identical Scripts-section output regardless of any other concurrent
+session's uncommitted WIP sitting in the live checkout. The real resolved
+HEAD sha is recorded in the output evidence (`git_head`) so a reader can
+verify which commit a given reading is pinned to. TABLES/SEARCH sections were
+already confirmed stable across the same real readings (35/42, 10/10
+unchanged) and are untouched by this fix -- they correctly reflect the live
+DB, which is expected to vary only with real DB writes.
+
+NUMERATOR-TO-ZERO MECHANISM (added by PM override task
+task-20260807-002908-pm-overrides-a-false-positive-credit-acc, same child
+UMR-20260806-182453-702a): a separate real reading (Scripts 0/154) collapsed
+the numerator to zero, not merely the denominator drifting. Root cause,
+confirmed by direct local repro (`pytest -q --no-header good.py broken.py`
+where `broken.py` has a real `SyntaxError`): pytest's default collection
+behavior aborts the ENTIRE run with `returncode=2` ("Interrupted: N errors
+during collection") the instant even ONE requested test file fails to
+collect -- none of the OTHER, fully-passing files' tests run at all in that
+invocation. The old `_run_pytest()` only recognized `FAILED`/`ERROR` lines
+for the specific file(s) that individually errored, then fell back to
+`"error"` for every OTHER requested file whenever `proc.returncode not in
+(0, 1)` -- so a single transient/incomplete test file (e.g. one another
+concurrent session was mid-write/mid-commit on when this scan's live glob
+caught it -- the same live, shared, mutable checkout implicated in the
+denominator finding above) was enough to mark literally every script's tests
+as errored, collapsing `complete_and_tested` to zero across the board. This
+is a real invocation failure, not a real loss of test coverage. The same
+`git archive HEAD` snapshot fix above also fixes this: `git archive` only
+ever extracts fully-committed, atomic blobs, so a concurrent session's
+uncommitted/mid-write file can never appear in `SNAPSHOT_ROOT` at all --
+pytest only ever collects real, complete, committed test files, so this
+collection-abort mode is structurally unreachable from this script's own
+runs regardless of how many other sessions are concurrently writing to the
+live checkout.
+
 Usage: python3 generate_platform_completion_checklist.py [--out-json PATH] [--out-md PATH] [--skip-tests]
 """
 import argparse
@@ -37,12 +87,24 @@ import importlib.util as _ilu
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 LIVE_DB = "/opt/veridian/ai-os/memory/superboss-register.sqlite"
+
+# Set once in main() to the real `git archive HEAD` snapshot dir -- every
+# filesystem read below (script/test discovery, grep content, pytest cwd)
+# goes through this, never REPO_ROOT's live working tree, so concurrent
+# sessions' uncommitted edits in the live checkout can never affect a run's
+# output. REPO_ROOT itself is still used to run `git` commands (it has to be
+# the real checkout to have a real .git) and to locate superboss-register.py
+# for the _fts_query import below, which is unrelated to the Scripts-section
+# instability this fixes.
+SNAPSHOT_ROOT = None
 
 # Reuse the platform's own canonical FTS5 query-builder (superboss-register.py
 # _fts_query()) instead of reimplementing term-escaping here -- a raw
@@ -66,11 +128,46 @@ SCRIPT_DIRS = [
 EXCLUDE_BASENAMES = {"generate_platform_completion_checklist.py"}
 
 
+def _git_head(repo_root):
+    """Real, resolved HEAD commit of the live checkout -- the fixed point
+    every snapshot below is pinned to. Fails loudly rather than silently
+    falling back to the live working tree: a silent fallback would quietly
+    reintroduce the exact non-determinism this function exists to remove."""
+    proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_root,
+                           capture_output=True, text=True, timeout=30)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"generate_platform_completion_checklist.py requires a real git "
+            f"repo at {repo_root} to pin a deterministic snapshot -- "
+            f"`git rev-parse HEAD` failed: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
+def _git_snapshot(repo_root, head):
+    """Extract the real, exact HEAD-committed tree into a fresh temp dir via
+    `git archive`, bypassing the live working tree entirely. This is the real
+    fix for the confirmed instability mechanism (child UMR-20260806-182453-702a):
+    /opt/veridian/scripts is a shared checkout that concurrent sessions write
+    uncommitted/in-flight .py files directly into, so a raw directory scan --
+    and a pytest run against whatever happens to be on disk at that instant --
+    picks up transient files that are not yet real, committed work. Caller
+    owns cleanup (shutil.rmtree) once done with the returned dir."""
+    dest = tempfile.mkdtemp(prefix="platform-checklist-snapshot-")
+    proc = subprocess.run(
+        f"git archive {head} | tar -x -C {dest}",
+        cwd=repo_root, shell=True, capture_output=True, text=True, timeout=120,
+    )
+    if proc.returncode != 0:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise RuntimeError(f"git archive snapshot of {head} failed: {proc.stderr.strip()}")
+    return dest
+
+
 def _list_scripts():
     import glob
     out = []
     for rel_dir, patterns in SCRIPT_DIRS:
-        d = os.path.join(REPO_ROOT, rel_dir)
+        d = os.path.join(SNAPSHOT_ROOT, rel_dir)
         if not os.path.isdir(d):
             continue
         for pat in patterns:
@@ -80,7 +177,7 @@ def _list_scripts():
                     continue
                 if base == "__init__.py":
                     continue
-                rel = os.path.relpath(p, REPO_ROOT)
+                rel = os.path.relpath(p, SNAPSHOT_ROOT)
                 out.append(rel)
     return sorted(set(out))
 
@@ -88,10 +185,10 @@ def _list_scripts():
 def _list_test_files():
     import glob
     out = []
-    for p in glob.glob(os.path.join(REPO_ROOT, "test_*.py")):
-        out.append(os.path.relpath(p, REPO_ROOT))
-    for p in glob.glob(os.path.join(REPO_ROOT, "tests", "test_*.py")):
-        out.append(os.path.relpath(p, REPO_ROOT))
+    for p in glob.glob(os.path.join(SNAPSHOT_ROOT, "test_*.py")):
+        out.append(os.path.relpath(p, SNAPSHOT_ROOT))
+    for p in glob.glob(os.path.join(SNAPSHOT_ROOT, "tests", "test_*.py")):
+        out.append(os.path.relpath(p, SNAPSHOT_ROOT))
     return sorted(set(out))
 
 
@@ -101,7 +198,7 @@ _TEST_CACHE = {}
 def _read(path):
     if path not in _TEST_CACHE:
         try:
-            with open(os.path.join(REPO_ROOT, path), "r", errors="replace") as f:
+            with open(os.path.join(SNAPSHOT_ROOT, path), "r", errors="replace") as f:
                 _TEST_CACHE[path] = f.read()
         except OSError:
             _TEST_CACHE[path] = ""
@@ -129,7 +226,7 @@ def _run_pytest(test_files, skip):
     uniq = sorted(set(test_files))
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "--no-header"] + uniq,
-        cwd=REPO_ROOT, capture_output=True, text=True, timeout=1800,
+        cwd=SNAPSHOT_ROOT, capture_output=True, text=True, timeout=1800,
     )
     combined = proc.stdout + "\n" + proc.stderr
     # Per-file status via pytest's own per-test verbose rerun is expensive;
@@ -190,7 +287,20 @@ def build_tables_section(conn, scripts):
     for t in tables:
         try:
             cnt = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-        except sqlite3.OperationalError as e:
+        except sqlite3.DatabaseError as e:
+            # DatabaseError, not the narrower OperationalError: a real,
+            # live corrupted table (confirmed by PM override task
+            # task-20260807-002908-pm-overrides-a-false-positive-credit-acc,
+            # same child UMR-20260806-182453-702a -- `PRAGMA integrity_check`
+            # independently reproduced real out-of-order rowids/index count
+            # mismatches in superboss-register.sqlite at investigation time)
+            # raises plain DatabaseError ("database disk image is malformed"),
+            # which OperationalError does NOT catch since it is DatabaseError's
+            # own subclass, not an ancestor. Uncaught, that crashed this whole
+            # script on ANY run, blocking every other section's real evidence
+            # too. This does not repair the corruption itself -- that is a
+            # separate, unactioned, out-of-scope finding -- it only stops one
+            # corrupted table from taking down the entire checklist run.
             cnt = None
         linked = _grep_scripts_for_table(t, scripts)
         rows.append({
@@ -210,7 +320,7 @@ def build_search_section(conn):
         base = fts[:-4]
         try:
             cols = [r[1] for r in conn.execute(f"PRAGMA table_info({fts})")]
-        except sqlite3.OperationalError as e:
+        except sqlite3.DatabaseError as e:
             rows.append({"fts_table": fts, "base_table": base, "works": False,
                          "evidence": f"PRAGMA failed: {e}"})
             continue
@@ -237,7 +347,7 @@ def build_search_section(conn):
             try:
                 rs = conn.execute(
                     f"SELECT {c} FROM {fts} WHERE {c} IS NOT NULL AND length({c})>3 LIMIT 50").fetchall()
-            except sqlite3.OperationalError:
+            except sqlite3.DatabaseError:
                 rs = []
             for (val,) in rs:
                 if fallback_row is None:
@@ -259,7 +369,7 @@ def build_search_section(conn):
         try:
             hits = conn.execute(
                 f"SELECT COUNT(*) FROM {fts} WHERE {fts} MATCH ?", (q,)).fetchone()[0]
-        except sqlite3.OperationalError as e:
+        except sqlite3.DatabaseError as e:
             rows.append({"fts_table": fts, "base_table": base, "works": False,
                          "evidence": f"MATCH query failed via real _fts_query({raw_term!r})={q!r}: {e}"})
             continue
@@ -272,24 +382,32 @@ def build_search_section(conn):
 
 
 def main():
+    global SNAPSHOT_ROOT
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--out-json", default=os.path.join(REPO_ROOT, "PLATFORM_COMPLETION_CHECKLIST.json"))
     ap.add_argument("--out-md", default=os.path.join(REPO_ROOT, "PLATFORM_COMPLETION_CHECKLIST.md"))
     ap.add_argument("--skip-tests", action="store_true", help="skip running pytest (faster, for iteration)")
     args = ap.parse_args()
 
-    scripts = _list_scripts()
-    all_tests = _list_test_files()
-    scripts_rows, pytest_results = build_scripts_section(scripts, all_tests, args.skip_tests)
+    git_head = _git_head(REPO_ROOT)
+    SNAPSHOT_ROOT = _git_snapshot(REPO_ROOT, git_head)
+    try:
+        scripts = _list_scripts()
+        all_tests = _list_test_files()
+        scripts_rows, pytest_results = build_scripts_section(scripts, all_tests, args.skip_tests)
 
-    conn = sqlite3.connect(f"file:{LIVE_DB}?mode=ro", uri=True, timeout=10)
-    conn.row_factory = None
-    tables_rows = build_tables_section(conn, scripts)
-    search_rows = build_search_section(conn)
-    conn.close()
+        conn = sqlite3.connect(f"file:{LIVE_DB}?mode=ro", uri=True, timeout=10)
+        conn.row_factory = None
+        tables_rows = build_tables_section(conn, scripts)
+        search_rows = build_search_section(conn)
+        conn.close()
+    finally:
+        shutil.rmtree(SNAPSHOT_ROOT, ignore_errors=True)
 
     evidence = {
         "db_path": LIVE_DB,
+        "git_head": git_head,
         "scripts": scripts_rows,
         "tables": tables_rows,
         "search": search_rows,
@@ -305,6 +423,9 @@ def main():
     lines = ["# Platform Completion Checklist (generated, mechanical evidence -- see PLATFORM_COMPLETION_CHECKLIST.json)",
              "",
              f"Generated by `generate_platform_completion_checklist.py` against live DB `{LIVE_DB}` (read-only).",
+             f"Scripts/Tables-linkage section pinned to real git HEAD `{git_head}` (a `git archive` snapshot, not the live "
+             f"working tree -- see module docstring; makes two runs at the same commit produce identical Scripts counts "
+             f"regardless of any concurrent session's uncommitted WIP in this checkout).",
              ""]
     n_yes = sum(1 for r in scripts_rows if r["complete_and_tested"])
     lines.append(f"## Scripts ({n_yes}/{len(scripts_rows)} genuinely complete+tested)")
@@ -338,6 +459,7 @@ def main():
     total_tables_yes = sum(1 for r in tables_rows if r["complete_and_tested"])
     total_search_yes = sum(1 for r in search_rows if r["works"])
     print(json.dumps({
+        "git_head": git_head,
         "scripts": f"{total_scripts_yes}/{len(scripts_rows)}",
         "tables": f"{total_tables_yes}/{len(tables_rows)}",
         "search": f"{total_search_yes}/{len(search_rows)}",

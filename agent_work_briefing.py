@@ -249,7 +249,9 @@ def assemble_briefing(umr_id, scope_terms, intent_text):
 def record_completion(umr_id, entry_text, role_label, umr_status, umr_reason,
                        gtm_category_index, gtm_result, gtm_script_path,
                        gtm_evidence_summary, gtm_evidence_json, gtm_fix_commit,
-                       gtm_fix_file_path, gtm_fix_pr_number, new_entity_record_file):
+                       gtm_fix_file_path, gtm_fix_pr_number, new_entity_record_file,
+                       umr_commit_sha=None, umr_file_path=None, umr_pr_number=None,
+                       umr_repo=None, umr_repo_root=None):
     """The real canonical write-back. Every write funnels through an
     existing, already-tested writer -- this function never issues a raw
     INSERT/UPDATE against umr_tasks or gtm_certification_categories itself,
@@ -265,11 +267,20 @@ def record_completion(umr_id, entry_text, role_label, umr_status, umr_reason,
         argparse.Namespace(umr_id=umr_id, entry_text=entry_text, role_label=role_label),
     )
 
-    # 2. umr_tasks -- the real standard system of record.
+    # 2. umr_tasks -- the real standard system of record. cmd_mark_umr_terminal
+    #    (UMR-20260806-130914-e7f1) requires real structured completion evidence
+    #    (a real --commit-sha ancestor-of-main or a real --file-path) for
+    #    status=completed/completed_unmerged, plus repo/repo_root to resolve and
+    #    verify that evidence -- this call must supply the same Namespace fields
+    #    superboss-register.py's own mark-umr-terminal CLI would.
     if umr_status:
         result["umr_tasks"] = _capture_json(
             sbr.cmd_mark_umr_terminal,
-            argparse.Namespace(umr_id=umr_id, status=umr_status, reason=umr_reason),
+            argparse.Namespace(
+                umr_id=umr_id, status=umr_status, reason=umr_reason,
+                commit_sha=umr_commit_sha, file_path=umr_file_path,
+                pr_number=umr_pr_number, repo=umr_repo, repo_root=umr_repo_root,
+            ),
         )
 
     # 3. gtm_certification_categories -- "where relevant" only: a real
@@ -337,6 +348,9 @@ def cmd_record_completion(args):
         args.gtm_category_index, args.gtm_result, args.gtm_script_path,
         args.gtm_evidence_summary, args.gtm_evidence_json, args.gtm_fix_commit,
         args.gtm_fix_file_path, args.gtm_fix_pr_number, args.new_entity_record_file,
+        umr_commit_sha=args.umr_commit_sha, umr_file_path=args.umr_file_path,
+        umr_pr_number=args.umr_pr_number, umr_repo=args.umr_repo,
+        umr_repo_root=args.umr_repo_root,
     )
     print(json.dumps(result, indent=2, default=str))
 
@@ -364,6 +378,20 @@ def build_parser():
     r.add_argument("--umr-status", dest="umr_status", default=None, choices=["completed", "failed", "killed"],
                     help="omit to leave umr_tasks untouched (e.g. an interim record-completion call)")
     r.add_argument("--umr-reason", dest="umr_reason", default=None)
+    r.add_argument("--umr-commit-sha", dest="umr_commit_sha", default=None,
+                    help="real completion evidence for --umr-status completed/completed_unmerged "
+                         "(superboss-register.py mark-umr-terminal's own structured-evidence gate, "
+                         "UMR-20260806-130914-e7f1) -- a real commit sha; required for status=completed "
+                         "unless --umr-file-path is supplied instead")
+    r.add_argument("--umr-file-path", dest="umr_file_path", default=None,
+                    help="real completion evidence: a real file path that exists on disk (alternative "
+                         "to --umr-commit-sha)")
+    r.add_argument("--umr-pr-number", dest="umr_pr_number", type=int, default=None)
+    r.add_argument("--umr-repo", dest="umr_repo", default=None,
+                    choices=["veridian-scripts", "compliance-tracker", "projexa"])
+    r.add_argument("--umr-repo-root", dest="umr_repo_root", default=None,
+                    help="local checkout used to verify --umr-commit-sha; defaults to the standard "
+                         "path for --umr-repo (see DEFAULT_OCID_RESOLVER_REPO_LOCAL_PATHS)")
     r.add_argument("--gtm-category-index", dest="gtm_category_index", type=int, default=None,
                     help="omit unless this real work actually maps to a gtm_certification_categories row")
     r.add_argument("--gtm-result", dest="gtm_result", default=None, choices=["pass", "fail", "blocked"])

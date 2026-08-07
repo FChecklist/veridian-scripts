@@ -217,10 +217,16 @@ def main():
 
     # 4. record-completion writes ai_agent_registry + umr_tasks; verify via
     #    the CLI (matches how a real caller would invoke this).
+    #    --umr-status completed now requires real structured completion
+    #    evidence (superboss-register.py's mark-umr-terminal gate,
+    #    UMR-20260806-130914-e7f1) -- a real --umr-file-path that exists on
+    #    disk (this test script's own real path) satisfies it without needing
+    #    a real git ancestor-of-main check.
     proc = subprocess.run(
         ["python3", BRIEFING, "record-completion", "--umr-id", umr_id,
          "--entry-text", "did the real work", "--role-label", "test agent",
-         "--umr-status", "completed", "--umr-reason", "test run complete"],
+         "--umr-status", "completed", "--umr-reason", "test run complete",
+         "--umr-file-path", os.path.abspath(__file__)],
         capture_output=True, text=True, env=env,
     )
     if proc.returncode != 0:

@@ -1937,10 +1937,78 @@ ROW_RESOLVED_NON_DISPATCH_ACTIONS = frozenset({
 })
 
 
+def _advance_owner_priority_phases_safe(now=None):
+    """Real, fail-open wrapper (same convention as _safe_superboss_register
+    above) around superboss-register.py's own advance_owner_priority_phases
+    -- amendment to UMR-20260807-070110-5ea7 (governed by
+    UMR-20260806-124055-bc80): called every real tick, BEFORE the first
+    next_queued_task() lookup, per that task's own SPEC ("run every tick
+    before next_queued_task"). A broken/unavailable Superboss Register or
+    any transient failure inside the phase-advance check must never crash
+    or block the rest of run_tick()'s own real dispatch loop -- same
+    'never raises for a normal outcome' contract scan_stuck_tasks()/
+    dispatch_one() already carry. Returns the real result dict from
+    advance_owner_priority_phases(), or a real {'error': ...} dict on any
+    failure (never raises).
+
+    Deliberately does NOT itself change next_queued_task()'s own row
+    selection -- that consumption side of owner_priority_override is
+    UMR-20260807-070110-5ea7's own real, separately-dispatched work (see
+    its SPEC: "build a real, narrow, bounded priority-override mechanism
+    in next_queued_task"). This function only keeps owner_priority_override
+    populated with the current real active phase's members every tick, so
+    that mechanism (whenever it lands) always reads a real, up-to-date
+    table -- extending 5ea7's population lifecycle, not duplicating its
+    consumption logic.
+
+    Real review finding (PR #256 review.json, round 2), fixed here:
+    this used to wrap the ENTIRE sbr.advance_owner_priority_phases() call
+    in sbr._write_lock() -- superboss-register.py's own cross-process
+    flock that every other write-path invocation of that script (dispatch,
+    submit, mark-terminal, ...) across the whole system must also acquire.
+    advance_owner_priority_phases() can, for commit_sha-backed member
+    evidence, shell out to real 60s-timeout git fetch/cat-file/merge-base
+    subprocess calls; holding the system-wide write lock across that meant
+    a slow/degraded network during an active large phase (3/4: 179/70 real
+    members per the SPEC's own evidence) could block every other worker's
+    write-path invocation of superboss-register.py for the whole window --
+    the exact starvation failure mode this feature exists to fix,
+    reintroduced at system-wide scope. advance_owner_priority_phases()
+    now acquires sbr._write_lock() itself, only around its own real reads/
+    writes, deliberately releasing it across its own evidence-check loop --
+    so this caller must NOT wrap the call in its own lock (see that
+    function's own docstring: doing so would, via _write_lock()'s real
+    reentrancy, collapse its two short critical sections back into one
+    long one spanning the unlocked loop, silently reintroducing this exact
+    bug).
+
+    Also real review finding (PR #256 review.json, round 2, minor): `conn`
+    is now opened before, and closed in a `finally` after, the real call --
+    previously an exception raised inside the `with sbr._write_lock():`
+    block (e.g. _sync_owner_priority_override's own >1-active-phase
+    RuntimeError) skipped the conn.close() below it entirely, leaking the
+    connection on that error path."""
+    sbr, error = _safe_superboss_register("advance_owner_priority_phases")
+    if error:
+        return {"error": error}
+    conn = None
+    try:
+        conn = sbr._connect()
+        sbr._ensure_umr_table(conn)
+        sbr._ensure_ocid_canonical_registry_table(conn)
+        return sbr.advance_owner_priority_phases(conn, now=now)
+    except Exception as e:
+        return {"error": f"advance_owner_priority_phases failed: {e}"}
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def run_tick(max_dispatches=None, now=None):
-    """One full governor pass: stuck-task scan, stale-queued-age safeguard,
-    the real UMR-20260807-110133-205d twelve-step orchestrator maintenance
-    pass (step 1/4/10/12, once per tick -- see
+    """One full governor pass: real owner-priority-phase advance check,
+    stuck-task scan, stale-queued-age safeguard, the real
+    UMR-20260807-110133-205d twelve-step orchestrator maintenance pass
+    (step 1/4/10/12, once per tick -- see
     _orchestrator_tick_maintenance()'s own docstring; steps 2/3/6/8/9/11 are
     wired into dispatch_one()'s own real per-row path, since they gate or
     shape an actual per-row dispatch decision; steps 5/7 are pre-existing,
@@ -1953,6 +2021,7 @@ def run_tick(max_dispatches=None, now=None):
     ROW_RESOLVED_NON_DISPATCH_ACTIONS's docstring above -- and only stops on
     a genuinely row-independent block or an empty queue."""
     results = {
+        "owner_priority_phase_advance": _advance_owner_priority_phases_safe(now=now),
         "stuck_task_actions": scan_stuck_tasks(now=now),
         "stale_queued_flagged": flag_stale_queued_tasks(now=now),
         "dispatches": [],

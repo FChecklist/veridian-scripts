@@ -1,0 +1,43 @@
+# =============================================================================
+# Owner directive 2026-08-07 ("one input gate, one output gate for
+# superboss-register.sqlite"): this is a genuinely NEW, additive, persistent
+# daemon -- NOT a periodic/cron job, so it does NOT fall under the
+# ~/.config/systemd/user/README.md closed-set-of-19 STANDING RULE (that rule
+# is explicitly scoped to "periodic jobs" with an OnCalendar cadence; see
+# that file's own text). It follows the same precedent already used for
+# other always-on singleton daemons on this box that required their own
+# explicit Owner directive to add -- veridian-glm-proxy.service (Owner
+# zero-waste directive 2026-07-20) and veridian-governor-tick.service --
+# Type=simple, Restart=always, [Install] WantedBy=default.target, no
+# per-task templating (%i) so there is no repeat of the 2026-08-01 24-unit
+# boot-storm OOM-kill (that incident was about a *templated* unit with many
+# live instances all auto-starting at once; this is a single, always-on
+# singleton, same shape as glm-proxy/governor-tick which already run this
+# way safely).
+#
+# Real problem this fixes: 46 separate scripts each open their own raw
+# sqlite3.connect() to the live superboss-register.sqlite (confirmed via
+# grep, 2026-08-07) -- no shared validation, no shared retry/serialization
+# discipline. This unit runs scripts/superboss_gateway.py (reviewed, not
+# rewritten, from the already end-to-end-tested draft at
+# /opt/veridian/ai-os/superboss_gateway_DRAFT_2026-08-07.py) as a local-only
+# (127.0.0.1:8790) HTTP JSON gateway: GET /health, POST /read, POST /write,
+# both allowlisted to a fixed set of tables. Deliberately scoped to landing
+# the gateway only -- migrating the 46 existing scripts to use it instead of
+# their own sqlite3.connect() is separate, later, explicitly out-of-scope
+# follow-up work (see this unit's own script header).
+# =============================================================================
+[Unit]
+Description=VERIDIAN superboss-register.sqlite single-writer gateway: one input gate, one output gate (127.0.0.1:8790), Owner directive 2026-08-07
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/veridian/scripts/superboss_gateway.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/opt/veridian/ai-os/logs/superboss-gateway.log
+StandardError=append:/opt/veridian/ai-os/logs/superboss-gateway.log
+
+[Install]
+WantedBy=default.target

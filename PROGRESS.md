@@ -1,26 +1,38 @@
-# PROGRESS -- task-20260807-081909-confirmed-with-fresh-evidence--aging-bas
+# PROGRESS -- task-20260807-085309-land-the-proven-single-gateway-for-super
 
 ## Completed
-- [x] Verified live DB (`/opt/veridian/ai-os/memory/superboss-register.sqlite`, the real one —
-      other candidate paths are 0-byte stubs) against every load-bearing claim in the SPEC.
-- [x] Found the SPEC's headline claim false: `UMR-20260807-061238-ae93` already has
-      `status=running`, non-NULL `ts_dispatched` (2026-08-07T08:19:07), and a confirmed real
-      `active`/`running` systemd unit — it was never starved, and was dispatched first among
-      the same burst the SPEC claims overtook it.
-- [x] Found the 2nd seed row `UMR-20260806-141055-1fec` already `completed` since
-      2026-08-06T19:40:12 (~13h before this task).
-- [x] Confirmed this SPEC is a near-verbatim repeat of a previously-declined identical request
-      (`task-20260806-201936-...`, same `owner_priority_override` schema, same 2nd seed UMR),
-      recorded in the durable false-premise memory (case #23).
-- [x] Confirmed `owner_priority_override` table does not exist (nothing built by the prior
-      declined request either).
-- [x] Documented full verification in `AGING_STARVATION_VERIFICATION.md`.
-- [x] Decision: did NOT build the requested hardcoded priority-override table/scheduler
-      bypass — the concrete instance it targets doesn't exhibit the claimed problem, and
-      building a permanent scheduler bypass seeded with an already-running row and an
-      already-completed row would be an unnecessary, hard-to-reverse change.
+- [x] Verified premises independently (not just trusting SPEC text): draft
+      file exists at /opt/veridian/ai-os/superboss_gateway_DRAFT_2026-08-07.py,
+      syntax-valid (py_compile), and re-ran the end-to-end test myself:
+      GET /health -> {"ok": true, "journal_mode": "wal"}; POST /read on
+      umr_tasks returned a row matching a direct sqlite3 SELECT on the real
+      DB exactly; POST /read on sqlite_master correctly rejected
+      ("table not allowlisted"). Confirmed live DB path
+      /opt/veridian/ai-os/memory/superboss-register.sqlite is real (8023
+      rows in umr_tasks, journal_mode=wal).
+- [x] Checked the deterministic briefing's 2 pointers -- both non-blocking:
+      wiring_registry match is just this task's own self-referential
+      dispatch_event row (noise from scope-term matching, not a prior
+      gateway); capability_registry "task_oa" is an unrelated Next.js
+      AI-orchestration API route capability, not a DB gateway -- no real
+      duplicate exists, safe to proceed.
+- [x] Checked ~/.config/systemd/user/README.md STANDING RULE: the
+      closed-set-of-19 applies to periodic/cron units only (explicit text:
+      "closed set of periodic jobs"); this is a persistent always-on
+      singleton daemon, same category as the already-live
+      veridian-glm-proxy.service / veridian-governor-tick.service, not
+      subject to that rule.
+- [x] Copied (not rewritten) the reviewed draft into scripts/superboss_gateway.py.
+- [x] Added systemd/veridian-superboss-gateway.service (Type=simple,
+      Restart=on-failure, [Install] WantedBy=default.target -- singleton,
+      not templated, so no repeat of the 2026-08-01 boot-storm OOM incident).
 
 ## Remaining
-- [ ] None — investigation closed as false premise. If a genuinely-still-queued tier-0 row
-      is found starved by real aging-tiebreak inversion in a future cycle (not this one),
-      that would be new evidence and would need its own fresh verification.
+- [ ] Commit + push scripts/superboss_gateway.py + systemd unit.
+- [ ] Open PR citing this UMR/task, get PR number.
+- [ ] After merge: sync /opt/veridian/scripts, install + daemon-reload +
+      enable --now the systemd --user unit, confirm `systemctl --user
+      status` active and real `curl 127.0.0.1:8790/health` returns ok:true.
+- [ ] Register capability_registry row `superboss_gateway` describing the
+      read/write endpoints and allowlisted tables.
+- [ ] Record completion via agent_work_briefing.py record-completion.

@@ -1,0 +1,45 @@
+{
+  "capability_name": "cron_systemd_state_manager",
+  "inputs": [
+    {"key": "unit_name", "label": "Real systemd --user unit name (e.g. veridian-cron-dispatch-tick.timer)", "type": "text"},
+    {"key": "verb", "label": "systemctl --user verb: is-enabled | is-active | enable | disable | start | stop", "type": "text"}
+  ],
+  "business_rules": [
+    {"leaf_key": "cron_systemd_state_manager", "phase": "check_or_change", "mechanism_path": "systemctl --user (is-enabled/is-active/enable/disable/start/stop) against /home/rajat/.config/systemd/user/*.timer|*.service", "registered": true}
+  ],
+  "workflow": "systemctl --user <verb> <unit> against the live veridian-* .timer/.service units under /home/rajat/.config/systemd/user/ -- the crontab at ~/.config (user crontab) is permanently retired (see crontab README: 'All scheduled jobs retired permanently on 2026-07-29 (task-20260729 cron-consolidation-phase6)'), so systemd --user timers are the only live scheduling mechanism this capability manages.",
+  "automation": null,
+  "documents": [],
+  "reports": null,
+  "apis": [
+    "systemctl --user is-enabled <unit>",
+    "systemctl --user is-active <unit>",
+    "systemctl --user list-unit-files --type=timer",
+    "systemctl --user list-timers --all"
+  ],
+  "ui_screens": null,
+  "permissions": "server-local shell execution only (systemctl --user, same OS user as the veridian dispatch mechanism), no tenant/org scoping applicable -- changing enable/active state of a priority-chain timer is an Owner-governed action, not a routine one",
+  "ai_required": false,
+  "confidence": 1.0,
+  "version": "1.0",
+  "owner": "VERIDIAN platform ops tooling (/opt/veridian/scripts) -- registered under governing chain UMR-20260806-124055-bc80",
+  "metadata": {
+    "registered_by_umr": "UMR-20260807-045110-6a56",
+    "registered_by_task": "task-20260807-053617-register-real-cron-and-systemd-timer-dis",
+    "governing_chain": "UMR-20260806-124055-bc80",
+    "canonical_for": "checking or changing systemd --user timer/service enable+active state for any veridian-* cron/timer unit going forward -- supersedes ad hoc systemctl calls as the citable reference for this class of action",
+    "live_state_at_registration": {
+      "checked_ts": "2026-08-07T05:39:51Z",
+      "veridian_timer_units_total": 24,
+      "enabled_and_active": ["veridian-cron-dispatch-tick.timer", "veridian-dispatch-tick.timer", "veridian-pm-report-tick.timer"],
+      "disabled": 21,
+      "note_vs_spec_narrative": "SPEC preamble claimed only veridian-cron-dispatch-tick.timer and veridian-pm-report-tick.timer remain enabled+active; live systemctl --user is-enabled/is-active re-verification (as this same SPEC's TASK section explicitly instructed) found a third timer, veridian-dispatch-tick.timer, also enabled+active, and found veridian-cron-session-metadata-60min.timer disabled but currently active (a running instance despite being disabled). Both discrepancies are recorded as real live evidence, not assumed away.",
+      "anomaly_disabled_but_active": ["veridian-cron-session-metadata-60min.timer"],
+      "out_of_scope_confirmed_unrelated": ["launchpadlib-cache-clean.timer (global system scope, enabled, per SPEC)", "systemd-tmpfiles-clean.timer (non-veridian system default, never had a wiring_registry cron_job row)"]
+    },
+    "checked_for_duplicate": "list-capabilities (18 existing rows at build time) and capability_name UNIQUE index both confirm zero prior row named cron_systemd_state_manager",
+    "reuses_directly": [
+      "superboss-register.py: register_entity_row, register_entity CLI (register-entity), _ensure_wiring_registry_table, register_capability CLI (register-capability)"
+    ]
+  }
+}

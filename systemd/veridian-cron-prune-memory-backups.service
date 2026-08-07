@@ -1,0 +1,34 @@
+# =============================================================================
+# Version-controlled reference copy of the LIVE, already-installed unit
+# (~/.config/systemd/user/veridian-cron-prune-memory-backups.service),
+# tracked here for the first time under UMR-20260806-134738-eec3 (governing
+# UMR-20260806-071025-1d28) alongside the cadence fix in the paired .timer
+# and the new companion .path unit in this same directory. Same "no
+# automated deploy step for this directory" convention as every other file
+# here -- see systemd/README.md. This .service file's content is unchanged
+# from what UMR-20260806-084306-f599 Step 6 (PR #151) originally installed;
+# only the trigger mechanism (paired .timer + new .path unit) changed.
+#
+# Original authorization context (UMR-20260806-084306-f599 Step 6, unit #19
+# under the ~/.config/systemd/user/README.md closed-set rule):
+# pruning redundant superboss-register.sqlite backup copies under
+# /opt/veridian/ai-os/memory does not genuinely fit any of the original 18
+# units -- the nearest analog, credit-ledger-prune, prunes a different
+# database for a different, financial-ledger-retention reason.
+# =============================================================================
+[Unit]
+Description=VERIDIAN cron-replacement: Prune redundant superboss-register.sqlite backup copies under ai-os/memory
+# Root cause fixed by this unit's existence: nothing on this box ever
+# pruned old superboss-register.sqlite copies, which let 20GB+ of redundant
+# full-DB copies accumulate under /opt/veridian/ai-os/memory not once but
+# twice in the same week (UMR-20260806-084306-f599). prune_memory_backups.py
+# keeps only the 3 most recent backups that pass a real, fresh
+# PRAGMA integrity_check, and refuses to delete anything at all if the LIVE
+# database itself fails that same check first.
+ConditionPathExists=!/opt/veridian/ai-os/locks/resource-governor-EMERGENCY_STOP
+
+[Service]
+Type=oneshot
+ExecStart=/opt/veridian/scripts/run-logged.sh "prune-memory-backups" /usr/bin/python3 /opt/veridian/scripts/prune_memory_backups.py
+StandardOutput=append:/opt/veridian/ai-os/logs/prune-memory-backups-cron.log
+StandardError=append:/opt/veridian/ai-os/logs/prune-memory-backups-cron.log

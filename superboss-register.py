@@ -188,6 +188,16 @@ def resolve_superboss_db_path(default_path="/opt/veridian/ai-os/memory/superboss
 DB_PATH = resolve_superboss_db_path()
 _WRITE_LOCK_PATH = DB_PATH + ".writelock"
 
+# UMR-20260806-130914-e7f1: process-local reentrancy depth counter for
+# _write_lock() below -- see that function's own docstring addendum for the
+# real, concrete deadlock this fixes. Not a threading.Lock/RLock: every
+# real caller of this script runs single-threaded per process invocation, so
+# a plain single-element list (mutable closure cell, avoids a `global`
+# statement) is the real, sufficient mechanism -- never shared across
+# processes, so it has zero effect on this lock's real cross-process mutual
+# exclusion guarantee.
+_write_lock_depth = [0]
+
 
 @contextlib.contextmanager
 def _write_lock():
@@ -209,13 +219,43 @@ def _write_lock():
     means a losing process blocks entirely outside any sqlite transaction,
     so killing it while it waits can never corrupt the file; flock is also
     auto-released if the holder itself is killed, so this cannot deadlock.
-    """
-    os.makedirs(os.path.dirname(_WRITE_LOCK_PATH), exist_ok=True)
-    with open(_WRITE_LOCK_PATH, "w") as lockfile:
-        fcntl.flock(lockfile, fcntl.LOCK_EX)
+
+    UMR-20260806-130914-e7f1 addendum: made safely re-entrant WITHIN the
+    same process via the plain _write_lock_depth counter above. flock() is
+    NOT reentrant across distinct open file descriptions even within one
+    process (confirmed against `man 2 flock`: "If a process uses open(2)...
+    to obtain more than one file descriptor for the same file, these file
+    descriptors are treated independently by flock()... An attempt to lock
+    the file using one of these file descriptors may be denied by a lock
+    that the calling process has already placed via another file
+    descriptor") -- so a naive nested `with _write_lock(): ... with
+    _write_lock(): ...` would self-deadlock. Real, concrete trigger this
+    fixes: the `init` CLI command already wraps init_db() in one
+    _write_lock(), and init_db() calls _migrate_schema() ->
+    _ensure_umr_table(), which now (see _migrate_umr_tasks_status_widen())
+    also needs its own real _write_lock() around its actual rebuild -- the
+    same real corruption-prevention reason documented above, since a
+    full-table rebuild is a much larger real write than the cheap ALTER
+    TABLE ADD COLUMN migrations that pattern already covered safely. Only
+    the OUTERMOST acquisition takes/releases the real OS flock; a nested
+    call is a pure no-op that still yields -- mutual exclusion against every
+    OTHER process is completely unaffected; this only ever prevents THIS
+    process from blocking on a lock it already holds itself."""
+    if _write_lock_depth[0] > 0:
+        _write_lock_depth[0] += 1
         try:
             yield
         finally:
+            _write_lock_depth[0] -= 1
+        return
+    os.makedirs(os.path.dirname(_WRITE_LOCK_PATH), exist_ok=True)
+    with open(_WRITE_LOCK_PATH, "w") as lockfile:
+        fcntl.flock(lockfile, fcntl.LOCK_EX)
+        _write_lock_depth[0] = 1
+        try:
+            yield
+        finally:
+            _write_lock_depth[0] = 0
             fcntl.flock(lockfile, fcntl.LOCK_UN)
 
 
@@ -2941,10 +2981,29 @@ def list_entities(args):
 #                                   found an existing active row for the same
 #                                   task_identity -- logged, not silently
 #                                   dropped, per this table's own row)
+# UMR-20260806-130914-e7f1 (real dispatch, governed by UMR-20260806-071025-1d28):
+# 'completed_unmerged' added below -- a real, distinct, honest status for the
+# case mark-umr-terminal's own new structured-evidence gate (see
+# cmd_mark_umr_terminal's docstring) now separates out: real AI-side work
+# genuinely finished, a real commit exists and is a real ancestor check
+# CANDIDATE, but that commit is NOT (yet) a real ancestor of origin/main --
+# i.e. a real, open, unmerged PR (this repo's own gridlock condition made this
+# a routine, not edge-case, outcome the same day this was written: PRs
+# #165/#166/#167/#169/#170/#171/#172 all real, tested, reviewed, and stuck
+# unmerged behind the same 5/5 concurrency-saturation condition). Naming
+# follows this codebase's own existing '<state>_unmerged' precedent
+# (backfill_ocid_registry_phase2_columns.py's 'closed_unmerged',
+# resource_governor.py's 'CLOSED-unmerged' comment) rather than inventing new
+# vocabulary. Deliberately NOT folded into UMR_ACTIVE_STATUSES: the work
+# itself is genuinely done (ts_completed is real and set) -- what's pending is
+# merge, not further AI work -- so the existing dedup/stale-heartbeat sweeps
+# that treat 'dispatched'/'running' rows as still-in-flight must never treat
+# a completed_unmerged row the same way (reusing 'dispatched' here, as
+# considered and rejected, would have caused exactly that false conflation).
 # ---------------------------------------------------------------------------
 UMR_STATUSES = (
-    "queued", "dispatched", "running", "completed", "failed",
-    "rejected_duplicate", "sigterm_sent", "killed",
+    "queued", "dispatched", "running", "completed", "completed_unmerged",
+    "failed", "rejected_duplicate", "sigterm_sent", "killed",
 )
 UMR_ACTIVE_STATUSES = ("queued", "dispatched", "running")
 
@@ -2994,8 +3053,25 @@ def _ensure_umr_table(conn):
         # real, live, already-migrated production DB -- confirmed via a
         # direct PRAGMA table_info() readback showing the new columns
         # missing even though _ensure_umr_table() had just run).
+        #
+        # UMR-20260806-130914-e7f1: the status column's own CHECK constraint
+        # is not a column-existence question PRAGMA table_info can answer, so
+        # it needs its own real check here -- a plain sqlite_master.sql text
+        # read (cheap, no write, safe on every hot-path call, same cost class
+        # as the PRAGMA table_info() call already made above) confirming
+        # 'completed_unmerged' is really present in the stored CREATE TABLE
+        # text. Skipping this would silently strand
+        # _migrate_umr_tasks_status_widen() the exact same way forgetting an
+        # external_agent_eligible-style column would -- this fast path must
+        # never return early on a DB whose real CHECK constraint hasn't
+        # actually been widened yet.
+        status_migrated = row is not None and "'completed_unmerged'" in (
+            conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='umr_tasks'"
+            ).fetchone()["sql"] or ""
+        )
         if {"last_heartbeat", "tenant_id", "utm_source", "external_agent_eligible",
-                "ts_relay_attempted"} <= cols:
+                "ts_relay_attempted"} <= cols and status_migrated:
             return
     status_sql = ",".join("'" + s + "'" for s in UMR_STATUSES)
     conn.execute(f"""CREATE TABLE IF NOT EXISTS umr_tasks (
@@ -3044,6 +3120,137 @@ def _ensure_umr_table(conn):
     _migrate_umr_utm(conn)
     _migrate_umr_tasks_external_agent_columns(conn)
     _migrate_umr_relay_courtesy(conn)
+    # UMR-20260806-130914-e7f1: must run AFTER every other ALTER-TABLE-ADD-
+    # COLUMN migration above (incl. _migrate_umr_relay_courtesy's own
+    # ts_relay_attempted/relay_outcome/relay_detail) -- its rebuild copies
+    # columns dynamically via a live PRAGMA table_info(umr_tasks) read, so
+    # every column added by an earlier migration in this function must
+    # already exist on the live table by the time this one runs, or it would
+    # be silently dropped on rebuild.
+    _migrate_umr_tasks_status_widen(conn)
+
+
+def _migrate_umr_tasks_status_widen(conn):
+    """UMR-20260806-130914-e7f1: widens umr_tasks.status's CHECK constraint to
+    allow the new 'completed_unmerged' status (see UMR_STATUSES's own comment
+    for what this status is and why it exists). SQLite has no ALTER TABLE for
+    CHECK constraints, so a pre-existing table (this DB has one, created
+    before this addition, with real production rows) needs a real rebuild --
+    same proven mechanism _migrate_wiring_registry_entity_types() already
+    established for this exact class of problem (CHECK-widening on a live
+    table), reused here rather than inventing a second one.
+
+    Unlike that function, this one does the rebuild via a targeted string
+    substitution on the table's own real, live, stored CREATE TABLE text
+    (sqlite_master.sql) rather than hand-reconstructing the full column list:
+    umr_tasks has picked up many ALTER TABLE ADD COLUMN'd columns over time
+    (last_heartbeat, tenant_id, the utm_* set, the external_agent_* set --
+    see the migration functions above) that are NOT part of this function's
+    own base CREATE TABLE text above, so hand-listing columns here would risk
+    silently dropping one on rebuild. Substituting only the exact known-old
+    status CHECK clause inside the real stored text, and refusing (raising,
+    never guessing) if that exact clause isn't found, is the only way to
+    guarantee every real column -- base and migrated-in alike -- survives the
+    rebuild unchanged.
+
+    No-op (checked via sqlite_master's own stored CREATE TABLE text, same
+    convention as the wiring_registry migration) once already migrated, so
+    this is safe to call on every _ensure_umr_table() invocation that reaches
+    it -- reaches it only because the fast-path gate above already excludes
+    the common case via the same sqlite_master.sql check, so in steady state
+    this function's own body never runs a second time.
+
+    UMR-20260806-130914-e7f1 real independent-review addendum: unlike
+    _migrate_wiring_registry_entity_types() (its real precedent, which does
+    its own equivalent rebuild WITHOUT _write_lock() protection -- a real,
+    pre-existing gap in that already-shipped code, out of scope to fix
+    here), this function's actual rebuild IS wrapped in _write_lock() below,
+    for the same real corruption-prevention reason _write_lock()'s own
+    docstring documents (2026-07-23 incident): a full DROP+rebuild+RENAME is
+    a much larger real write than a single ALTER TABLE ADD COLUMN, so it
+    deserves the same real protection reconcile_umr_status_against_pr()'s
+    own write already gets, not less. Safe to nest under an outer
+    _write_lock() (e.g. the `init` CLI command) because _write_lock() was
+    made re-entrant specifically for this real call site -- see its own
+    docstring addendum."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='umr_tasks'"
+    ).fetchone()
+    if row is None:
+        return  # table doesn't exist yet -- the CREATE TABLE IF NOT EXISTS above already covers that with the widened CHECK
+    old_sql = row["sql"]
+    if "'completed_unmerged'" in old_sql:
+        return  # already migrated
+
+    old_status_clause = (
+        "CHECK(status IN ('queued','dispatched','running','completed','failed',"
+        "'rejected_duplicate','sigterm_sent','killed'))"
+    )
+    if old_status_clause not in old_sql:
+        raise RuntimeError(
+            "_migrate_umr_tasks_status_widen: expected exact old status CHECK "
+            "clause not found in live umr_tasks CREATE TABLE text -- refusing "
+            "to guess at a rebuild. Real text was: " + old_sql
+        )
+    new_status_sql = ",".join("'" + s + "'" for s in UMR_STATUSES)
+    new_status_clause = f"CHECK(status IN ({new_status_sql}))"
+
+    migrate_sql = old_sql.replace(old_status_clause, new_status_clause, 1)
+    if "CREATE TABLE umr_tasks (" not in migrate_sql:
+        raise RuntimeError(
+            "_migrate_umr_tasks_status_widen: expected 'CREATE TABLE umr_tasks (' "
+            "prefix not found in live umr_tasks CREATE TABLE text -- refusing "
+            "to guess at a rebuild. Real text was: " + old_sql
+        )
+    migrate_sql = migrate_sql.replace(
+        "CREATE TABLE umr_tasks (", "CREATE TABLE umr_tasks__migrate (", 1
+    )
+
+    with _write_lock():
+        # Re-check under the real lock -- a concurrent process may have
+        # already completed this exact rebuild while this process was
+        # merely constructing migrate_sql above (no write happened yet).
+        row2 = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='umr_tasks'"
+        ).fetchone()
+        if row2 is not None and "'completed_unmerged'" in row2["sql"]:
+            return
+
+        conn.execute("DROP TRIGGER IF EXISTS umr_tasks_ai")
+        conn.execute("DROP TRIGGER IF EXISTS umr_tasks_au")
+        conn.execute("DROP TRIGGER IF EXISTS umr_tasks_ad")
+        conn.execute("DROP TABLE IF EXISTS umr_tasks_fts")
+
+        conn.execute(migrate_sql)
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(umr_tasks)").fetchall()]
+        cols_sql = ", ".join(cols)
+        conn.execute(f"INSERT INTO umr_tasks__migrate ({cols_sql}) SELECT {cols_sql} FROM umr_tasks")
+        conn.execute("DROP TABLE umr_tasks")
+        conn.execute("ALTER TABLE umr_tasks__migrate RENAME TO umr_tasks")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_umr_tasks_identity ON umr_tasks(task_identity)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_umr_tasks_status ON umr_tasks(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_umr_tasks_tier ON umr_tasks(tier)")
+
+        conn.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS umr_tasks_fts USING fts5(
+            task_identity, source_trigger, logs_ref,
+            content='umr_tasks', content_rowid='rowid'
+        )""")
+        conn.execute("""CREATE TRIGGER IF NOT EXISTS umr_tasks_ai AFTER INSERT ON umr_tasks BEGIN
+            INSERT INTO umr_tasks_fts(rowid, task_identity, source_trigger, logs_ref)
+            VALUES (new.rowid, new.task_identity, new.source_trigger, new.logs_ref);
+        END""")
+        conn.execute("""CREATE TRIGGER IF NOT EXISTS umr_tasks_au AFTER UPDATE ON umr_tasks BEGIN
+            INSERT INTO umr_tasks_fts(umr_tasks_fts, rowid, task_identity, source_trigger, logs_ref)
+            VALUES ('delete', old.rowid, old.task_identity, old.source_trigger, old.logs_ref);
+            INSERT INTO umr_tasks_fts(rowid, task_identity, source_trigger, logs_ref)
+            VALUES (new.rowid, new.task_identity, new.source_trigger, new.logs_ref);
+        END""")
+        conn.execute("""CREATE TRIGGER IF NOT EXISTS umr_tasks_ad AFTER DELETE ON umr_tasks BEGIN
+            INSERT INTO umr_tasks_fts(umr_tasks_fts, rowid, task_identity, source_trigger, logs_ref)
+            VALUES ('delete', old.rowid, old.task_identity, old.source_trigger, old.logs_ref);
+        END""")
+        conn.execute("INSERT INTO umr_tasks_fts(umr_tasks_fts) VALUES ('rebuild')")
+        conn.commit()
 
 
 def _ensure_ocid_artifact_links_table(conn):
@@ -3522,6 +3729,57 @@ def _default_ocid_resolver_runner(cmd, cwd=None):
     sibling compliance-tracker repo, which splits pure decision logic from
     the I/O that feeds it)."""
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=60)
+
+
+def _umr_terminal_commit_exists(repo_root, sha, _runner=None):
+    """UMR-20260806-130914-e7f1: real existence check for a commit object --
+    `git cat-file -e <sha>^{commit}` -- used by cmd_mark_umr_terminal's
+    structured-evidence gate to confirm a caller-supplied --commit-sha is a
+    real commit object this repo checkout actually has (fetched fresh first),
+    not a fabricated/garbage hex string. Fails closed (returns False) on any
+    error/timeout -- a real completion write must never proceed on an
+    unverifiable claim, same fail-closed convention as
+    _is_umr_terminal_commit_ancestor_of_main below."""
+    runner = _runner or _default_ocid_resolver_runner
+    if not sha or not repo_root or not os.path.isdir(repo_root):
+        return False
+    try:
+        runner(["git", "fetch", "origin", sha], cwd=repo_root)
+    except Exception:
+        pass
+    try:
+        result = runner(["git", "cat-file", "-e", sha + "^{commit}"], cwd=repo_root)
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _is_umr_terminal_commit_ancestor_of_main(repo_root, sha, _runner=None):
+    """UMR-20260806-130914-e7f1: real merge-base ancestry check for
+    cmd_mark_umr_terminal's completed-status gate -- mirrors
+    triage_owner_umr_24h.py's own is_commit_on_main(), the only signal this
+    codebase already trusts that a commit is genuinely on main (never a PR's
+    mergedAt field alone, and never gh's --json state field alone: a PR can
+    be merged into a non-main base, or a base later force-reset). Fetches
+    origin/main and the target sha fresh (best-effort -- a fetch failure
+    still lets the subsequent merge-base call fail honestly rather than
+    trusting a stale local ref) before the real check. Fails closed: any
+    subprocess/timeout error is treated as 'not confirmed an ancestor', never
+    as 'assume merged' -- this is the one check status=completed's real
+    artifact requirement is not allowed to get wrong in the optimistic
+    direction."""
+    runner = _runner or _default_ocid_resolver_runner
+    if not sha or not repo_root or not os.path.isdir(repo_root):
+        return False
+    try:
+        runner(["git", "fetch", "origin", "main"], cwd=repo_root)
+    except Exception:
+        pass
+    try:
+        result = runner(["git", "merge-base", "--is-ancestor", sha, "origin/main"], cwd=repo_root)
+        return result.returncode == 0
+    except Exception:
+        return False
 
 
 def _ocid_casing_variants(ocid_number):
@@ -5074,7 +5332,11 @@ def _check_rule_2_outcome_classification(umr_row):
     real umr_tasks.status column, never inferred."""
     if not umr_row:
         return None, "no real umr_tasks row found"
-    valid_terminal = {"completed", "failed", "killed", "rejected_duplicate"}
+    # UMR-20260806-130914-e7f1: 'completed_unmerged' is real, ts_completed-bearing,
+    # terminal-for-AI-work-purposes vocabulary too (see UMR_STATUSES's own comment) --
+    # excluding it here would misclassify a real, honestly-recorded row as a
+    # compliance violation.
+    valid_terminal = {"completed", "completed_unmerged", "failed", "killed", "rejected_duplicate"}
     valid_active = {"queued", "dispatched", "running"}
     status = umr_row["status"]
     if status in valid_terminal or status in valid_active:
@@ -5117,7 +5379,7 @@ def _check_rule_5_stall_detection(umr_row):
     if not umr_row:
         return None, "no real umr_tasks row found"
     status = umr_row["status"]
-    if status in ("completed", "failed", "killed", "rejected_duplicate"):
+    if status in ("completed", "completed_unmerged", "failed", "killed", "rejected_duplicate"):
         ok = umr_row["ts_completed"] is not None
         return ok, f"real terminal status={status!r}; ts_completed={'present' if ok else 'MISSING'}"
     ok = umr_row["last_heartbeat"] is not None
@@ -6377,11 +6639,106 @@ def cmd_requeue_build_lock_contended(args):
                        "status": "queued", "reason": "build_lock_contended"}, indent=2, default=str))
 
 
+def validate_umr_terminal_completion_evidence(*, status, file_path, commit_sha, repo_root,
+                                               commit_exists_fn=None, is_ancestor_fn=None):
+    """UMR-20260806-130914-e7f1 real dispatch (governed by
+    UMR-20260806-071025-1d28), correcting the real 'false completion' finding
+    against UMR-20260806-122546-78d6: root cause confirmed directly against
+    this file's own real pre-fix code (cmd_mark_umr_terminal /
+    p_markterm argparse block) was that mark-umr-terminal had NO parameter
+    for structured outputs_json/logs_ref evidence at all -- not a
+    caller-discipline gap, a real mechanism gap. This function is the real,
+    pure(-ish; I/O only via the injected commit_exists_fn/is_ancestor_fn,
+    same testability convention as this module's other _runner-injectable
+    helpers) decision logic cmd_mark_umr_terminal calls to close it.
+
+    status=completed requires ONE real, independently-verifiable artifact:
+      - a real --file-path that genuinely exists on disk (checked here via
+        os.path.isfile, resolved against repo_root when not absolute), OR
+      - a real --commit-sha that IS a real ancestor of origin/main (checked
+        live via _is_umr_terminal_commit_ancestor_of_main -- mirrors
+        triage_owner_umr_24h.py's own is_commit_on_main(), never trusting a
+        PR's mergedAt field alone).
+    A real, existing commit that is NOT yet an ancestor of origin/main (the
+    real 'PR open, unmerged' case -- confirmed live for PR #171 / commit
+    2290b1b... at the time this was written) is explicitly refused for
+    status=completed, with a message pointing the caller at
+    status=completed_unmerged instead -- this is the real, honest
+    distinction UMR_STATUSES' own comment explains, not a weakened gate.
+
+    status=completed_unmerged requires a real --commit-sha that exists but is
+    NOT (yet) an ancestor of origin/main -- if it already is, this refuses
+    too (in the other direction: a caller must not under-claim a real merged
+    commit as unmerged either).
+
+    Any other status (failed/killed) is always allowed through unchanged --
+    this gate only ever concerns the two 'real completed work' statuses.
+
+    Returns (allowed: bool, refusal_reason: str or None)."""
+    if status not in ("completed", "completed_unmerged"):
+        return True, None
+
+    commit_exists_fn = commit_exists_fn or _umr_terminal_commit_exists
+    is_ancestor_fn = is_ancestor_fn or _is_umr_terminal_commit_ancestor_of_main
+
+    file_ok = False
+    if file_path:
+        candidate = file_path if os.path.isabs(file_path) else os.path.join(repo_root or "", file_path)
+        file_ok = os.path.isfile(candidate)
+
+    commit_real = bool(commit_sha) and commit_exists_fn(repo_root, commit_sha)
+    is_ancestor = commit_real and is_ancestor_fn(repo_root, commit_sha)
+
+    if status == "completed":
+        if file_ok:
+            return True, None
+        if commit_real and is_ancestor:
+            return True, None
+        if commit_sha and not commit_real:
+            return False, (
+                f"--commit-sha {commit_sha!r} is not a real commit object this repo checkout "
+                f"({repo_root!r}) could verify (git cat-file -e failed even after a real fetch) -- "
+                "refusing to record status=completed"
+            )
+        if commit_real and not is_ancestor:
+            return False, (
+                f"--commit-sha {commit_sha!r} is a real commit but is NOT (yet) a real ancestor of "
+                "origin/main (real open/unmerged PR) -- refusing to record status=completed; "
+                "re-run with --status completed_unmerged instead once you have confirmed the real PR "
+                "is genuinely still open, or wait for it to merge and re-verify"
+            )
+        return False, (
+            "status=completed requires a real --file-path that genuinely exists on disk OR a real "
+            "--commit-sha that is a real ancestor of origin/main -- neither was supplied or verified"
+        )
+
+    # status == "completed_unmerged"
+    if not commit_sha:
+        return False, (
+            "status=completed_unmerged requires a real --commit-sha (the real commit this status "
+            "exists to honestly record as done-but-not-yet-merged) -- none was supplied"
+        )
+    if not commit_real:
+        return False, (
+            f"--commit-sha {commit_sha!r} is not a real commit object this repo checkout "
+            f"({repo_root!r}) could verify (git cat-file -e failed even after a real fetch) -- "
+            "refusing to record status=completed_unmerged"
+        )
+    if is_ancestor:
+        return False, (
+            f"--commit-sha {commit_sha!r} is ALREADY a real ancestor of origin/main -- use "
+            "--status completed instead of completed_unmerged (this status must never be used to "
+            "under-claim a real merged commit as still unmerged)"
+        )
+    return True, None
+
+
 def cmd_mark_umr_terminal(args):
-    """UMR-20260806-085144-9c63. CLI entry point that writes a real
-    ts_completed + a real terminal status onto an existing umr_tasks row via
-    the existing real update_umr_task(), under _write_lock() -- same
-    convention as cmd_reconcile_umr_status above.
+    """UMR-20260806-085144-9c63, structurally extended by
+    UMR-20260806-130914-e7f1. CLI entry point that writes a real ts_completed
+    + a real terminal status onto an existing umr_tasks row via the existing
+    real update_umr_task(), under _write_lock() -- same convention as
+    cmd_reconcile_umr_status above.
 
     Two real callers:
       1. dispatch-owner-task.sh's tmux-relay-failure branch (the real
@@ -6394,28 +6751,78 @@ def cmd_mark_umr_terminal(args):
          instead of requiring a later reconciliation-sweep guess.
 
     --status is restricted to real terminal states this command is meant to
-    assert directly (completed/failed/killed); 'rejected_duplicate' and
-    'sigterm_sent' are written by their own existing real code paths
-    (resource_governor.py's duplicate check, SIGTERM handling), not this
-    generic CLI.
+    assert directly (completed/completed_unmerged/failed/killed);
+    'rejected_duplicate' and 'sigterm_sent' are written by their own existing
+    real code paths (resource_governor.py's duplicate check, SIGTERM
+    handling), not this generic CLI.
+
+    UMR-20260806-130914-e7f1 (real dispatch UMR-20260806-130914-e7f1,
+    governed by UMR-20260806-071025-1d28): status=completed and
+    status=completed_unmerged now structurally REQUIRE real, structured,
+    independently-verifiable evidence -- see
+    validate_umr_terminal_completion_evidence()'s own docstring for the
+    exact real rule. A caller that fails this gate gets a real refusal
+    (printed JSON with refused=true and a real reason, exit code 1) and the
+    row is NOT written at all -- never a silent partial write. Evidence that
+    does pass is recorded onto the row's own real outputs_json (never only
+    inside the free-text --reason) via update_umr_task()'s existing 'outputs'
+    kwarg, so it becomes real, machine-checkable data for the next caller
+    (e.g. reconcile_umr_status_against_pr, an audit sweep) instead of prose
+    that only a human or an LLM re-reading --reason could parse.
 
     Usage:
       python3 superboss-register.py mark-umr-terminal --umr-id UMR-... \\
-          --status {completed,failed,killed} [--reason "why"]
+          --status {completed,completed_unmerged,failed,killed} [--reason "why"] \\
+          [--commit-sha SHA] [--file-path PATH] [--pr-number N] \\
+          [--repo veridian-scripts|compliance-tracker|projexa] [--repo-root PATH]
+
+      --commit-sha / --file-path are REQUIRED (at least one, per the real
+      rule above) when --status is completed or completed_unmerged; ignored
+      (but still recorded onto outputs_json if supplied) for failed/killed,
+      since only a real completed claim needs a real artifact gate.
     """
     init_db_silent()
     conn = _connect()
     _ensure_umr_table(conn)
+
+    repo_root = args.repo_root or DEFAULT_OCID_RESOLVER_REPO_LOCAL_PATHS.get(
+        args.repo, DEFAULT_OCID_RESOLVER_REPO_LOCAL_PATHS["veridian-scripts"]
+    )
+    allowed, refusal_reason = validate_umr_terminal_completion_evidence(
+        status=args.status, file_path=args.file_path, commit_sha=args.commit_sha,
+        repo_root=repo_root,
+    )
+    if not allowed:
+        conn.close()
+        print(json.dumps({
+            "umr_id": args.umr_id, "status": args.status, "refused": True,
+            "reason": refusal_reason,
+        }, indent=2, default=str))
+        sys.exit(1)
+
     ts_completed = _now_iso()
     fields = {"status": args.status, "ts_completed": ts_completed}
     if args.reason:
         fields["reason"] = args.reason
+    outputs = {}
+    if args.pr_number is not None:
+        outputs["pr_number"] = args.pr_number
+    if args.commit_sha:
+        outputs["commit_sha"] = args.commit_sha
+    if args.file_path:
+        outputs["file_path"] = args.file_path
+    if args.repo:
+        outputs["repo"] = args.repo
+    if outputs:
+        fields["outputs"] = outputs
+
     with _write_lock():
         update_umr_task(conn, args.umr_id, **fields)
         conn.commit()
     conn.close()
     print(json.dumps({"umr_id": args.umr_id, "status": args.status,
-                       "ts_completed": ts_completed}, indent=2, default=str))
+                       "ts_completed": ts_completed, "outputs": outputs or None},
+                      indent=2, default=str))
 
 
 def reset_umr_task_to_queued(conn, umr_id, *, reason):
@@ -7687,14 +8094,38 @@ if __name__ == "__main__":
     p_reqlock.add_argument("--unit-name", dest="unit_name", required=True)
 
     p_markterm = sub.add_parser("mark-umr-terminal",
-                                 help="UMR-20260806-085144-9c63: write a real ts_completed + "
+                                 help="UMR-20260806-085144-9c63, structurally extended by "
+                                      "UMR-20260806-130914-e7f1: write a real ts_completed + "
                                       "terminal status onto a umr_tasks row -- used both by "
                                       "dispatch-owner-task.sh's tmux-relay-failure branch "
                                       "(--status failed) and by a worker/interactive session "
-                                      "recording genuine completion")
+                                      "recording genuine completion. --status completed/"
+                                      "completed_unmerged now REQUIRE real structured evidence "
+                                      "(--commit-sha real-and-an-ancestor-of-origin/main, or a "
+                                      "real --file-path) -- see cmd_mark_umr_terminal's own "
+                                      "docstring")
     p_markterm.add_argument("--umr-id", dest="umr_id", required=True)
-    p_markterm.add_argument("--status", required=True, choices=["completed", "failed", "killed"])
+    p_markterm.add_argument("--status", required=True,
+                             choices=["completed", "completed_unmerged", "failed", "killed"])
     p_markterm.add_argument("--reason", default=None)
+    p_markterm.add_argument("--commit-sha", dest="commit_sha", default=None,
+                             help="real commit SHA -- required (with/without --file-path) for "
+                                  "--status completed (must be a real ancestor of origin/main) "
+                                  "or completed_unmerged (must be real but NOT yet an ancestor)")
+    p_markterm.add_argument("--file-path", dest="file_path", default=None,
+                             help="real file path that must genuinely exist on disk (absolute, "
+                                  "or resolved against --repo-root/--repo) -- an alternative real "
+                                  "artifact to --commit-sha for --status completed")
+    p_markterm.add_argument("--pr-number", dest="pr_number", type=int, default=None,
+                             help="real PR number, recorded onto outputs_json for traceability "
+                                  "(not itself verified live -- --commit-sha is the real gate)")
+    p_markterm.add_argument("--repo", default="veridian-scripts",
+                             choices=list(DEFAULT_OCID_RESOLVER_REPO_LOCAL_PATHS),
+                             help="which real local repo checkout to verify --commit-sha/--file-path "
+                                  "against (default: veridian-scripts)")
+    p_markterm.add_argument("--repo-root", dest="repo_root", default=None,
+                             help="override the local repo checkout path used for the real "
+                                  "commit-ancestor/file-exists check (default: derived from --repo)")
 
     p_gtmupd = sub.add_parser("update-gtm-category",
                                help="UMR-20260806-114728-d469 (ported to current main under "

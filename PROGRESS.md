@@ -15,7 +15,7 @@
       dispatch_event row (noise from scope-term matching, not a prior
       gateway); capability_registry "task_oa" is an unrelated Next.js
       AI-orchestration API route capability, not a DB gateway -- no real
-      duplicate exists, safe to proceed.
+      duplicate exists.
 - [x] Checked ~/.config/systemd/user/README.md STANDING RULE: the
       closed-set-of-19 applies to periodic/cron units only (explicit text:
       "closed set of periodic jobs"); this is a persistent always-on
@@ -26,13 +26,36 @@
 - [x] Added systemd/veridian-superboss-gateway.service (Type=simple,
       Restart=on-failure, [Install] WantedBy=default.target -- singleton,
       not templated, so no repeat of the 2026-08-01 boot-storm OOM incident).
+- [x] PR #257 opened + merged: scripts/superboss_gateway.py + systemd unit.
+- [x] PR #258 opened + merged: fixed ExecStart path bug found before
+      install (repo root == /opt/veridian/scripts, and the file landed at
+      scripts/superboss_gateway.py relative to repo root, so the real live
+      path is /opt/veridian/scripts/scripts/superboss_gateway.py).
+- [x] Synced /opt/veridian/scripts (git checkout of just the 2 new paths,
+      no disturbance to other agents' in-flight local changes there),
+      confirmed py_compile clean and byte-identical to the tested draft.
+- [x] Installed unit into ~/.config/systemd/user/, daemon-reload, enable
+      --now. Killed a leftover manual-test process that was squatting on
+      port 8790 from my own earlier verification run. Confirmed real:
+      `systemctl --user is-active` -> active, `is-enabled` -> enabled,
+      `curl 127.0.0.1:8790/health` -> {"ok": true, "journal_mode": "wal"}.
+- [x] Registered capability_registry row via the canonical
+      `superboss-register.py register-capability --record-file` CLI (not
+      raw SQL): capability_id CAP-20260807-085901-a234, capability_name
+      superboss_gateway, describing the health/read/write endpoints and
+      the 7-table allowlist. PR #259 opened + merged with the
+      version-controlled copy of that record (same convention as the
+      other *_capability_record.json files in this repo).
+- [x] Explicitly did NOT migrate any of the 46 existing scripts to use the
+      gateway -- out of scope per SPEC, tracked as separate future work.
 
 ## Remaining
-- [ ] Commit + push scripts/superboss_gateway.py + systemd unit.
-- [ ] Open PR citing this UMR/task, get PR number.
-- [ ] After merge: sync /opt/veridian/scripts, install + daemon-reload +
-      enable --now the systemd --user unit, confirm `systemctl --user
-      status` active and real `curl 127.0.0.1:8790/health` returns ok:true.
-- [ ] Register capability_registry row `superboss_gateway` describing the
-      read/write endpoints and allowlisted tables.
-- [ ] Record completion via agent_work_briefing.py record-completion.
+- [ ] None. Record completion via agent_work_briefing.py record-completion.
+
+## Real evidence
+- PR #257: https://github.com/FChecklist/veridian-scripts/pull/257 (merged)
+- PR #258: https://github.com/FChecklist/veridian-scripts/pull/258 (merged)
+- PR #259: https://github.com/FChecklist/veridian-scripts/pull/259 (merged)
+- systemd: `veridian-superboss-gateway.service` active (running), enabled
+- curl: `curl 127.0.0.1:8790/health` -> `{"ok": true, "db": "/opt/veridian/ai-os/memory/superboss-register.sqlite", "journal_mode": "wal"}`
+- capability_registry: CAP-20260807-085901-a234 / superboss_gateway

@@ -188,8 +188,27 @@ this time the headline claims held up true (rare; see step 1 below).
       -- flagged for a future UMR rather than fixed unilaterally under this
       one (out of this SPEC's own explicit scope).
 
+- [x] Committed + pushed this branch; opened PR #255 in `veridian-scripts`.
+- [x] Real `agent_work_briefing.py record-completion` write-back for this
+      task's own governing UMR (`UMR-20260807-074739-dde3`,
+      `AGENT-20260807-074739-dde3`), plus `mark-umr-terminal --status
+      completed_unmerged` (PR #255 is real and pushed but not yet merged --
+      `record-completion --umr-status completed` correctly refused a
+      premature `completed` claim since the commit isn't yet an ancestor of
+      `origin/main`; recorded honestly as `completed_unmerged` instead).
+
 ## Remaining
 
 - [ ] Commit + push this branch, open PR.
 - [ ] Real `agent_work_briefing.py record-completion` write-back for this
       task's own governing UMR (`UMR-20260807-074739-dde3`).
+
+---
+
+- [ ] None for this task's own scope. Once PR #255 merges: re-run
+      `mark-umr-terminal --status completed --commit-sha <merge-sha>` to
+      upgrade `UMR-20260807-074739-dde3` from `completed_unmerged` to
+      `completed` (real ancestor-of-main gate will then pass).
+- [ ] Separately scoped, not this UMR: register the 1 unregistered `gh` repo
+      (`zai-sap-reports-queue`) and address the 2011 `relationship_coverage`
+      gaps the new audit surfaced.

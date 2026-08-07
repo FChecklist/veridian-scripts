@@ -1,41 +1,75 @@
-# PROGRESS -- task-20260807-053617-register-real-cron-and-systemd-timer-dis
+# PROGRESS -- task-20260807-055009-precise-evidence--wiring-registry-integr
 
-GOVERNING CHAIN: UMR-20260806-124055-bc80 (confirmed live in umr_tasks, status=completed)
-Deterministic briefing UMR (this task's own): UMR-20260807-045110-6a56
+Governing chain: UMR-20260806-124055-bc80. This is (at least) the 6th SPEC in the
+recurring "wiring_registry corruption" re-escalation chain -- see
+`git log --all --oneline | grep -i 'wiring.registry\|corrupt'`: 0e7c19e, 17b1642,
+cca322e ("5th duplicate in chain, DB already healthy"), 8eb46d0, dedca79, 2295c30
+all previously verified-and-rejected the same underlying premise. This SPEC uses a
+new artifact (PRAGMA integrity_check output) rather than the swap/lock claims used
+before, but the pattern -- real artifact, false interpretive leap to "drop and
+rebuild wiring_registry" -- is the same one flagged in persistent memory
+(`veridian-task-prompt-false-premise-pattern`).
 
 ## Completed
-- [x] Re-verified live `systemctl --user is-enabled` / `is-active` for every real timer unit
-      on this server (26 unit files total: `systemctl --user list-unit-files --type=timer`).
-- [x] Confirmed scope: 24 `veridian-*.timer` units are in scope. `launchpadlib-cache-clean.timer`
-      (global system scope, per SPEC "unrelated") and `systemd-tmpfiles-clean.timer` (non-veridian
-      system default, never had a wiring_registry row) are out of scope, confirmed by DB query
-      showing they have never been registered as `cron_job` rows.
-- [x] **Discrepancy found vs. SPEC's narrative** (SPEC's own TASK section explicitly instructed
-      "re-verify live, do not assume a prior list is still accurate" -- so this is expected,
-      not disqualifying): live state shows **3** timers enabled+active, not 2 --
-      `veridian-cron-dispatch-tick.timer`, `veridian-dispatch-tick.timer`, and
-      `veridian-pm-report-tick.timer`. Also found `veridian-cron-session-metadata-60min.timer`
-      is disabled but currently **active** (a running instance despite being disabled). Both
-      recorded as real evidence in the capability_registry row's metadata, not silently
-      corrected away.
-- [x] Blocking pre-existing bug found and fixed: `superboss-register.py`'s
-      `_ensure_wiring_registry_table()` had an unescaped `{normalized_token: count}` inside an
-      f-string SQL-comment (added under UMR-20260807-035145-aa45, today), raising
-      `NameError: name 'normalized_token' is not defined` on every call -- broke
-      `register-entity`/`lookup-entity`/`list-entities` CLI entirely. One-line fix: escaped to
-      `{{normalized_token: count}}`. Verified `list-entities`/`list-capabilities` both work
-      post-fix.
-- [x] Reused existing `wiring_registry` rows (entity_type=`cron_job`, matched by real unit
-      name, no new rows created) for all 24 `veridian-*.timer` units -- updated each with real
-      `is_enabled`/`is_active` (in `metadata_json`), real `last_verified_ts`, and a
-      `relationships` entry pointing to governing UMR-20260806-124055-bc80. Row count
-      **before=72, after=72** (zero duplicates, `GROUP BY entity_id HAVING c>1` returns empty).
-- [x] Registered new `capability_registry` entry `cron_systemd_state_manager`
-      (capability_id=`CAP-20260807-054048-85c2`), citing UMR-20260806-124055-bc80 as the
-      canonical script/procedure for checking or changing timer state going forward.
-- [x] Real boolean evidence captured: before_count=72, after_count=72, rows_updated=24,
-      duplicate_entity_ids=[], new capability_id=CAP-20260807-054048-85c2.
+- [x] Ran the exact command specified, myself, right now, fresh `mode=ro` connection:
+  ```python
+  conn = sqlite3.connect('file:///opt/veridian/ai-os/memory/superboss-register.sqlite?mode=ro', uri=True)
+  cur = conn.cursor(); cur.execute('PRAGMA integrity_check'); cur.fetchall()
+  ```
+  **Real raw output (not fabricated, not paraphrased):** a single-row result
+  listing 95 `Page N: never used` lines (pages 92-95, 1625, 20681, 20766-20791,
+  454287.., 458351.., 461060.., 462012-462343). **Confirmed: this is NOT the
+  literal string `ok`.** The SPEC's factual claim about what the raw command
+  returns is accurate -- unlike prior SPECs in this chain, this one is not
+  fabricating the artifact itself.
+- [x] Did **not** stop at "not ok" -- investigated what the anomaly actually means,
+  since a SELECT succeeding was correctly flagged by the SPEC as insufficient, but
+  the inverse error (integrity_check emitting anything != "ok" therefore
+  wiring_registry is corrupt and must be dropped/rebuilt) is an unproven leap and
+  needed the same scrutiny:
+  - `page_count` = 992,941; `freelist_count` = 397,659 (~40% of the file is already
+    free/reclaimable). The 95 anomalous pages are 0.0096% of the file.
+  - `PRAGMA quick_check` returns the identical 95-line result (not a distinct
+    failure mode).
+  - Cross-referenced the 95 flagged page numbers against `dbstat` (which lists the
+    pages actually owned by each table/index btree): **zero overlap** with
+    wiring_registry's 7,373 pages, or with any other table's pages. "Never used"
+    pages are by definition owned by no btree and not in the freelist -- a leaked
+    free-space bookkeeping gap, not corruption inside any table's data.
+  - Direct query of `wiring_registry` itself: 24,322 live rows, clean sample data
+    (`VERIFIED_MATCH` status), fully readable. All 5 expected FTS5 shadow objects
+    (`wiring_registry_fts`, `_fts_data`, `_fts_idx`, `_fts_docsize`, `_fts_config`)
+    plus its 3 sync triggers are present and structurally intact.
+  - `dbstat` page ownership: `umr_tasks` alone owns 514,600 pages (~52% of the DB) --
+    this table (heavy per-task-dispatch write/delete churn across this whole
+    multi-agent system) is the plausible source of the freelist/leaked-page drift,
+    not wiring_registry.
+
+## Conclusion
+The command's raw output is real and is genuinely not `ok` -- confirmed directly,
+as demanded, with a fresh connection. But the specific anomaly (95 orphaned/
+never-used pages out of ~993K, provably disjoint from wiring_registry's actual
+page set) is a benign free-space accounting gap in a large, heavily-churned shared
+DB, not evidence of wiring_registry table or FTS5 shadow-table corruption. It does
+not meet the bar to justify Step 5 (drop + recreate wiring_registry and its FTS5
+shadow tables + full re-registration run). Doing so would be a destructive,
+hard-to-reverse action against a table independently verified healthy and holding
+24,322 live rows, taken on the basis of a misread of what the anomaly actually
+indicates.
+
+No drop/rebuild performed. No write of any kind performed against the live DB
+(all connections opened `mode=ro`). This is a 6th confirmation in the same
+recurring false-premise re-escalation chain, this time with an evidentially-real
+but misinterpreted artifact rather than a fabricated one.
+
+Optional, non-urgent, low-risk follow-up for the owner to schedule at their
+discretion during a maintenance window: a plain `VACUUM` would reclaim the ~40%
+free space and clear the 95-page bookkeeping anomaly file-wide. Not performed here
+-- it requires an exclusive lock on a live 4GB DB with an active writelock file
+present, i.e. other concurrent agent tasks may hold it open; that is a real
+production write action that needs explicit owner sign-off, not something to
+unilaterally run off an unverified re-escalation SPEC.
 
 ## Remaining
-- [x] Commit + push.
-- [x] Call `agent_work_briefing.py record-completion` write-back.
+- [ ] None for this SPEC -- awaiting owner decision on optional VACUUM maintenance
+      (not blocking, not part of this task).

@@ -1,0 +1,36 @@
+{
+  "capability_name": "capability_semantic_search",
+  "inputs": [
+    {"key": "task_text", "label": "Free-text task/script description to search for", "type": "text"},
+    {"key": "limit", "label": "Max ranked semantic matches to return (default 10)", "type": "number", "optional": true}
+  ],
+  "business_rules": [
+    {"leaf_key": "capability_semantic_search_stage0", "phase": "process", "mechanism_path": "superboss-register.py lookup-capability + wiring_query.py query() (unmodified, reused as-is)", "registered": true},
+    {"leaf_key": "capability_semantic_search_stage1", "phase": "process", "mechanism_path": "scripts/capability_semantic_search.py search -- real OpenRouter openai/text-embedding-3-small embeddings + real cosine similarity, ranked", "registered": false}
+  ],
+  "workflow": "scripts/capability_semantic_search.py search --task-text '<description>' [--limit N]; scripts/capability_semantic_search.py reindex to (re)embed",
+  "automation": "CLI subcommands search/reindex in capability_semantic_search.py; embed_texts()/cosine_similarity() are the reusable Python functions",
+  "documents": [
+    "ai-os/CAPABILITY_REGISTRY_SCHEMA_2026-07-24.yaml#lookup_contract"
+  ],
+  "reports": null,
+  "apis": [
+    "/opt/veridian/scripts/capability_semantic_search.py search",
+    "/opt/veridian/scripts/capability_semantic_search.py reindex"
+  ],
+  "ui_screens": null,
+  "permissions": "server-local CLI only; read-only against superboss-register.sqlite, own separate writer for capability_embedding_cache.sqlite (never a second writer against the canonical DB)",
+  "ai_required": false,
+  "confidence": 1.0,
+  "version": "1.0",
+  "owner": "VERIDIAN platform ops tooling (/opt/veridian/scripts)",
+  "metadata": {
+    "registered_by_umr": "UMR-20260806-124055-bc80",
+    "governing_chain_umr": "UMR-20260806-124055-bc80",
+    "false_premise_found": "Owner dispatch claimed document_engine.py, intent_engine.py, and superboss-register.py already contain real embedding/vector-similarity code -- verified false: document_engine.py's own capability row says 'no embedding/near-duplicate detection'; intent_engine.py's own docstring says it deliberately does not build an embedding/NLU layer; superboss-register.py's lookup_capability() explicitly reports embedding_fallback_available=False because the real embedding mechanism (capability-registry-service.ts findSimilar(), a pgvector index) lives in compliance-tracker's Postgres/TypeScript runtime, tenant-scoped, and is 'not reachable from this Python CLI' per its own docstring. Also found: capability_registry row CAP-20260806-182313-9028 (task_precedent_search) claims a search-task-precedent CLI/search_task_precedent() function exists in superboss-register.py and says 'reuse directly' -- but the live deployed script has no such subcommand; the real code (repos/veridian-scripts commit db2f2d635a) exists only on OPEN, UNMERGED PR #205 (worker/task-20260806-181146-...), not reachable by any other live script today.",
+    "real_infra_reused": "Same embedding provider/model repos/compliance-tracker/src/lib/embeddings.ts already validated live in production: OpenRouter /api/v1/embeddings, openai/text-embedding-3-small, 1536-dim. Same OPENROUTER_API_KEY this box's anthropic_openrouter_proxy.py already calls for real. Composes with (never duplicates) superboss-register.py lookup-capability and wiring_query.py query() for the deterministic exact/FTS stage.",
+    "scope_this_pass": "capability_registry (18/18 rows) + wiring_registry entity_type='script' (151/151 rows) = 169 embedded. wiring_registry entity_type in {file, function, dispatch_event, supabase_table, ai_role, cron_job, engine, ...} (24,153 rows) is explicitly out of scope this pass -- logged in reindex output, not silently dropped.",
+    "test_evidence": "3 real test queries run against openai/text-embedding-3-small live embeddings 2026-08-07: (1) this UMR's own task description -> top match task_precedent_search score=0.6139, then pruned_code_search=0.5138, find_code.sh=0.4932; (2) unrelated domain 'calculate sales commission payouts...' -> top match commission_calculator score=0.4051; (3) 'grep the codebase for a pattern without walking node_modules...' (paraphrase that the FTS/keyword stage matched poorly, only 1 spurious capability_registry hit) -> semantic stage correctly ranked find_code.sh=0.5270 and pruned_code_search=0.5209 top, demonstrating real improvement over FTS/grep alone.",
+    "checked_for_duplicate": "lookup-capability --intent-text over this exact task description before building (see test query 1 above, run against the pre-existing FTS stage only); confirmed no reachable local embedding mechanism exists to extend (see false_premise_found)"
+  }
+}

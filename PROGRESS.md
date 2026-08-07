@@ -25,6 +25,10 @@ real UMR IDs, register it in capability_registry.
       (verified live via `lookup-capability --capability-name`).
 - [x] Recorded completion via `agent_work_briefing.py record-completion`.
 
+- [x] Called `agent_work_briefing.py record-completion` for
+      UMR-20260807-033052-f756 (this task's own briefing UMR), recording the
+      real summary above.
+
 ## Remaining
 - [ ] (none)
 

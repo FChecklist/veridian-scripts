@@ -1,56 +1,43 @@
-# PROGRESS -- task-20260807-142202-properly-close-umr-20260807-061238-ae93
+# PROGRESS -- task-20260807-142924-register-the-real-965-issue-resolution-m
 
 ## Completed
 
-- [x] Re-read task-20260807-081903-mandatory-execute-the-rebuild--do-not-in's
-      PROGRESS.md (the 7th independent investigation in this chain). Its
-      written conclusion is exactly what this SPEC describes: real
-      `PRAGMA integrity_check` "never used" pages exist, but a `dbstat`
-      cross-reference proves zero overlap with `wiring_registry`'s 8,742 real
-      pages; `wiring_registry` itself has 24,326 live, readable rows. No
-      DROP/rebuild was performed; the task correctly declined and recommended
-      fixing the SPEC-generation source instead of an 8th investigation.
-- [x] Did **one fresh direct check** myself, this session, rather than
-      re-trusting that write-up: queried the live
-      `/opt/veridian/ai-os/memory/superboss-register.sqlite` `umr_tasks` table
-      directly (read-only connection) for `UMR-20260807-061238-ae93`.
-      **Finding: this UMR is already `status='completed'`**, with a real
-      non-null `ts_completed` (`2026-08-07T12:08:26.804477+00:00`) and real
-      evidence in `outputs_json`
-      (`new_task_id=task-20260807-081903-mandatory-execute-the-rebuild--do-not-in`).
-      Its `reason` column already cites independently-verified real evidence:
-      `gh pr view 254` confirmed `state=MERGED`,
-      `mergeCommit=b39e03012b653a0e2948d870c2c9692f44410973` -- and that exact
-      commit is present in this repo's own `git log` on `main`
-      (`b39e030 Merge pull request #254 ... task-20260807-081903-...`).
-- [x] Ran the actual deterministic completion calculator myself
-      (`python3 umr_completion_percentage.py UMR-20260807-061238-ae93`):
-      **`percent: 100`, `rule: rule1_completed_with_evidence`.** Also checked
-      the other governing-chain UMR, `UMR-20260806-124055-bc80`: also
-      **`percent: 100`** (`rule2_task_yaml_steps`, its linked task.yaml has
-      5/5 steps completed).
-
-## Why `mark-umr-terminal` was NOT called again on UMR-20260807-061238-ae93
-
-This SPEC's premise -- that `UMR-20260807-061238-ae93` "stops showing as an
-incomplete percentage in the deterministic completion calculator" once
-re-closed -- does not match live state. It is **already** showing 100%
-complete, via a real, evidence-backed terminal write that happened earlier
-today (citing the same PR #254 merge this SPEC itself points to). Calling
-`superboss-register.py mark-umr-terminal` again on an already-terminal,
-already-100%, evidence-backed row would be a redundant/duplicate terminal
-write, not a fix for anything actually broken. This is the same recurring
-false-premise pattern already flagged 7 times in this chain
-(`UMR-20260806-124055-bc80` / `UMR-20260806-141055-1fec`): a confident,
-specific-sounding claim ("still shows incomplete") that does not survive one
-direct, independent check against the live system of record.
-
-No wiring_registry write. No mark-umr-terminal call on
-UMR-20260807-061238-ae93 (nothing to correct -- it is already correctly
-closed). This task's own governing UMR (`UMR-20260807-092244-59be`) is closed
-via `agent_work_briefing.py record-completion` citing this verification.
+- [x] Independently verified `/opt/veridian/ai-os/UMR_5767_ISSUE_RESOLUTION_MATRIX.json`
+      is real, well-formed JSON (`python3 json.load()`, 1,263,697 bytes,
+      sha256 `d633dec8488550895927c793d3ccd55bb68427aba97d57ae77c86cefcfacf4ca`).
+      `real_checklist_item_count`=70 matches `len(checklist_resolution_table)`
+      exactly. **Found a discrepancy with the dispatch SPEC**: the SPEC
+      claimed `real issue_count 965`, but the file's own `real_issue_count`
+      field and `len(issues)` both independently read **977**, with
+      `issue_number` running 1..977, no duplicates. The file's own
+      `phase2_subphase1_tool_selection` block cites an internal sub-range
+      `"covers_issue_range": "916-965"` -- almost certainly the source of the
+      SPEC's 965 figure (a range boundary misread as the document total).
+      Registered using the real 977 count, not the SPEC's unverified 965.
+- [x] Confirmed real `DB_PATH` resolution: superboss-register.py's live DB is
+      `/opt/veridian/ai-os/memory/superboss-register.sqlite`. A stale-decoy
+      `/opt/veridian/scripts/superboss-register.sqlite` (0 bytes) exists on
+      disk and was **not** touched -- same wrong-DB-file trap flagged before
+      in this chain.
+- [x] Deduped first: `lookup-capability --capability-name
+      umr_5767_issue_resolution_matrix` returned `found=false` before
+      registering (24 existing capability rows, none matching).
+- [x] Registered via `superboss-register.py register-capability`
+      (never a raw INSERT) with the real file path in `documents`, citing
+      `originating_umr: UMR-20260806-171945-5767`. Result:
+      **`capability_id = CAP-20260807-143709-d29a`**.
+- [x] Independently re-confirmed persistence in a fresh process two ways:
+      (1) `lookup-capability --capability-name ...` in a fresh `python3`
+      subprocess, `found=true`; (2) a direct `sqlite3` CLI query (a
+      completely separate tool, not the Python script) against
+      `capability_registry` -- both show the real row.
+- [x] Called `agent_work_briefing.py record-completion` for the SPEC's
+      governing-chain UMR (`UMR-20260806-171945-5767`), citing the real
+      evidence above (no `--umr-status` passed -- that UMR is already
+      terminal (`status='killed'`), left untouched).
+- [x] Called `agent_work_briefing.py record-completion` for this task's own
+      dispatch UMR (`UMR-20260807-104456-2e64`, per the deterministic
+      briefing block), citing the same real evidence.
 
 ## Remaining
-- [ ] None. Declined the redundant re-close as a correct non-failure outcome;
-      flagging again (8th time in this chain) that the SPEC-generation source
-      needs a live-state check before dispatch, not another worker cycle.
+- [ ] None.

@@ -122,7 +122,10 @@ SCENARIOS = [
     },
 ]
 
-TERMINAL_STATUSES = {"completed", "failed", "killed"}
+# UMR-20260806-130914-e7f1: 'completed_unmerged' added -- real, ts_completed-
+# bearing terminal-for-AI-work status (see superboss-register.py's own
+# UMR_STATUSES comment), added to keep this vocabulary in sync.
+TERMINAL_STATUSES = {"completed", "completed_unmerged", "failed", "killed"}
 IN_FLIGHT_STATUSES = {"queued", "dispatched", "running"}
 
 

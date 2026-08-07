@@ -46,7 +46,10 @@ SPEC_TMP_DIR = os.environ.get("VERIDIAN_DIRECTIVE_SPEC_TMP_DIR", "/tmp/directive
 # silently overwrite it.
 DIRECTIVE_RETRY_STATE_FILE = os.environ.get(
     "VERIDIAN_DIRECTIVE_RETRY_STATE_FILE", "/opt/veridian/ai-os/tasks/DIRECTIVE_RETRY_STATE.json")
-TERMINAL_STATES = {"completed", "failed", "rejected_duplicate", "killed"}
+# UMR-20260806-130914-e7f1: 'completed_unmerged' added -- real, ts_completed-
+# bearing terminal-for-AI-work status (see superboss-register.py's own
+# UMR_STATUSES comment), added to keep this vocabulary in sync.
+TERMINAL_STATES = {"completed", "completed_unmerged", "failed", "rejected_duplicate", "killed"}
 
 os.makedirs(SPEC_TMP_DIR, exist_ok=True)
 

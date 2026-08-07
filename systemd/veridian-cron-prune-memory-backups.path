@@ -1,0 +1,39 @@
+# =============================================================================
+# NEW FILE -- UMR-20260806-134738-eec3 (governing UMR-20260806-071025-1d28).
+#
+# Companion .path unit for the already Owner-authorized unit #19
+# (veridian-cron-prune-memory-backups, UMR-20260806-084306-f599 Step 6).
+# This is NOT a new unit-#20 / new periodic purpose under the
+# ~/.config/systemd/user/README.md closed-set STANDING RULE -- it is a
+# second, event-based trigger wired to the SAME already-authorized oneshot
+# service, added because a purely clock-based trigger can always be
+# outrun by a real creation burst (see veridian-cron-prune-memory-backups
+# .timer in this same directory for the real observed-rate evidence this
+# is based on: two ~2.1GB superboss-register.sqlite copies created 7
+# minutes apart on 2026-08-06, 13:30Z and 13:37Z).
+#
+# PathChanged (not PathExists/PathExistsGlob) is used on each directory so
+# systemd's inotify watch re-fires on every new/modified file, not just the
+# first ever seen -- per systemd.path(5): "if the path is ... a directory,
+# [PathChanged triggers] if a file is created or deleted within it".
+# Watches both scan_dirs prune_memory_backups.py itself defaults to
+# (MEMORY_DIR root -- the legacy/ad-hoc-copy location -- and its backups/
+# subdirectory), so this fires for a new backup landing in either place.
+#
+# TriggerLimitIntervalSec/Burst self-throttles against an inotify storm from
+# a single large sqlite3 .backup() call generating multiple write/close
+# events on the same file, so a single backup creation cannot fire more
+# than 10 real service activations in any 30s window.
+# =============================================================================
+[Unit]
+Description=Trigger veridian-cron-prune-memory-backups.service immediately when a new file appears under ai-os/memory or ai-os/memory/backups (event-based primary trigger; UMR-20260806-134738-eec3)
+
+[Path]
+PathChanged=/opt/veridian/ai-os/memory
+PathChanged=/opt/veridian/ai-os/memory/backups
+Unit=veridian-cron-prune-memory-backups.service
+TriggerLimitIntervalSec=30
+TriggerLimitBurst=10
+
+[Install]
+WantedBy=timers.target

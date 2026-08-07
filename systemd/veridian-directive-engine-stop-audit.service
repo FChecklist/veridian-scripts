@@ -1,0 +1,49 @@
+# =============================================================================
+# LIVE / INSTALLED on this server as of 2026-08-06T23:15Z. This is a
+# version-controlled reference copy of the real unit file at
+# ~/.config/systemd/user/veridian-directive-engine-stop-audit.service.
+#
+# Note on the systemd/README.md "CLOSED SET of 19" STANDING RULE in this
+# same directory: that rule scopes explicitly to *periodic* cron-replacement
+# units (OnCalendar timer + oneshot service pairs standing in for the old
+# crontab). This unit is not periodic -- Type=simple, Restart=always, no
+# .timer pairing, WantedBy=default.target (starts once at login and runs
+# continuously) -- the same shape as veridian-directive-engine.service
+# itself and veridian-worker@.service, both of which are real live units on
+# this box and neither of which is part of that closed set for the same
+# reason. It therefore does not fall under that STANDING RULE and does not
+# need a 20th-cron-unit exception the way
+# systemd/veridian-cron-prune-memory-backups.* did.
+#
+# Authorization: this is a real mechanical-blocker dispatch
+# (task-20260806-230715, PM report contract UMR-20260806-042531-be9c) whose
+# own explicit step 2 instructs "enabling a real systemd audit mechanism
+# that captures the real job origin" as one of two named acceptable
+# mechanisms -- the dispatch instruction is itself the explicit decision
+# authorizing this one companion unit, same precedent already used for the
+# memory-backup-prune exception in systemd/README.md's "Unit #20" section.
+# Registered under child UMR-20260806-231410-331d (insert-owner-proposal,
+# pm_decisions_pending id=295), linked under parent UMR-20260806-103954-6f42.
+#
+# WHY this mechanism over a plain ExecStop= hook on the target unit, and the
+# honest limitation discovered while building it: see the header comment of
+# /opt/veridian/scripts/directive-engine-stop-audit-monitor.sh (this unit's
+# real ExecStart=), which documents both in full, including a live
+# self-test result and a documented, abandoned 2nd approach (a
+# dbus-python persistent-connection daemon,
+# directive_engine_stop_audit_monitor.py, kept in this repo for the record
+# but NOT wired to this unit after a reproducible crash -- 2 consecutive
+# failures of that approach, stopped per this task's own protocol rather
+# than reattempted a 3rd time).
+# =============================================================================
+[Unit]
+Description=VERIDIAN real-time D-Bus audit: captures the real caller of StopUnit/KillUnit/RestartUnit/Unit.Stop against veridian-directive-engine.service (UMR-20260806-231410-331d, child of UMR-20260806-103954-6f42)
+After=default.target
+
+[Service]
+ExecStart=/opt/veridian/scripts/directive-engine-stop-audit-monitor.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

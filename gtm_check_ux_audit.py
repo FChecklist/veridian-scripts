@@ -270,7 +270,28 @@ const errorPath = process.argv[4];
 async function extractPage(page) {
   return page.evaluate(() => {
     const q = (sel) => Array.from(document.querySelectorAll(sel));
-    const txt = (el) => (el.textContent || '').trim().slice(0, 120);
+    // OCID-020 category 23 fix (UMR-20260806-132527-30dc): plain el.textContent
+    // concatenated a purely decorative icon-letter glyph (a single-character
+    // logo badge marked aria-hidden) together with the adjacent real brand
+    // text inside the same <a>, producing a nonsense string (e.g. a "V" badge
+    // + "VERIDIAN AI" text read back as "VVERIDIAN AI") that no real user
+    // ever sees and no screen reader ever announces -- aria-hidden content is
+    // by definition excluded from the accessible name/text a user encounters,
+    // so it must also be excluded here. Strip aria-hidden="true" descendants
+    // (on a detached clone, so the live DOM is never touched) before reading
+    // textContent. Real, confirmed false positive this closes: compliance-
+    // tracker's /pricing nav renders a decorative single-letter "V" logo
+    // badge immediately before its "VERIDIAN AI" brand text inside the same
+    // <Link>; before this fix, navLinks reported that link's text as
+    // "VVERIDIAN AI" (a typo that does not exist on the rendered page) and
+    // this contributed to a real heuristic-4 (consistency) severity-3
+    // finding. See compliance-tracker PR #987 for the corresponding product
+    // fix (aria-hidden added to the decorative badge itself).
+    const txt = (el) => {
+      const clone = el.cloneNode(true);
+      clone.querySelectorAll('[aria-hidden="true"]').forEach((n) => n.remove());
+      return (clone.textContent || '').trim().slice(0, 120);
+    };
     const headings = q('h1,h2,h3,h4,h5,h6').map((el) => ({ tag: el.tagName.toLowerCase(), text: txt(el) }));
     const navLinks = q('nav a, header a').map((el) => ({ text: txt(el), href: el.getAttribute('href') }));
     const footerLinks = q('footer a').map((el) => ({ text: txt(el), href: el.getAttribute('href') }));

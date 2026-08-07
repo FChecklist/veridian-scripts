@@ -1959,20 +1959,49 @@ def _advance_owner_priority_phases_safe(now=None):
     populated with the current real active phase's members every tick, so
     that mechanism (whenever it lands) always reads a real, up-to-date
     table -- extending 5ea7's population lifecycle, not duplicating its
-    consumption logic."""
+    consumption logic.
+
+    Real review finding (PR #256 review.json, round 2), fixed here:
+    this used to wrap the ENTIRE sbr.advance_owner_priority_phases() call
+    in sbr._write_lock() -- superboss-register.py's own cross-process
+    flock that every other write-path invocation of that script (dispatch,
+    submit, mark-terminal, ...) across the whole system must also acquire.
+    advance_owner_priority_phases() can, for commit_sha-backed member
+    evidence, shell out to real 60s-timeout git fetch/cat-file/merge-base
+    subprocess calls; holding the system-wide write lock across that meant
+    a slow/degraded network during an active large phase (3/4: 179/70 real
+    members per the SPEC's own evidence) could block every other worker's
+    write-path invocation of superboss-register.py for the whole window --
+    the exact starvation failure mode this feature exists to fix,
+    reintroduced at system-wide scope. advance_owner_priority_phases()
+    now acquires sbr._write_lock() itself, only around its own real reads/
+    writes, deliberately releasing it across its own evidence-check loop --
+    so this caller must NOT wrap the call in its own lock (see that
+    function's own docstring: doing so would, via _write_lock()'s real
+    reentrancy, collapse its two short critical sections back into one
+    long one spanning the unlocked loop, silently reintroducing this exact
+    bug).
+
+    Also real review finding (PR #256 review.json, round 2, minor): `conn`
+    is now opened before, and closed in a `finally` after, the real call --
+    previously an exception raised inside the `with sbr._write_lock():`
+    block (e.g. _sync_owner_priority_override's own >1-active-phase
+    RuntimeError) skipped the conn.close() below it entirely, leaking the
+    connection on that error path."""
     sbr, error = _safe_superboss_register("advance_owner_priority_phases")
     if error:
         return {"error": error}
+    conn = None
     try:
         conn = sbr._connect()
         sbr._ensure_umr_table(conn)
         sbr._ensure_ocid_canonical_registry_table(conn)
-        with sbr._write_lock():
-            result = sbr.advance_owner_priority_phases(conn, now=now)
-        conn.close()
-        return result
+        return sbr.advance_owner_priority_phases(conn, now=now)
     except Exception as e:
         return {"error": f"advance_owner_priority_phases failed: {e}"}
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def run_tick(max_dispatches=None, now=None):

@@ -294,6 +294,115 @@ class OwnerPrioritySequenceTest(unittest.TestCase):
         self.assertTrue(ok, reason)
         self.assertIn(real_ancestor_sha, reason)
 
+    def test_phase3_4_scale_git_subprocess_calls_bounded_and_lock_not_held(self):
+        """Real review finding (PR #256 review.json, both rounds): (1) once
+        phase 3/4's real live-discovery membership (179/70 real hits per the
+        SPEC's own evidence) is active, a tick evaluating every not-yet-
+        confirmed commit_sha-backed member could shell out to hundreds of
+        real git subprocess calls in one tick; (2) round 2 found those
+        subprocess calls used to run while superboss-register.py's own
+        cross-process _write_lock() was held, serializing every other
+        writer in the system behind them. This test proves both fixes
+        directly at phase-3/4 scale: builds a synthetic phase with 150 real
+        commit_sha-evidenced umr_tasks rows (more than the per-tick cap),
+        monkeypatches the one real subprocess entry point
+        (_default_ocid_resolver_runner) with a counting fake that also
+        records whether sbr._write_lock() was held at call time, and
+        asserts (a) the number of real git subprocess calls issued in any
+        single tick never exceeds a fixed bound tied to
+        OWNER_PRIORITY_PHASE_MAX_EVALUATIONS_PER_TICK -- staying flat
+        across repeated ticks rather than growing as more members remain
+        unconfirmed -- and (b) not one of those calls happened while the
+        cross-process write lock was held."""
+        sbr._ensure_owner_priority_tables(self.conn)
+
+        member_count = 150  # comparable order of magnitude to the SPEC's own 179/70 phase 3/4 evidence
+        members = [f"UMR-SCALETEST-{i:04d}" for i in range(member_count)]
+        now = sbr._now_iso()
+        for umr_id in members:
+            self.conn.execute(
+                "INSERT INTO umr_tasks (umr_id, task_identity, ts_submitted, tier, status, "
+                "source_trigger, outputs_json) VALUES (?, ?, ?, ?, 'completed', ?, ?)",
+                (umr_id, f"scale test row {umr_id}", now, 3, "test",
+                 json.dumps({"commit_sha": "deadbeef" + umr_id[-4:], "repo": "veridian-scripts"})),
+            )
+        self.conn.execute(
+            "INSERT INTO owner_priority_sequence "
+            "(phase_order, phase_name, governing_umr, real_member_umrs, status, created_at, updated_at) "
+            "VALUES (1, 'phase 3/4 scale test', 'UMR-SCALETEST-GOV', ?, 'active', ?, ?)",
+            (json.dumps(members), now, now),
+        )
+        self.conn.commit()
+
+        cap = 25
+        orig_cap = sbr.OWNER_PRIORITY_PHASE_MAX_EVALUATIONS_PER_TICK
+        sbr.OWNER_PRIORITY_PHASE_MAX_EVALUATIONS_PER_TICK = cap
+        orig_runner = sbr._default_ocid_resolver_runner
+        call_log = []  # each entry records the write-lock reentrancy depth at call time
+
+        class _FakeResult:
+            returncode = 0
+
+        def counting_runner(cmd, cwd=None):
+            call_log.append({"cmd": cmd, "lock_depth": sbr._write_lock_depth[0]})
+            return _FakeResult()
+
+        sbr._default_ocid_resolver_runner = counting_runner
+        try:
+            per_tick_counts = []
+            max_ticks = (member_count // cap) + 3  # real safety margin, not a tight bound
+            for _ in range(max_ticks):
+                before = len(call_log)
+                result = sbr.advance_owner_priority_phases(self.conn)
+                per_tick_counts.append(len(call_log) - before)
+                # A None evaluated_phase means no phase is 'active' any more
+                # (this phase fully confirmed and transitioned to 'complete'
+                # on a prior tick, and there is no next phase to activate) --
+                # real, unambiguous stop condition, real convergence proven.
+                if result.get("evaluated_phase") is None:
+                    break
+
+            # (a) real bound: at most 4 real subprocess calls (fetch+cat-file
+            # for commit-exists, fetch+merge-base for is-ancestor) per member
+            # evaluated, and never more than `cap` members evaluated per
+            # tick -- so no single tick's real subprocess-call count ever
+            # exceeds cap * 4, regardless of how many total members remain
+            # unconfirmed.
+            max_calls_per_tick = cap * 4
+            for count in per_tick_counts:
+                self.assertLessEqual(
+                    count, max_calls_per_tick,
+                    f"a single tick issued {count} real git subprocess calls, expected at most "
+                    f"{max_calls_per_tick} (cap={cap}) -- the original PR #256 review.json defect "
+                    "was exactly this growing unbounded with phase size"
+                )
+            self.assertGreater(len(per_tick_counts), 1,
+                                "expected more than one tick to be needed to confirm all 150 members "
+                                "at this cap -- otherwise this test isn't exercising real convergence")
+
+            # (b) real proof the fix moved these calls outside the write
+            # lock: not one recorded call happened while
+            # sbr._write_lock_depth was nonzero (i.e. while the
+            # cross-process lock was held).
+            held_during = [c for c in call_log if c["lock_depth"] != 0]
+            self.assertEqual(
+                held_during, [],
+                f"{len(held_during)} real git subprocess call(s) happened while _write_lock() was "
+                "held -- round 2 PR #256 review.json regression (system-wide dispatch starvation)"
+            )
+
+            # Real convergence: memoization means every real member is
+            # eventually confirmed across however many ticks it took, never
+            # stalled by an already-confirmed member being re-checked.
+            row = dict(self.conn.execute(
+                "SELECT confirmed_complete_members FROM owner_priority_sequence WHERE phase_order=1"
+            ).fetchone())
+            confirmed = set(json.loads(row["confirmed_complete_members"]))
+            self.assertEqual(confirmed, set(members))
+        finally:
+            sbr._default_ocid_resolver_runner = orig_runner
+            sbr.OWNER_PRIORITY_PHASE_MAX_EVALUATIONS_PER_TICK = orig_cap
+
     def test_live_db_untouched(self):
         """The copy-based tests above must never have written to the real
         live DB -- confirm no owner_priority_sequence table exists there

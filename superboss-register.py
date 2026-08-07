@@ -8352,36 +8352,66 @@ def advance_owner_priority_phases(conn, now=None, repos_root="/opt/veridian/repo
     write here is a plain UPDATE/DELETE/INSERT against these two tables,
     trivially undone (e.g. re-run seed_owner_priority_sequence(force=True)).
 
-    Real review finding (PR #256 review.json), fixed here: this used to
-    re-run _umr_genuinely_completed() for every member of the active phase
-    on EVERY tick, including members already confirmed complete on a prior
-    tick, with no bound on how many real evidence checks happen in one tick.
-    Now: members already recorded in the row's own confirmed_complete_members
-    (persisted JSON list) are never re-checked, and at most
-    OWNER_PRIORITY_PHASE_MAX_EVALUATIONS_PER_TICK not-yet-confirmed members
-    get a real _umr_genuinely_completed() evidence check per call -- the
-    remainder are reported as 'not yet evaluated this tick' and picked up on
-    a later call. The phase only transitions to 'complete' once every real
-    member is present in confirmed_complete_members (i.e. every member has,
-    across however many ticks it took, been independently verified) --
-    this bound changes WHEN a large phase's completion is detected, never
-    WHETHER a member's completion is genuinely verified before the phase
-    transitions."""
-    now = now or _now_iso()
-    _ensure_owner_priority_tables(conn)
-    seeded = seed_owner_priority_sequence(conn)  # no-op if already seeded
-    active_row = conn.execute(
-        "SELECT phase_order, phase_name, real_member_umrs, confirmed_complete_members "
-        "FROM owner_priority_sequence WHERE status = 'active'"
-    ).fetchone()
-    result = {"seeded_this_call": seeded.get("seeded", False), "transitioned": False,
-              "evaluated_phase": None, "member_evidence": []}
-    if not active_row:
-        result["sync"] = _sync_owner_priority_override(conn, now=now)
-        conn.commit()
-        return result
+    Real review finding (PR #256 review.json, round 1), fixed here: this
+    used to re-run _umr_genuinely_completed() for every member of the
+    active phase on EVERY tick, including members already confirmed
+    complete on a prior tick, with no bound on how many real evidence
+    checks happen in one tick. Now: members already recorded in the row's
+    own confirmed_complete_members (persisted JSON list) are never
+    re-checked, and at most OWNER_PRIORITY_PHASE_MAX_EVALUATIONS_PER_TICK
+    not-yet-confirmed members get a real _umr_genuinely_completed()
+    evidence check per call -- the remainder are reported as 'not yet
+    evaluated this tick' and picked up on a later call. The phase only
+    transitions to 'complete' once every real member is present in
+    confirmed_complete_members (i.e. every member has, across however many
+    ticks it took, been independently verified) -- this bound changes WHEN
+    a large phase's completion is detected, never WHETHER a member's
+    completion is genuinely verified before the phase transitions.
 
-    active = dict(active_row)
+    Real review finding (PR #256 review.json, round 2), fixed here too:
+    round 1's fix still ran the entire function -- including the real
+    evidence-check loop below, which for commit_sha-backed members shells
+    out to real 60s-timeout git fetch/cat-file/merge-base subprocess calls
+    -- while the caller held this file's own cross-process _write_lock(),
+    the same OS-level flock every other write-path invocation of this
+    script (dispatch, submit, mark-terminal, ...) across the whole system
+    must also acquire. That serialized every writer in the system behind
+    this one tick's git subprocess calls -- worse than round 1's bug, not
+    better. Same convention cmd_mark_umr_terminal already uses (calls
+    validate_umr_terminal_completion_evidence() BEFORE acquiring
+    _write_lock(), wrapping only the resulting write): this function now
+    acquires _write_lock() itself, in two short, separate critical
+    sections around the real reads/writes only -- the real evidence-check
+    loop in between runs with NO lock held at all. Callers (resource_governor.py's
+    _advance_owner_priority_phases_safe, cmd_advance_owner_priority_phases
+    below) must NOT wrap this call in their own _write_lock() -- doing so
+    would (via _write_lock()'s own real reentrancy) collapse the two short
+    sections back into one long one spanning the unlocked evidence loop,
+    silently reintroducing this exact bug.
+
+    Because the lock is released between the first read and the final
+    write, a real concurrent writer (another process, or another call to
+    this same function) could in principle commit a confirmed_complete_members
+    update in between -- the final write section re-reads that column fresh
+    from disk immediately before writing and unions it with this call's own
+    newly-confirmed members, so such a write is merged, never clobbered."""
+    now = now or _now_iso()
+
+    with _write_lock():
+        _ensure_owner_priority_tables(conn)
+        seeded = seed_owner_priority_sequence(conn)  # no-op if already seeded
+        active_row = conn.execute(
+            "SELECT phase_order, phase_name, real_member_umrs, confirmed_complete_members "
+            "FROM owner_priority_sequence WHERE status = 'active'"
+        ).fetchone()
+        result = {"seeded_this_call": seeded.get("seeded", False), "transitioned": False,
+                  "evaluated_phase": None, "member_evidence": []}
+        if not active_row:
+            result["sync"] = _sync_owner_priority_override(conn, now=now)
+            conn.commit()
+            return result
+        active = dict(active_row)
+
     members = json.loads(active["real_member_umrs"])
     try:
         confirmed = json.loads(active["confirmed_complete_members"] or "[]")
@@ -8394,6 +8424,14 @@ def advance_owner_priority_phases(conn, now=None, repos_root="/opt/veridian/repo
     this_tick_batch = to_check[:OWNER_PRIORITY_PHASE_MAX_EVALUATIONS_PER_TICK]
     still_pending = set(to_check[OWNER_PRIORITY_PHASE_MAX_EVALUATIONS_PER_TICK:])
 
+    # ---- real evidence-check loop: no _write_lock() held across this ----
+    # This is the one part of the function that can shell out to real,
+    # 60s-timeout git subprocess calls (via _umr_genuinely_completed ->
+    # validate_umr_terminal_completion_evidence, for commit_sha-backed
+    # members). Deliberately runs against `conn` with no write lock held
+    # (only real, read-only SELECTs happen here against umr_tasks) so a
+    # slow/degraded network during this loop never blocks any other
+    # process's own write-path invocation of this script.
     member_evidence = []
     newly_confirmed = []
     for m in members:
@@ -8412,35 +8450,63 @@ def advance_owner_priority_phases(conn, now=None, repos_root="/opt/veridian/repo
     result["members_evaluated_this_tick"] = len(this_tick_batch)
     result["members_still_pending"] = sorted(still_pending)
 
-    if newly_confirmed:
-        confirmed_set.update(newly_confirmed)
-        conn.execute(
-            "UPDATE owner_priority_sequence SET confirmed_complete_members = ?, updated_at = ? "
-            "WHERE phase_order = ?",
-            (json.dumps(sorted(confirmed_set)), now, active["phase_order"]),
-        )
-
-    if confirmed_set >= set(members):
-        conn.execute(
-            "UPDATE owner_priority_sequence SET status = 'complete', updated_at = ? WHERE phase_order = ?",
-            (now, active["phase_order"]),
-        )
-        next_row = conn.execute(
-            "SELECT phase_order FROM owner_priority_sequence WHERE phase_order > ? AND status = 'pending' "
-            "ORDER BY phase_order LIMIT 1",
-            (active["phase_order"],),
-        ).fetchone()
-        if next_row:
-            next_order = dict(next_row)["phase_order"]
+    # ---- real writes only from here on: lock re-acquired, no further ----
+    # subprocess calls happen inside this section.
+    with _write_lock():
+        if newly_confirmed:
+            # Re-read the row's own confirmed_complete_members fresh (not
+            # the stale copy read before the unlocked loop above)
+            # immediately before writing, so a real concurrent writer that
+            # committed while this call was shelling out to git is unioned
+            # in, never clobbered.
+            fresh_row = conn.execute(
+                "SELECT confirmed_complete_members FROM owner_priority_sequence WHERE phase_order = ?",
+                (active["phase_order"],),
+            ).fetchone()
+            try:
+                fresh_confirmed = (json.loads(dict(fresh_row)["confirmed_complete_members"] or "[]")
+                                    if fresh_row else [])
+            except (json.JSONDecodeError, TypeError):
+                fresh_confirmed = []
+            confirmed_set = set(fresh_confirmed) | confirmed_set | set(newly_confirmed)
             conn.execute(
-                "UPDATE owner_priority_sequence SET status = 'active', updated_at = ? WHERE phase_order = ?",
-                (now, next_order),
+                "UPDATE owner_priority_sequence SET confirmed_complete_members = ?, updated_at = ? "
+                "WHERE phase_order = ?",
+                (json.dumps(sorted(confirmed_set)), now, active["phase_order"]),
             )
-            result["transitioned"] = True
-            result["new_active_phase"] = next_order
 
-    result["sync"] = _sync_owner_priority_override(conn, now=now)
-    conn.commit()
+        if confirmed_set >= set(members):
+            # Real invariant: only transition phase_order -> 'complete' if
+            # it is still genuinely 'active' at write time -- a concurrent
+            # writer could in principle have already advanced it (or this
+            # phase could have been re-seeded away) between the unlocked
+            # read above and this lock re-acquisition.
+            still_active = conn.execute(
+                "SELECT 1 FROM owner_priority_sequence WHERE phase_order = ? AND status = 'active'",
+                (active["phase_order"],),
+            ).fetchone()
+            if still_active:
+                conn.execute(
+                    "UPDATE owner_priority_sequence SET status = 'complete', updated_at = ? "
+                    "WHERE phase_order = ?",
+                    (now, active["phase_order"]),
+                )
+                next_row = conn.execute(
+                    "SELECT phase_order FROM owner_priority_sequence WHERE phase_order > ? AND status = 'pending' "
+                    "ORDER BY phase_order LIMIT 1",
+                    (active["phase_order"],),
+                ).fetchone()
+                if next_row:
+                    next_order = dict(next_row)["phase_order"]
+                    conn.execute(
+                        "UPDATE owner_priority_sequence SET status = 'active', updated_at = ? WHERE phase_order = ?",
+                        (now, next_order),
+                    )
+                    result["transitioned"] = True
+                    result["new_active_phase"] = next_order
+
+        result["sync"] = _sync_owner_priority_override(conn, now=now)
+        conn.commit()
     return result
 
 
@@ -8457,13 +8523,23 @@ def cmd_seed_owner_priority_sequence(args):
 
 
 def cmd_advance_owner_priority_phases(args):
-    """Usage: python3 superboss-register.py advance-owner-priority-phases"""
+    """Usage: python3 superboss-register.py advance-owner-priority-phases
+
+    Deliberately does NOT wrap advance_owner_priority_phases() in its own
+    _write_lock() (round 2 of the PR #256 review.json finding): that
+    function now acquires the lock itself, only around its real reads/
+    writes, and deliberately releases it across its own real
+    evidence-check loop (which can shell out to real, 60s-timeout git
+    subprocess calls for commit_sha-backed members). Wrapping the whole
+    call in an outer _write_lock() here would, via _write_lock()'s own
+    real reentrancy, collapse those two short critical sections back into
+    one long one spanning the unlocked loop -- silently reintroducing the
+    exact bug that fix exists to prevent."""
     init_db_silent()
     conn = _connect()
     _ensure_umr_table(conn)
     _ensure_ocid_canonical_registry_table(conn)
-    with _write_lock():
-        result = advance_owner_priority_phases(conn)
+    result = advance_owner_priority_phases(conn)
     conn.close()
     print(json.dumps(result, indent=2, default=str))
 

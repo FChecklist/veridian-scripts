@@ -1,0 +1,33 @@
+{
+  "capability_name": "umr_output_contract",
+  "inputs": [
+    {"key": "--umr-id", "label": "existing umr_tasks row to mark terminal", "type": "string", "optional": false},
+    {"key": "--status", "label": "completed|completed_unmerged|failed|killed", "type": "string", "optional": false},
+    {"key": "--reason/--commit-sha/--file-path/--pr-number/--repo", "label": "existing mark-umr-terminal evidence args, unchanged", "type": "string", "optional": true}
+  ],
+  "business_rules": [
+    {"leaf_key": "umr_output_contract", "phase": "task_completion", "mechanism_path": "scripts/superboss-register.py::derive_umr_output_contract", "registered": true}
+  ],
+  "workflow": "scripts/superboss-register.py mark-umr-terminal --umr-id UMR-... --status ... [evidence flags]  (also fires in-process via agent_work_briefing.py record-completion, and via subprocess from dispatch-owner-task.sh's tmux-relay-failure branch)",
+  "automation": "wired into the one real terminal-write chokepoint (cmd_mark_umr_terminal); every caller of mark-umr-terminal gets the contract automatically, no per-caller change needed",
+  "documents": null,
+  "reports": null,
+  "apis": ["/opt/veridian/scripts/superboss-register.py mark-umr-terminal"],
+  "ui_screens": null,
+  "permissions": "server-local shell/in-process execution only; writes umr_tasks.outputs_json on the one live superboss-register.sqlite, under the existing _write_lock(); no new table, no new DB",
+  "ai_required": 0,
+  "confidence": 1.0,
+  "version": "1.0",
+  "owner": "VERIDIAN platform ops tooling (/opt/veridian/scripts)",
+  "metadata": {
+    "governing_umr_chain": ["UMR-20260806-124055-bc80", "UMR-20260806-171945-5767", "UMR-20260807-035145-aa45"],
+    "task_id": "task-20260807-053232-second-amendment-to-umr-20260806-171945",
+    "purpose": "UMR-20260806-171945-5767's own real requirement ('single deterministic orchestrator: one entrance, one exit, boolean output contract for VERIDIAN'), finally implemented by its second amendment: every umr_tasks terminal write now carries a real, honestly-computed {data, meta:{deterministic, close_ended, boolean, work_id}} contract (adapted from the owner-supplied DeepSeek reference JSON) under an additive 'output_contract' key inside outputs_json, alongside the pre-existing real evidence fields (pr_number/commit_sha/file_path/repo) -- never replacing them.",
+    "extended_existing_file_and_why": "superboss-register.py's cmd_mark_umr_terminal()/update_umr_task() -- the ONE real function every terminal umr_tasks write already shares across all 3 real callers on this platform (superboss-register.py CLI itself; agent_work_briefing.py's record_completion(), in-process sbr.cmd_mark_umr_terminal call; dispatch-owner-task.sh's tmux-relay-failure branch, subprocess CLI call) -- confirmed via direct grep before writing any code. This IS the platform's real single exit point for task-completion output; extending it once, rather than editing 3 separate files, is what 'single exit point' actually means here, and is itself the anti-duplication choice.",
+    "duplication_check_before_writing": "Queried capability_registry (18 rows before this UMR) for output_contract/boolean/deterministic/orchestrator/entrance/exit_point -- zero matches; this is genuinely new, not a rebuild. Also confirmed the original spec's own dedicated task (task-20260806-201941-single-deterministic-orchestrator--one-e, PR #219) never wrote any application code (gh pr diff 219 touches only PROGRESS.md) and the presumed 'first amendment' (UMR-20260807-035145-aa45) has zero wiring_registry/capability_registry footprint and no real task.yaml on disk -- so no prior real implementation of this contract existed anywhere to duplicate.",
+    "duplication_removed": "None found to remove: no second script/table implemented any part of this contract. The change is purely additive inside the one existing chokepoint (a new 'output_contract' key alongside the pre-existing flat evidence keys) -- verified by re-running the full pre-existing test_mark_umr_terminal_structured_evidence.py (12 tests) and test_dispatch_owner_task_status_write.py (17 tests) suites unmodified after the change: all 29 pass, proving no existing behavior/shape was duplicated or diverged.",
+    "real_timing_evidence": "tests/test_umr_output_contract.py::test_real_timing_ten_terminal_writes_stay_fast -- 10 real end-to-end CLI invocations (full Python subprocess startup + sqlite write + contract derivation each) completed in 1.106s-1.168s across repeated runs (~110-117ms/call); the derive_umr_output_contract() logic itself is pure dict/string computation, sub-millisecond, no I/O, no network, no LLM call in the path.",
+    "real_restart_survival_evidence": "tests/test_umr_output_contract.py::test_state_survives_process_exit_reread_from_a_second_independent_process -- writer subprocess marks a row terminal and fully exits; a SECOND, wholly independent Python subprocess (no shared memory/object) re-opens the same on-disk sqlite file and reads back the identical output_contract, proving real persisted DB state via update_umr_task()'s existing write path, never in-process-only. Run against an isolated scratch DB (SUPERBOSS_REGISTER_DB override, same convention every other real test in this suite already uses) rather than the live production superboss-register.sqlite, to avoid mutating real UMR rows for a demonstration -- the code path exercised (cmd_mark_umr_terminal -> update_umr_task -> sqlite3 UPDATE ... commit()) is byte-identical to the one every real production caller already uses.",
+    "false_premise_finding_this_task_also_recorded": "This task's own SPEC ('second amendment... read together with both the original spec and the first amendment') presumes finished antecedent work that does not exist: UMR-20260806-171945-5767's real task stayed blocked on its precondition gate and shipped zero application code (task.yaml status=blocked, PR #219 touches only PROGRESS.md); UMR-20260807-035145-aa45 ('first amendment', a vector-search reuse gate) shows status=running in umr_tasks but last_heartbeat is NULL, its systemd unit is inactive, no task.yaml exists under TASKS_DIR for it, and no wiring_registry/capability_registry row cites it -- a stale/ghost dispatch row, not real completed or in-progress work. Rather than building speculative vector-search code atop that phantom prerequisite (itself an assumption this SPEC's own 'no assumption anywhere' bar forbids), this task implemented the one concrete, well-specified, precedent-free piece of the real governing chain: the original spec's boolean output contract."
+  }
+}

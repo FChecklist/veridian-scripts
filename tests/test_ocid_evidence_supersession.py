@@ -159,6 +159,10 @@ def test_reproduces_the_real_incident_queued_task_superseded_by_newer_evidence()
 
         env = {"SUPERBOSS_REGISTER_DB": scratch_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
         rg = _load("rg_ocid_supersede_repro", "resource_governor.py", env=env)
+        # Real issue #980's standing stop-work-order gate is out of scope for
+        # this file (OCID-evidence supersession, not governance) -- direct
+        # module-attribute override, not a real exemption.
+        rg.STOP_WORK_ORDER_TASK_IDS = ()
         rg._dispatch_core = lambda: _FakeDispatchCoreAlwaysFreeSlot()
         rg._perform_spawn = lambda row: {"status": "running", "unit_name": "fake-test-unit-never-real.service", "outputs": {}}
 

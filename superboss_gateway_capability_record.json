@@ -1,0 +1,36 @@
+{
+  "capability_name": "superboss_gateway",
+  "inputs": [
+    {"key": "table", "label": "Allowlisted table name (umr_tasks, wiring_registry, capability_registry, ai_agent_registry, knowledge_engine, owner_priority_sequence, owner_priority_override)", "type": "text"},
+    {"key": "where", "label": "Optional column=value equality filter (POST /read) or row selector (POST /write update), validated against real PRAGMA table_info() columns", "type": "object", "optional": true},
+    {"key": "limit", "label": "Optional row cap for POST /read, default 100, hard max 1000", "type": "number", "optional": true},
+    {"key": "op", "label": "POST /write operation: insert or update", "type": "text", "optional": true},
+    {"key": "values", "label": "POST /write column=value payload, validated against real PRAGMA table_info() columns", "type": "object", "optional": true}
+  ],
+  "business_rules": [
+    {"leaf_key": "superboss_gateway", "phase": "process", "mechanism_path": "scripts/superboss_gateway.py", "registered": false}
+  ],
+  "workflow": "Owner directive 2026-08-07: one input gate, one output gate for superboss-register.sqlite, replacing the pattern of 46 separate scripts each opening their own raw sqlite3.connect() to the live DB (confirmed via grep). A single persistent process (systemd --user unit veridian-superboss-gateway.service) owns the write connection behind an in-process lock and serves concurrent mode=ro reads, matching the DB's existing native WAL-mode concurrency (journal_mode=wal, busy_timeout=5000, already live before this was built).",
+  "automation": "systemd/veridian-superboss-gateway.service -- Type=simple persistent singleton daemon, Restart=on-failure, WantedBy=default.target, running scripts/superboss_gateway.py on 127.0.0.1:8790",
+  "documents": [],
+  "reports": null,
+  "apis": [
+    "GET http://127.0.0.1:8790/health -- {\"ok\": true, \"db\": <path>, \"journal_mode\": \"wal\"}",
+    "POST http://127.0.0.1:8790/read {\"table\", \"where\"?, \"limit\"?} -- {\"count\", \"rows\"}",
+    "POST http://127.0.0.1:8790/write {\"op\": \"insert\"|\"update\", \"table\", \"values\", \"where\"?} -- {\"ok\", \"rowid\"|\"rows_changed\"}"
+  ],
+  "ui_screens": null,
+  "permissions": "server-local only, bound to 127.0.0.1:8790, no external network exposure; table access allowlisted to {umr_tasks, wiring_registry, capability_registry, ai_agent_registry, knowledge_engine, owner_priority_sequence, owner_priority_override} -- all other tables (including sqlite_master) rejected; column names validated against real PRAGMA table_info() before use, never raw caller SQL",
+  "ai_required": false,
+  "confidence": 1.0,
+  "version": "1.0",
+  "owner": "VERIDIAN platform ops tooling (/opt/veridian/scripts)",
+  "metadata": {
+    "registered_by_phase": "UMR-20260807-085244-3ce1",
+    "real_problem_fixed": "46 separate scripts each open their own raw sqlite3.connect() to the live superboss-register.sqlite, confirmed via grep 2026-08-07 -- no shared validation, no shared retry/serialization discipline, no single place to fix a query bug once",
+    "scope_note": "additive only -- none of the 46 existing scripts were migrated to use this gateway in this UMR; that migration is separate, larger follow-up work tracked as its own future task",
+    "checked_for_duplicate": "deterministic briefing's capability_registry match ('task_oa', CAP-20260727-084004-bff8) independently verified as an unrelated Next.js AI-orchestration API route (repos/compliance-tracker/src/app/api/ai/orchestrate/route.ts), not a DB gateway -- no real duplicate existed before this row",
+    "pr_evidence": "PR #257 (scripts/superboss_gateway.py + systemd unit), PR #258 (ExecStart path fix) -- both merged to main",
+    "live_verification": "systemctl --user status veridian-superboss-gateway.service active (running); curl 127.0.0.1:8790/health returned {\"ok\": true, \"journal_mode\": \"wal\"}"
+  }
+}

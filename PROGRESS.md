@@ -63,9 +63,30 @@ Governing chain: UMR-20260806-124055-bc80, UMR-20260806-135632-329e
       (4,067,086,336 bytes, md5 `aeb33a818a9a283e58bd6b8d631a1616`), plus matching `-wal`
       (4,124,152 bytes) and `-shm` (32,768 bytes) snapshots, all under
       `/opt/veridian/ai-os/memory/`. Not overwritten; will not be modified further.
-- [ ] Step 3: attempt real recovery via `sqlite3 .recover` against the **copy** (not live db,
-      to avoid extra load/lock risk on production while other processes use it) -- report
-      real recovered row count for wiring_registry if any.
+- [x] Step 3: ran `sqlite3 .recover` against the forensic **copy** (not live db, to avoid
+      extra load/lock risk on production). Result: **clean recovery, zero errors on either
+      the `.recover` pass (1m40s) or loading its SQL output into a fresh db (22s)**.
+      `PRAGMA integrity_check` on the recovered db reports exactly **one** remaining issue:
+      `fts5: corruption found reading blob 10 from table "wiring_registry_fts"` -- the FTS5
+      shadow index itself is unrecoverable (expected/disposable, matches SPEC's own framing).
+      The **base table recovered 24,281 real rows**, breakdown by entity_type: file 17,662;
+      function 5,028; dispatch_event 661; supabase_table 444; ai_role 195; script 151;
+      cron_job 72; engine 20; github_repo 15; gateway 10; governance_doc 10; route 6;
+      browser_component 4; vercel_project 3. Spot-checked rows (incl. `github_repo`/
+      `vercel_project` entries with rich live-API-derived metadata -- PR counts, workflows,
+      branch protection) look structurally intact and plausible, not garbled.
+      `umr_tasks` also recovered fine (7,977 rows) as an independent sanity check.
+      **Decision (deviating from SPEC step 4's literal "drop and rebuild from scripts"
+      default, documented per faithful-reporting practice):** since recovery of the base
+      table was genuinely clean (only the disposable FTS5 index was not), the lower-risk,
+      lower-resource path is to **restore the 24,281 recovered rows as the new live table
+      content** (exact pre-corruption state, no dependency on live GitHub/Vercel/Supabase
+      API re-calls which may be slow/rate-limited/credential-dependent on this
+      resource-constrained box -- swap at 3.3/4.0GB, load avg ~7 at time of writing), rebuild
+      the FTS5 index fresh from that restored content, THEN opportunistically re-run the
+      cheap deterministic filesystem-only registration script(s) on top to catch any drift
+      since last write -- rather than discarding a clean recovery to redo a slower, external-
+      API-dependent full re-scan that isn't actually needed here.
 - [ ] Step 4: rename corrupted `wiring_registry` table aside (precedent-consistent), drop
       corrupted `wiring_registry_fts` + shadow tables, recreate fresh schema via
       `superboss-register.py`'s own `_ensure_wiring_registry_table()` (single source of

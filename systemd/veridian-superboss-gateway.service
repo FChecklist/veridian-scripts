@@ -33,7 +33,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /opt/veridian/scripts/superboss_gateway.py
+ExecStart=/usr/bin/python3 /opt/veridian/scripts/scripts/superboss_gateway.py
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:/opt/veridian/ai-os/logs/superboss-gateway.log

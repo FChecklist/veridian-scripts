@@ -140,6 +140,11 @@ def test_run_tick_continues_after_duplicate_pr_skip():
         env = {"SUPERBOSS_REGISTER_DB": scratch_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
         rg = _load_rg("rg_runtick_1", env)
         rg.EMERGENCY_STOP_PATH = os.path.join(d, "EMERGENCY_STOP_never_created")
+        # Real issue #980's standing stop-work-order gate is out of scope for
+        # this test (it targets the duplicate-PR guard specifically) -- same
+        # direct module-attribute override this file already uses for
+        # EMERGENCY_STOP_PATH above, not a real exemption.
+        rg.STOP_WORK_ORDER_TASK_IDS = ()
 
         now = rg._utcnow()
         conn = _new_conn(scratch_db)

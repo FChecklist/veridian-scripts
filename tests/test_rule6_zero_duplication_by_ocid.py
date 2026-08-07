@@ -58,6 +58,12 @@ def test_second_submission_for_same_ocid_while_first_still_active_is_rejected():
         _seed_scratch_db(scratch_db)
         env = {"SUPERBOSS_REGISTER_DB": scratch_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
         rg = _load("rg_rule6_dup", "resource_governor.py", env=env)
+        # Real issue #980's standing stop-work-order gate is out of scope for
+        # this file (Rule 6 dedup, not governance) -- disabled the same way
+        # tests/test_flag_stale_queued_tasks.py disables EMERGENCY_STOP_PATH
+        # for tests unrelated to that gate: a direct module-attribute
+        # override, not a real exemption.
+        rg.STOP_WORK_ORDER_TASK_IDS = ()
 
         os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
         try:
@@ -95,6 +101,10 @@ def test_second_submission_for_same_ocid_after_first_goes_terminal_is_allowed():
         env = {"SUPERBOSS_REGISTER_DB": scratch_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
         rg = _load("rg_rule6_sequential", "resource_governor.py", env=env)
         sbr = _load("sbr_rule6_sequential", "superboss-register.py", env=env)
+        # Real issue #980's standing stop-work-order gate is out of scope for
+        # this file (Rule 6 dedup, not governance) -- see the sibling test
+        # above for why this override is the right fix, not a real exemption.
+        rg.STOP_WORK_ORDER_TASK_IDS = ()
 
         os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
         try:

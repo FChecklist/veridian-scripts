@@ -1,0 +1,33 @@
+{
+  "capability_name": "umr_completion_percentage",
+  "inputs": [
+    {"key": "umr_ids", "label": "one or more umr_id positional args", "type": "string[]", "optional": false},
+    {"key": "--umr-id", "label": "repeatable alternative to positional args", "type": "string", "optional": true}
+  ],
+  "business_rules": [
+    {"leaf_key": "umr_completion_percentage", "phase": "reporting", "mechanism_path": "scripts/umr_completion_percentage.py", "registered": true}
+  ],
+  "workflow": "scripts/umr_completion_percentage.py UMR-... [UMR-... ...]",
+  "automation": "manual/on-demand CLI, callable by generate_pm_report_v3.py or any cron; no scheduled cron wiring added by this task",
+  "documents": null,
+  "reports": null,
+  "apis": ["/opt/veridian/scripts/umr_completion_percentage.py"],
+  "ui_screens": null,
+  "permissions": "server-local shell execution only; read-only against the one live superboss-register.sqlite (umr_tasks table) and read-only against TASKS_DIR/*/task.yaml; never writes; no tenant/org scoping applicable",
+  "ai_required": 0,
+  "confidence": 1.0,
+  "version": "1.0",
+  "owner": "VERIDIAN platform ops tooling (/opt/veridian/scripts)",
+  "metadata": {
+    "governing_umr_chain": ["UMR-20260806-124055-bc80", "UMR-20260807-033052-f756"],
+    "task_id": "task-20260807-052106-build-real-deterministic-umr-percent-com",
+    "purpose": "Owner standing order 2026-08-07: no manual AI-judged completion percentages anywhere, ever. Computes a real, reproducible percent-completion for any given umr_id using 5 fixed deterministic rules over real umr_tasks columns (status/ts_completed/ts_dispatched/outputs_json) and real task.yaml completed_steps/remaining_steps lists -- never AI estimation. Unresolvable cases emit percent:null with a real, specific reason string instead of guessing.",
+    "reused_from": [
+      "scripts/superboss-register.py (resolve_superboss_db_path()/_connect()/init_db_silent(), imported not reimplemented, via the same in-process importlib load convention agent_work_briefing.py/resource_governor.py already use)",
+      "scripts/backfill_phase_self_report.py (yaml.safe_load() task.yaml read pattern, reused not reimplemented)",
+      "scripts/resource_governor.py (_recorded_new_task_ids_for_identity()'s own outputs_json.new_task_id convention, reused not reimplemented)"
+    ],
+    "known_honest_limitation": "task.yaml lookup checks only outputs_json.new_task_id and task_identity as TASKS_DIR entry names -- a row whose real dispatched task dir is named neither (a historical/legacy dispatch shape) falls through to the unresolved rule with a real reason string rather than guessing a match.",
+    "real_test_evidence": "Run live against the 5 UMR ids required by UMR-20260807-033052-f756's own SPEC: UMR-20260806-135632-329e -> 100 (rule1), UMR-20260806-140841-46d1 -> 100 (rule1), UMR-20260806-141055-1fec -> 17 (rule2, completed but ts_completed NULL so rule1 didn't fire, real task.yaml resolved it), UMR-20260806-171945-5767 -> 33 (rule2, failed status but a real task.yaml showed genuine progress), UMR-20260807-024922-f432 -> 80 (rule5, running with real task.yaml). Full output + a 13-scenario standalone test (test_umr_completion_percentage.py, covers the null/unresolved path none of the 5 live rows happened to hit) committed alongside."
+  }
+}

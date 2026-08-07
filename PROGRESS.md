@@ -1,202 +1,3 @@
-# PROGRESS -- task-20260807-150157-fix-real-false-premise-chain--record-rea
-
-## Completed
-
-- [x] Independently reverified the SPEC's claims before any write (per this codebase's own
-      recurring false-premise pattern -- did not trust the SPEC's prose at face value):
-  - Read `task-20260807-053227-amendment-to-umr-20260806-171945-5767--v/task.yaml` directly: real
-    task dir exists, `status: blocked`, real completed_steps (`reuse_verdict_engine.py`,
-    `vector_similarity.py`, 24 real tests), but its own last checkpoint note says the merge itself
-    **failed** ("Superboss-approved (tier=tier1), but the merge itself FAILED ... NOT actually
-    merged") -- corrected the SPEC's looser framing ("finished and awaiting review") to the more
-    precise real state: real work finished, PR open, merge automation failed, needs manual
-    attention.
-  - `gh pr view 251`: confirmed `state=OPEN`, `mergedAt=null` -- PR #251 is real but **not merged**.
-  - `systemctl --user status veridian-worker@task-20260807-053227-...--v.service`: confirmed
-    `inactive (dead)` (loaded, ran, exited -- not "never existed").
-  - Read `UMR-20260807-035145-aa45`'s own `umr_tasks` row directly (via the existing
-    `query_umr_tasks`-adjacent read path, no raw SQL writes): `status=running`, `ts_completed=null`,
-    `unit_name` field already correctly stores
-    `veridian-worker@task-20260807-053227-...--v.service`, `outputs_json.new_task_id` confirms the
-    same -- reconfirming PR #250's bug (it derived the unit name from `task_identity` instead).
-  - Read PR #250's live body: confirmed it does say exactly what the SPEC described (wrong unit
-    name, "stale/ghost dispatch row" claim).
-
-- [x] Called `agent_work_briefing.py record-completion` for `UMR-20260807-035145-aa45`, citing PR
-      #251 as real evidence (ai_agent_registry write-back only at this call).
-
-- [x] Fixed `UMR-20260807-035145-aa45`'s `umr_tasks` row honestly: **not** `--status completed`
-      (would have been refused by `mark-umr-terminal`'s own real evidence gate -- the real commit
-      is not yet an ancestor of `origin/main`) -- used `--status completed_unmerged` instead (the
-      real, honest status this codebase's own tooling defines for exactly this case), via
-      `superboss-register.py mark-umr-terminal` directly (the same real underlying writer
-      `record-completion` itself calls; `agent_work_briefing.py`'s own CLI wrapper only exposes
-      `completed`/`failed`/`killed` at the argparse level, not `completed_unmerged`, so the more
-      precise real CLI entry point was used instead of forcing a false "completed" claim through
-      a narrower wrapper). Row now: `status=completed_unmerged`, `ts_completed` set,
-      `outputs_json` carries `pr_number=251`/real `commit_sha`/`repo`. Independently re-queried in
-      a fresh connection to confirm persistence.
-
-- [x] Corrected PR #250 (still open, unmerged -- safe to edit directly): pushed a commit to its
-      real branch (`worker/task-20260807-053232-second-amendment-to-umr-20260806-171945`) adding a
-      correction block to `PROGRESS.md`, and rewrote the PR body via the GitHub REST API
-      (`gh pr edit`/GraphQL failed on an unrelated deprecated-field error; used
-      `gh api .../pulls/250 -X PATCH --input <json>` instead). Both now state honestly: the
-      "stale/ghost dispatch row" claim was false, caused by deriving the systemd unit name from
-      `task_identity` instead of the row's own `outputs_json.new_task_id`; `UMR-20260807-035145-aa45`
-      was real, dispatched real tested work, and PR #251 is its real (currently unmerged)
-      deliverable. Did **not** touch, revert, or delete PR #250's real code
-      (`derive_umr_output_contract()` in `superboss-register.py`) -- explicitly noted in both
-      places that it stands on its own real, tested merit independent of the false justification.
-
-- [x] Recorded this task's own completion for `UMR-20260807-110103-df55` via
-      `agent_work_briefing.py record-completion`.
-
-### STEP 2 -- extend `resource_governor.py`'s real `run_tick` with the
-      12-step ordered pipeline
-- [x] Researched exact real signatures/patterns from all 9 named files
-      before writing any code (document_engine.py, intent_engine.py,
-      audit_ocid_canonical_registry.py, audit_ocid_compliance.py,
-      dispatch_core.py, health-check-15min.py, superboss_gateway.py,
-      reuse_verdict_engine.py, superboss-register.py) -- see the research
-      agent's structured report cited in this task's transcript for exact
-      line numbers.
-- [x] Extended `resource_governor.py` only -- **zero new files created**
-      (`git status --short` shows only ` M resource_governor.py`;
-      `git diff --stat`: 1 file changed, 460 insertions, 9 deletions).
-- [x] All twelve steps wired, each a real import + real function call into
-      the named existing file, never reimplemented (grep evidence for
-      every step is in this task's transcript; summary):
-  1. `superboss_gateway.py`'s real `handle_read()`/`handle_write()` called
-     in-process (not HTTP) -- new lazy loader `_superboss_gateway()`,
-     used once per tick in `_orchestrator_tick_maintenance()` for a real
-     `wiring_registry` snapshot read. Pre-existing DB access in this file
-     (via `_superboss_register()`) is explicitly NOT migrated -- matches
-     `superboss_gateway.py`'s own docstring, which scopes migrating the 46
-     existing raw-`sqlite3.connect()` callers as separate follow-up work.
-  2. `reuse_verdict_engine.py`'s real `assess()` called immediately before
-     `_perform_spawn()` in `_dispatch_one_inner()` (a NEW third duplication
-     guard alongside the two pre-existing, independently-proven ones);
-     `duplication_blocked` verdicts reject the dispatch
-     (`rejected_duplicate_reuse_verdict`, added to `RULE2_OUTCOME_MAP` and
-     `ROW_RESOLVED_NON_DISPATCH_ACTIONS`).
-  3. OCID-068 Rule 1 (`superboss-register.py`'s real
-     `find_most_recent_umr_by_identity()`) -- reused inside
-     `_orchestrator_ocid_governance_check()`, gated to only run when a row
-     genuinely names a real OCID (same extraction regex the existing
-     `superseded_by_ocid_evidence` guard already uses).
-  4. `health-check-15min.py`'s real `is_stale_blocked()`, imported directly
-     (not subprocess) -- `_health_check_15min()` loader, applied once per
-     tick to the real current blocked-task set under `TASKS_DIR`.
-  5. Existing swap/load checks: confirmed unchanged, no new code (verified
-     `sample_metrics`/`over_threshold_metrics` untouched by this diff).
-  6. `audit_ocid_canonical_registry.py`'s real `plan_for_ocid()` (the real
-     six-method cross-reference: umr_tasks substring + full-dump grep, `gh
-     pr list --search`, `git log --all --grep`, PR-body UMR-id extraction,
-     MASTER-TRACKER/ACTIVE-CLAIMS grep) -- same gated call site as step 3,
-     `_orchestrator_ocid_governance_check()`.
-  7. `dispatch_core.py`: confirmed already the one real spawn lock (`with
-     dc.acquire_dispatch_lock(): ... dc.has_free_slot_detail()`,
-     pre-existing, unmodified) -- no second spawn path added.
-  8. `audit_ocid_compliance.py`'s real `build_compliance_report()` over
-     `sbr.query_ocid_compliance_state()` (trigger-derived booleans, never
-     re-derived) -- same gated call site as steps 3/6.
-  9. Every terminal-status `update_umr_task()` write reachable from
-     `run_tick()` (the 2 duplicate-guard sites + the final spawn-result
-     write in `_dispatch_one_inner()`, plus the SIGKILL write in
-     `scan_stuck_tasks()`) now merges `superboss-register.py`'s real
-     `derive_umr_output_contract()` output under `output_contract` via new
-     helper `_orchestrator_output_contract()`. Deliberately scoped to only
-     the 4 real terminal-status call sites `run_tick()` itself reaches --
-     intermediate-status writes (`running`/`sigterm_sent`) and the
-     separate one-time backfill functions (`reconcile_stale_heartbeats()`,
-     the systemd/external-AI backfill sweep) are NOT touched, since
-     `derive_umr_output_contract()` is a completion-time contract by its
-     own docstring and those functions are not part of `run_tick()`'s own
-     real call chain.
-  10. `document_engine.py`'s real `detect_duplicate_documents_by_hash()` --
-      real sha256 content hashes computed here (document_engine.py itself
-      never hashes, confirmed via research: it only groups pre-supplied
-      hashes), grouping logic reused unmodified, applied once per tick to
-      the real `*.py` files under `SCRIPTS`.
-  11. `intent_engine.py`'s real `cmd_check_intent()` miss-logging pattern
-      -- new helper `_orchestrator_log_intent_miss()`, called from the
-      step-2 reuse-verdict gate whenever `assess()` returns
-      `create_authorized` (a real inventory gap: no existing candidate
-      matched at all).
-  12. `PRAGMA wal_checkpoint(TRUNCATE)` + conditional `VACUUM` added
-      directly into `_orchestrator_tick_maintenance()`, reusing
-      `sbr._connect()` (the real, already-trusted connection helper) --
-      the one deliberate, documented exception to "never raw
-      sqlite3.connect": neither `superboss_gateway.py` nor
-      `superboss-register.py` expose a maintenance/PRAGMA endpoint.
-      `VACUUM` is conditional (only when `freelist_count/page_count >=
-      0.20`, same real-cost reasoning `credit-accountant.py`'s own
-      pre-existing `VACUUM` call already documents) -- confirmed via a
-      real isolated-scratch-DB run: `wal_checkpoint: "truncate_attempted"`,
-      `vacuum: "skipped_below_threshold"` (freelist_count=0).
-- [x] **Real, isolated smoke-test evidence** (`python3 run_tick()` against
-      a genuinely isolated scratch DB, `sbr.DB_PATH` overridden directly --
-      the same convention `tests/test_umr_output_contract.py`'s own
-      `scratch_db` fixture already uses): `run_tick(max_dispatches=1)`
-      completed cleanly end-to-end, `orchestrator_maintenance` populated
-      with real evidence from all of steps 1/4/10/12, scratch DB page_count
-      unchanged at 135 pages, **live production DB size confirmed
-      byte-identical before and after (2524807168 bytes both times)**.
-      (One earlier smoke-test run, before this isolation was corrected,
-      revealed a pre-existing sharp edge in `resolve_superboss_db_path()`:
-      it silently falls back to the live default path if
-      `SUPERBOSS_REGISTER_DB` points at a not-yet-existing file, rather
-      than erroring -- caused one non-destructive `PRAGMA
-      wal_checkpoint(TRUNCATE)` against the real live DB (safe, idempotent,
-      same operation SQLite performs automatically; VACUUM correctly did
-      NOT run, freelist_count was 0) before this was caught and fixed in
-      the test harness. Not a defect in the shipped pipeline code itself --
-      documented here for honesty and as a real caveat for any future
-      caller of `resolve_superboss_db_path()` in tests.)
-- [x] Real before/after `output_contract` sample (via
-      `_orchestrator_output_contract()` directly, loaded against this git
-      checkout's own merged `superboss-register.py`):
-      BEFORE: `{"error": "sample_upstream_failure"}`
-      AFTER: adds `"output_contract": {"data": "umr_tasks row
-      UMR-SAMPLE-0002 marked status=failed reason='sample failure reason'
-      evidence_keys=['error']", "meta": {"deterministic": true,
-      "close_ended": true, "boolean": true, "work_id":
-      "UMR-SAMPLE-0002"}}` -- the one real output shape, no second one
-      invented.
-- [x] Zero duplicate logic introduced: `grep -n "sqlite3.connect"
-      resource_governor.py` -- zero real call sites (2 comment mentions
-      only); no dedup-grouping/hash-comparison logic duplicated (only
-      sha256 content-hash *preparation*, the grouping algorithm itself
-      stays in `document_engine.py`); `output_contract` shape appears only
-      via `sbr.derive_umr_output_contract()` calls, never a second
-      hand-built dict shape.
-- [x] **Real test evidence, zero regressions**: re-ran the full real test
-      suite covering every file this diff touches (22 test files, 151
-      real tests) both before and after this diff -- same 2 pre-existing,
-      test-order-dependent failures (`test_stuck_task_heartbeat.py`,
-      `test_worker_boot_activation_and_resume.py`, both pass in isolation)
-      occur identically on unmodified `resource_governor.py`, confirming
-      they predate this change. `tests/test_umr_output_contract.py` (14)
-      and `test_reuse_verdict_engine.py` (24) also still pass unmodified.
-
-## Honest caveat -- live activation still needs a real, separate step
-`resource_governor.py`'s own `_superboss_register()`/`_dispatch_core()`
-loaders (and this task's new loaders, matching that same established
-convention) load from `/opt/veridian/scripts/` (`SCRIPTS`), the real
-deploy-live-scripts.sh sync target -- **not** this git checkout directly.
-As of this task's real completion, that live directory has not been
-re-synced since PR #250/#251 merged in this session: confirmed
-`/opt/veridian/scripts/superboss-register.py` still has zero occurrences of
-`derive_umr_output_contract`. This means steps 2/9 will currently fail-open
-(silently no-op, logging a WARNING to ATTENTION.md) in live production until
-`deploy-live-scripts.sh` runs -- by design (fail-open, never crash a real
-tick), but real, and worth flagging rather than silently assuming
-deployed. Running that live-wide sync script was judged out of scope for
-this task (a separate, higher-blast-radius operational action covering
-every tracked script, not scoped to this change) and was not run here.
-
-## Remaining
 - [ ] Flag for the next real dispatch: run `deploy-live-scripts.sh` (or
       wait for its normal cron cadence) so `/opt/veridian/scripts/` picks
       up PR #250/#251/this task's `resource_governor.py` changes and steps
@@ -206,3 +7,219 @@ every tracked script, not scoped to this change) and was not run here.
 - [ ] Graduate into `capability_registry` citing this UMR
       (UMR-20260807-110133-205d).
 - [ ] `agent_work_briefing.py record-completion` for UMR-20260807-110133-205d.
+
+---
+
+- [ ] None. Declined the redundant re-close as a correct non-failure outcome;
+      flagging again (8th time in this chain) that the SPEC-generation source
+      needs a live-state check before dispatch, not another worker cycle.
+
+---
+
+# PROGRESS -- task-20260807-081913-amendment-to-umr-20260807-070110-5ea7--s
+
+Real amendment to UMR-20260807-070110-5ea7 (governed by UMR-20260806-124055-bc80):
+extends 5ea7's narrow single-UMR owner_priority_override fix into a real,
+self-advancing 4-phase owner_priority_sequence.
+
+## Pre-work verification (before any write)
+
+- [x] Verified every cited UMR id in the SPEC is a real row in the live
+      `umr_tasks` table (not fabricated) -- see check below.
+- [x] Confirmed no `owner_priority_override`/`owner_priority_sequence`
+      table or code exists yet anywhere in the repo (grep across scripts +
+      ai-os came back empty) -- this is genuinely new work, not a
+      duplicate of prior work.
+- [x] Confirmed OCID-020 -> `UMR-20260802-165606-4413` and OCID-021 ->
+      `UMR-20260802-173631-ca85` via a real `ocid_canonical_registry`
+      lookup (never hand-typed).
+- [x] Caught and avoided a real false-positive trap in Phase 3/4 discovery:
+      a raw substring LIKE scan of `metadata_json` matched 567/8022 rows
+      for OCID-020's governing UMR, but several real rows carry
+      multi-megabyte `metadata_json` blobs (confirmed:
+      UMR-20260806-130110-c620 at 7.1MB) that are historical audit-report
+      dumps, not real linkage -- e.g. `UMR-20260729-112414-3269`, dated
+      *before* OCID-020's own governing UMR even existed, only "matched"
+      because its 1.19MB metadata_json embeds an unrelated report
+      mentioning it. Fixed by scoping the real deterministic search to each
+      row's parsed `inputs_json.prompt`/`.title` fields only (179 real
+      hits for OCID-020, 70 for OCID-021).
+- [x] Caught a second false-premise risk: `umr_tasks.status='completed'`
+      is **not** always backed by real, independently-verifiable evidence
+      -- e.g. Phase 1 member `UMR-20260806-141055-1fec` is `status=completed`
+      but its own `outputs_json` only ever recorded a spawned child
+      task id, never a commit/file. Built `_umr_genuinely_completed()` to
+      re-verify real evidence (file exists on disk / commit is a real
+      ancestor of origin/main) rather than trusting the status label alone.
+
+## Completed
+
+- [x] `superboss-register.py`: added `owner_priority_sequence` +
+      `owner_priority_override` tables (`_ensure_owner_priority_tables`),
+      real deterministic Phase 3/4 discovery (`discover_prompt_citing_umrs`,
+      `_lookup_ocid_governing_umr`, `build_owner_priority_sequence_phases`),
+      idempotent seeding (`seed_owner_priority_sequence`), real
+      evidence-based completion check (`_umr_genuinely_completed`, reusing
+      the existing `validate_umr_terminal_completion_evidence` gate), the
+      real advance function (`advance_owner_priority_phases`) and
+      override-resync (`_sync_owner_priority_override`), plus 3 CLI
+      subcommands (`seed-owner-priority-sequence`,
+      `advance-owner-priority-phases`, `show-owner-priority-state`).
+- [x] `resource_governor.py`: `run_tick()` now calls
+      `_advance_owner_priority_phases_safe()` first, before
+      `next_queued_task()`/`dispatch_one()` -- fail-open (never raises),
+      same convention as `scan_stuck_tasks`/`dispatch_one`'s own
+      `_safe_superboss_register` wrapper. Deliberately does **not** touch
+      `next_queued_task()`'s own row-selection logic -- that consumption
+      side of `owner_priority_override` is UMR-20260807-070110-5ea7's own
+      separately-dispatched real work; this only keeps the table populated.
+- [x] `test_owner_priority_sequence.py` (5 tests, all real, run against a
+      real **copy** of the live DB via SQLite's own `backup()` API, never
+      the live table -- a raw `shutil.copy2` of this WAL-mode live DB was
+      tried first and produced a real "database disk image is malformed"
+      error mid-run, confirming the copy must use the backup API, not a
+      byte copy):
+      - all 4 phases seed with real discovered UMR ids, every id verified
+        to be a real `umr_tasks` row
+      - only Phase 1 is active immediately after seeding
+      - a tick before Phase 1 members are genuinely complete makes no
+        transition
+      - once Phase 1 members are given real evidence (a real existing
+        file path), the phase correctly advances: Phase 1 -> complete,
+        Phase 2 -> active, `owner_priority_override` resynced to exactly
+        Phase 2's members
+      - never more than one phase is active at once
+      - the live DB is provably untouched by any of the above
+- [x] `test_resource_governor_owner_priority_advance.py` (2 tests): confirms
+      `run_tick()` calls the advance function before the dispatch loop and
+      seeds a real copy DB correctly; confirms fail-open behavior (never
+      raises) when Superboss Register is unavailable. `max_dispatches=0`
+      guarantees no real systemctl/dispatch call is ever made.
+- [x] All 7 new tests pass (`python3 -m pytest test_owner_priority_sequence.py
+      test_resource_governor_owner_priority_advance.py -q` -> `7 passed`).
+- [x] Verified I had accidentally made this exact edit against the **live**
+      shared checkout at `/opt/veridian/scripts/superboss-register.py`
+      (wrong repo -- not this task's own git workspace) before catching it;
+      reverted that file back to its pre-edit state (confirmed via
+      `git diff` that only the other concurrently-running worker's
+      legitimate in-progress changes remained) and redid the real work in
+      this task's own workspace/branch instead.
+- [x] PR #256 review.json (reject, tier1) flagged this claim as "a claim
+      about a live production file outside this diff's own scope and was
+      not independently re-verified as part of this review" -- independently
+      re-verified during the real fix-up pass for that review:
+      `git diff -- superboss-register.py` in `/opt/veridian/scripts` right
+      now contains 122 insertions/5 deletions, all scoped to
+      UMR-20260807-035145-aa45's vector-similarity work (`_vector_similarity`
+      import, `_migrate_wiring_registry_vector`,
+      `_migrate_capability_registry_vector`) -- grepping that live diff for
+      `owner_priority_sequence`, `owner_priority_override`,
+      `advance_owner_priority_phases`, `_umr_genuinely_completed` returns zero
+      matches. The accidental edit is genuinely not present in the live
+      checkout; only the other, unrelated worker's legitimate in-progress
+      change remains, confirming the original claim above.
+
+- [x] Opened PR #256: https://github.com/FChecklist/veridian-scripts/pull/256
+
+## Remaining
+
+- [ ] PR #256 review/merge (out of this task's control once opened).
+- [ ] Once merged and deployed via the existing live-deploy pipeline, run
+      `python3 superboss-register.py seed-owner-priority-sequence` for real
+      against the live DB (not done by this task -- deploy pipeline's job,
+      per this repo's own convention).
+
+---
+# PROGRESS -- task-20260807-142156-fix-pr-256-real-audit-fail--memoize-owne
+
+Real fix-up task (governed by UMR-20260807-070904-736a, UMR-20260807-070110-5ea7),
+same PR #256, not a new one.
+
+## Pre-work verification (before any write -- standing false-premise-check policy)
+
+- [x] Fetched PR #256's real head (`d890bae`, commit ts 2026-08-07T11:58:27Z)
+      and read `advance_owner_priority_phases()` as it actually exists there.
+      **The exact finding quoted in this task's own SPEC (no memoization, no
+      per-tick bound, no short-circuit for the cheap file_path path) was
+      already fixed on this head** -- `confirmed_complete_members`
+      memoization, `OWNER_PRIORITY_PHASE_MAX_EVALUATIONS_PER_TICK=25`, and
+      `validate_umr_terminal_completion_evidence()`'s file_ok short-circuit
+      all already exist in the code, with an existing passing regression
+      test (`test_advance_memoizes_confirmed_members_and_bounds_per_tick_evaluations`).
+      This SPEC's quoted "exact real finding" text is verbatim the **first**
+      of PR #256's two real audit-fail review comments (posted
+      2026-08-07T08:48:49Z, i.e. *before* `d890bae` fixed it) -- confirmed via
+      `gh api repos/.../issues/256/comments`, not the current/second one
+      (posted 2026-08-07T12:06:52Z, *after* `d890bae`). Matches this
+      environment's own recurring false-premise pattern (stale/superseded
+      finding text handed down as if current).
+- [x] Read the real, current (second, most recent) audit-fail comment in
+      full instead of trusting the SPEC's quote. Its real finding: round 1's
+      own fix still ran the entire real evidence-check loop (including real
+      60s-timeout `git fetch`/`cat-file`/`merge-base` subprocess calls for
+      commit_sha-backed members) while `resource_governor.py`'s
+      `_advance_owner_priority_phases_safe()` held superboss-register.py's
+      cross-process `_write_lock()` -- the same OS-level flock every other
+      write-path invocation of the script (dispatch, submit, mark-terminal,
+      ...) system-wide must also acquire. A degraded network during an
+      active large phase could hold that lock for tens of minutes, blocking
+      every other worker's write across the whole Superboss Register --
+      worse than the bug round 1 fixed, not better. Also flagged (minor): no
+      `finally` around `conn.close()` in `_advance_owner_priority_phases_safe`,
+      leaking the connection on an exception path.
+- [x] Independently re-read the current code myself and confirmed both
+      findings are real: `resource_governor.py`'s
+      `_advance_owner_priority_phases_safe()` wrapped the *entire*
+      `sbr.advance_owner_priority_phases(conn, now=now)` call (including its
+      internal evidence-check loop) in `with sbr._write_lock():`; and
+      `conn.close()` sat after that `with` block with no `try`/`finally`.
+      Decided to fix the real, current (second) finding rather than
+      re-applying the already-fixed first one, per this task's own SPEC
+      intent ("real fix required" / "fresh audit against the new head").
+
+## Completed
+
+- [x] `superboss-register.py`: restructured `advance_owner_priority_phases()`
+      to acquire `_write_lock()` itself, in two short separate critical
+      sections around the real reads/writes only (seed + read active phase;
+      later, write confirmed_complete_members / phase transition / override
+      resync) -- the real evidence-check loop in between (the one place that
+      can shell out to real git subprocess calls) now runs with **no lock
+      held at all**. The final write section re-reads
+      `confirmed_complete_members` fresh immediately before writing and
+      unions it with this call's own newly-confirmed members (never
+      clobbers a real concurrent writer that committed during the unlocked
+      loop), and re-verifies the phase is still genuinely `'active'` before
+      transitioning it to `'complete'`.
+- [x] Removed the now-redundant (and, if left, actively-harmful via
+      `_write_lock()`'s own real reentrancy) outer `_write_lock()` wrapping
+      at both real call sites: `resource_governor.py`'s
+      `_advance_owner_priority_phases_safe()` and `superboss-register.py`'s
+      `cmd_advance_owner_priority_phases()`.
+- [x] `resource_governor.py`: fixed the real connection-leak-on-exception
+      finding too -- `conn` is now opened before, and closed in a real
+      `finally` after, the call.
+- [x] `test_owner_priority_sequence.py`: added
+      `test_phase3_4_scale_git_subprocess_calls_bounded_and_lock_not_held` --
+      builds a synthetic 150-member phase (real umr_tasks rows, real
+      commit_sha-only evidence, comparable order of magnitude to the SPEC's
+      own 179/70 phase 3/4 evidence), monkeypatches the one real subprocess
+      entry point (`_default_ocid_resolver_runner`) with a counting fake
+      that also records `sbr._write_lock_depth[0]` at call time, and
+      asserts (a) no single tick ever issues more than `cap * 4` real git
+      subprocess calls regardless of total member count (stays flat across
+      repeated ticks, never grows unbounded) and (b) not one of those calls
+      happened while `_write_lock()` was held. Verified this test actually
+      catches the real round-2 regression: temporarily re-wrapped
+      `advance_owner_priority_phases()` in an outer `_write_lock()` (the old
+      bug) and confirmed the test fails with 600 real subprocess calls
+      recorded at `lock_depth=1`; reverted, test passes clean.
+- [x] Full real suite: `pytest test_owner_priority_sequence.py
+      test_resource_governor_owner_priority_advance.py -v` -> **10 passed**,
+      including `test_live_db_untouched`.
+
+## Remaining
+
+- [ ] Push to PR #256's existing branch (same PR, not a new one, per SPEC).
+- [ ] Fresh audit against the new head commit is required before merge --
+      this task does not merge it itself, per SPEC.

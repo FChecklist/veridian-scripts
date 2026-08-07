@@ -192,6 +192,108 @@ class OwnerPrioritySequenceTest(unittest.TestCase):
             "SELECT phase_order FROM owner_priority_sequence WHERE status='active'").fetchall()
         self.assertEqual(len(active_rows), 1)
 
+    def test_advance_memoizes_confirmed_members_and_bounds_per_tick_evaluations(self):
+        """Real review finding (PR #256 review.json): advance_owner_priority_phases()
+        used to re-run _umr_genuinely_completed() for EVERY member on EVERY tick
+        (no memoization) with no bound on how many real evidence checks happen in
+        one tick -- for phase 3/4's live-discovery membership (179/70 real hits in
+        the SPEC's own evidence) this could mean hundreds of synchronous real git
+        subprocess calls in a single tick. This test proves both fixes directly:
+        (1) a phase with more members than the per-tick cap only evaluates the
+        capped subset in one call, (2) a member already confirmed complete is
+        never re-evaluated on a later call."""
+        # Synthetic phase inserted directly (seed_owner_priority_sequence is a
+        # no-op once owner_priority_sequence already has rows), so this test
+        # controls membership size precisely without depending on how many
+        # real live rows OCID-020/021 discovery currently returns.
+        sbr._ensure_owner_priority_tables(self.conn)
+        real_complete_members = list(sbr.OWNER_PRIORITY_PHASE1_MEMBERS)  # 3 real umr_tasks rows
+        fake_members = [f"UMR-TESTONLY-{i:03d}" for i in range(12)]  # real rows do not exist -> False, not fabricated-True
+        members = real_complete_members + fake_members
+        now = sbr._now_iso()
+        self.conn.execute(
+            "INSERT INTO owner_priority_sequence "
+            "(phase_order, phase_name, governing_umr, real_member_umrs, status, created_at, updated_at) "
+            "VALUES (1, 'test phase', 'UMR-TESTONLY-GOV', ?, 'active', ?, ?)",
+            (json.dumps(members), now, now),
+        )
+        self.conn.commit()
+
+        # Give the 3 real members genuine file-path evidence so they are
+        # real, independently-verifiable completions (same convention as
+        # test_advances_phase_1_to_phase_2_once_members_genuinely_completed).
+        for umr_id in real_complete_members:
+            self.conn.execute(
+                "UPDATE umr_tasks SET status='completed', ts_completed=?, outputs_json=? WHERE umr_id=?",
+                (sbr._now_iso(), json.dumps({"file_path": SBR_PATH, "repo": "veridian-scripts"}), umr_id),
+            )
+        self.conn.commit()
+
+        cap = 5
+        orig_cap = sbr.OWNER_PRIORITY_PHASE_MAX_EVALUATIONS_PER_TICK
+        sbr.OWNER_PRIORITY_PHASE_MAX_EVALUATIONS_PER_TICK = cap
+        call_log = []
+        orig_fn = sbr._umr_genuinely_completed
+
+        def counting_wrapper(conn, umr_id, repos_root="/opt/veridian/repos"):
+            call_log.append(umr_id)
+            return orig_fn(conn, umr_id, repos_root=repos_root)
+
+        sbr._umr_genuinely_completed = counting_wrapper
+        try:
+            result1 = sbr.advance_owner_priority_phases(self.conn)
+            # Real bound: exactly `cap` members got a real evidence check
+            # this tick, never all 15.
+            self.assertEqual(result1["members_evaluated_this_tick"], cap)
+            self.assertEqual(len(call_log), cap)
+            self.assertEqual(len(result1["members_still_pending"]), len(members) - cap)
+            self.assertFalse(result1["transitioned"])
+
+            row = dict(self.conn.execute(
+                "SELECT confirmed_complete_members FROM owner_priority_sequence WHERE phase_order=1"
+            ).fetchone())
+            confirmed_after_1 = set(json.loads(row["confirmed_complete_members"]))
+            # The first `cap` members in list order are the 3 real ones (they
+            # sort first) plus 2 fake ones -- only the real ones can be
+            # genuinely confirmed complete.
+            self.assertEqual(confirmed_after_1, set(real_complete_members))
+
+            # Second tick: real members already confirmed must NOT be
+            # re-checked -- the call log must contain zero repeats of them.
+            call_log.clear()
+            result2 = sbr.advance_owner_priority_phases(self.conn)
+            self.assertNotIn(real_complete_members[0], call_log,
+                              "a member already in confirmed_complete_members must not be re-evaluated")
+            self.assertNotIn(real_complete_members[1], call_log)
+            self.assertNotIn(real_complete_members[2], call_log)
+            # Still bounded to `cap` real NEW evaluations this tick too.
+            self.assertEqual(result2["members_evaluated_this_tick"], cap)
+        finally:
+            sbr._umr_genuinely_completed = orig_fn
+            sbr.OWNER_PRIORITY_PHASE_MAX_EVALUATIONS_PER_TICK = orig_cap
+
+    def test_umr_genuinely_completed_accepts_real_commit_sha_ancestor_of_main_evidence(self):
+        """Real review finding (PR #256 review.json): no test exercised the
+        commit_sha evidence branch at all, only the file_path branch -- this
+        proves _umr_genuinely_completed() (and by extension
+        advance_owner_priority_phases()) also genuinely accepts a real
+        --commit-sha that IS a real ancestor of origin/main, against a real
+        repo checkout, not a mock."""
+        real_repo_root = "/opt/veridian/repos/veridian-scripts"
+        self.assertTrue(os.path.isdir(os.path.join(real_repo_root, ".git")))
+        real_ancestor_sha = "4d751bfa94a25a92163def398db08fd96c024dd9"  # real origin/main~1, verified ancestor
+
+        test_umr_id = sbr.OWNER_PRIORITY_PHASE1_MEMBERS[0]
+        self.conn.execute(
+            "UPDATE umr_tasks SET status='completed', ts_completed=?, outputs_json=? WHERE umr_id=?",
+            (sbr._now_iso(), json.dumps({"commit_sha": real_ancestor_sha, "repo": "veridian-scripts"}), test_umr_id),
+        )
+        self.conn.commit()
+
+        ok, reason = sbr._umr_genuinely_completed(self.conn, test_umr_id, repos_root="/opt/veridian/repos")
+        self.assertTrue(ok, reason)
+        self.assertIn(real_ancestor_sha, reason)
+
     def test_live_db_untouched(self):
         """The copy-based tests above must never have written to the real
         live DB -- confirm no owner_priority_sequence table exists there

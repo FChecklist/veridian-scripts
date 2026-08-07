@@ -121,8 +121,6 @@ self-advancing 4-phase owner_priority_sequence.
 
 - [x] Opened PR #256: https://github.com/FChecklist/veridian-scripts/pull/256
 
-- [x] Opened PR #256: https://github.com/FChecklist/veridian-scripts/pull/256
-
 ## Remaining
 
 - [ ] PR #256 review/merge (out of this task's control once opened).

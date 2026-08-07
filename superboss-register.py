@@ -6803,8 +6803,22 @@ def validate_umr_terminal_completion_evidence(*, status, file_path, commit_sha, 
         candidate = file_path if os.path.isabs(file_path) else os.path.join(repo_root or "", file_path)
         file_ok = os.path.isfile(candidate)
 
-    commit_real = bool(commit_sha) and commit_exists_fn(repo_root, commit_sha)
-    is_ancestor = commit_real and is_ancestor_fn(repo_root, commit_sha)
+    # Real review finding (PR #256 review.json): this function used to always
+    # evaluate the commit_sha branch (2 real 'git fetch' calls plus
+    # cat-file/merge-base, 60s timeout each) even when file_ok was already
+    # True and status=="completed" -- i.e. even on the cheap, already-decided
+    # path, meaning the expensive real subprocess calls below had no
+    # short-circuit at all. status=="completed" with file_ok True is
+    # returned as allowed unconditionally two lines below regardless of
+    # commit_real/is_ancestor, so skip the real git subprocess work entirely
+    # in that case. completed_unmerged always needs a real commit_sha
+    # evaluation (it has no file-evidence path), so this only ever skips
+    # work that could not have changed the outcome.
+    commit_real = False
+    is_ancestor = False
+    if not (status == "completed" and file_ok):
+        commit_real = bool(commit_sha) and commit_exists_fn(repo_root, commit_sha)
+        is_ancestor = commit_real and is_ancestor_fn(repo_root, commit_sha)
 
     if status == "completed":
         if file_ok:
@@ -8045,13 +8059,31 @@ def _ensure_owner_priority_tables(conn):
     status in {'pending','active','complete'}). The durable record of what
     the Owner's real 4-phase order actually names -- written once by
     seed_owner_priority_sequence() below, never hand-edited afterward.
+    Also carries confirmed_complete_members (JSON array, additive column,
+    default '[]') -- real review finding (PR #256 review.json) confirmed
+    advance_owner_priority_phases() re-ran _umr_genuinely_completed() for
+    EVERY member on EVERY tick, including members already confirmed
+    complete on a prior tick; this column is the persisted memo of which
+    member UMRs have already been independently verified complete, so a
+    later tick only re-checks the real remainder. ALTER TABLE ADD COLUMN
+    (not CREATE TABLE IF NOT EXISTS, which only covers brand-new DBs) --
+    same additive-migration convention as _migrate_schema()'s own
+    system_index.tags / wiring_registry.content_hash columns above.
 
     owner_priority_override -- UMR-20260807-070110-5ea7's own real table
     (umr_id, reason, set_by, ts), created here too (idempotently) since
     that UMR's own worker may not have created it yet at the time this one
     runs concurrently -- both workers race to CREATE TABLE IF NOT EXISTS
     the identical schema, which is safe by construction (SQLite serializes
-    DDL under this module's own _write_lock() anyway)."""
+    DDL under this module's own _write_lock() anyway). Real review finding
+    (PR #256 review.json): a CREATE TABLE IF NOT EXISTS race is only safe
+    if the two real schemas genuinely match -- if 5ea7's own worker created
+    a table with a different real column set first, this would otherwise
+    silently coexist and misbehave rather than fail loudly. So after the
+    idempotent create, this function independently re-verifies via
+    PRAGMA table_info that the table actually on disk -- whoever's worker
+    created it -- has exactly the expected (umr_id, reason, set_by, ts)
+    columns, and raises loudly (never silently proceeds) if it does not."""
     conn.execute("""CREATE TABLE IF NOT EXISTS owner_priority_sequence (
         phase_order INTEGER PRIMARY KEY,
         phase_name TEXT NOT NULL,
@@ -8061,6 +8093,11 @@ def _ensure_owner_priority_tables(conn):
         created_at TEXT,
         updated_at TEXT
     )""")
+    seq_cols = {row["name"] for row in conn.execute("PRAGMA table_info(owner_priority_sequence)").fetchall()}
+    if "confirmed_complete_members" not in seq_cols:
+        conn.execute(
+            "ALTER TABLE owner_priority_sequence ADD COLUMN confirmed_complete_members TEXT NOT NULL DEFAULT '[]'"
+        )
     conn.execute("""CREATE TABLE IF NOT EXISTS owner_priority_override (
         umr_id TEXT PRIMARY KEY,
         reason TEXT,
@@ -8068,6 +8105,16 @@ def _ensure_owner_priority_tables(conn):
         ts TEXT
     )""")
     conn.commit()
+    override_cols = {row["name"] for row in conn.execute("PRAGMA table_info(owner_priority_override)").fetchall()}
+    expected_override_cols = {"umr_id", "reason", "set_by", "ts"}
+    if override_cols != expected_override_cols:
+        raise RuntimeError(
+            "owner_priority_override real schema mismatch -- expected columns "
+            f"{sorted(expected_override_cols)!r}, found {sorted(override_cols)!r} on disk. "
+            "This means a concurrently-dispatched worker (e.g. UMR-20260807-070110-5ea7's own "
+            "work) created this table with a real, different schema first -- refusing to proceed "
+            "rather than silently writing against a mismatched table (PR #256 review.json finding)."
+        )
 
 
 def discover_prompt_citing_umrs(conn, governing_umr):
@@ -8272,6 +8319,22 @@ def _sync_owner_priority_override(conn, now=None):
     return {"active_phase": phase["phase_order"], "override_members": members}
 
 
+# Real review finding (PR #256 review.json): phase 3/4 membership is a live
+# discovery query, not the small bounded explicit list phases 1/2 use (the
+# SPEC's own evidence: 179 hits for OCID-020, 70 for OCID-021) -- once one of
+# those phases is active, evaluating every not-yet-confirmed member in one
+# tick could require hundreds of synchronous real 'git fetch'/cat-file/
+# merge-base subprocess calls (each up to 60s) before run_tick() ever reaches
+# next_queued_task()/dispatch_one(), stalling dispatch for the entire system
+# during a degraded network -- the exact starvation failure mode this feature
+# exists to fix, reintroduced at a larger blast radius. Bounding how many
+# NOT-YET-CONFIRMED members get a real evidence check in a single tick caps
+# that worst case regardless of phase size; combined with the persisted
+# confirmed_complete_members memo below, a large phase converges over
+# several ticks instead of stalling one.
+OWNER_PRIORITY_PHASE_MAX_EVALUATIONS_PER_TICK = 25
+
+
 def advance_owner_priority_phases(conn, now=None, repos_root="/opt/veridian/repos"):
     """The real, deterministic advance function the SPEC requires to run
     every tick before next_queued_task (see resource_governor.py's
@@ -8287,12 +8350,29 @@ def advance_owner_priority_phases(conn, now=None, repos_root="/opt/veridian/repo
     (owner_priority_sequence.status='active' is a real invariant enforced
     loudly by _sync_owner_priority_override above). Fully reversible: every
     write here is a plain UPDATE/DELETE/INSERT against these two tables,
-    trivially undone (e.g. re-run seed_owner_priority_sequence(force=True))."""
+    trivially undone (e.g. re-run seed_owner_priority_sequence(force=True)).
+
+    Real review finding (PR #256 review.json), fixed here: this used to
+    re-run _umr_genuinely_completed() for every member of the active phase
+    on EVERY tick, including members already confirmed complete on a prior
+    tick, with no bound on how many real evidence checks happen in one tick.
+    Now: members already recorded in the row's own confirmed_complete_members
+    (persisted JSON list) are never re-checked, and at most
+    OWNER_PRIORITY_PHASE_MAX_EVALUATIONS_PER_TICK not-yet-confirmed members
+    get a real _umr_genuinely_completed() evidence check per call -- the
+    remainder are reported as 'not yet evaluated this tick' and picked up on
+    a later call. The phase only transitions to 'complete' once every real
+    member is present in confirmed_complete_members (i.e. every member has,
+    across however many ticks it took, been independently verified) --
+    this bound changes WHEN a large phase's completion is detected, never
+    WHETHER a member's completion is genuinely verified before the phase
+    transitions."""
     now = now or _now_iso()
     _ensure_owner_priority_tables(conn)
     seeded = seed_owner_priority_sequence(conn)  # no-op if already seeded
     active_row = conn.execute(
-        "SELECT phase_order, phase_name, real_member_umrs FROM owner_priority_sequence WHERE status = 'active'"
+        "SELECT phase_order, phase_name, real_member_umrs, confirmed_complete_members "
+        "FROM owner_priority_sequence WHERE status = 'active'"
     ).fetchone()
     result = {"seeded_this_call": seeded.get("seeded", False), "transitioned": False,
               "evaluated_phase": None, "member_evidence": []}
@@ -8303,12 +8383,44 @@ def advance_owner_priority_phases(conn, now=None, repos_root="/opt/veridian/repo
 
     active = dict(active_row)
     members = json.loads(active["real_member_umrs"])
-    evidence = [_umr_genuinely_completed(conn, m, repos_root=repos_root) for m in members]
+    try:
+        confirmed = json.loads(active["confirmed_complete_members"] or "[]")
+    except (json.JSONDecodeError, TypeError):
+        confirmed = []
+    confirmed_set = set(confirmed)
     result["evaluated_phase"] = active["phase_order"]
-    result["member_evidence"] = [{"umr_id": m, "genuinely_completed": ok, "reason": reason}
-                                  for m, (ok, reason) in zip(members, evidence)]
 
-    if all(ok for ok, _ in evidence):
+    to_check = [m for m in members if m not in confirmed_set]
+    this_tick_batch = to_check[:OWNER_PRIORITY_PHASE_MAX_EVALUATIONS_PER_TICK]
+    still_pending = set(to_check[OWNER_PRIORITY_PHASE_MAX_EVALUATIONS_PER_TICK:])
+
+    member_evidence = []
+    newly_confirmed = []
+    for m in members:
+        if m in confirmed_set:
+            member_evidence.append({"umr_id": m, "genuinely_completed": True,
+                                     "reason": "previously confirmed (memoized, not re-checked this tick)"})
+        elif m in still_pending:
+            member_evidence.append({"umr_id": m, "genuinely_completed": False,
+                                     "reason": "not yet evaluated this tick (per-tick evaluation cap reached)"})
+        else:
+            ok, reason = _umr_genuinely_completed(conn, m, repos_root=repos_root)
+            member_evidence.append({"umr_id": m, "genuinely_completed": ok, "reason": reason})
+            if ok:
+                newly_confirmed.append(m)
+    result["member_evidence"] = member_evidence
+    result["members_evaluated_this_tick"] = len(this_tick_batch)
+    result["members_still_pending"] = sorted(still_pending)
+
+    if newly_confirmed:
+        confirmed_set.update(newly_confirmed)
+        conn.execute(
+            "UPDATE owner_priority_sequence SET confirmed_complete_members = ?, updated_at = ? "
+            "WHERE phase_order = ?",
+            (json.dumps(sorted(confirmed_set)), now, active["phase_order"]),
+        )
+
+    if confirmed_set >= set(members):
         conn.execute(
             "UPDATE owner_priority_sequence SET status = 'complete', updated_at = ? WHERE phase_order = ?",
             (now, active["phase_order"]),

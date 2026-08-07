@@ -1,39 +1,38 @@
 # PROGRESS -- task-20260807-094754-stop-work-order--batch-1--write-real-tes
 
-## Verification of SPEC claims (done before any writes, per standing false-premise-check policy)
-- [x] Confirmed live `PLATFORM_COMPLETION_CHECKLIST.md`/`.json` reads Scripts 47/148 (file mtime 2026-08-07 09:47:55Z)
-- [x] Confirmed all 101 incomplete rows have evidence reason `no test file references this script by name` (101/101, no other reason present)
-- [x] Confirmed alphabetical-sort of incomplete scripts matches SPEC's stated first-6 and derived the real first-15 list
-- [x] Read `generate_platform_completion_checklist.py` to understand exact pass condition: a `test_*.py` file (top level or `tests/`) whose content contains the script's basename/stem (underscore/hyphen variants), AND that test file passes when pytest is run on it (via a `git archive HEAD` snapshot -- i.e. must be committed to count)
+## Completed
 
-## Batch 1 target list (first 15 alphabetically, complete_and_tested=false)
-1. automation_rule_engine.py
-2. backfill_phase_self_report.py
-3. batch-import-conversation-log.py
-4. chatgpt_audit_guard.py
-5. chatgpt_audit_versioning.py
-6. chatgpt_promptlib_guard.py
-7. check_latest_task.py
-8. check_single_protocol_file.py
-9. chrome_start.sh
-10. chrome_stop.sh
-11. claude-tmux-usage-limit-check.sh
-12. claude-usage-limit-retry.sh
-13. context_engine.py
-14. cost-reconciliation.py
-15. cost-usage-60min.py
+- [x] Verified SPEC claims independently before any write (standing false-premise-check policy): 47/148 before, all 101 incomplete reasons = `no_referencing_tests`, alphabetical first-15 confirmed.
+- [x] Wrote 15 real pytest test files (5 parallel agents, 2-4 scripts each) for the first 15 alphabetical `complete_and_tested=false` scripts:
+  - [x] test_automation_rule_engine.py (23 tests)
+  - [x] test_backfill_phase_self_report.py (41 tests)
+  - [x] test_batch_import_conversation_log.py (6 tests)
+  - [x] test_chatgpt_audit_guard.py (21 tests)
+  - [x] test_chatgpt_audit_versioning.py (11 tests)
+  - [x] test_chatgpt_promptlib_guard.py (19 tests)
+  - [x] test_check_latest_task.py (3 tests)
+  - [x] test_check_single_protocol_file.py (21 tests)
+  - [x] test_chrome_start.py (2 tests)
+  - [x] test_chrome_stop.py (2 tests)
+  - [x] test_claude_tmux_usage_limit_check.py (7 tests)
+  - [x] test_claude_usage_limit_retry.py (9 tests)
+  - [x] test_context_engine.py (8 tests)
+  - [x] test_cost_reconciliation.py (8 tests)
+  - [x] test_cost_usage_60min.py (22 tests, note: agent report said 21, actual grep count 22)
+- [x] Ran full suite myself: **210 passed, 0 failed**. Confirmed live DB mtime unchanged before/after, confirmed no real systemd unit/tmux session was touched by the check_latest_task.py / claude-tmux-usage-limit-check.sh tests.
+- [x] Committed test files (b13e204), pushed.
+- [x] Regenerated PLATFORM_COMPLETION_CHECKLIST via `generate_platform_completion_checklist.py`. **Before: 47/148. After: 60/158.** All 15 target scripts individually confirmed `complete_and_tested: true`. Net delta is +13 (not +15) and denominator grew by 10 -- see "Known non-target changes" below; this is NOT a batch-1 shortfall, it's concurrent unrelated platform activity plus a pre-existing unrelated test failure.
+- [x] Committed + pushed regenerated checklist.
 
-## In progress
-- [ ] 5 parallel subagents dispatched to write real pytest tests (temp-DB/temp-file/stubbed-boundary discipline, house style from test_apply_owner_dispatch_status_corrections.py) for the 15 scripts above, 2-3 scripts each. Each agent runs its own tests locally before returning.
-  - [ ] Group 1: automation_rule_engine.py, backfill_phase_self_report.py
-  - [ ] Group 2: batch-import-conversation-log.py, chatgpt_audit_guard.py, chatgpt_audit_versioning.py
-  - [ ] Group 3: chatgpt_promptlib_guard.py, check_latest_task.py, check_single_protocol_file.py
-  - [ ] Group 4: chrome_start.sh, chrome_stop.sh, claude-tmux-usage-limit-check.sh, claude-usage-limit-retry.sh
-  - [ ] Group 5: context_engine.py, cost-reconciliation.py, cost-usage-60min.py
+## Known non-target changes (informational, NOT fixed -- out of scope for batch 1)
+- Denominator moved 148->158: 10 new scripts landed on `main` via other concurrent sessions' merged PRs between session start and the regeneration run (this generator pins to real live git HEAD by design -- expected).
+- Numerator is +13 net instead of a clean +15 because 4 pre-existing scripts (`credit-accountant.py`, `quality-gate.sh`, `reconcile_owner_dispatch_status.py`, `triage_owner_umr_24h.py`) flipped from YES to NO. Root cause confirmed real and unrelated to this task: their shared referencing test file `test_triage_owner_umr_24h.py` (last legitimately modified 2026-08-06, i.e. before this session started) currently has 2 real failing tests (`test_load_rows_only_returns_failed_and_killed_owner_dispatch_gateway_rows`, `test_main_apply_file_proposals_releases_write_lock_before_filing_proposals`) on current HEAD -- confirmed via direct `pytest test_triage_owner_umr_24h.py` run (2 failed, 27 passed). Not caused by any file this task touched; out of scope per "this is batch 1, do not attempt all 101."
 
-## Remaining (after agents return)
-- [ ] Review each generated test file myself for the fake-test anti-patterns (bare imports, assert True, existence-only checks) before trusting group reports
-- [ ] Run full pytest suite on all 15 new test files together, fix any real failures
-- [ ] Regenerate PLATFORM_COMPLETION_CHECKLIST via `generate_platform_completion_checklist.py`, capture real before/after N/148
-- [ ] Commit new test files + regenerated checklist, open PR
+## Genuine bugs found while writing tests (documented as regression tests, NOT fixed per task rules)
+1. `check_latest_task.py`: `glob.glob(os.path.join(tasks_dir, "*"))` has no `os.path.isdir` filter -- a non-directory entry (e.g. a log file) can be selected as "latest task," and if no matching systemd unit is active, the script issues a real `systemctl --user start veridian-worker@<bogus>.service`. Reproduced read-only in `test_check_latest_task.py`.
+2. `batch-import-conversation-log.py`: only `json.JSONDecodeError` is caught around `json.loads(line)`; a line that is valid JSON but not an object (bare number/string/array) raises an uncaught `AttributeError` on `ev.get(...)`, aborting `main()` and losing the whole batch's uncommitted rows instead of counting it as malformed/skipped. Documented in `test_batch_import_conversation_log.py`.
+3. `backfill_phase_self_report.py`: `patch_phase_block()` overwrites existing stale `completed_by_task`/`evidence` lines in place but only sets `changed=True` on the insert-missing-field branches -- so `backfill_one()` sees `changed=False` and never writes the corrected lines back to disk, silently discarding a computed fix. Documented in `test_backfill_phase_self_report.py`.
+
+## Remaining
+- [ ] Open PR for this branch against main
 - [ ] Record real completion via `agent_work_briefing.py record-completion --umr-id UMR-20260807-060727-c3ae`

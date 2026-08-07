@@ -1937,33 +1937,57 @@ def _safe_parse_iso(value):
 
 
 def _task_yaml_for_umr_row(task_docs, row):
-    """Real task.yaml lookup for one umr_tasks row -- two real, ordered paths,
-    not one, per a real gap found while live-re-verifying this fix against
-    the current 24h owner_dispatch_gateway set: a plain source_trigger=
-    'owner_dispatch_gateway' row's own task_identity is a synthetic
-    'owner-task-<ts>-<pid>' string that was NEVER itself a TASKS_DIR
-    directory name (confirmed live: 261 of 277 real such rows checked this
-    cycle have no task.yaml under either path at all -- a real, honest
-    'no evidence' outcome, not a bug). The real remediation/progress record
-    for such a row, when one exists, lives in a SEPARATE, later-created
-    'adopted-reconcile-umr-<umr_id>-...' task (confirmed live for 16 of
-    those 277 real rows) -- e.g. the real task.yaml this exact fix's own
-    live re-verification found: task-20260806-072312-adopted-reconcile-umr-
-    20260806-042531-be9c--pr11, which explicitly reconciles umr_id
-    UMR-20260806-042531-be9c in its own directory name and title.
+    """Real task.yaml lookup for one umr_tasks row -- three real, ordered
+    paths, not two, per a real gap found live re-verifying this against 5
+    real owner_dispatch_gateway rows (UMR-20260807-112306-4e60, reconciling
+    UMR-20260807-061238-ae93/070110-5ea7/070904-736a/035145-aa45/040704-992a):
+    a plain source_trigger='owner_dispatch_gateway' row's own task_identity is
+    a synthetic 'owner-task-<ts>-<pid>' string that was NEVER itself a
+    TASKS_DIR directory name (confirmed live: 261 of 277 real such rows
+    checked in an earlier cycle have no task.yaml under path 1 or 2 below --
+    a real, honest 'no evidence' outcome, not a bug, for THAT set). But the
+    real remediation/progress record for a row dispatched straight through
+    resource_governor.submit() -> a real systemd unit does not require a
+    separately-created 'adopted-reconcile-umr-...' task at all: the row's own
+    real `unit_name` column (e.g. 'veridian-worker@task-20260807-081903-
+    mandatory-execute-the-rebuild--do-not-in.service') already IS, minus the
+    'veridian-worker@' prefix and '.service' suffix, the exact real TASKS_DIR
+    directory name -- confirmed live for all 5 real rows this fix was built
+    against (task_status_sync() had a correctly-keyed entry for every one,
+    under exactly this derived id; path 1 above missed all 5 because each
+    row's own task_identity is the synthetic parent id, not this child id;
+    path 2 missed all 5 too because none of their real directory names
+    contain 'reconcile-umr-'). Without this third path,
+    backfill_null_heartbeats() silently defaulted every one of these 5 real,
+    NULL-heartbeat, systemctl-confirmed-inactive rows to 'failed', even
+    though 4 had a real OPEN PR (genuine forward progress) and 1 had a real
+    MERGED PR (genuine completion) -- the exact false-negative class this
+    module's own docstring already describes fixing for paths 1/2, just not
+    yet for this third, more common systemd-dispatch shape.
 
       1. Direct: task_docs.get(row['task_identity']) -- the common case for
          a directly-dispatched worker task whose own task_identity IS its
          real TASKS_DIR directory name.
-      2. Fallback: any task.yaml whose own real directory name contains
+      2. unit_name-derived: for a systemd-dispatched row (unit_name matching
+         'veridian-worker@<child_task_id>.service'), task_docs.get(<child_task_id>)
+         -- the child task_identity resource_governor.submit() actually
+         dispatched under, which a synthetic 'owner-task-...' parent
+         task_identity (path 1) can never match directly.
+      3. Fallback: any task.yaml whose own real directory name contains
          'reconcile-umr-<row's own umr_id, lowercased>' -- if more than one
          (a real re-attempt history), the most recently created_at wins.
 
-    Returns the doc, or None if neither path finds one (falls through to
-    the original unconditional 'failed' behavior, unchanged)."""
+    Returns the doc, or None if no path finds one (falls through to the
+    original unconditional 'failed' behavior, unchanged)."""
     doc = task_docs.get(row["task_identity"])
     if doc is not None:
         return doc
+    unit = row.get("unit_name")
+    if unit and unit.startswith("veridian-worker@") and unit.endswith(".service"):
+        derived_id = unit[len("veridian-worker@"):-len(".service")]
+        doc = task_docs.get(derived_id)
+        if doc is not None:
+            return doc
     umr_suffix = row["umr_id"][4:] if row["umr_id"].upper().startswith("UMR-") else row["umr_id"]
     needle = f"reconcile-umr-{umr_suffix}".lower()
     candidates = [

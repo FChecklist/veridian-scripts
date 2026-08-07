@@ -435,6 +435,67 @@ def test_owner_dispatch_gateway_row_correlates_via_adopted_reconcile_task():
         print("PASS: test_owner_dispatch_gateway_row_correlates_via_adopted_reconcile_task")
 
 
+def test_owner_dispatch_gateway_row_correlates_via_unit_name_derived_child_task():
+    """Real gap found by UMR-20260807-112306-4e60 (reconciling 5 real
+    owner_dispatch_gateway rows -- UMR-20260807-061238-ae93/070110-5ea7/
+    070904-736a/035145-aa45/040704-992a): a systemd-dispatched row's real
+    child task.yaml does not require a separately-created
+    'adopted-reconcile-umr-...' task to be found (path 3) -- its own real
+    `unit_name` column already encodes the exact real TASKS_DIR directory
+    name (path 2, new). All 5 real rows this fix was built against hit
+    exactly this shape: synthetic 'owner-task-<ts>-<pid>' task_identity
+    (path 1 misses), no 'reconcile-umr-' anywhere in the real child
+    directory name (path 3 misses), but unit_name='veridian-worker@<real
+    child task id>.service' resolves directly (path 2 catches it)."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        sbr, conn = _seed_scratch_db(scratch_db)
+        child_task_id = "task-20260807-081903-mandatory-execute-the-rebuild--do-not-in"
+        row = {
+            "task_identity": "owner-task-20260807-061237-3886557", "tier": 0, "status": "running",
+            "source_trigger": "owner_dispatch_gateway", "task_kind": "veridian_task_create",
+            "unit_name": f"veridian-worker@{child_task_id}.service", "reason": "seed",
+        }
+        umr_id = sbr.upsert_umr_task(conn, row)
+        conn.execute("UPDATE umr_tasks SET last_heartbeat=NULL WHERE umr_id=?", (umr_id,))
+        conn.commit()
+        conn.close()
+
+        tasks_dir = os.path.join(d, "tasks")
+        doc_text = (
+            "status: blocked\n"
+            "repo: veridian-scripts\n"
+            "adopted_pr_url: https://github.com/FChecklist/veridian-scripts/pull/254\n"
+        )
+        _write_task_yaml(tasks_dir, child_task_id, doc_text)
+
+        env = {"SUPERBOSS_REGISTER_DB": scratch_db, "VERIDIAN_TASKS_DIR": tasks_dir}
+        gov = _load_governor(env=env)
+        gov._run = _fake_run_factory(
+            systemctl_active=False,
+            gh_pr_state={"state": "OPEN", "mergedAt": None, "mergeCommit": None, "url": "x"},
+        )
+        old_env = {k: os.environ.get(k) for k in env}
+        os.environ.update(env)
+        try:
+            report = gov.backfill_null_heartbeats(execute=True)
+        finally:
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+        assert report["counts"]["systemd_marked_running"] == 1, report
+        conn2 = sqlite3.connect(scratch_db)
+        conn2.row_factory = sqlite3.Row
+        final_row = dict(conn2.execute("SELECT * FROM umr_tasks WHERE umr_id=?", (umr_id,)).fetchone())
+        conn2.close()
+        assert final_row["status"] == "running", final_row
+        assert final_row["last_heartbeat"] is not None, final_row
+        print("PASS: test_owner_dispatch_gateway_row_correlates_via_unit_name_derived_child_task")
+
+
 def test_dry_run_never_writes_even_when_evidence_says_completed():
     """execute=False (the default) must compute and report the identical
     decision without writing anything -- 'would_mark_completed', DB row left

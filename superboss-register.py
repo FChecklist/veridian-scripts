@@ -77,6 +77,19 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+# 2026-08-07 (UMR-20260807-035145-aa45): vector_similarity.py is a plain
+# same-directory sibling module (no hyphen in its filename, unlike this
+# script), so a normal import works as long as this script's own directory is
+# on sys.path -- true whenever this file is invoked directly (python3
+# .../superboss-register.py ...), which is its only real call convention.
+# Wrapped defensively so a missing/broken sibling module degrades the two
+# vector-column-population call sites below to a no-op rather than breaking
+# every other command this file serves.
+try:
+    import vector_similarity as _vector_similarity
+except ImportError:
+    _vector_similarity = None
+
 class SuperbossDbPathError(Exception):
     """Raised by resolve_superboss_db_path() below when the real Superboss
     Register database path fails a real, deterministic verification check.
@@ -738,6 +751,8 @@ def _migrate_schema(conn):
     _migrate_instructions_content_hash(conn)
     _migrate_capability_registry_utm(conn)
     _migrate_wiring_registry_umr_and_version(conn)
+    _migrate_wiring_registry_vector(conn)
+    _migrate_capability_registry_vector(conn)
     _ensure_external_agent_dispatch_table(conn)
 
 
@@ -783,6 +798,45 @@ def _migrate_wiring_registry_umr_and_version(conn):
         conn.commit()
 
 
+def _migrate_wiring_registry_vector(conn):
+    """2026-08-07 (UMR-20260807-035145-aa45, amendment to UMR-20260806-171945-5767):
+    additive ALTER TABLE ADD COLUMN for wiring_registry.vector_json/vector_updated_ts,
+    same no-CHECK-constraint-involved pattern as _migrate_wiring_registry_umr_and_version
+    above -- never needs the full-table rebuild _migrate_wiring_registry_entity_types
+    needs. No-op once migrated, safe to call on every startup. See that CREATE TABLE's
+    own comment in _ensure_wiring_registry_table for what these two columns hold."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='wiring_registry'"
+    ).fetchone()
+    if row is None:
+        return  # table doesn't exist yet; the next CREATE TABLE IF NOT EXISTS covers it
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(wiring_registry)").fetchall()}
+    if "vector_json" not in cols:
+        conn.execute("ALTER TABLE wiring_registry ADD COLUMN vector_json TEXT")
+        conn.commit()
+    if "vector_updated_ts" not in cols:
+        conn.execute("ALTER TABLE wiring_registry ADD COLUMN vector_updated_ts TEXT")
+        conn.commit()
+
+
+def _migrate_capability_registry_vector(conn):
+    """2026-08-07 (UMR-20260807-035145-aa45, amendment to UMR-20260806-171945-5767):
+    same additive vector_json/vector_updated_ts ADD COLUMN pair as
+    _migrate_wiring_registry_vector above, for capability_registry. No-op once migrated."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='capability_registry'"
+    ).fetchone()
+    if row is None:
+        return  # table doesn't exist yet; the next CREATE TABLE IF NOT EXISTS covers it
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(capability_registry)").fetchall()}
+    if "vector_json" not in cols:
+        conn.execute("ALTER TABLE capability_registry ADD COLUMN vector_json TEXT")
+        conn.commit()
+    if "vector_updated_ts" not in cols:
+        conn.execute("ALTER TABLE capability_registry ADD COLUMN vector_updated_ts TEXT")
+        conn.commit()
+
+
 def _migrate_wiring_registry_entity_types(conn):
     """2026-07-27, dispatch-script consolidation: widens wiring_registry's entity_type
     CHECK constraint to allow 'dispatch_event' (see WIRING_ENTITY_TYPES above), extended
@@ -805,6 +859,7 @@ def _migrate_wiring_registry_entity_types(conn):
     them despite both being additive, no-CHECK-constraint columns themselves."""
     _migrate_wiring_registry_content_hash(conn)
     _migrate_wiring_registry_umr_and_version(conn)
+    _migrate_wiring_registry_vector(conn)
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='wiring_registry'"
     ).fetchone()
@@ -831,14 +886,17 @@ def _migrate_wiring_registry_entity_types(conn):
         metadata_json TEXT NOT NULL DEFAULT '{{}}',
         content_hash TEXT,
         originating_umr TEXT,
-        script_version TEXT
+        script_version TEXT,
+        vector_json TEXT,
+        vector_updated_ts TEXT
     )""")
     conn.execute(
         "INSERT INTO wiring_registry__migrate (entity_id, ts, entity_type, source_system, path, "
         "relationships, last_verified_ts, verification_status, source_ref, metadata_json, content_hash, "
-        "originating_umr, script_version) "
+        "originating_umr, script_version, vector_json, vector_updated_ts) "
         "SELECT entity_id, ts, entity_type, source_system, path, relationships, last_verified_ts, "
-        "verification_status, source_ref, metadata_json, content_hash, originating_umr, script_version "
+        "verification_status, source_ref, metadata_json, content_hash, originating_umr, script_version, "
+        "vector_json, vector_updated_ts "
         "FROM wiring_registry"
     )
     conn.execute("DROP TABLE wiring_registry")
@@ -2411,7 +2469,15 @@ def _ensure_capability_registry_table(conn):
         utm_medium TEXT NOT NULL DEFAULT 'register-capability',
         utm_campaign TEXT,
         utm_content TEXT,
-        utm_term TEXT
+        utm_term TEXT,
+        -- 2026-08-07 (UMR-20260807-035145-aa45, amendment to UMR-20260806-171945-5767):
+        -- same additive vector_json/vector_updated_ts pair as wiring_registry's own
+        -- 2026-08-07 addition (see that CREATE TABLE's comment for the full rationale) --
+        -- built from capability_name/apis/workflow/owner/business_rules text by
+        -- vector_similarity.vector_for_capability_row(), kept current automatically by
+        -- register_capability() below on every real insert/update.
+        vector_json TEXT,
+        vector_updated_ts TEXT
     )""")
     conn.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS capability_registry_fts USING fts5(
         capability_name, owner, apis, ui_screens, workflow, utm_source, utm_campaign, utm_term,
@@ -2653,6 +2719,22 @@ def register_capability(args):
             utm["utm_source"], utm["utm_medium"], utm["utm_campaign"], utm["utm_content"], utm["utm_term"],
         ),
     )
+    # 2026-08-07 (UMR-20260807-035145-aa45): same real on-write update mechanism
+    # as register_entity_row()'s vector_json population above, for
+    # capability_registry -- see that call site's comment for the full
+    # rationale.
+    if _vector_similarity is not None:
+        vec_text = _vector_similarity.text_for_capability_row({
+            "capability_name": record["capability_name"],
+            "workflow": record.get("workflow"),
+            "owner": record["owner"],
+            "apis": record["apis"],
+            "business_rules": record["business_rules"],
+        })
+        conn.execute(
+            "UPDATE capability_registry SET vector_json = ?, vector_updated_ts = ? WHERE capability_name = ?",
+            (json.dumps(_vector_similarity.term_freq_vector(vec_text)), now, record["capability_name"]),
+        )
     conn.commit()
     row = conn.execute(
         "SELECT capability_id FROM capability_registry WHERE capability_name = ?",
@@ -2806,7 +2888,23 @@ def _ensure_wiring_registry_table(conn):
         -- migration and generate_software_catalog.py/generate_wiring_registry.py
         -- for how these are actually derived, not guessed here.
         originating_umr TEXT,
-        script_version TEXT
+        script_version TEXT,
+        -- 2026-08-07 (UMR-20260807-035145-aa45, amendment to UMR-20260806-171945-5767,
+        -- governing chain UMR-20260806-124055-bc80 / UMR-20260807-033123-d5c0): additive
+        -- nullable-ADD-COLUMN pair, same convention as content_hash/originating_umr above,
+        -- for reuse_verdict_engine.py's deterministic (non-ML) term-frequency vector --
+        -- vector_json is a JSON object {{normalized_token: count}} built from the entity's
+        -- own real path/entity_id/source_ref/metadata_json text by
+        -- vector_similarity.vector_for_wiring_row(), never an embedding-model call (see
+        -- vector_similarity.py's own module docstring for why: intent_engine.py's real,
+        -- already-adopted constraint against speculative NLU/embedding builds, and
+        -- superboss-register.py's own lookup_capability() docstring already documents that
+        -- the only real embedding index in this system is compliance-tracker's TS/pgvector
+        -- service, not reachable from this Python CLI). vector_updated_ts is the real ISO-8601
+        -- timestamp the vector was last (re)computed, NULL until reuse_verdict_engine.py's
+        -- backfill or the automatic on-write recompute in register_entity_row() below has run.
+        vector_json TEXT,
+        vector_updated_ts TEXT
     )""")
     conn.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS wiring_registry_fts USING fts5(
         path, entity_type, source_ref,
@@ -2867,6 +2965,25 @@ def register_entity_row(conn, entity):
             entity.get("content_hash"), entity.get("originating_umr"), entity.get("script_version"),
         ),
     )
+    # 2026-08-07 (UMR-20260807-035145-aa45): the real update mechanism that keeps
+    # wiring_registry.vector_json current -- every entity write, from any real
+    # caller (this is the one write path every caller already goes through, per
+    # this UMR's own SPEC), recomputes its deterministic term-frequency vector
+    # here. Never a separate backfill-only step for new/changed rows; the
+    # one-time backfill in reuse_verdict_engine.py only exists to cover rows
+    # written before this column existed.
+    if _vector_similarity is not None:
+        vec_text = _vector_similarity.text_for_wiring_row({
+            "entity_id": entity["entity_id"],
+            "entity_type": entity["entity_type"],
+            "path": entity.get("path"),
+            "source_ref": entity["source_ref"],
+            "metadata_json": entity.get("metadata"),
+        })
+        conn.execute(
+            "UPDATE wiring_registry SET vector_json = ?, vector_updated_ts = ? WHERE entity_id = ?",
+            (json.dumps(_vector_similarity.term_freq_vector(vec_text)), now, entity["entity_id"]),
+        )
 
 
 def register_entity(args):

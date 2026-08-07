@@ -806,6 +806,396 @@ def submit(task_spec, tier, source_trigger):
 
 
 # ---------------------------------------------------------------------------
+# UMR-20260807-110133-205d -- single deterministic orchestrator pipeline.
+# Governing chain: UMR-20260806-171945-5767 (original spec,
+# task-20260806-201941), first amendment (UMR-20260807-035145-aa45, real:
+# task-20260807-053227-...), second amendment (task-20260807-053232-...).
+#
+# Twelve real, ordered integration steps into run_tick()'s own real pass,
+# each one a real import + real function call into the named existing file,
+# never reimplemented here. Every new call site below is wrapped fail-open
+# (same convention as _safe_superboss_register() above): a problem in any
+# ONE of these twelve additions must never block or crash the real
+# stuck-task/stale-queue/dispatch pass this whole module exists to run.
+# ---------------------------------------------------------------------------
+
+_sbg = None
+
+
+def _superboss_gateway():
+    """Step 1 lazy loader for scripts/superboss_gateway.py, same importlib
+    convention as _superboss_register()/_dispatch_core() above (the file
+    lives under SCRIPTS/scripts/, the real deployed location -- see
+    `ls /opt/veridian/scripts/scripts/superboss_gateway.py`, landed PR
+    #257). Calls its real handle_read()/handle_write() in-process (never
+    over its HTTP transport) -- those ARE the real allowlisted-table /
+    validated-column logic the gateway's docstring describes; calling them
+    directly here reuses that real logic without making a governor tick
+    depend on a separate long-running server process being up first.
+    superboss_gateway.py's own docstring is explicit that migrating the 46
+    PRE-EXISTING raw sqlite3.connect() callers (including this file's own
+    sbr-based access via _superboss_register()) is separate,
+    deliberately-not-done-here follow-up work -- this wiring only covers
+    the NEW read this pipeline itself adds (step 1 below), it does not
+    touch any pre-existing DB access path in this file."""
+    global _sbg
+    if _sbg is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_gateway_governor", os.path.join(SCRIPTS, "scripts", "superboss_gateway.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbg = _mod
+    return _sbg
+
+
+_rve = None
+
+
+def _reuse_verdict_engine():
+    """Step 2 lazy loader for reuse_verdict_engine.py (PR #251, real
+    deterministic three-tier create/reuse/duplicate_blocked verdict --
+    sha256 intent hash + stable term-frequency/IDF vector similarity, zero
+    AI model call)."""
+    global _rve
+    if _rve is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "reuse_verdict_engine_governor", os.path.join(SCRIPTS, "reuse_verdict_engine.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _rve = _mod
+    return _rve
+
+
+_hc15 = None
+
+
+def _health_check_15min():
+    """Step 4 lazy loader for health-check-15min.py, imported directly (not
+    subprocess) so its real is_stale_blocked(task_id) staleness function
+    runs in-process."""
+    global _hc15
+    if _hc15 is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "health_check_15min_governor", os.path.join(SCRIPTS, "health-check-15min.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _hc15 = _mod
+    return _hc15
+
+
+_aocr = None
+
+
+def _audit_ocid_canonical_registry():
+    """Steps 3/6 lazy loader for audit_ocid_canonical_registry.py's real
+    plan_for_ocid()/resolve_ocid_canonical() six-method cross-reference
+    (umr_tasks substring + full-dump grep, `gh pr list --search`, `git log
+    --all --grep`, PR-body UMR-id extraction, MASTER-TRACKER/ACTIVE-CLAIMS
+    grep as last resort)."""
+    global _aocr
+    if _aocr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "audit_ocid_canonical_registry_governor",
+            os.path.join(SCRIPTS, "audit_ocid_canonical_registry.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _aocr = _mod
+    return _aocr
+
+
+_aocc = None
+
+
+def _audit_ocid_compliance():
+    """Step 8 lazy loader for audit_ocid_compliance.py's real
+    build_compliance_report()/plan_pairs() -- read-only over
+    ocid_compliance_state, whose 13 boolean fields are themselves derived
+    by real sqlite AFTER INSERT/UPDATE triggers from ocid_compliance_audit_log
+    evidence (superboss-register.py's
+    _ensure_ocid_compliance_state_derive_triggers()), never caller-set."""
+    global _aocc
+    if _aocc is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "audit_ocid_compliance_governor", os.path.join(SCRIPTS, "audit_ocid_compliance.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _aocc = _mod
+    return _aocc
+
+
+_docen = None
+
+
+def _document_engine():
+    """Step 10 lazy loader for document_engine.py's real
+    detect_duplicate_documents_by_hash() -- exact contentHash grouping."""
+    global _docen
+    if _docen is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "document_engine_governor", os.path.join(SCRIPTS, "document_engine.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _docen = _mod
+    return _docen
+
+
+_intenge = None
+
+
+def _intent_engine():
+    """Step 11 lazy loader for intent_engine.py's real
+    cmd_check_intent()/intent_unmatched_log miss-logging pattern."""
+    global _intenge
+    if _intenge is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "intent_engine_governor", os.path.join(SCRIPTS, "intent_engine.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _intenge = _mod
+    return _intenge
+
+
+_TERMINAL_UMR_STATUSES = frozenset({
+    "completed", "failed", "rejected_duplicate", "rejected_duplicate_pr",
+    "killed", "superseded_by_ocid_evidence", "rejected_duplicate_reuse_verdict",
+})
+
+
+def _orchestrator_output_contract(sbr, umr_id, status, reason, outputs):
+    """Step 9: every real completion write this file makes for a terminal
+    status (see _TERMINAL_UMR_STATUSES above) now ends at
+    superboss-register.py's real derive_umr_output_contract() -- the one
+    real output shape (UMR-20260806-171945-5767 2nd amendment, PR #250) --
+    merged into outputs under 'output_contract' before the existing
+    sbr.update_umr_task() call already writes it. Non-terminal writes
+    (running/sigterm_sent/etc.) are intentionally left untouched by
+    callers of this helper -- derive_umr_output_contract() is a
+    completion-time contract, not an intermediate-state one, per its own
+    docstring. Never raises: an output-contract derivation failure must
+    never block the real status write it's attached to (same fail-open
+    convention as _safe_superboss_register())."""
+    if status not in _TERMINAL_UMR_STATUSES:
+        return outputs
+    try:
+        contract = sbr.derive_umr_output_contract(umr_id, status, reason or "", outputs or {})
+        return {**(outputs or {}), "output_contract": contract}
+    except Exception as e:
+        try:
+            _append_attention(f"WARNING: output_contract derivation failed for {umr_id!r}: {e}")
+        except Exception:
+            pass
+        return outputs
+
+
+def _orchestrator_reuse_verdict_gate(sbr, conn, row):
+    """Step 2: call reuse_verdict_engine.py's real assess() before any new
+    dispatch (spawn). Returns (blocked: bool, verdict_result_or_None).
+    Fail-open: any exception here (e.g. the vector_similarity candidate
+    table not yet populated on a brand-new DB) is treated as
+    non-blocking -- this is a NEW, additive gate on top of the two
+    existing, independently-proven duplicate guards
+    (superseded_by_ocid_evidence / rejected_duplicate_pr) already in
+    _dispatch_one_inner, never a replacement for them."""
+    try:
+        rve = _reuse_verdict_engine()
+        raw_inputs = row.get("inputs_json")
+        inputs = json.loads(raw_inputs) if isinstance(raw_inputs, str) else (raw_inputs or {})
+        intent_text = (inputs.get("title") or row.get("task_identity") or "")
+        result = rve.assess(conn, sbr, intent_text, use_cache=True)
+        if result.get("verdict") == "duplication_blocked":
+            return True, result
+        if result.get("verdict") == "create_authorized":
+            # Step 11: reuse intent_engine.py's real miss-logging pattern
+            # for this real inventory gap (a dispatch about to create new
+            # work with no existing candidate match at all).
+            _orchestrator_log_intent_miss(intent_text, domain="dispatch")
+        return False, result
+    except Exception as e:
+        try:
+            _append_attention(f"WARNING: reuse_verdict_engine.assess() failed, dispatch not blocked: {e}")
+        except Exception:
+            pass
+        return False, None
+
+
+def _orchestrator_log_intent_miss(intent_text, domain=None):
+    """Step 11: reuse intent_engine.py's real cmd_check_intent()
+    miss-logging pattern (writes intent_unmatched_log via its own
+    _ensure_tables()/INSERT, only for a genuine miss) rather than
+    reimplementing that INSERT here. Fail-open, best-effort: a logging
+    failure must never affect a real dispatch decision."""
+    try:
+        ie = _intent_engine()
+        args = argparse.Namespace(intent_text=intent_text, domain=domain, session_id=None)
+        ie.cmd_check_intent(args)
+    except Exception as e:
+        try:
+            _append_attention(f"WARNING: intent_engine miss-logging failed: {e}")
+        except Exception:
+            pass
+
+
+def _orchestrator_ocid_governance_check(sbr, conn, ocid_number):
+    """Steps 3/6/8, combined and gated: only runs when a real dispatch row
+    actually names an OCID (same `ocid_match = re.search(r"OCID-0*(\\d+)",
+    title)` extraction _dispatch_one_inner already uses for its own
+    superseded_by_ocid_evidence guard) -- never on every tick/row, since
+    audit_ocid_canonical_registry.py's real six-method cross-reference
+    shells out to `gh pr list --search` and `git log --all --grep` per
+    OCID, and running that unconditionally on every dispatch would itself
+    be exactly the kind of resource load this governor exists to prevent.
+
+    Step 3: OCID-068 Rule 1 (superboss-register.py's real
+    find_most_recent_umr_by_identity()) for idempotent reuse-not-remint
+    ordering -- already the live pattern submit() itself uses; re-checked
+    here so the SAME idempotency guarantee also covers this tick's
+    governance read, not only submission time.
+    Step 6: audit_ocid_canonical_registry.py's real plan_for_ocid() for
+    this OCID's cross-referenced canonical-registry integrity claim.
+    Step 8: audit_ocid_compliance.py's real trigger-derived compliance
+    state (query_ocid_compliance_state(), never re-derived here) for the
+    governance decision itself.
+
+    Returns a dict of real evidence (never raises -- fail-open, matching
+    every other real call site in this pipeline)."""
+    evidence = {"ocid_number": ocid_number}
+    try:
+        task_identity_hint = f"OCID-driven governance check for {ocid_number}"
+        prior = sbr.find_most_recent_umr_by_identity(conn, task_identity_hint)
+        evidence["rule1_idempotent_prior"] = prior["umr_id"] if prior else None
+    except Exception as e:
+        evidence["rule1_error"] = str(e)
+    try:
+        aocr = _audit_ocid_canonical_registry()
+        existing_by_ocid = {
+            r["ocid_number"]: r for r in sbr.query_ocid_canonical_registry(conn, ocid_number=ocid_number)
+        }
+        plan = aocr.plan_for_ocid(sbr, conn, ocid_number, existing_by_ocid)
+        evidence["canonical_status"] = plan.get("status")
+    except Exception as e:
+        evidence["canonical_registry_error"] = str(e)
+    try:
+        aocc = _audit_ocid_compliance()
+        state_rows = sbr.query_ocid_compliance_state(conn, ocid_number=ocid_number)
+        evidence["compliance_report"] = aocc.build_compliance_report(
+            state_rows, sbr.OCID_COMPLIANCE_STATE_RULE_FIELDS)
+    except Exception as e:
+        evidence["compliance_error"] = str(e)
+    return evidence
+
+
+def _orchestrator_tick_maintenance(sbr, now=None):
+    """Real, once-per-tick (never once-per-row) additions -- deliberately
+    kept OUTSIDE the dispatch_core lock and outside any per-row hot path,
+    since none of these need row-level freshness and running them once per
+    real run_tick() pass (not once per dispatched row) keeps their real
+    cost bounded, matching this module's own resource-governance purpose.
+
+    Step 1: superboss_gateway.py real read (wiring_registry snapshot) --
+    the one NEW read this pipeline itself adds through the gateway.
+    Step 4: health-check-15min.py real is_stale_blocked() staleness check,
+    applied to any real 'blocked' task.yaml rows under TASKS_DIR (bounded:
+    only the current real blocked set, not a fresh directory-wide scan
+    beyond what os.listdir already returns).
+    Step 10: document_engine.py real detect_duplicate_documents_by_hash()
+    exact-hash dedup, applied to the real top-level *.py files in SCRIPTS
+    (file/script cruft detection) -- real sha256 content hashes computed
+    here (document_engine.py itself never hashes; it only groups
+    pre-supplied hashes, per its own real code), the grouping logic reused
+    unmodified.
+    Step 12: PRAGMA wal_checkpoint(TRUNCATE) + conditional VACUUM, added
+    directly here per the governing SPEC's own explicit instruction --
+    neither superboss_gateway.py nor superboss-register.py expose a
+    maintenance/PRAGMA endpoint, so this is the one genuinely unavoidable
+    exception to "never raw sqlite3.connect": it reuses sbr._connect() (the
+    real, already-trusted connection helper) rather than opening a second,
+    independently-hardcoded raw connection.
+
+    Returns a dict of real evidence for this tick; never raises."""
+    now = now or _utcnow()
+    report = {}
+
+    try:
+        sbg = _superboss_gateway()
+        status, payload = sbg.handle_read({"table": "wiring_registry", "limit": 1})
+        report["gateway_read"] = {"status": status, "count": payload.get("count")}
+    except Exception as e:
+        report["gateway_read_error"] = str(e)
+
+    try:
+        hc = _health_check_15min()
+        stale_blocked = []
+        if os.path.isdir(hc.TASKS_DIR):
+            for task_id in os.listdir(hc.TASKS_DIR):
+                yaml_path = os.path.join(hc.TASKS_DIR, task_id, "task.yaml")
+                if not os.path.exists(yaml_path):
+                    continue
+                try:
+                    with open(yaml_path) as f:
+                        if "status: blocked" not in f.read():
+                            continue
+                except Exception:
+                    continue
+                if hc.is_stale_blocked(task_id):
+                    stale_blocked.append(task_id)
+        report["stale_blocked_tasks"] = stale_blocked
+    except Exception as e:
+        report["staleness_check_error"] = str(e)
+
+    try:
+        docen = _document_engine()
+        import hashlib as _hashlib
+        documents = []
+        for name in os.listdir(SCRIPTS):
+            if not name.endswith(".py"):
+                continue
+            path = os.path.join(SCRIPTS, name)
+            try:
+                with open(path, "rb") as f:
+                    content_hash = _hashlib.sha256(f.read()).hexdigest()
+            except Exception:
+                continue
+            documents.append({"id": name, "contentHash": content_hash})
+        report["duplicate_script_groups"] = docen.detect_duplicate_documents_by_hash(documents)
+    except Exception as e:
+        report["dedup_check_error"] = str(e)
+
+    try:
+        conn = sbr._connect()
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+            conn.commit()
+            report["wal_checkpoint"] = "truncate_attempted"
+            page_count = conn.execute("PRAGMA page_count;").fetchone()[0]
+            freelist_count = conn.execute("PRAGMA freelist_count;").fetchone()[0]
+            report["page_count"] = page_count
+            report["freelist_count"] = freelist_count
+            # Conditional, not unconditional: VACUUM is real, non-trivial
+            # I/O (same real-cost reasoning credit-accountant.py's own
+            # existing VACUUM call already documents) -- only run it when
+            # free pages are a real, non-trivial fraction of the file,
+            # never on every single tick.
+            if page_count > 0 and (freelist_count / page_count) >= 0.20:
+                conn.execute("VACUUM;")
+                report["vacuum"] = "ran"
+            else:
+                report["vacuum"] = "skipped_below_threshold"
+        finally:
+            conn.close()
+    except Exception as e:
+        report["pragma_maintenance_error"] = str(e)
+
+    return report
+
+
+# ---------------------------------------------------------------------------
 # Dynamic realignment (anti-starvation aging) + dispatcher
 # ---------------------------------------------------------------------------
 
@@ -1134,6 +1524,10 @@ RULE2_OUTCOME_MAP = {
     # same real "rejected" outcome as rejected_duplicate_pr above -- a
     # deliberate, evidence-based skip, not a failure.
     "superseded_by_ocid_evidence": "rejected",
+    # UMR-20260807-110133-205d step 2: reuse_verdict_engine.py's real
+    # duplication_blocked verdict -- same real "rejected" outcome as the
+    # two existing duplicate guards above, a NEW third one.
+    "rejected_duplicate_reuse_verdict": "rejected",
 }
 
 
@@ -1342,9 +1736,17 @@ def _dispatch_one_inner(dry_run=False, now=None):
                         f"completed while this task sat queued; redispatch skipped, not spawned"
                     )
                     with sbr._write_lock():
-                        sbr.update_umr_task(conn, row["umr_id"], status="rejected_duplicate",
-                                             ts_completed=_now_iso(), reason=reason)
+                        sbr.update_umr_task(
+                            conn, row["umr_id"], status="rejected_duplicate",
+                            ts_completed=_now_iso(), reason=reason,
+                            outputs=_orchestrator_output_contract(
+                                sbr, row["umr_id"], "rejected_duplicate", reason, {}),
+                        )
                         conn.commit()
+                    # Steps 3/6/8: OCID governance cross-reference, since
+                    # this row genuinely names a real OCID -- run before
+                    # conn.close() below, reusing this same real connection.
+                    ocid_evidence = _orchestrator_ocid_governance_check(sbr, conn, ocid_number)
                     conn.close()
                     _append_attention(
                         f"INFO: dispatch_one() skipped a real, redundant veridian_task_create "
@@ -1352,7 +1754,8 @@ def _dispatch_one_inner(dry_run=False, now=None):
                         f"{reason}"
                     )
                     return {"action": "superseded_by_ocid_evidence", "umr_id": row["umr_id"],
-                             "detail": reason, "ocid_number": ocid_number, "metrics": metrics}
+                             "detail": reason, "ocid_number": ocid_number, "metrics": metrics,
+                             "ocid_governance": ocid_evidence}
 
         # Stage 4 (2026-07-29): duplicate-PR guard. See find_pr_for_task_identity()'s
         # docstring for the lock-scope reasoning. Only veridian_task_create rows can
@@ -1383,19 +1786,49 @@ def _dispatch_one_inner(dry_run=False, now=None):
                     f"the same PR number as this task's own title) -- redispatch skipped, not spawned"
                 )
                 with sbr._write_lock():
-                    sbr.update_umr_task(conn, row["umr_id"], status="rejected_duplicate",
-                                         ts_completed=_now_iso(), reason=reason)
+                    sbr.update_umr_task(
+                        conn, row["umr_id"], status="rejected_duplicate",
+                        ts_completed=_now_iso(), reason=reason,
+                        outputs=_orchestrator_output_contract(
+                            sbr, row["umr_id"], "rejected_duplicate", reason, {}),
+                    )
                     conn.commit()
                 conn.close()
                 return {"action": "rejected_duplicate_pr", "umr_id": row["umr_id"], "detail": reason,
                          "pr": {"repo": dup_repo, "number": dup_pr}, "metrics": metrics}
+
+        # Step 2: reuse_verdict_engine.py's real assess() -- a NEW,
+        # additive duplication gate on top of the two existing,
+        # independently-proven guards just above. Fail-open (see
+        # _orchestrator_reuse_verdict_gate()'s own docstring).
+        blocked, verdict_result = _orchestrator_reuse_verdict_gate(sbr, conn, row)
+        if blocked:
+            reason = (
+                f"reuse_verdict_engine.assess() real verdict=duplication_blocked "
+                f"(best_match={verdict_result.get('best_match')!r}, score={verdict_result.get('score')!r}) "
+                f"-- redispatch skipped, not spawned"
+            )
+            with sbr._write_lock():
+                sbr.update_umr_task(
+                    conn, row["umr_id"], status="rejected_duplicate",
+                    ts_completed=_now_iso(), reason=reason,
+                    outputs=_orchestrator_output_contract(
+                        sbr, row["umr_id"], "rejected_duplicate", reason, {"reuse_verdict": verdict_result}),
+                )
+                conn.commit()
+            conn.close()
+            return {"action": "rejected_duplicate_reuse_verdict", "umr_id": row["umr_id"],
+                     "detail": reason, "reuse_verdict": verdict_result, "metrics": metrics}
 
         result = _perform_spawn(row)
         with sbr._write_lock():
             sbr.update_umr_task(
                 conn, row["umr_id"], status=result["status"],
                 unit_name=result.get("unit_name") or row["unit_name"],
-                ts_dispatched=_now_iso(), outputs=result.get("outputs", {}), metric_snapshot=metrics,
+                ts_dispatched=_now_iso(),
+                outputs=_orchestrator_output_contract(
+                    sbr, row["umr_id"], result["status"], None, result.get("outputs", {})),
+                metric_snapshot=metrics,
             )
             conn.commit()
         if result["status"] == "running":
@@ -1498,13 +1931,22 @@ def flag_stale_queued_tasks(now=None):
 # succeed since nothing about which row was picked changes the outcome.
 ROW_RESOLVED_NON_DISPATCH_ACTIONS = frozenset({
     "dispatched", "rejected_duplicate_pr", "superseded_by_ocid_evidence",
+    # UMR-20260807-110133-205d step 2: same real row-resolved reasoning as
+    # the two actions above -- this row is no longer 'queued' either.
+    "rejected_duplicate_reuse_verdict",
 })
 
 
 def run_tick(max_dispatches=None, now=None):
     """One full governor pass: stuck-task scan, stale-queued-age safeguard,
-    then priority-ordered dispatch until the queue is empty, a slot/metric
-    limit stops it, or max_dispatches is reached.
+    the real UMR-20260807-110133-205d twelve-step orchestrator maintenance
+    pass (step 1/4/10/12, once per tick -- see
+    _orchestrator_tick_maintenance()'s own docstring; steps 2/3/6/8/9/11 are
+    wired into dispatch_one()'s own real per-row path, since they gate or
+    shape an actual per-row dispatch decision; steps 5/7 are pre-existing,
+    unmodified real behavior of this module and dispatch_core.py
+    respectively), then priority-ordered dispatch until the queue is empty,
+    a slot/metric limit stops it, or max_dispatches is reached.
 
     The loop keeps going past any outcome that already resolved the picked
     row to a real terminal (non-'queued') status -- see
@@ -1515,6 +1957,11 @@ def run_tick(max_dispatches=None, now=None):
         "stale_queued_flagged": flag_stale_queued_tasks(now=now),
         "dispatches": [],
     }
+    sbr, error = _safe_superboss_register("run_tick_orchestrator_maintenance")
+    if error:
+        results["orchestrator_maintenance"] = {"error": error}
+    else:
+        results["orchestrator_maintenance"] = _orchestrator_tick_maintenance(sbr, now=now)
     while max_dispatches is None or len(results["dispatches"]) < max_dispatches:
         r = dispatch_one(now=now)
         results["dispatches"].append(r)
@@ -1597,8 +2044,12 @@ def scan_stuck_tasks(now=None):
             # manager restart resurrect this exact unit later regardless of
             # its now-terminal umr_tasks status.
             _run(["systemctl", "--user", "disable", row["unit_name"]])
+            kill_reason = f"stuck-task SIGKILL: no exit {SIGTERM_TO_SIGKILL_GRACE_SECONDS}s after SIGTERM"
             with sbr._write_lock():
-                sbr.update_umr_task(conn, row["umr_id"], status="killed", ts_completed=_now_iso())
+                sbr.update_umr_task(
+                    conn, row["umr_id"], status="killed", ts_completed=_now_iso(), reason=kill_reason,
+                    outputs=_orchestrator_output_contract(sbr, row["umr_id"], "killed", kill_reason, {}),
+                )
                 conn.commit()
             actions.append({"umr_id": row["umr_id"], "unit_name": row["unit_name"], "action": "SIGKILL",
                              "since_sigterm_s": since_sigterm})

@@ -33,6 +33,8 @@
 2. `batch-import-conversation-log.py`: only `json.JSONDecodeError` is caught around `json.loads(line)`; a line that is valid JSON but not an object (bare number/string/array) raises an uncaught `AttributeError` on `ev.get(...)`, aborting `main()` and losing the whole batch's uncommitted rows instead of counting it as malformed/skipped. Documented in `test_batch_import_conversation_log.py`.
 3. `backfill_phase_self_report.py`: `patch_phase_block()` overwrites existing stale `completed_by_task`/`evidence` lines in place but only sets `changed=True` on the insert-missing-field branches -- so `backfill_one()` sees `changed=False` and never writes the corrected lines back to disk, silently discarding a computed fix. Documented in `test_backfill_phase_self_report.py`.
 
+- [x] Opened PR #261: https://github.com/FChecklist/veridian-scripts/pull/261
+- [x] Recorded real completion via `agent_work_briefing.py record-completion --umr-id UMR-20260807-060727-c3ae`
+
 ## Remaining
-- [ ] Open PR for this branch against main
-- [ ] Record real completion via `agent_work_briefing.py record-completion --umr-id UMR-20260807-060727-c3ae`
+- [ ] None for batch 1. Batches 2-7 (remaining ~86 of the 101 no-test scripts) are out of scope for this task per SPEC ("this is batch 1, do not attempt all 101").

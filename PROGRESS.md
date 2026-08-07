@@ -135,3 +135,18 @@ verification per the repo's standing false-premise protocol
 - Fix commits: `b0a2516098b24a4a8881474e5215530fe9fdf76e`,
   `68e0b9471006af9f88bf918081d179e9114a72b7` (both pre-existing on `main`,
   not authored by this task).
+
+## Update (invocation 2/20)
+- Re-verified state on resume: task's own conclusion and fix status unchanged
+  (nothing new landed on `directive_engine.py` since invocation 1).
+- PR #225 had drifted to `CONFLICTING`/`DIRTY` against `origin/main` purely
+  because many unrelated PRs merged (each replacing the shared root
+  `PROGRESS.md`) after this branch was opened -- not a content problem with
+  this task's own change.
+- Rebased onto latest `origin/main` (`5ebc095`), resolved the `PROGRESS.md`
+  conflict by taking this task's own full section (that file is
+  fully-replaced-per-task, not cumulative, per the repo's established
+  pattern), force-pushed with `--force-with-lease`.
+- Confirmed via `gh pr view 225`: now `mergeStateStatus=CLEAN`,
+  `mergeable=MERGEABLE`. No functional code touched in this update either --
+  still documentation-only.

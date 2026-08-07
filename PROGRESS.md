@@ -51,10 +51,14 @@
 - [x] Regenerated `PLATFORM_COMPLETION_CHECKLIST.md`/`.json` via the
       unmodified `generate_platform_completion_checklist.py`.
 
-## Remaining
-- [ ] Open PR, record real PR number.
-- [ ] Record real completion via `agent_work_briefing.py record-completion`
+- [x] Regenerated checklist: **Scripts 60/158 -> 76/160** (real mechanical
+      run, checklist generator itself untouched).
+- [x] Opened PR **#271** (FChecklist/veridian-scripts).
+- [x] Recorded real completion via `agent_work_briefing.py record-completion`
       for UMR-20260807-154552-6a7c.
+
+## Remaining
+- [ ] None -- task complete.
 
 ## Real pytest results (first run, before fixes)
 169 passed, 1 failed (the 13 non-doc-worker files ran clean at 168/169;

@@ -198,8 +198,8 @@ echo "DISPATCHED: umr_id=$UMR_ID instruction_id=$INSTRUCTION_ID work_item_id=$WO
 COMPLETION_INSTRUCTION="
 
 MANDATORY FINAL STEP for ${UMR_ID} (structural, not optional -- read this even if the rest of this message was skimmed): once the real work above reaches a genuine terminal outcome, record it by running this exact command with this exact UMR id (from the veridian-scripts repo, e.g. /opt/veridian/repos/veridian-scripts):
-  python3 superboss-register.py mark-umr-terminal --umr-id ${UMR_ID} --status completed --reason \"<real one-line summary of what finished>\"
-Use --status failed or --status killed instead of completed, with a real --reason, if the work genuinely did not finish successfully -- never record a genuine failure as a success. Run this as the actual last action for ${UMR_ID}, after any PR/merge work, not before. Leave it unrun only if the work is genuinely still in progress."
+  python3 superboss-register.py mark-umr-terminal --umr-id ${UMR_ID} --status completed --reason \"<real one-line summary of what finished>\" --commit-sha <real commit SHA, must be a real ancestor of origin/main> [--pr-number <N>]
+--status completed now structurally REQUIRES that real --commit-sha (or, for a non-PR artifact, a real --file-path that genuinely exists on disk) -- UMR-20260806-130914-e7f1 (real completion-evidence gap fix): a real PR opened but NOT YET merged into origin/main must NOT be recorded as completed -- use --status completed_unmerged instead (same --commit-sha, but it need not yet be an ancestor of main) and re-run with --status completed once it is actually merged. Use --status failed or --status killed instead, with a real --reason, if the work genuinely did not finish successfully -- never record a genuine failure as a success. Run this as the actual last action for ${UMR_ID}, after any PR/merge work, not before. Leave it unrun only if the work is genuinely still in progress."
 RELAY_TEXT="[${UMR_ID}] ${PROMPT}${COMPLETION_INSTRUCTION}"
 if [ "$RELAY" -eq 1 ]; then
   exec 9>"$TMUX_RELAY_LOCK"

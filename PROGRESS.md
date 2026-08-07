@@ -1,81 +1,74 @@
-# PROGRESS -- task-20260806-234537-stop-the-hung-governance-reconciliation
+# PROGRESS -- task-20260807-003146-critical--real-corruption-confirmed-in-w
 
-Governing UMR: UMR-20260806-071025-1d28. SPEC instruction: UMR-20260806-113534-b70b (sentinel_pm,
-2026-08-06T11:35:34Z, "hard rule 2" ruling).
+Governing chain: UMR-20260806-124055-bc80, UMR-20260806-135632-329e
 
 ## Completed
-
-- [x] **Step 1 -- independently verified both claimed facts, before touching anything.**
-  - **PR 147 fact: TRUE.** `gh api repos/FChecklist/veridian-scripts/pulls/147` (independent of the
-    SPEC's own claim): `state=closed`, `merged=true`, `merged_at=2026-08-06T09:28:10Z`,
-    `merge_commit_sha=32c8dbcdac0bea8a9b875185ae5b2951160f3dbb`. Matches the SPEC exactly.
-  - **"Currently running and hung" fact: FALSE.** Checked every real place a live agent could show
-    up:
-    - `systemctl --user list-units 'veridian-worker@*' --all` -- no unit for this UMR's work,
-      running or failed. Only 5 units are `active running` right now, all from *this* dispatch
-      batch (`task-20260806-2345{29,37,42,46,52}-*`); none is a "governance reconciliation" build.
-    - `tmux list-sessions` / `list-panes` -- exactly one session, one window, one pane (this
-      session). No second pane exists to host a sibling "Build governance reconciliation" agent.
-    - This harness's own `TaskList` -- no tasks found.
-    - **superboss-register.sqlite (source of truth), queried directly by exact `umr_id`** (not
-      full-text search, to rule out matching a different row): both
-      `UMR-20260806-075726-babc` (the directive UMR the SPEC names) and its actual build/PR-147
-      child row `UMR-20260806-082646-3aba` already carried `status='completed'` *before* this task
-      touched anything -- i.e. this work was not running, hung or otherwise, at the moment the
-      sentinel took its three readings. `UMR-20260806-082646-3aba`'s own `metadata_json` contains a
-      full, independently-cross-checked completion record for PR 147 (merge verified against a
-      fresh clone via `git merge-base --is-ancestor`, second AUDIT:PASS at 09:28:07Z, real
-      production `--apply` run logged) -- this is a genuinely finished task, not a stale label.
-    - Cross-checked history: instruction `INS-20260806-095627-7572` (09:56Z, *before* this SPEC)
-      already told a prior session "zero processes matching governance anywhere ... the Build
-      governance reconciliation agent shown in your panel is dead". A later prior task,
-      `task-20260806-212459-urgent--governance-reconciliation-backgr`, investigated that same
-      "panel" narrative in depth and concluded it was a false premise -- a queued backlog item
-      (`UMR-20260806-095628-5547`, unrelated to babc) that later dispatched and completed normally,
-      never a live crashed/hung process, and noted explicitly that no host-level "panel" is even
-      visible from inside this sandbox.
-  - **Conclusion:** neither an "advancing" nor a "hung-and-live" agent exists for this UMR right
-    now -- it simply isn't running: it already finished, cleanly, before this dispatch. The PM
-    sentinel's elapsed/token-freeze reading does not correspond to any real process this session
-    can find by any independent method (systemd, tmux, harness tasks, or the DB). This matches this
-    project's own recurring pattern of fabricated/stale panel claims (23+ prior cases).
-
-- [x] **Step 2 -- no stop performed.** There was no live agent/process to stop (see Step 1). Did
-  not touch `UMR-20260806-112013-088f` or the veridian-ui-kit CVE agent (both out of scope
-  regardless, and never at risk since no stop action was taken at all).
-
-- [x] **Step 3 -- recorded the real outcome via the canonical script, no raw SQL writes.** Ran:
-  `superboss-register.py mark-umr-terminal --umr-id UMR-20260806-075726-babc --status completed
-  --reason "..."`. The row was already `status=completed` but had a stale `reason='queued'` and a
-  null `ts_completed`; this call (which only ever touches `status`/`ts_completed`/`reason`, never
-  `metadata_json` -- confirmed by reading `cmd_mark_umr_terminal` before running it) filled those
-  in honestly: cites merged PR 147 as the evidence the goal was achieved, cites
-  UMR-20260806-113534-b70b as the authority that prompted this check, and explicitly records that
-  no stop action was needed since nothing was live. Verified post-write: `metadata_json` still
-  intact (731 chars, untouched).
-
-- [x] **Step 4 -- checked for a real lock/slot and for the "queued frozen at 37" claim; found no
-  connection, said so plainly.**
-  - `/tmp/veridian-quality-gate-build.lock` (the one real build lock in this system, per
-    `build_lock_liveness_guard.py`) exists but is currently **unheld** -- `fuser` returns no holder,
-    and its inode (337783) does not appear anywhere in `/proc/locks`. Nothing is holding it, and
-    nothing needed to be freed from it.
-  - Current live `queued` count in `umr_tasks` is **22** (sampled twice, ~13s apart, unchanged at
-    22 both times -- too short a window to characterize a 50-minute freeze either way, but it
-    flatly does not match the SPEC's claimed **37** at all, at the current time).
-  - Because Step 1 already established this UMR was never a live, slot-holding process at any
-    point the sentinel observed it (it was already `completed` beforehand), there is no mechanism
-    by which it could have been blocking dispatch of other queued work. **No connection exists
-    between this UMR and the queued-count behavior; not forcing one.**
-
-- [x] **Step 5 -- background agent count, before/after.**
-  - `systemctl --user` `active running` `veridian-worker@*` units: **5 before, 5 after** (unchanged
-    -- expected, since Step 2 performed no stop).
-  - `umr_tasks` rows with `status='running'`: **30 before, 30 after** (unchanged; the Step 3 write
-    only affected a row that was already `status='completed'`, not counted in either figure).
+- [x] Independent verification of SPEC claims before any write/destructive action (per
+      standing lesson on recurring false-premise dispatch SPECs in this environment):
+  - Real DB path resolved via `superboss-register.py`'s own `resolve_superboss_db_path()`:
+    `/opt/veridian/ai-os/memory/superboss-register.sqlite`, confirmed 4,067,086,336 bytes
+    (~4.07GB), WAL mode (live `-wal`/`-shm` files present).
+  - `SELECT count(*) FROM wiring_registry` via direct read-only sqlite3 connection ->
+    **`database disk image is malformed`** -- corruption is REAL, reproduced independently,
+    not just asserted. `wiring_registry_fts` and its `_data/_idx/_docsize/_config` shadow
+    tables also present/implicated (fts5 content table = wiring_registry).
+  - Cross-checked "all other tables intact" claim directly: `umr_tasks` 7,976 rows (SPEC
+    said 7,954 -- close, natural growth since SPEC was written), `capability_registry` 17,
+    `knowledge_engine` 383, `ocid_canonical_registry` 69 -- **all exact matches** to SPEC.
+  - Both governing UMR IDs verified to genuinely exist in `umr_tasks` (initial FTS-based
+    `--query-umr --search` lookup returned 0 hits, but that flag only indexes
+    task_identity/source_trigger/logs_ref, not umr_id itself -- confirmed by direct
+    `umr_id =` lookup, which found both rows; not a fabrication).
+  - `CAP-20260806-194100-e97b` verified real in `capability_registry`, correctly describes
+    `full_server_file_registration.py` (which exists on disk, matches description).
+    `UMR-20260806-140841-46d1` verified real, status completed.
+  - **Correction to SPEC's causal narrative** (documented, not silently accepted): SPEC's
+    claim that UMR-20260806-135632-329e "shows zero wiring_registry progress since
+    last_checkpoint_at 19:45:23Z" does not match its actual DB row -- `umr_tasks` has no
+    `last_checkpoint_at` column, and this UMR's real `reason` field shows it was marked
+    `failed` by an automated backfill/reconciliation process at 2026-08-06T20:57:44Z because
+    its systemd worker unit (`veridian-worker@task-20260806-192052-...`) was found
+    **inactive** (no heartbeat), not because of a directly-observed break at 19:45. The
+    19:45 wiring-corruption timing correlation is SPEC's plausible inference, not a
+    demonstrated fact -- treating it as a hypothesis, not settled root cause.
+  - Safety check (SPEC step 1): **no active writer to wiring_registry found.** `ps aux` /
+    `lsof` on the db+wal show only `health-check-15min.py` (PID 2434545, routine periodic
+    connection, unrelated to wiring_registry). `veridian-cron-generate-wiring-registry.service`
+    is inactive/dead (last run `Result=success`); its `.timer` is active/waiting (scheduled,
+    not currently firing).
+  - Root-cause correlation (SPEC step 6): no sudo/log-group access to kernel `dmesg`/
+    `/var/log/kern.log`/`syslog` (permission denied) -- cannot confirm or rule out an
+    OOM-kill directly. Best available internal proxy: `/opt/veridian/ai-os/logs/health-15min.log`
+    samples every ~60-180s across 19:36-19:53 UTC on 2026-08-06 show **healthy RAM usage
+    (16-21% `mem_pct_used`)** throughout the claimed corruption window, with only a minor
+    ~3min sampling gap (19:45:22 -> 19:48:24). This does not track swap directly, but it
+    does **not corroborate** the SPEC's "swap-exhaustion episode" hypothesis for this
+    specific window -- treat root cause as **inconclusive**, not confirmed OOM.
+  - Precedent found: a prior corruption incident on this exact file
+    (`file_inventory_corrupted_orig_20260806T044301Z`) was handled by **renaming** the
+    corrupted table aside (not DROPping it), then rebuilding fresh under the original name.
+    Following the same convention for `wiring_registry` for consistency and extra safety
+    margin (preserves raw corrupted pages in case deeper forensics are ever needed, on top
+    of the file-level forensic copy in step 2).
 
 ## Remaining
-
-- [ ] None. SPEC's core premise (a currently-running, hung agent) did not hold up under
-  independent verification -- there was nothing live to stop. All five steps were carried out
-  honestly against that real finding; no further action applies.
+- [ ] Step 1 (safety): pause `veridian-cron-generate-wiring-registry.timer` for the duration
+      of the repair (reversible), confirm no writer attaches mid-repair.
+- [ ] Step 2: real forensic copy of the live file (main + `-wal` + `-shm`, WAL-mode aware) to
+      `superboss-register.sqlite.corrupt-wiring-registry-real-<UTC timestamp>`.
+- [ ] Step 3: attempt real recovery via `sqlite3 .recover` against the **copy** (not live db,
+      to avoid extra load/lock risk on production while other processes use it) -- report
+      real recovered row count for wiring_registry if any.
+- [ ] Step 4: rename corrupted `wiring_registry` table aside (precedent-consistent), drop
+      corrupted `wiring_registry_fts` + shadow tables, recreate fresh schema via
+      `superboss-register.py`'s own `_ensure_wiring_registry_table()` (single source of
+      truth for the DDL -- reuse, don't reimplement).
+- [ ] Step 5: re-run `full_server_file_registration.py` (CAP-20260806-194100-e97b),
+      the Vercel/GitHub/Supabase registration logic from UMR-20260806-140841-46d1, and
+      `generate_wiring_registry.py` for the other 8 sources -- reusing existing
+      content_hash dedup logic.
+- [ ] Step 6: real evidence -- `PRAGMA integrity_check` clean, final row count by
+      entity_type, confirm no other table affected (re-verify row counts post-rebuild).
+- [ ] Step 7: finalize root-cause note for the record (documented above; will restate in
+      final summary).
+- [ ] Resume normal timer schedule; commit + push.

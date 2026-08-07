@@ -1,6 +1,6 @@
 {
   "db_path": "/opt/veridian/ai-os/memory/superboss-register.sqlite",
-  "git_head": "b13e204f4b539410e9ff1247d3a29f4f27008613",
+  "git_head": "de2df886e883a141b4e069da1f570b3bb4cd8cad",
   "scripts": [
     {
       "script": "agent_work_briefing.py",
@@ -16,11 +16,13 @@
       "script": "ai_agent_registry.py",
       "referencing_tests": [
         "test_agent_work_briefing.py",
-        "test_ai_agent_registry.py"
+        "test_ai_agent_registry.py",
+        "test_full_server_file_registration.py",
+        "test_reuse_verdict_engine.py"
       ],
-      "tests_pass": true,
-      "complete_and_tested": true,
-      "evidence": "pytest ['test_agent_work_briefing.py', 'test_ai_agent_registry.py'] -> {'test_agent_work_briefing.py': 'pass', 'test_ai_agent_registry.py': 'pass'}"
+      "tests_pass": false,
+      "complete_and_tested": false,
+      "evidence": "pytest ['test_agent_work_briefing.py', 'test_ai_agent_registry.py', 'test_full_server_file_registration.py', 'test_reuse_verdict_engine.py'] -> {'test_agent_work_briefing.py': 'pass', 'test_ai_agent_registry.py': 'pass', 'test_full_server_file_registration.py': 'fail', 'test_reuse_verdict_engine.py': 'pass'}"
     },
     {
       "script": "anthropic_openrouter_proxy.py",
@@ -84,11 +86,13 @@
     {
       "script": "automation_rule_engine.py",
       "referencing_tests": [
-        "test_automation_rule_engine.py"
+        "test_automation_rule_engine.py",
+        "test_doc_worker_entrypoint.py",
+        "test_document_engine.py"
       ],
       "tests_pass": true,
       "complete_and_tested": true,
-      "evidence": "pytest ['test_automation_rule_engine.py'] -> {'test_automation_rule_engine.py': 'pass'}"
+      "evidence": "pytest ['test_automation_rule_engine.py', 'test_doc_worker_entrypoint.py', 'test_document_engine.py'] -> {'test_automation_rule_engine.py': 'pass', 'test_doc_worker_entrypoint.py': 'pass', 'test_document_engine.py': 'pass'}"
     },
     {
       "script": "backfill_evidence_json_schema.py",
@@ -148,29 +152,34 @@
       "script": "chatgpt_audit_guard.py",
       "referencing_tests": [
         "test_chatgpt_audit_guard.py",
-        "test_chatgpt_audit_versioning.py"
+        "test_chatgpt_audit_versioning.py",
+        "test_generate_chatgpt_audit_index.py",
+        "test_generate_chatgpt_audit_request.py"
       ],
       "tests_pass": true,
       "complete_and_tested": true,
-      "evidence": "pytest ['test_chatgpt_audit_guard.py', 'test_chatgpt_audit_versioning.py'] -> {'test_chatgpt_audit_guard.py': 'pass', 'test_chatgpt_audit_versioning.py': 'pass'}"
+      "evidence": "pytest ['test_chatgpt_audit_guard.py', 'test_chatgpt_audit_versioning.py', 'test_generate_chatgpt_audit_index.py', 'test_generate_chatgpt_audit_request.py'] -> {'test_chatgpt_audit_guard.py': 'pass', 'test_chatgpt_audit_versioning.py': 'pass', 'test_generate_chatgpt_audit_index.py': 'pass', 'test_generate_chatgpt_audit_request.py': 'pass'}"
     },
     {
       "script": "chatgpt_audit_versioning.py",
       "referencing_tests": [
-        "test_chatgpt_audit_versioning.py"
+        "test_chatgpt_audit_versioning.py",
+        "test_generate_chatgpt_audit_request.py"
       ],
       "tests_pass": true,
       "complete_and_tested": true,
-      "evidence": "pytest ['test_chatgpt_audit_versioning.py'] -> {'test_chatgpt_audit_versioning.py': 'pass'}"
+      "evidence": "pytest ['test_chatgpt_audit_versioning.py', 'test_generate_chatgpt_audit_request.py'] -> {'test_chatgpt_audit_versioning.py': 'pass', 'test_generate_chatgpt_audit_request.py': 'pass'}"
     },
     {
       "script": "chatgpt_promptlib_guard.py",
       "referencing_tests": [
-        "test_chatgpt_promptlib_guard.py"
+        "test_chatgpt_promptlib_guard.py",
+        "test_detect_prompt_duplicates.py",
+        "test_generate_chatgpt_promptbatch_request.py"
       ],
       "tests_pass": true,
       "complete_and_tested": true,
-      "evidence": "pytest ['test_chatgpt_promptlib_guard.py'] -> {'test_chatgpt_promptlib_guard.py': 'pass'}"
+      "evidence": "pytest ['test_chatgpt_promptlib_guard.py', 'test_detect_prompt_duplicates.py', 'test_generate_chatgpt_promptbatch_request.py'] -> {'test_chatgpt_promptlib_guard.py': 'pass', 'test_detect_prompt_duplicates.py': 'pass', 'test_generate_chatgpt_promptbatch_request.py': 'pass'}"
     },
     {
       "script": "check_latest_task.py",
@@ -257,78 +266,95 @@
       "script": "credit-accountant.py",
       "referencing_tests": [
         "test_claude_usage_limit_retry.py",
+        "test_doc_worker_entrypoint.py",
         "test_triage_owner_umr_24h.py"
       ],
       "tests_pass": false,
       "complete_and_tested": false,
-      "evidence": "pytest ['test_claude_usage_limit_retry.py', 'test_triage_owner_umr_24h.py'] -> {'test_claude_usage_limit_retry.py': 'pass', 'test_triage_owner_umr_24h.py': 'fail'}"
+      "evidence": "pytest ['test_claude_usage_limit_retry.py', 'test_doc_worker_entrypoint.py', 'test_triage_owner_umr_24h.py'] -> {'test_claude_usage_limit_retry.py': 'pass', 'test_doc_worker_entrypoint.py': 'pass', 'test_triage_owner_umr_24h.py': 'fail'}"
     },
     {
       "script": "ddl_authorization_check.py",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_ddl_authorization_check.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_ddl_authorization_check.py'] -> {'test_ddl_authorization_check.py': 'pass'}"
     },
     {
       "script": "decision-service.py",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_decision_service.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_decision_service.py'] -> {'test_decision_service.py': 'pass'}"
     },
     {
       "script": "deploy-live-scripts.sh",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_deploy_live_scripts.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_deploy_live_scripts.py'] -> {'test_deploy_live_scripts.py': 'pass'}"
     },
     {
       "script": "detect_prompt_duplicates.py",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_detect_prompt_duplicates.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_detect_prompt_duplicates.py'] -> {'test_detect_prompt_duplicates.py': 'pass'}"
     },
     {
       "script": "directive-engine-stop-audit-monitor.sh",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_directive_engine_stop_audit_monitor.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_directive_engine_stop_audit_monitor.py'] -> {'test_directive_engine_stop_audit_monitor.py': 'pass'}"
     },
     {
       "script": "directive_engine.py",
       "referencing_tests": [
+        "test_directive_engine_stop_audit_monitor.py",
         "tests/test_directive_engine_retry_gate.py"
       ],
       "tests_pass": true,
       "complete_and_tested": true,
-      "evidence": "pytest ['tests/test_directive_engine_retry_gate.py'] -> {'tests/test_directive_engine_retry_gate.py': 'pass'}"
+      "evidence": "pytest ['test_directive_engine_stop_audit_monitor.py', 'tests/test_directive_engine_retry_gate.py'] -> {'test_directive_engine_stop_audit_monitor.py': 'pass', 'tests/test_directive_engine_retry_gate.py': 'pass'}"
     },
     {
       "script": "directive_engine.sh",
       "referencing_tests": [
+        "test_directive_engine_stop_audit_monitor.py",
         "tests/test_directive_engine_retry_gate.py"
       ],
       "tests_pass": true,
       "complete_and_tested": true,
-      "evidence": "pytest ['tests/test_directive_engine_retry_gate.py'] -> {'tests/test_directive_engine_retry_gate.py': 'pass'}"
+      "evidence": "pytest ['test_directive_engine_stop_audit_monitor.py', 'tests/test_directive_engine_retry_gate.py'] -> {'test_directive_engine_stop_audit_monitor.py': 'pass', 'tests/test_directive_engine_retry_gate.py': 'pass'}"
     },
     {
       "script": "directive_engine_stop_audit_monitor.py",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_directive_engine_stop_audit_monitor.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_directive_engine_stop_audit_monitor.py'] -> {'test_directive_engine_stop_audit_monitor.py': 'pass'}"
     },
     {
       "script": "dispatch-docworker-task.sh",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_dispatch_docworker_task.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_dispatch_docworker_task.py'] -> {'test_dispatch_docworker_task.py': 'pass'}"
     },
     {
       "script": "dispatch-owner-task.sh",
@@ -337,9 +363,9 @@
         "tests/test_dispatch_owner_task_tmux_relay_lock.py",
         "tests/test_ocid_evidence_supersession.py"
       ],
-      "tests_pass": true,
-      "complete_and_tested": true,
-      "evidence": "pytest ['tests/test_dispatch_owner_task_status_write.py', 'tests/test_dispatch_owner_task_tmux_relay_lock.py', 'tests/test_ocid_evidence_supersession.py'] -> {'tests/test_dispatch_owner_task_status_write.py': 'pass', 'tests/test_dispatch_owner_task_tmux_relay_lock.py': 'pass', 'tests/test_ocid_evidence_supersession.py': 'pass'}"
+      "tests_pass": false,
+      "complete_and_tested": false,
+      "evidence": "pytest ['tests/test_dispatch_owner_task_status_write.py', 'tests/test_dispatch_owner_task_tmux_relay_lock.py', 'tests/test_ocid_evidence_supersession.py'] -> {'tests/test_dispatch_owner_task_status_write.py': 'fail', 'tests/test_dispatch_owner_task_tmux_relay_lock.py': 'fail', 'tests/test_ocid_evidence_supersession.py': 'pass'}"
     },
     {
       "script": "dispatch-tick.py",
@@ -356,9 +382,9 @@
         "tests/test_rule5_real_stall_detection.py",
         "tests/test_umr_reuse_on_resume.py"
       ],
-      "tests_pass": true,
-      "complete_and_tested": true,
-      "evidence": "pytest ['test_generate_pm_report_v3.py', 'test_pm_cycle_precheck.py', 'test_pm_triage.py', 'test_stuck_task_heartbeat.py', 'test_worker_boot_activation_and_resume.py', 'tests/test_build_lock_contended_requeue.py', 'tests/test_dispatch_owner_task_status_write.py', 'tests/test_resume_interrupted_workers_no_duplicate_row.py', 'tests/test_rule4_pm_visible_real_counts.py', 'tests/test_rule5_real_stall_detection.py', 'tests/test_umr_reuse_on_resume.py'] -> {'test_generate_pm_report_v3.py': 'pass', 'test_pm_cycle_precheck.py': 'pass', 'test_pm_triage.py': 'pass', 'test_stuck_task_heartbeat.py': 'pass', 'test_worker_boot_activation_and_resume.py': 'pass', 'tests/test_build_lock_contended_requeue.py': 'pass', 'tests/test_dispatch_owner_task_status_write.py': 'pass', 'tests/test_resume_interrupted_workers_no_duplicate_row.py': 'pass', 'tests/test_rule4_pm_visible_real_counts.py': 'pass', 'tests/test_rule5_real_stall_detection.py': 'pass', 'tests/test_umr_reuse_on_resume.py': 'pass'}"
+      "tests_pass": false,
+      "complete_and_tested": false,
+      "evidence": "pytest ['test_generate_pm_report_v3.py', 'test_pm_cycle_precheck.py', 'test_pm_triage.py', 'test_stuck_task_heartbeat.py', 'test_worker_boot_activation_and_resume.py', 'tests/test_build_lock_contended_requeue.py', 'tests/test_dispatch_owner_task_status_write.py', 'tests/test_resume_interrupted_workers_no_duplicate_row.py', 'tests/test_rule4_pm_visible_real_counts.py', 'tests/test_rule5_real_stall_detection.py', 'tests/test_umr_reuse_on_resume.py'] -> {'test_generate_pm_report_v3.py': 'pass', 'test_pm_cycle_precheck.py': 'pass', 'test_pm_triage.py': 'pass', 'test_stuck_task_heartbeat.py': 'pass', 'test_worker_boot_activation_and_resume.py': 'pass', 'tests/test_build_lock_contended_requeue.py': 'pass', 'tests/test_dispatch_owner_task_status_write.py': 'fail', 'tests/test_resume_interrupted_workers_no_duplicate_row.py': 'pass', 'tests/test_rule4_pm_visible_real_counts.py': 'pass', 'tests/test_rule5_real_stall_detection.py': 'pass', 'tests/test_umr_reuse_on_resume.py': 'pass'}"
     },
     {
       "script": "dispatch_core.py",
@@ -382,17 +408,21 @@
     },
     {
       "script": "doc-worker-entrypoint.sh",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_doc_worker_entrypoint.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_doc_worker_entrypoint.py'] -> {'test_doc_worker_entrypoint.py': 'pass'}"
     },
     {
       "script": "document_engine.py",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_document_engine.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_document_engine.py'] -> {'test_document_engine.py': 'pass'}"
     },
     {
       "script": "external_ai_state_machine.py",
@@ -414,45 +444,57 @@
     },
     {
       "script": "full_server_file_registration.py",
-      "referencing_tests": [],
-      "tests_pass": null,
+      "referencing_tests": [
+        "test_full_server_file_registration.py"
+      ],
+      "tests_pass": false,
       "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "evidence": "pytest ['test_full_server_file_registration.py'] -> {'test_full_server_file_registration.py': 'fail'}"
     },
     {
       "script": "gap-status.py",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_gap_status.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_gap_status.py'] -> {'test_gap_status.py': 'pass'}"
     },
     {
       "script": "generate-system-diagram.py",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_generate_system_diagram.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_system_diagram.py'] -> {'test_generate_system_diagram.py': 'pass'}"
     },
     {
       "script": "generate_chatgpt_audit_index.py",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_generate_chatgpt_audit_index.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_chatgpt_audit_index.py'] -> {'test_generate_chatgpt_audit_index.py': 'pass'}"
     },
     {
       "script": "generate_chatgpt_audit_request.py",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_generate_chatgpt_audit_request.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_chatgpt_audit_request.py'] -> {'test_generate_chatgpt_audit_request.py': 'pass'}"
     },
     {
       "script": "generate_chatgpt_promptbatch_request.py",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_generate_chatgpt_promptbatch_request.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_chatgpt_promptbatch_request.py'] -> {'test_generate_chatgpt_promptbatch_request.py': 'pass'}"
     },
     {
       "script": "generate_module_gap_audit_module_list.py",
@@ -476,10 +518,12 @@
     },
     {
       "script": "generate_prompt_coverage_report.py",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_generate_chatgpt_promptbatch_request.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_chatgpt_promptbatch_request.py'] -> {'test_generate_chatgpt_promptbatch_request.py': 'pass'}"
     },
     {
       "script": "generate_quick_reference.py",
@@ -792,10 +836,12 @@
     },
     {
       "script": "module_gap_audit_lib.py",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_generate_chatgpt_audit_request.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_generate_chatgpt_audit_request.py'] -> {'test_generate_chatgpt_audit_request.py': 'pass'}"
     },
     {
       "script": "notification_engine.py",
@@ -868,19 +914,23 @@
     },
     {
       "script": "policy_decision.py",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_ddl_authorization_check.py",
+        "test_decision_service.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_ddl_authorization_check.py', 'test_decision_service.py'] -> {'test_ddl_authorization_check.py': 'pass', 'test_decision_service.py': 'pass'}"
     },
     {
       "script": "preflight-guard.py",
       "referencing_tests": [
-        "test_check_crontab_unauthorized_change.py"
+        "test_check_crontab_unauthorized_change.py",
+        "test_doc_worker_entrypoint.py"
       ],
       "tests_pass": true,
       "complete_and_tested": true,
-      "evidence": "pytest ['test_check_crontab_unauthorized_change.py'] -> {'test_check_crontab_unauthorized_change.py': 'pass'}"
+      "evidence": "pytest ['test_check_crontab_unauthorized_change.py', 'test_doc_worker_entrypoint.py'] -> {'test_check_crontab_unauthorized_change.py': 'pass', 'test_doc_worker_entrypoint.py': 'pass'}"
     },
     {
       "script": "prompt_gateway/config.py",
@@ -888,8 +938,15 @@
         "test_automation_rule_engine.py",
         "test_backfill_phase_self_report.py",
         "test_cost_usage_60min.py",
+        "test_ddl_authorization_check.py",
+        "test_decision_service.py",
+        "test_deploy_live_scripts.py",
+        "test_doc_worker_entrypoint.py",
+        "test_full_server_file_registration.py",
+        "test_generate_chatgpt_audit_request.py",
         "test_generate_pm_report_v3.py",
         "test_pm_triage.py",
+        "test_reuse_verdict_engine.py",
         "test_stuck_task_heartbeat.py",
         "test_tight_task_validation.py",
         "test_worker_boot_activation_and_resume.py",
@@ -901,7 +958,7 @@
       ],
       "tests_pass": false,
       "complete_and_tested": false,
-      "evidence": "pytest ['test_automation_rule_engine.py', 'test_backfill_phase_self_report.py', 'test_cost_usage_60min.py', 'test_generate_pm_report_v3.py', 'test_pm_triage.py', 'test_stuck_task_heartbeat.py', 'test_tight_task_validation.py', 'test_worker_boot_activation_and_resume.py', 'tests/test_build_lock_liveness_guard_deployment.py', 'tests/test_external_agent_dispatch.py', 'tests/test_gtm_check_load_stress_testing.py', 'tests/test_mark_umr_terminal_structured_evidence.py', 'tests/test_rule5_real_stall_detection.py'] -> {'test_automation_rule_engine.py': 'pass', 'test_backfill_phase_self_report.py': 'pass', 'test_cost_usage_60min.py': 'pass', 'test_generate_pm_report_v3.py': 'pass', 'test_pm_triage.py': 'pass', 'test_stuck_task_heartbeat.py': 'pass', 'test_tight_task_validation.py': 'pass', 'test_worker_boot_activation_and_resume.py': 'pass', 'tests/test_build_lock_liveness_guard_deployment.py': 'fail', 'tests/test_external_agent_dispatch.py': 'pass', 'tests/test_gtm_check_load_stress_testing.py': 'pass', 'tests/test_mark_umr_terminal_structured_evidence.py': 'pass', 'tests/test_rule5_real_stall_detection.py': 'pass'}"
+      "evidence": "pytest ['test_automation_rule_engine.py', 'test_backfill_phase_self_report.py', 'test_cost_usage_60min.py', 'test_ddl_authorization_check.py', 'test_decision_service.py', 'test_deploy_live_scripts.py', 'test_doc_worker_entrypoint.py', 'test_full_server_file_registration.py', 'test_generate_chatgpt_audit_request.py', 'test_generate_pm_report_v3.py', 'test_pm_triage.py', 'test_reuse_verdict_engine.py', 'test_stuck_task_heartbeat.py', 'test_tight_task_validation.py', 'test_worker_boot_activation_and_resume.py', 'tests/test_build_lock_liveness_guard_deployment.py', 'tests/test_external_agent_dispatch.py', 'tests/test_gtm_check_load_stress_testing.py', 'tests/test_mark_umr_terminal_structured_evidence.py', 'tests/test_rule5_real_stall_detection.py'] -> {'test_automation_rule_engine.py': 'pass', 'test_backfill_phase_self_report.py': 'pass', 'test_cost_usage_60min.py': 'pass', 'test_ddl_authorization_check.py': 'pass', 'test_decision_service.py': 'pass', 'test_deploy_live_scripts.py': 'pass', 'test_doc_worker_entrypoint.py': 'pass', 'test_full_server_file_registration.py': 'fail', 'test_generate_chatgpt_audit_request.py': 'pass', 'test_generate_pm_report_v3.py': 'pass', 'test_pm_triage.py': 'pass', 'test_reuse_verdict_engine.py': 'pass', 'test_stuck_task_heartbeat.py': 'pass', 'test_tight_task_validation.py': 'pass', 'test_worker_boot_activation_and_resume.py': 'pass', 'tests/test_build_lock_liveness_guard_deployment.py': 'fail', 'tests/test_external_agent_dispatch.py': 'pass', 'tests/test_gtm_check_load_stress_testing.py': 'pass', 'tests/test_mark_umr_terminal_structured_evidence.py': 'pass', 'tests/test_rule5_real_stall_detection.py': 'pass'}"
     },
     {
       "script": "prompt_gateway/engine/classifier.py",
@@ -924,10 +981,12 @@
     },
     {
       "script": "prompt_gateway/engine/document_engine.py",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_document_engine.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_document_engine.py'] -> {'test_document_engine.py': 'pass'}"
     },
     {
       "script": "prompt_gateway/engine/id_generator.py",
@@ -970,11 +1029,12 @@
         "tests/test_mark_umr_terminal_structured_evidence.py",
         "tests/test_ocid_evidence_supersession.py",
         "tests/test_reconcile_dispatched_dead_zone.py",
-        "tests/test_reuse_check_unbounded_metadata_fix.py"
+        "tests/test_reuse_check_unbounded_metadata_fix.py",
+        "tests/test_umr_output_contract.py"
       ],
       "tests_pass": false,
       "complete_and_tested": false,
-      "evidence": "pytest ['test_apply_owner_dispatch_status_corrections.py', 'test_automation_rule_engine.py', 'test_generate_pm_report_v3.py', 'test_tight_task_validation.py', 'test_triage_owner_umr_24h.py', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py', 'tests/test_dispatch_owner_task_status_write.py', 'tests/test_mark_umr_terminal_structured_evidence.py', 'tests/test_ocid_evidence_supersession.py', 'tests/test_reconcile_dispatched_dead_zone.py', 'tests/test_reuse_check_unbounded_metadata_fix.py'] -> {'test_apply_owner_dispatch_status_corrections.py': 'pass', 'test_automation_rule_engine.py': 'pass', 'test_generate_pm_report_v3.py': 'pass', 'test_tight_task_validation.py': 'pass', 'test_triage_owner_umr_24h.py': 'fail', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py': 'pass', 'tests/test_dispatch_owner_task_status_write.py': 'pass', 'tests/test_mark_umr_terminal_structured_evidence.py': 'pass', 'tests/test_ocid_evidence_supersession.py': 'pass', 'tests/test_reconcile_dispatched_dead_zone.py': 'pass', 'tests/test_reuse_check_unbounded_metadata_fix.py': 'pass'}"
+      "evidence": "pytest ['test_apply_owner_dispatch_status_corrections.py', 'test_automation_rule_engine.py', 'test_generate_pm_report_v3.py', 'test_tight_task_validation.py', 'test_triage_owner_umr_24h.py', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py', 'tests/test_dispatch_owner_task_status_write.py', 'tests/test_mark_umr_terminal_structured_evidence.py', 'tests/test_ocid_evidence_supersession.py', 'tests/test_reconcile_dispatched_dead_zone.py', 'tests/test_reuse_check_unbounded_metadata_fix.py', 'tests/test_umr_output_contract.py'] -> {'test_apply_owner_dispatch_status_corrections.py': 'pass', 'test_automation_rule_engine.py': 'pass', 'test_generate_pm_report_v3.py': 'pass', 'test_tight_task_validation.py': 'pass', 'test_triage_owner_umr_24h.py': 'fail', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py': 'pass', 'tests/test_dispatch_owner_task_status_write.py': 'fail', 'tests/test_mark_umr_terminal_structured_evidence.py': 'pass', 'tests/test_ocid_evidence_supersession.py': 'pass', 'tests/test_reconcile_dispatched_dead_zone.py': 'pass', 'tests/test_reuse_check_unbounded_metadata_fix.py': 'pass', 'tests/test_umr_output_contract.py': 'pass'}"
     },
     {
       "script": "prompt_gateway/gateway_persistence.py",
@@ -987,7 +1047,9 @@
       "script": "prompt_gateway/query.py",
       "referencing_tests": [
         "test_batch_import_conversation_log.py",
+        "test_ddl_authorization_check.py",
         "test_generate_pm_report_v3.py",
+        "test_reuse_verdict_engine.py",
         "test_tight_task_validation.py",
         "test_triage_owner_umr_24h.py",
         "tests/test_audit_ocid_canonical_registry.py",
@@ -1001,7 +1063,7 @@
       ],
       "tests_pass": false,
       "complete_and_tested": false,
-      "evidence": "pytest ['test_batch_import_conversation_log.py', 'test_generate_pm_report_v3.py', 'test_tight_task_validation.py', 'test_triage_owner_umr_24h.py', 'tests/test_audit_ocid_canonical_registry.py', 'tests/test_audit_ocid_compliance_report.py', 'tests/test_evidence_json_schema_gate.py', 'tests/test_ocid_artifact_links.py', 'tests/test_ocid_canonical_registry.py', 'tests/test_ocid_evidence_supersession.py', 'tests/test_ocid_registry_completion_gate.py', 'tests/test_reuse_check_unbounded_metadata_fix.py'] -> {'test_batch_import_conversation_log.py': 'pass', 'test_generate_pm_report_v3.py': 'pass', 'test_tight_task_validation.py': 'pass', 'test_triage_owner_umr_24h.py': 'fail', 'tests/test_audit_ocid_canonical_registry.py': 'pass', 'tests/test_audit_ocid_compliance_report.py': 'pass', 'tests/test_evidence_json_schema_gate.py': 'pass', 'tests/test_ocid_artifact_links.py': 'pass', 'tests/test_ocid_canonical_registry.py': 'pass', 'tests/test_ocid_evidence_supersession.py': 'pass', 'tests/test_ocid_registry_completion_gate.py': 'pass', 'tests/test_reuse_check_unbounded_metadata_fix.py': 'pass'}"
+      "evidence": "pytest ['test_batch_import_conversation_log.py', 'test_ddl_authorization_check.py', 'test_generate_pm_report_v3.py', 'test_reuse_verdict_engine.py', 'test_tight_task_validation.py', 'test_triage_owner_umr_24h.py', 'tests/test_audit_ocid_canonical_registry.py', 'tests/test_audit_ocid_compliance_report.py', 'tests/test_evidence_json_schema_gate.py', 'tests/test_ocid_artifact_links.py', 'tests/test_ocid_canonical_registry.py', 'tests/test_ocid_evidence_supersession.py', 'tests/test_ocid_registry_completion_gate.py', 'tests/test_reuse_check_unbounded_metadata_fix.py'] -> {'test_batch_import_conversation_log.py': 'pass', 'test_ddl_authorization_check.py': 'pass', 'test_generate_pm_report_v3.py': 'pass', 'test_reuse_verdict_engine.py': 'pass', 'test_tight_task_validation.py': 'pass', 'test_triage_owner_umr_24h.py': 'fail', 'tests/test_audit_ocid_canonical_registry.py': 'pass', 'tests/test_audit_ocid_compliance_report.py': 'pass', 'tests/test_evidence_json_schema_gate.py': 'pass', 'tests/test_ocid_artifact_links.py': 'pass', 'tests/test_ocid_canonical_registry.py': 'pass', 'tests/test_ocid_evidence_supersession.py': 'pass', 'tests/test_ocid_registry_completion_gate.py': 'pass', 'tests/test_reuse_check_unbounded_metadata_fix.py': 'pass'}"
     },
     {
       "script": "prune_memory_backups.py",
@@ -1026,13 +1088,14 @@
     {
       "script": "quality-gate.sh",
       "referencing_tests": [
+        "test_doc_worker_entrypoint.py",
         "test_triage_owner_umr_24h.py",
         "tests/test_build_lock_contended_requeue.py",
         "tests/test_build_lock_liveness_guard.py"
       ],
       "tests_pass": false,
       "complete_and_tested": false,
-      "evidence": "pytest ['test_triage_owner_umr_24h.py', 'tests/test_build_lock_contended_requeue.py', 'tests/test_build_lock_liveness_guard.py'] -> {'test_triage_owner_umr_24h.py': 'fail', 'tests/test_build_lock_contended_requeue.py': 'pass', 'tests/test_build_lock_liveness_guard.py': 'pass'}"
+      "evidence": "pytest ['test_doc_worker_entrypoint.py', 'test_triage_owner_umr_24h.py', 'tests/test_build_lock_contended_requeue.py', 'tests/test_build_lock_liveness_guard.py'] -> {'test_doc_worker_entrypoint.py': 'pass', 'test_triage_owner_umr_24h.py': 'fail', 'tests/test_build_lock_contended_requeue.py': 'pass', 'tests/test_build_lock_liveness_guard.py': 'pass'}"
     },
     {
       "script": "reconcile_dispatched_dead_zone.py",
@@ -1080,6 +1143,7 @@
     {
       "script": "resource_governor.py",
       "referencing_tests": [
+        "test_dispatch_docworker_task.py",
         "test_generate_software_catalog.py",
         "test_stuck_task_heartbeat.py",
         "test_worker_boot_activation_and_resume.py",
@@ -1103,9 +1167,9 @@
         "tests/test_run_tick_continues_past_row_resolved_skip.py",
         "tests/test_umr_reuse_on_resume.py"
       ],
-      "tests_pass": true,
-      "complete_and_tested": true,
-      "evidence": "pytest ['test_generate_software_catalog.py', 'test_stuck_task_heartbeat.py', 'test_worker_boot_activation_and_resume.py', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py', 'tests/test_build_lock_contended_requeue.py', 'tests/test_directive_engine_retry_gate.py', 'tests/test_dispatch_owner_task_status_write.py', 'tests/test_flag_stale_queued_tasks.py', 'tests/test_ocid_artifact_links.py', 'tests/test_ocid_evidence_supersession.py', 'tests/test_reconcile_owner_dispatch_status.py', 'tests/test_reconcile_stale_heartbeats_execute_gate.py', 'tests/test_resolve_superboss_db_path.py', 'tests/test_resume_interrupted_workers_no_duplicate_row.py', 'tests/test_reuse_check_unbounded_metadata_fix.py', 'tests/test_rule2_dispatch_outcomes.py', 'tests/test_rule3_no_premature_umr_minting.py', 'tests/test_rule4_pm_visible_real_counts.py', 'tests/test_rule5_real_stall_detection.py', 'tests/test_rule6_zero_duplication_by_ocid.py', 'tests/test_run_tick_continues_past_row_resolved_skip.py', 'tests/test_umr_reuse_on_resume.py'] -> {'test_generate_software_catalog.py': 'pass', 'test_stuck_task_heartbeat.py': 'pass', 'test_worker_boot_activation_and_resume.py': 'pass', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py': 'pass', 'tests/test_build_lock_contended_requeue.py': 'pass', 'tests/test_directive_engine_retry_gate.py': 'pass', 'tests/test_dispatch_owner_task_status_write.py': 'pass', 'tests/test_flag_stale_queued_tasks.py': 'pass', 'tests/test_ocid_artifact_links.py': 'pass', 'tests/test_ocid_evidence_supersession.py': 'pass', 'tests/test_reconcile_owner_dispatch_status.py': 'pass', 'tests/test_reconcile_stale_heartbeats_execute_gate.py': 'pass', 'tests/test_resolve_superboss_db_path.py': 'pass', 'tests/test_resume_interrupted_workers_no_duplicate_row.py': 'pass', 'tests/test_reuse_check_unbounded_metadata_fix.py': 'pass', 'tests/test_rule2_dispatch_outcomes.py': 'pass', 'tests/test_rule3_no_premature_umr_minting.py': 'pass', 'tests/test_rule4_pm_visible_real_counts.py': 'pass', 'tests/test_rule5_real_stall_detection.py': 'pass', 'tests/test_rule6_zero_duplication_by_ocid.py': 'pass', 'tests/test_run_tick_continues_past_row_resolved_skip.py': 'pass', 'tests/test_umr_reuse_on_resume.py': 'pass'}"
+      "tests_pass": false,
+      "complete_and_tested": false,
+      "evidence": "pytest ['test_dispatch_docworker_task.py', 'test_generate_software_catalog.py', 'test_stuck_task_heartbeat.py', 'test_worker_boot_activation_and_resume.py', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py', 'tests/test_build_lock_contended_requeue.py', 'tests/test_directive_engine_retry_gate.py', 'tests/test_dispatch_owner_task_status_write.py', 'tests/test_flag_stale_queued_tasks.py', 'tests/test_ocid_artifact_links.py', 'tests/test_ocid_evidence_supersession.py', 'tests/test_reconcile_owner_dispatch_status.py', 'tests/test_reconcile_stale_heartbeats_execute_gate.py', 'tests/test_resolve_superboss_db_path.py', 'tests/test_resume_interrupted_workers_no_duplicate_row.py', 'tests/test_reuse_check_unbounded_metadata_fix.py', 'tests/test_rule2_dispatch_outcomes.py', 'tests/test_rule3_no_premature_umr_minting.py', 'tests/test_rule4_pm_visible_real_counts.py', 'tests/test_rule5_real_stall_detection.py', 'tests/test_rule6_zero_duplication_by_ocid.py', 'tests/test_run_tick_continues_past_row_resolved_skip.py', 'tests/test_umr_reuse_on_resume.py'] -> {'test_dispatch_docworker_task.py': 'pass', 'test_generate_software_catalog.py': 'pass', 'test_stuck_task_heartbeat.py': 'pass', 'test_worker_boot_activation_and_resume.py': 'pass', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py': 'pass', 'tests/test_build_lock_contended_requeue.py': 'pass', 'tests/test_directive_engine_retry_gate.py': 'pass', 'tests/test_dispatch_owner_task_status_write.py': 'fail', 'tests/test_flag_stale_queued_tasks.py': 'pass', 'tests/test_ocid_artifact_links.py': 'pass', 'tests/test_ocid_evidence_supersession.py': 'pass', 'tests/test_reconcile_owner_dispatch_status.py': 'pass', 'tests/test_reconcile_stale_heartbeats_execute_gate.py': 'pass', 'tests/test_resolve_superboss_db_path.py': 'pass', 'tests/test_resume_interrupted_workers_no_duplicate_row.py': 'pass', 'tests/test_reuse_check_unbounded_metadata_fix.py': 'pass', 'tests/test_rule2_dispatch_outcomes.py': 'pass', 'tests/test_rule3_no_premature_umr_minting.py': 'pass', 'tests/test_rule4_pm_visible_real_counts.py': 'pass', 'tests/test_rule5_real_stall_detection.py': 'pass', 'tests/test_rule6_zero_duplication_by_ocid.py': 'pass', 'tests/test_run_tick_continues_past_row_resolved_skip.py': 'pass', 'tests/test_umr_reuse_on_resume.py': 'pass'}"
     },
     {
       "script": "resource_governor_tick_loop.sh",
@@ -1115,11 +1179,22 @@
       "evidence": "no test file references this script by name -- NO real test evidence found"
     },
     {
+      "script": "reuse_verdict_engine.py",
+      "referencing_tests": [
+        "test_reuse_verdict_engine.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_reuse_verdict_engine.py'] -> {'test_reuse_verdict_engine.py': 'pass'}"
+    },
+    {
       "script": "risk-tier.py",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_decision_service.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_decision_service.py'] -> {'test_decision_service.py': 'pass'}"
     },
     {
       "script": "run-logged.sh",
@@ -1176,10 +1251,16 @@
         "test_automation_rule_engine.py",
         "test_batch_import_conversation_log.py",
         "test_context_engine.py",
+        "test_decision_service.py",
         "test_dedup_constraints_2026-07-31.py",
+        "test_doc_worker_entrypoint.py",
+        "test_document_engine.py",
+        "test_full_server_file_registration.py",
+        "test_generate_chatgpt_promptbatch_request.py",
         "test_generate_pm_report_v3.py",
         "test_pm_cycle_precheck.py",
         "test_regenerate_master_index.py",
+        "test_reuse_verdict_engine.py",
         "test_tight_task_validation.py",
         "test_triage_owner_umr_24h.py",
         "test_umr_completion_percentage.py",
@@ -1215,12 +1296,13 @@
         "tests/test_rule6_zero_duplication_by_ocid.py",
         "tests/test_run_tick_continues_past_row_resolved_skip.py",
         "tests/test_snapshot_memory_backup.py",
+        "tests/test_umr_output_contract.py",
         "tests/test_umr_reuse_on_resume.py",
         "tests/test_wiring_registry_umr_and_version.py"
       ],
       "tests_pass": false,
       "complete_and_tested": false,
-      "evidence": "pytest ['test_agent_work_briefing.py', 'test_ai_agent_registry.py', 'test_apply_owner_dispatch_status_corrections.py', 'test_automation_rule_engine.py', 'test_batch_import_conversation_log.py', 'test_context_engine.py', 'test_dedup_constraints_2026-07-31.py', 'test_generate_pm_report_v3.py', 'test_pm_cycle_precheck.py', 'test_regenerate_master_index.py', 'test_tight_task_validation.py', 'test_triage_owner_umr_24h.py', 'test_umr_completion_percentage.py', 'tests/test_audit_ocid_canonical_registry.py', 'tests/test_audit_ocid_compliance_report.py', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py', 'tests/test_build_lock_contended_requeue.py', 'tests/test_directive_engine_retry_gate.py', 'tests/test_dispatch_owner_task_status_write.py', 'tests/test_dispatch_owner_task_tmux_relay_lock.py', 'tests/test_evidence_json_schema_gate.py', 'tests/test_external_agent_dispatch.py', 'tests/test_flag_stale_queued_tasks.py', 'tests/test_mark_umr_terminal_structured_evidence.py', 'tests/test_ocid_068_compliance.py', 'tests/test_ocid_artifact_links.py', 'tests/test_ocid_canonical_registry.py', 'tests/test_ocid_evidence_supersession.py', 'tests/test_ocid_master_standard_phase1.py', 'tests/test_ocid_registry_completion_gate.py', 'tests/test_pm_decisions_pending.py', 'tests/test_prune_memory_backups.py', 'tests/test_reconcile_dispatched_dead_zone.py', 'tests/test_reconcile_owner_dispatch_status.py', 'tests/test_reconcile_stale_heartbeats_execute_gate.py', 'tests/test_resolve_superboss_db_path.py', 'tests/test_resume_interrupted_workers_no_duplicate_row.py', 'tests/test_reuse_check_unbounded_metadata_fix.py', 'tests/test_rule2_dispatch_outcomes.py', 'tests/test_rule3_no_premature_umr_minting.py', 'tests/test_rule4_pm_visible_real_counts.py', 'tests/test_rule5_real_stall_detection.py', 'tests/test_rule6_zero_duplication_by_ocid.py', 'tests/test_run_tick_continues_past_row_resolved_skip.py', 'tests/test_snapshot_memory_backup.py', 'tests/test_umr_reuse_on_resume.py', 'tests/test_wiring_registry_umr_and_version.py'] -> {'test_agent_work_briefing.py': 'pass', 'test_ai_agent_registry.py': 'pass', 'test_apply_owner_dispatch_status_corrections.py': 'pass', 'test_automation_rule_engine.py': 'pass', 'test_batch_import_conversation_log.py': 'pass', 'test_context_engine.py': 'pass', 'test_dedup_constraints_2026-07-31.py': 'pass', 'test_generate_pm_report_v3.py': 'pass', 'test_pm_cycle_precheck.py': 'pass', 'test_regenerate_master_index.py': 'pass', 'test_tight_task_validation.py': 'pass', 'test_triage_owner_umr_24h.py': 'fail', 'test_umr_completion_percentage.py': 'pass', 'tests/test_audit_ocid_canonical_registry.py': 'pass', 'tests/test_audit_ocid_compliance_report.py': 'pass', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py': 'pass', 'tests/test_build_lock_contended_requeue.py': 'pass', 'tests/test_directive_engine_retry_gate.py': 'pass', 'tests/test_dispatch_owner_task_status_write.py': 'pass', 'tests/test_dispatch_owner_task_tmux_relay_lock.py': 'pass', 'tests/test_evidence_json_schema_gate.py': 'pass', 'tests/test_external_agent_dispatch.py': 'pass', 'tests/test_flag_stale_queued_tasks.py': 'pass', 'tests/test_mark_umr_terminal_structured_evidence.py': 'pass', 'tests/test_ocid_068_compliance.py': 'pass', 'tests/test_ocid_artifact_links.py': 'pass', 'tests/test_ocid_canonical_registry.py': 'pass', 'tests/test_ocid_evidence_supersession.py': 'pass', 'tests/test_ocid_master_standard_phase1.py': 'pass', 'tests/test_ocid_registry_completion_gate.py': 'pass', 'tests/test_pm_decisions_pending.py': 'pass', 'tests/test_prune_memory_backups.py': 'pass', 'tests/test_reconcile_dispatched_dead_zone.py': 'pass', 'tests/test_reconcile_owner_dispatch_status.py': 'pass', 'tests/test_reconcile_stale_heartbeats_execute_gate.py': 'pass', 'tests/test_resolve_superboss_db_path.py': 'pass', 'tests/test_resume_interrupted_workers_no_duplicate_row.py': 'pass', 'tests/test_reuse_check_unbounded_metadata_fix.py': 'pass', 'tests/test_rule2_dispatch_outcomes.py': 'pass', 'tests/test_rule3_no_premature_umr_minting.py': 'pass', 'tests/test_rule4_pm_visible_real_counts.py': 'pass', 'tests/test_rule5_real_stall_detection.py': 'pass', 'tests/test_rule6_zero_duplication_by_ocid.py': 'pass', 'tests/test_run_tick_continues_past_row_resolved_skip.py': 'pass', 'tests/test_snapshot_memory_backup.py': 'pass', 'tests/test_umr_reuse_on_resume.py': 'pass', 'tests/test_wiring_registry_umr_and_version.py': 'pass'}"
+      "evidence": "pytest ['test_agent_work_briefing.py', 'test_ai_agent_registry.py', 'test_apply_owner_dispatch_status_corrections.py', 'test_automation_rule_engine.py', 'test_batch_import_conversation_log.py', 'test_context_engine.py', 'test_decision_service.py', 'test_dedup_constraints_2026-07-31.py', 'test_doc_worker_entrypoint.py', 'test_document_engine.py', 'test_full_server_file_registration.py', 'test_generate_chatgpt_promptbatch_request.py', 'test_generate_pm_report_v3.py', 'test_pm_cycle_precheck.py', 'test_regenerate_master_index.py', 'test_reuse_verdict_engine.py', 'test_tight_task_validation.py', 'test_triage_owner_umr_24h.py', 'test_umr_completion_percentage.py', 'tests/test_audit_ocid_canonical_registry.py', 'tests/test_audit_ocid_compliance_report.py', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py', 'tests/test_build_lock_contended_requeue.py', 'tests/test_directive_engine_retry_gate.py', 'tests/test_dispatch_owner_task_status_write.py', 'tests/test_dispatch_owner_task_tmux_relay_lock.py', 'tests/test_evidence_json_schema_gate.py', 'tests/test_external_agent_dispatch.py', 'tests/test_flag_stale_queued_tasks.py', 'tests/test_mark_umr_terminal_structured_evidence.py', 'tests/test_ocid_068_compliance.py', 'tests/test_ocid_artifact_links.py', 'tests/test_ocid_canonical_registry.py', 'tests/test_ocid_evidence_supersession.py', 'tests/test_ocid_master_standard_phase1.py', 'tests/test_ocid_registry_completion_gate.py', 'tests/test_pm_decisions_pending.py', 'tests/test_prune_memory_backups.py', 'tests/test_reconcile_dispatched_dead_zone.py', 'tests/test_reconcile_owner_dispatch_status.py', 'tests/test_reconcile_stale_heartbeats_execute_gate.py', 'tests/test_resolve_superboss_db_path.py', 'tests/test_resume_interrupted_workers_no_duplicate_row.py', 'tests/test_reuse_check_unbounded_metadata_fix.py', 'tests/test_rule2_dispatch_outcomes.py', 'tests/test_rule3_no_premature_umr_minting.py', 'tests/test_rule4_pm_visible_real_counts.py', 'tests/test_rule5_real_stall_detection.py', 'tests/test_rule6_zero_duplication_by_ocid.py', 'tests/test_run_tick_continues_past_row_resolved_skip.py', 'tests/test_snapshot_memory_backup.py', 'tests/test_umr_output_contract.py', 'tests/test_umr_reuse_on_resume.py', 'tests/test_wiring_registry_umr_and_version.py'] -> {'test_agent_work_briefing.py': 'pass', 'test_ai_agent_registry.py': 'pass', 'test_apply_owner_dispatch_status_corrections.py': 'pass', 'test_automation_rule_engine.py': 'pass', 'test_batch_import_conversation_log.py': 'pass', 'test_context_engine.py': 'pass', 'test_decision_service.py': 'pass', 'test_dedup_constraints_2026-07-31.py': 'pass', 'test_doc_worker_entrypoint.py': 'pass', 'test_document_engine.py': 'pass', 'test_full_server_file_registration.py': 'fail', 'test_generate_chatgpt_promptbatch_request.py': 'pass', 'test_generate_pm_report_v3.py': 'pass', 'test_pm_cycle_precheck.py': 'pass', 'test_regenerate_master_index.py': 'pass', 'test_reuse_verdict_engine.py': 'pass', 'test_tight_task_validation.py': 'pass', 'test_triage_owner_umr_24h.py': 'fail', 'test_umr_completion_percentage.py': 'pass', 'tests/test_audit_ocid_canonical_registry.py': 'pass', 'tests/test_audit_ocid_compliance_report.py': 'pass', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py': 'pass', 'tests/test_build_lock_contended_requeue.py': 'pass', 'tests/test_directive_engine_retry_gate.py': 'pass', 'tests/test_dispatch_owner_task_status_write.py': 'fail', 'tests/test_dispatch_owner_task_tmux_relay_lock.py': 'fail', 'tests/test_evidence_json_schema_gate.py': 'pass', 'tests/test_external_agent_dispatch.py': 'pass', 'tests/test_flag_stale_queued_tasks.py': 'pass', 'tests/test_mark_umr_terminal_structured_evidence.py': 'pass', 'tests/test_ocid_068_compliance.py': 'pass', 'tests/test_ocid_artifact_links.py': 'pass', 'tests/test_ocid_canonical_registry.py': 'pass', 'tests/test_ocid_evidence_supersession.py': 'pass', 'tests/test_ocid_master_standard_phase1.py': 'pass', 'tests/test_ocid_registry_completion_gate.py': 'pass', 'tests/test_pm_decisions_pending.py': 'pass', 'tests/test_prune_memory_backups.py': 'pass', 'tests/test_reconcile_dispatched_dead_zone.py': 'pass', 'tests/test_reconcile_owner_dispatch_status.py': 'pass', 'tests/test_reconcile_stale_heartbeats_execute_gate.py': 'pass', 'tests/test_resolve_superboss_db_path.py': 'pass', 'tests/test_resume_interrupted_workers_no_duplicate_row.py': 'pass', 'tests/test_reuse_check_unbounded_metadata_fix.py': 'pass', 'tests/test_rule2_dispatch_outcomes.py': 'pass', 'tests/test_rule3_no_premature_umr_minting.py': 'pass', 'tests/test_rule4_pm_visible_real_counts.py': 'pass', 'tests/test_rule5_real_stall_detection.py': 'pass', 'tests/test_rule6_zero_duplication_by_ocid.py': 'pass', 'tests/test_run_tick_continues_past_row_resolved_skip.py': 'pass', 'tests/test_snapshot_memory_backup.py': 'pass', 'tests/test_umr_output_contract.py': 'pass', 'tests/test_umr_reuse_on_resume.py': 'pass', 'tests/test_wiring_registry_umr_and_version.py': 'pass'}"
     },
     {
       "script": "supervisor-entrypoint.sh",
@@ -1314,11 +1396,19 @@
     {
       "script": "umr_completion_percentage.py",
       "referencing_tests": [
-        "test_umr_completion_percentage.py"
+        "test_umr_completion_percentage.py",
+        "tests/test_umr_output_contract.py"
       ],
       "tests_pass": true,
       "complete_and_tested": true,
-      "evidence": "pytest ['test_umr_completion_percentage.py'] -> {'test_umr_completion_percentage.py': 'pass'}"
+      "evidence": "pytest ['test_umr_completion_percentage.py', 'tests/test_umr_output_contract.py'] -> {'test_umr_completion_percentage.py': 'pass', 'tests/test_umr_output_contract.py': 'pass'}"
+    },
+    {
+      "script": "vector_similarity.py",
+      "referencing_tests": [],
+      "tests_pass": null,
+      "complete_and_tested": false,
+      "evidence": "no test file references this script by name -- NO real test evidence found"
     },
     {
       "script": "veridian-task-watchdog.py",
@@ -1331,9 +1421,12 @@
       "script": "veridian-task.py",
       "referencing_tests": [
         "test_checkpoint_blocked_completion_guard.py",
+        "test_dispatch_docworker_task.py",
+        "test_doc_worker_entrypoint.py",
         "test_generate_pm_report_v3.py",
         "test_ocid063_handoff_envelope.py",
         "test_worker_boot_activation_and_resume.py",
+        "tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py",
         "tests/test_build_lock_contended_requeue.py",
         "tests/test_checkpoint_prunes_node_modules_on_terminal_status.py",
         "tests/test_directive_engine_retry_gate.py",
@@ -1347,11 +1440,12 @@
         "tests/test_rule3_no_premature_umr_minting.py",
         "tests/test_rule6_zero_duplication_by_ocid.py",
         "tests/test_rule7_completion_evidence.py",
-        "tests/test_run_tick_continues_past_row_resolved_skip.py"
+        "tests/test_run_tick_continues_past_row_resolved_skip.py",
+        "tests/test_umr_output_contract.py"
       ],
-      "tests_pass": true,
-      "complete_and_tested": true,
-      "evidence": "pytest ['test_checkpoint_blocked_completion_guard.py', 'test_generate_pm_report_v3.py', 'test_ocid063_handoff_envelope.py', 'test_worker_boot_activation_and_resume.py', 'tests/test_build_lock_contended_requeue.py', 'tests/test_checkpoint_prunes_node_modules_on_terminal_status.py', 'tests/test_directive_engine_retry_gate.py', 'tests/test_dispatch_owner_task_status_write.py', 'tests/test_flag_stale_queued_tasks.py', 'tests/test_mark_umr_terminal_structured_evidence.py', 'tests/test_ocid_artifact_links.py', 'tests/test_ocid_evidence_supersession.py', 'tests/test_prune_task_node_modules.py', 'tests/test_reconcile_dispatched_dead_zone.py', 'tests/test_rule3_no_premature_umr_minting.py', 'tests/test_rule6_zero_duplication_by_ocid.py', 'tests/test_rule7_completion_evidence.py', 'tests/test_run_tick_continues_past_row_resolved_skip.py'] -> {'test_checkpoint_blocked_completion_guard.py': 'pass', 'test_generate_pm_report_v3.py': 'pass', 'test_ocid063_handoff_envelope.py': 'pass', 'test_worker_boot_activation_and_resume.py': 'pass', 'tests/test_build_lock_contended_requeue.py': 'pass', 'tests/test_checkpoint_prunes_node_modules_on_terminal_status.py': 'pass', 'tests/test_directive_engine_retry_gate.py': 'pass', 'tests/test_dispatch_owner_task_status_write.py': 'pass', 'tests/test_flag_stale_queued_tasks.py': 'pass', 'tests/test_mark_umr_terminal_structured_evidence.py': 'pass', 'tests/test_ocid_artifact_links.py': 'pass', 'tests/test_ocid_evidence_supersession.py': 'pass', 'tests/test_prune_task_node_modules.py': 'pass', 'tests/test_reconcile_dispatched_dead_zone.py': 'pass', 'tests/test_rule3_no_premature_umr_minting.py': 'pass', 'tests/test_rule6_zero_duplication_by_ocid.py': 'pass', 'tests/test_rule7_completion_evidence.py': 'pass', 'tests/test_run_tick_continues_past_row_resolved_skip.py': 'pass'}"
+      "tests_pass": false,
+      "complete_and_tested": false,
+      "evidence": "pytest ['test_checkpoint_blocked_completion_guard.py', 'test_dispatch_docworker_task.py', 'test_doc_worker_entrypoint.py', 'test_generate_pm_report_v3.py', 'test_ocid063_handoff_envelope.py', 'test_worker_boot_activation_and_resume.py', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py', 'tests/test_build_lock_contended_requeue.py', 'tests/test_checkpoint_prunes_node_modules_on_terminal_status.py', 'tests/test_directive_engine_retry_gate.py', 'tests/test_dispatch_owner_task_status_write.py', 'tests/test_flag_stale_queued_tasks.py', 'tests/test_mark_umr_terminal_structured_evidence.py', 'tests/test_ocid_artifact_links.py', 'tests/test_ocid_evidence_supersession.py', 'tests/test_prune_task_node_modules.py', 'tests/test_reconcile_dispatched_dead_zone.py', 'tests/test_rule3_no_premature_umr_minting.py', 'tests/test_rule6_zero_duplication_by_ocid.py', 'tests/test_rule7_completion_evidence.py', 'tests/test_run_tick_continues_past_row_resolved_skip.py', 'tests/test_umr_output_contract.py'] -> {'test_checkpoint_blocked_completion_guard.py': 'pass', 'test_dispatch_docworker_task.py': 'pass', 'test_doc_worker_entrypoint.py': 'pass', 'test_generate_pm_report_v3.py': 'pass', 'test_ocid063_handoff_envelope.py': 'pass', 'test_worker_boot_activation_and_resume.py': 'pass', 'tests/test_backfill_null_heartbeats_task_yaml_crosscheck.py': 'pass', 'tests/test_build_lock_contended_requeue.py': 'pass', 'tests/test_checkpoint_prunes_node_modules_on_terminal_status.py': 'pass', 'tests/test_directive_engine_retry_gate.py': 'pass', 'tests/test_dispatch_owner_task_status_write.py': 'fail', 'tests/test_flag_stale_queued_tasks.py': 'pass', 'tests/test_mark_umr_terminal_structured_evidence.py': 'pass', 'tests/test_ocid_artifact_links.py': 'pass', 'tests/test_ocid_evidence_supersession.py': 'pass', 'tests/test_prune_task_node_modules.py': 'pass', 'tests/test_reconcile_dispatched_dead_zone.py': 'pass', 'tests/test_rule3_no_premature_umr_minting.py': 'pass', 'tests/test_rule6_zero_duplication_by_ocid.py': 'pass', 'tests/test_rule7_completion_evidence.py': 'pass', 'tests/test_run_tick_continues_past_row_resolved_skip.py': 'pass', 'tests/test_umr_output_contract.py': 'pass'}"
     },
     {
       "script": "veridian_remediation_dispatcher.py",
@@ -1392,10 +1486,12 @@
     },
     {
       "script": "worker-entrypoint.sh",
-      "referencing_tests": [],
-      "tests_pass": null,
-      "complete_and_tested": false,
-      "evidence": "no test file references this script by name -- NO real test evidence found"
+      "referencing_tests": [
+        "test_doc_worker_entrypoint.py"
+      ],
+      "tests_pass": true,
+      "complete_and_tested": true,
+      "evidence": "pytest ['test_doc_worker_entrypoint.py'] -> {'test_doc_worker_entrypoint.py': 'pass'}"
     },
     {
       "script": "workflow_contract.py",
@@ -1415,7 +1511,7 @@
   "tables": [
     {
       "table": "actions",
-      "row_count": 30723,
+      "row_count": 31327,
       "linked_scripts_count": 16,
       "linked_scripts": [
         "batch-import-conversation-log.py",
@@ -1428,11 +1524,11 @@
         "resource_governor.py"
       ],
       "complete_and_tested": true,
-      "evidence": "live COUNT(*)=30723; referenced by 16 real script(s)"
+      "evidence": "live COUNT(*)=31327; referenced by 16 real script(s)"
     },
     {
       "table": "ai_agent_registry",
-      "row_count": 49,
+      "row_count": 62,
       "linked_scripts_count": 4,
       "linked_scripts": [
         "agent_work_briefing.py",
@@ -1441,7 +1537,7 @@
         "worker-entrypoint.sh"
       ],
       "complete_and_tested": true,
-      "evidence": "live COUNT(*)=49; referenced by 4 real script(s)"
+      "evidence": "live COUNT(*)=62; referenced by 4 real script(s)"
     },
     {
       "table": "audit_events",
@@ -1517,8 +1613,8 @@
     },
     {
       "table": "capability_registry",
-      "row_count": 24,
-      "linked_scripts_count": 19,
+      "row_count": 26,
+      "linked_scripts_count": 21,
       "linked_scripts": [
         "agent_work_briefing.py",
         "ai_agent_registry.py",
@@ -1530,7 +1626,7 @@
         "generate_prompt_coverage_report.py"
       ],
       "complete_and_tested": true,
-      "evidence": "live COUNT(*)=24; referenced by 19 real script(s)"
+      "evidence": "live COUNT(*)=26; referenced by 21 real script(s)"
     },
     {
       "table": "conversation_memory",
@@ -1618,7 +1714,7 @@
     },
     {
       "table": "instructions",
-      "row_count": 3649,
+      "row_count": 3673,
       "linked_scripts_count": 12,
       "linked_scripts": [
         "batch-import-conversation-log.py",
@@ -1631,17 +1727,18 @@
         "prompt_gateway/gateway.py"
       ],
       "complete_and_tested": true,
-      "evidence": "live COUNT(*)=3649; referenced by 12 real script(s)"
+      "evidence": "live COUNT(*)=3673; referenced by 12 real script(s)"
     },
     {
       "table": "intent_unmatched_log",
-      "row_count": 4,
-      "linked_scripts_count": 1,
+      "row_count": 7,
+      "linked_scripts_count": 2,
       "linked_scripts": [
-        "intent_engine.py"
+        "intent_engine.py",
+        "resource_governor.py"
       ],
       "complete_and_tested": true,
-      "evidence": "live COUNT(*)=4; referenced by 1 real script(s)"
+      "evidence": "live COUNT(*)=7; referenced by 2 real script(s)"
     },
     {
       "table": "knowledge_engine",
@@ -1727,34 +1824,36 @@
     {
       "table": "ocid_compliance_audit_log",
       "row_count": 2938,
-      "linked_scripts_count": 2,
+      "linked_scripts_count": 3,
       "linked_scripts": [
         "audit_ocid_compliance.py",
+        "resource_governor.py",
         "superboss-register.py"
       ],
       "complete_and_tested": true,
-      "evidence": "live COUNT(*)=2938; referenced by 2 real script(s)"
+      "evidence": "live COUNT(*)=2938; referenced by 3 real script(s)"
     },
     {
       "table": "ocid_compliance_state",
       "row_count": 113,
-      "linked_scripts_count": 2,
+      "linked_scripts_count": 3,
       "linked_scripts": [
         "audit_ocid_compliance.py",
+        "resource_governor.py",
         "superboss-register.py"
       ],
       "complete_and_tested": true,
-      "evidence": "live COUNT(*)=113; referenced by 2 real script(s)"
+      "evidence": "live COUNT(*)=113; referenced by 3 real script(s)"
     },
     {
       "table": "ocid_master_standard_audit_log",
-      "row_count": 131,
+      "row_count": 142,
       "linked_scripts_count": 1,
       "linked_scripts": [
         "superboss-register.py"
       ],
       "complete_and_tested": true,
-      "evidence": "live COUNT(*)=131; referenced by 1 real script(s)"
+      "evidence": "live COUNT(*)=142; referenced by 1 real script(s)"
     },
     {
       "table": "orchestrator_executions",
@@ -1793,7 +1892,7 @@
     },
     {
       "table": "pm_decisions_pending",
-      "row_count": 497,
+      "row_count": 517,
       "linked_scripts_count": 9,
       "linked_scripts": [
         "build_lock_liveness_guard.py",
@@ -1806,11 +1905,11 @@
         "snapshot_memory_backup.py"
       ],
       "complete_and_tested": true,
-      "evidence": "live COUNT(*)=497; referenced by 9 real script(s)"
+      "evidence": "live COUNT(*)=517; referenced by 9 real script(s)"
     },
     {
       "table": "pm_report_snapshots",
-      "row_count": 193,
+      "row_count": 232,
       "linked_scripts_count": 3,
       "linked_scripts": [
         "generate_pm_report_v3.py",
@@ -1818,7 +1917,7 @@
         "superboss-register.py"
       ],
       "complete_and_tested": true,
-      "evidence": "live COUNT(*)=193; referenced by 3 real script(s)"
+      "evidence": "live COUNT(*)=232; referenced by 3 real script(s)"
     },
     {
       "table": "prompt_templates",
@@ -1912,7 +2011,7 @@
     },
     {
       "table": "umr_tasks",
-      "row_count": 8027,
+      "row_count": 8053,
       "linked_scripts_count": 28,
       "linked_scripts": [
         "agent_work_briefing.py",
@@ -1925,7 +2024,7 @@
         "dispatch-tick.py"
       ],
       "complete_and_tested": true,
-      "evidence": "live COUNT(*)=8027; referenced by 28 real script(s)"
+      "evidence": "live COUNT(*)=8053; referenced by 28 real script(s)"
     },
     {
       "table": "unregistered_mentions",
@@ -1940,8 +2039,8 @@
     },
     {
       "table": "wiring_registry",
-      "row_count": 24336,
-      "linked_scripts_count": 17,
+      "row_count": 24368,
+      "linked_scripts_count": 19,
       "linked_scripts": [
         "agent_work_briefing.py",
         "build_and_apply_timer_records.py",
@@ -1953,11 +2052,11 @@
         "plan_generator.py"
       ],
       "complete_and_tested": true,
-      "evidence": "live COUNT(*)=24336; referenced by 17 real script(s)"
+      "evidence": "live COUNT(*)=24368; referenced by 19 real script(s)"
     },
     {
       "table": "work_items",
-      "row_count": 2250,
+      "row_count": 2294,
       "linked_scripts_count": 11,
       "linked_scripts": [
         "generate-system-diagram.py",
@@ -1970,7 +2069,7 @@
         "regenerate_master_index.py"
       ],
       "complete_and_tested": true,
-      "evidence": "live COUNT(*)=2250; referenced by 11 real script(s)"
+      "evidence": "live COUNT(*)=2294; referenced by 11 real script(s)"
     }
   ],
   "search": [
@@ -1979,8 +2078,8 @@
       "base_table": "instructions",
       "works": true,
       "seed_term": "Confirm",
-      "hits": 596,
-      "evidence": "seeded real word 'Confirm' from live instructions_fts.raw_text, via real _fts_query() -> MATCH returned 596 row(s)"
+      "hits": 602,
+      "evidence": "seeded real word 'Confirm' from live instructions_fts.raw_text, via real _fts_query() -> MATCH returned 602 row(s)"
     },
     {
       "fts_table": "work_items_fts",
@@ -2011,8 +2110,8 @@
       "base_table": "actions",
       "works": true,
       "seed_term": "start",
-      "hits": 8595,
-      "evidence": "seeded real word 'start' from live actions_fts.utm_content, via real _fts_query() -> MATCH returned 8595 row(s)"
+      "hits": 8675,
+      "evidence": "seeded real word 'start' from live actions_fts.utm_content, via real _fts_query() -> MATCH returned 8675 row(s)"
     },
     {
       "fts_table": "knowledge_engine_fts",
@@ -2063,6 +2162,6 @@
       "evidence": "seeded real word 'veridian' from live wiring_registry_fts.path, via real _fts_query() -> MATCH returned 17896 row(s)"
     }
   ],
-  "pytest_summary": "3 failed, 790 passed in 121.35s (0:02:01)",
+  "pytest_summary": "8 failed, 960 passed, 17 errors in 131.26s (0:02:11)",
   "pytest_returncode": 1
 }

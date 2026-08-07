@@ -10,6 +10,20 @@ Type=simple
 WorkingDirectory=/opt/veridian/ai-os/tasks/%i
 EnvironmentFile=/opt/veridian/shared/.env
 ExecStart=/opt/veridian/scripts/worker-entrypoint.sh %i
+# 2026-08-07 RCA fix (task-20260807-052027-platform-integrity--worker-units-exit-0):
+# real root cause of 32 confirmed rows stuck at umr_tasks.status='running' forever
+# (ages 0.9h-5.3h, unit inactive, ExecMainStatus=0, Result=success) was that every
+# "give up, no more retries" exit path in worker-entrypoint.sh only ever calls
+# `veridian-task.py checkpoint` (writes task.yaml/CONTROLLER.yaml + an audit-log row)
+# and NEVER `superboss-register.py mark-umr-terminal` -- umr_tasks.status is set once
+# at dispatch and never written again by anything in the worker's own lifecycle.
+# ExecStopPost runs on EVERY stop of this unit -- clean exit, non-zero exit,
+# TimeoutStopSec, SIGKILL, OOM-kill -- unlike worker-entrypoint.sh's own
+# `trap ... EXIT`, which cannot fire at all once the shell is SIGKILLed. See
+# worker-exit-status-bridge.py's own docstring for the exact, deliberately
+# conservative decision rule (never writes completed/completed_unmerged from exit
+# code alone; only bridges a definitive, already-self-reported negative outcome).
+ExecStopPost=/opt/veridian/scripts/worker-exit-status-bridge.py %i
 Restart=on-failure
 RestartSec=30
 StandardOutput=append:/opt/veridian/ai-os/tasks/%i/systemd.log

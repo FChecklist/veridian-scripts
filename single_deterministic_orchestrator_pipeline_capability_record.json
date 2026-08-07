@@ -1,0 +1,32 @@
+{
+  "capability_name": "single_deterministic_orchestrator_pipeline",
+  "inputs": [
+    {"key": "max_dispatches", "label": "optional cap on dispatches this tick", "type": "int", "optional": true},
+    {"key": "now", "label": "optional injected clock for tests", "type": "datetime", "optional": true}
+  ],
+  "business_rules": [
+    {"leaf_key": "single_deterministic_orchestrator_pipeline", "phase": "task_dispatch", "mechanism_path": "resource_governor.py::run_tick", "registered": true}
+  ],
+  "workflow": "resource_governor.py run_tick() (systemd-timer-driven real governor tick) -- twelve real, ordered integration steps, each a real import + real function call into an existing file, never reimplemented: superboss_gateway.py, reuse_verdict_engine.py, superboss-register.py (OCID-068 Rule 1, derive_umr_output_contract), health-check-15min.py, audit_ocid_canonical_registry.py, dispatch_core.py, audit_ocid_compliance.py, document_engine.py, intent_engine.py, plus a PRAGMA wal_checkpoint(TRUNCATE)/conditional VACUUM maintenance step.",
+  "automation": "wired into run_tick() itself (the real dispatch entrance/exit every real caller -- dispatch-tick.py, systemd timer -- already uses); no new entrypoint, no second dispatch path",
+  "documents": null,
+  "reports": null,
+  "apis": ["/opt/veridian/scripts/resource_governor.py run_tick (in-process; also via dispatch-tick.py)"],
+  "ui_screens": null,
+  "permissions": "server-local shell/in-process execution only; writes umr_tasks via the existing superboss-register.py write path under _write_lock(); reads live sqlite via sbr._connect()/superboss_gateway.py handle_read; no new table, no new DB, no new file",
+  "ai_required": 0,
+  "confidence": 1.0,
+  "version": "1.0",
+  "owner": "VERIDIAN platform ops tooling (/opt/veridian/scripts)",
+  "metadata": {
+    "governing_umr_chain": ["UMR-20260806-171945-5767", "UMR-20260807-035145-aa45", "task-20260807-053232-second-amendment", "UMR-20260807-110133-205d"],
+    "task_id": "task-20260807-150203-build-the-single-deterministic-orchestra",
+    "purpose": "Resolves the owner directive to integrate the 619 already-resolvable-by-existing-file issues (of 965 real cataloged in /opt/veridian/ai-os/UMR_5767_ISSUE_RESOLUTION_MATRIX.json) into ONE deterministic run_tick() pipeline in resource_governor.py, zero new files, zero AI inside the execution path.",
+    "extended_existing_file_and_why": "resource_governor.py's run_tick()/dispatch_one()/_dispatch_one_inner()/scan_stuck_tasks() -- the platform's one real dispatch entrance/exit (per the original spec's own explicit constraint to extend an existing file, never create a new one). Confirmed via git diff --stat: 1 file changed (resource_governor.py only), zero new files.",
+    "step1_pr_merge": "PR #250 and #251 (both real, both genuinely CONFLICTING against main at task start -- gh api confirmed mergeable_state=dirty for both) rebased individually onto origin/main (only PROGRESS.md conflicted each time, zero code conflicts), re-tested (14/14, 24/24), force-pushed, verified mergeable=clean, merged: #251 -> 6a0e18a, #250 -> 9ccb4d1.",
+    "step2_twelve_steps": "See PROGRESS.md on the merged branch (PR #269, merge commit 3854798) for full per-step grep evidence, before/after output_contract sample, isolated smoke-test proof (run_tick() against a genuinely isolated scratch DB; live production DB byte-identical before/after), and the full 22-file/151-test regression re-run before/after (same 2 pre-existing, test-order-dependent failures, unrelated to this change).",
+    "duplication_check_before_writing": "capability_registry briefing (agent_work_briefing.py assemble-briefing) confirmed 3 pre-existing capabilities to reuse directly (cron_systemd_state_manager, superboss_gateway, umr_5767_issue_resolution_matrix) and zero prior implementation of this exact 12-step pipeline. grep -c sqlite3.connect resource_governor.py: 0 real call sites (only doc comments) -- confirms zero raw-connection duplication introduced.",
+    "duplication_removed": "None found to remove -- purely additive: 3 new duplication-guard/governance helper functions alongside the two pre-existing, independently-proven guards (superseded_by_ocid_evidence / rejected_duplicate_pr) in _dispatch_one_inner(), never replacing them.",
+    "honest_caveat": "/opt/veridian/scripts/ (the real deploy-live-scripts.sh sync target resource_governor.py's own lazy loaders read from) had not been re-synced since PR #250/#251 merged as of this task's completion -- steps 2/9 fail-open (by design, logging a WARNING to ATTENTION.md) until that separate, standard operational sync step runs. Not run here (out of scope, higher blast radius than this change)."
+  }
+}

@@ -344,3 +344,59 @@ def test_find_code_helper_script_itself_is_unaffected():
 def test_empty_command_is_allowed():
     result = run_hook("")
     assert result.returncode == 0
+
+
+# ---------------------------------------------------------------------------
+# Real, confirmed bugs fixed 2026-08-08 (independent tier1 review, round 5):
+# (1) backtick/$(...) command substitution around a find invocation was
+# invisible to this guard -- the substitution's backtick glued to the
+# adjacent word token, never comparing equal to "find" after basename
+# normalization; (2) the raw-text fast-path pre-filter skipped tokenization
+# entirely whenever the raw command string didn't contain a contiguous
+# "find" substring, so quote-fragment ('f'ind) and backslash-escape
+# (f\ind) tricks that shlex would correctly reduce to the word "find"
+# bypassed the guard before tokenization ever ran. Both verified live
+# before the fix, every one of these exited 0 (allow).
+# ---------------------------------------------------------------------------
+
+def test_backtick_substitution_unbounded_find_is_rejected():
+    result = run_hook("`find / -iname secret`")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+    assert "BLOCKED" in result.stderr
+
+
+def test_backtick_substitution_assigned_unbounded_find_is_rejected():
+    result = run_hook("R=`find / -iname secret`; echo $R")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_dollar_paren_substitution_unbounded_find_is_rejected():
+    result = run_hook("R=$(find / -iname secret); echo $R")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_backtick_substitution_scoped_find_is_still_allowed():
+    result = run_hook("`find /opt/veridian/scripts -iname secret`")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_backtick_substitution_non_find_is_still_allowed():
+    result = run_hook("echo `date`")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_quote_fragment_unbounded_find_is_rejected():
+    """The fast-path pre-filter (raw-text 'find' substring check) used to
+    skip tokenization entirely here, allowing this through outright."""
+    result = run_hook("'f'ind /")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_backslash_escaped_unbounded_find_is_rejected():
+    result = run_hook(r"f\ind /")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_quote_fragment_scoped_find_is_still_allowed():
+    result = run_hook("'f'ind /opt/veridian/scripts")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"

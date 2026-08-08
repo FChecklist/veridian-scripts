@@ -391,16 +391,68 @@ def _segment_unbounded_root(segment, cwd):
     return True, None
 
 
+def _extract_command_substitutions(command):
+    """Real, confirmed bug fixed 2026-08-08 (independent tier1 review, round
+    5): backtick command substitution (`` `find / -iname secret` ``) and
+    $(...) command substitution both let a `find` invocation's raw text be
+    glued to adjacent punctuation (a backtick token never equals the literal
+    word "find" after tokenization) or be embedded somewhere the segment-
+    based tokenizer never isolates as its own command. Extracted here, as
+    raw substring content, for recursive evaluation the same way bash -c/
+    eval/-exec are handled -- backtick pairs (real POSIX shell backtick
+    substitution never nests without escaping, so simple non-nested
+    extraction is correct for the real, common case) and $(...) pairs
+    (balanced-paren scan, since these genuinely can nest, e.g.
+    $(find $(dirname .) -name x))."""
+    substitutions = []
+    # Backtick pairs: `...`
+    for m in re.finditer(r"`([^`]*)`", command):
+        substitutions.append(m.group(1))
+    # $(...) pairs, balanced.
+    i, n = 0, len(command)
+    while i < n:
+        if command[i] == "$" and i + 1 < n and command[i + 1] == "(":
+            depth = 1
+            j = i + 2
+            while j < n and depth > 0:
+                if command[j] == "(":
+                    depth += 1
+                elif command[j] == ")":
+                    depth -= 1
+                j += 1
+            if depth == 0:
+                substitutions.append(command[i + 2:j - 1])
+                i = j
+                continue
+        i += 1
+    return substitutions
+
+
 def evaluate(command, cwd):
     """Returns (verdict, reason) where verdict is one of 'allow',
     'reject_unbounded', 'reject_unclassifiable'."""
     if not command or not command.strip():
         return "allow", None
 
-    if not _FIND_WORD_RE.search(command):
-        return "allow", None  # no `find` anywhere -- out of this guard's scope
-
+    # Real, confirmed bug fixed 2026-08-08 (independent tier1 review, round
+    # 5): the original fast-path pre-filter here matched _FIND_WORD_RE
+    # against the RAW, untokenized command string, and returned "allow"
+    # immediately with zero tokenization if no contiguous "find" substring
+    # was present. Live-verified bypasses: 'f'ind / and f\\ind / (quote-
+    # fragment and backslash-escape tricks that shlex would correctly
+    # reduce to the literal word "find" if ever reached) both skipped
+    # tokenization entirely and were allowed outright. There is no reliable
+    # raw-text shortcut for "definitely does not contain find" once quoting
+    # and escaping are in play -- this guard now always tokenizes; the
+    # real, measured cost (shlex over a typical shell command string) is
+    # microseconds, not worth trading away this guard's own fail-closed
+    # purpose for.
     try:
+        for substitution in _extract_command_substitutions(command):
+            sub_verdict = evaluate(substitution, cwd)
+            if sub_verdict[0] != "allow":
+                return sub_verdict
+
         for line in command.split("\n"):
             if not line.strip():
                 continue

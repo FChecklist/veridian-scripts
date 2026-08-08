@@ -155,6 +155,27 @@ _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 _FIND_WORD_RE = re.compile(r"(?<![\w-])find(?![\w-])")
 _VAR_OR_SUBST_RE = re.compile(r"\$|`")
 
+# Real, confirmed bug fixed 2026-08-08 (independent tier1 review, round 8):
+# every root-resolution path in this file resolved a RELATIVE find root
+# against the single `cwd` value passed in from the hook payload (the
+# session's real shell working directory at invocation time), with no
+# tracking of an intervening `cd` inside the SAME command string. Live-
+# verified bypass: `cd / && find . -iname secret` (or `cd /; find . -x`)
+# walks the real filesystem root but was evaluated as if `.` still meant the
+# session's actual cwd (e.g. /opt/veridian/scripts), so it was silently
+# allowed. Fixed by making evaluate()'s segment loop stateful: a real `cd`
+# segment updates a running `effective_cwd` used for every later segment in
+# the same command, instead of the original payload cwd being used
+# unconditionally throughout. `cd`'s own three genuinely unresolvable forms
+# -- bare `cd` (goes to $HOME, which this hook cannot know), `cd -`
+# (previous directory, also unknown), and a variable/substitution target
+# (`cd "$X"`, `cd "$(foo)"`) -- deliberately make effective_cwd unresolvable
+# from that point forward (this sentinel), which in turn makes every
+# subsequent RELATIVE find root Unclassifiable (fail closed) rather than
+# silently resolved against a guessed or stale directory. Absolute find
+# roots are unaffected either way, since they never depend on cwd.
+_CWD_UNKNOWN = object()
+
 # Control-operator tokens that end one command segment and start another,
 # once shlex (punctuation_chars=True) has split them out as their own
 # tokens. Real, confirmed bug (2026-08-08, independent tier1 review of this
@@ -482,11 +503,51 @@ def _recursive_shell_string_verdict(segment, cwd, evaluate_fn):
     return None
 
 
+# Real, confirmed bug fixed 2026-08-08 (independent tier1 review, round 8):
+# GNU find's own real global options (-H/-L/-P for symlink handling, -D
+# debugopts, -Olevel -- see find's own SYNOPSIS/man page) legitimately
+# precede the starting-point path(s), unlike find's EXPRESSION flags
+# (-iname, -name, ...) which come after. The original _extract_root_tokens
+# stopped at the FIRST flag-looking token unconditionally, so
+# `find -L / -iname x` saw "-L", stopped immediately with an empty root
+# list, and fell back to treating cwd as the assumed root -- silently
+# discarding the real, unbounded "/" root that followed. Confirmed live
+# before this fix: evaluate('find -L / -iname x', cwd) returned
+# ('allow', None). These are now explicitly skipped before root-token
+# scanning begins, same real GNU find option shape, not a guess -- -D takes
+# its debugopts value as a SEPARATE token (`-D help`, `-D tree`); -O's level
+# is attached directly to the flag itself (`-O2`, per find's own SYNOPSIS
+# "[-Olevel]"), never a separate token, which a first version of this fix
+# got wrong (modeled -O the same as -D) -- caught live before commit:
+# `find -O2 / -iname x` was still silently allowed because "-O2" as a whole
+# token never matched the bare "-O" this file was checking for.
+_FIND_GLOBAL_OPTIONS_NO_VALUE = {"-H", "-L", "-P"}
+_FIND_GLOBAL_OPTIONS_WITH_VALUE = {"-D"}
+_FIND_DASH_O_RE = re.compile(r"^-O[0-9]*$")
+
+
+def _skip_find_global_options(argv):
+    """Real, leading GNU find global options (see _FIND_GLOBAL_OPTIONS_*/
+    _FIND_DASH_O_RE above) skipped before root-token scanning -- returns
+    the remaining argv starting at the first real starting-point path (or
+    the first expression flag, if no global options were present)."""
+    i, n = 0, len(argv)
+    while i < n:
+        if argv[i] in _FIND_GLOBAL_OPTIONS_WITH_VALUE:
+            i += 2
+        elif argv[i] in _FIND_GLOBAL_OPTIONS_NO_VALUE or _FIND_DASH_O_RE.match(argv[i]):
+            i += 1
+        else:
+            break
+    return argv[i:]
+
+
 def _extract_root_tokens(argv):
-    """find's leading non-flag arguments are its search roots (paths).
-    Stops at the first token that looks like a flag/expression operator."""
+    """find's leading non-flag arguments (after any real global options,
+    see _skip_find_global_options above) are its search roots (paths).
+    Stops at the first token that looks like an expression flag/operator."""
     roots = []
-    for tok in argv:
+    for tok in _skip_find_global_options(argv):
         if tok.startswith("-") or tok in ("(", ")", "!", ","):
             break
         roots.append(tok)
@@ -497,13 +558,21 @@ def _resolve_root(token, cwd):
     """Resolves one find root token to an absolute, normalized path.
     Raises Unclassifiable if the token contains an unresolved shell
     variable or command substitution (we cannot know its real value at
-    hook time)."""
+    hook time), or if cwd itself is unresolvable (_CWD_UNKNOWN, see above)
+    and the token is a relative path -- there is nothing safe to resolve it
+    against."""
     if _VAR_OR_SUBST_RE.search(token):
         raise Unclassifiable(f"root argument {token!r} contains an unresolved shell variable/substitution")
     if _UNBOUNDED_GLOB_RE.match(token):
         return "/"  # top-level glob under root -- treat as unbounded
     if os.path.isabs(token):
         return os.path.normpath(token)
+    if cwd is _CWD_UNKNOWN:
+        raise Unclassifiable(
+            f"root argument {token!r} is relative, but the working directory at this "
+            f"point in the command is unresolvable (an earlier `cd` target could not "
+            f"be determined)"
+        )
     return os.path.normpath(os.path.join(cwd or "/", token))
 
 
@@ -515,12 +584,46 @@ def _segment_unbounded_root(segment, cwd):
         return False, None
     roots = _extract_root_tokens(argv)
     if not roots:
+        if cwd is _CWD_UNKNOWN:
+            raise Unclassifiable(
+                "find has no explicit root argument (defaults to the working "
+                "directory), but the working directory at this point in the command "
+                "is unresolvable (an earlier `cd` target could not be determined)"
+            )
         roots = [cwd or "/"]
     for tok in roots:
         resolved = _resolve_root(tok, cwd)
         if _is_unbounded(resolved):
             return True, resolved
     return True, None
+
+
+_CD_CMDS = {"cd"}
+
+
+def _cd_target(segment, cwd):
+    """If `segment` is a `cd` invocation, returns the new effective cwd it
+    produces (an absolute, normalized path, or _CWD_UNKNOWN if the target
+    can't be determined). Returns None if `segment` is not a `cd`
+    invocation at all (caller should leave cwd unchanged)."""
+    if not segment or _cmd_name(segment[0]) not in _CD_CMDS:
+        return None
+    rest = segment[1:]
+    if not rest:
+        return _CWD_UNKNOWN  # bare `cd` -> $HOME, unknown to this hook
+    if "-" in rest:
+        return _CWD_UNKNOWN  # `cd -` (previous directory) -- unknown
+    args = [t for t in rest if not t.startswith("-")]
+    if not args:
+        return _CWD_UNKNOWN  # only flags given (e.g. `cd -L`), no real target
+    target = args[0]
+    if _VAR_OR_SUBST_RE.search(target):
+        return _CWD_UNKNOWN  # `cd "$X"` / `cd "$(...)"` -- unknown
+    if cwd is _CWD_UNKNOWN:
+        return _CWD_UNKNOWN  # already unresolvable; stays unresolvable
+    if os.path.isabs(target):
+        return os.path.normpath(target)
+    return os.path.normpath(os.path.join(cwd or "/", target))
 
 
 _SUBST_TRIGGER_CHARS = ("$", "<", ">")
@@ -591,11 +694,26 @@ def evaluate(command, cwd):
             if sub_verdict[0] != "allow":
                 return sub_verdict
 
+        # Real, confirmed bug fixed 2026-08-08 (independent tier1 review,
+        # round 8): effective_cwd tracks the working directory as it would
+        # really stand at each point in the command, updated whenever a real
+        # `cd` segment is seen (see _cd_target above) -- NOT the original
+        # payload cwd used unconditionally throughout. It persists across
+        # both segments and lines within this single evaluate() call/
+        # command string; recursive evaluate() calls (subshells, bash -c,
+        # eval, -exec, command substitution) are handed the CURRENT
+        # effective_cwd at the point they're encountered, not the original
+        # cwd, so a `cd` before a nested shell is honored inside it too.
+        effective_cwd = cwd
         for line in command.split("\n"):
             if not line.strip():
                 continue
             tokens = _tokenize_line(line)
             for segment in _split_segments(tokens):
+                cd_target = _cd_target(segment, effective_cwd)
+                if cd_target is not None:
+                    effective_cwd = cd_target
+                    continue
                 # Real, confirmed bug fixed 2026-08-08 (independent tier1
                 # review, round 7, same pass as removing "("/")" from
                 # _SEGMENT_BREAKS above): a genuine shell subshell-grouping
@@ -615,11 +733,11 @@ def evaluate(command, cwd):
                 if len(segment) >= 2 and segment[0] == "(" and segment[-1] == ")":
                     inner = segment[1:-1]
                     if inner:
-                        subshell = evaluate(" ".join(inner), cwd)
+                        subshell = evaluate(" ".join(inner), effective_cwd)
                         if subshell[0] != "allow":
                             return subshell
                     continue
-                is_find, unbounded_root = _segment_unbounded_root(segment, cwd)
+                is_find, unbounded_root = _segment_unbounded_root(segment, effective_cwd)
                 if is_find and unbounded_root is not None:
                     return "reject_unbounded", unbounded_root
                 if is_find:
@@ -630,7 +748,7 @@ def evaluate(command, cwd):
                     # -exec/-execdir -- scan this find's own argv for that.
                     nested_argv = _find_invocation_argv(segment)
                     if nested_argv is not None:
-                        nested = _scan_nested_execs(nested_argv, cwd, evaluate)
+                        nested = _scan_nested_execs(nested_argv, effective_cwd, evaluate)
                         if nested is not None and nested[0] != "allow":
                             return nested
                 if not is_find:
@@ -639,7 +757,7 @@ def evaluate(command, cwd):
                     # ARGUMENT to bash -c/sh -c/eval was invisible to the
                     # literal-first-word check above -- recursively evaluate
                     # the embedded shell text as its own fresh command line.
-                    recursive = _recursive_shell_string_verdict(segment, cwd, evaluate)
+                    recursive = _recursive_shell_string_verdict(segment, effective_cwd, evaluate)
                     if recursive is not None and recursive[0] != "allow":
                         return recursive
     except Unclassifiable as exc:

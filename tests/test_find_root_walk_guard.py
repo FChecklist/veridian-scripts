@@ -519,3 +519,100 @@ def test_python_interpreter_c_form_is_documented_boundary_allowed():
     quoting/escaping) -- explicitly allowed, not a silent gap."""
     result = run_hook('python3 -c "import os; os.system(\'find / -iname secret\')"')
     assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# Round 8 (independent tier1 review, 2026-08-08): find's own leading global
+# options (-H/-L/-P/-D/-O) were not skipped before root-token scanning, and
+# no `cd` occurring earlier in the same command was tracked before resolving
+# a later RELATIVE find root.
+# ---------------------------------------------------------------------------
+def test_dash_L_global_option_before_unbounded_root_is_rejected():
+    result = run_hook("find -L / -iname x")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+    assert "BLOCKED" in result.stderr
+
+
+def test_dash_H_global_option_before_unbounded_root_is_rejected():
+    result = run_hook("find -H / -iname x")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_dash_P_global_option_before_unbounded_root_is_rejected():
+    result = run_hook("find -P / -iname x")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_dash_D_global_option_with_value_before_unbounded_root_is_rejected():
+    result = run_hook("find -D exec / -iname x")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_dash_O_level_attached_before_unbounded_root_is_rejected():
+    """Real bug caught in this hook's own round-8 fix before it shipped: -O's
+    level is attached directly to the flag (-O2), never a separate token
+    like -D's debugopts -- a first draft modeled it the same as -D and this
+    case was still silently allowed."""
+    result = run_hook("find -O2 / -iname x")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_global_options_before_scoped_root_is_still_allowed():
+    result = run_hook("find -L /opt/veridian/scripts -iname x")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_cd_to_root_then_relative_find_is_rejected():
+    result = run_hook("cd / && find . -iname secret")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+    assert "BLOCKED" in result.stderr
+
+
+def test_cd_to_root_semicolon_then_relative_find_is_rejected():
+    result = run_hook("cd /; find . -iname secret")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_cd_twice_final_cd_to_root_then_relative_find_is_rejected():
+    result = run_hook("cd /tmp && cd / && find . -iname secret")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_cd_to_scoped_dir_then_relative_find_is_still_allowed():
+    result = run_hook("cd /opt/veridian/scripts && find . -iname secret")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_cd_relative_from_scoped_cwd_then_relative_find_is_still_allowed():
+    result = run_hook("cd subdir && find . -iname secret")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_bare_cd_then_relative_find_is_unclassifiable():
+    """Bare `cd` goes to $HOME, which this hook cannot know -- fail closed,
+    not silently resolved against the original session cwd."""
+    result = run_hook("cd && find . -iname secret")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_cd_dash_then_relative_find_is_unclassifiable():
+    result = run_hook("cd - && find . -iname secret")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_cd_variable_target_then_relative_find_is_unclassifiable():
+    result = run_hook('cd "$HOME" && find . -iname secret')
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_find_before_any_cd_is_unaffected_by_a_later_cd():
+    """A `cd` occurring AFTER a find in the same command must not
+    retroactively change how that earlier find's root was already
+    resolved."""
+    result = run_hook("find /opt/veridian/scripts -iname secret; cd /")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_cd_to_root_then_scoped_find_then_unbounded_find_is_rejected():
+    result = run_hook("cd /opt/veridian/scripts && find . -iname secret && cd / && find . -iname secret2")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"

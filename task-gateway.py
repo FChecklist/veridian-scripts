@@ -973,6 +973,28 @@ _ALERT_CONDITION_POINTS = {14, 20}
 # return (True, ...), and the persisted UMR171945-0014 row showed
 # solution_applied=YES/issue_resolved_permanently=YES despite the real
 # problem still being live.
+#
+# Real, confirmed bug fixed 2026-08-08 (independent tier1 review, PR #280
+# round 2): round 1's fix only updated _persist_audit24_point_result()'s own
+# inline healthy-computation -- cmd_audit_24_points() itself, building the
+# printed/returned JSON, still used the raw `passed` boolean directly for
+# if_false_who_acts/if_false_how_told, so for points 14/20 the remediation
+# guidance fields went silently None exactly when a real alert was firing
+# (passed=True) and were populated only when nothing was wrong -- the
+# identical inversion bug class, just in the OTHER of the two places it was
+# duplicated inline instead of shared. _point_is_healthy() is now the ONE
+# real place this alert-aware inversion is computed; every caller (both
+# _persist_audit24_point_result() and cmd_audit_24_points()) calls it,
+# so this logic can never diverge between the two call sites again.
+
+
+def _point_is_healthy(point, boolean_result):
+    """The one real, shared alert-aware health computation -- see
+    _ALERT_CONDITION_POINTS's own comment above for why points 14/20 invert
+    the raw boolean. Every caller that needs to know "is this point okay"
+    (as opposed to "what did the raw check literally return") must go
+    through this, not recompute it inline."""
+    return (not boolean_result) if point in _ALERT_CONDITION_POINTS else boolean_result
 
 
 def _persist_audit24_point_result(point, boolean_result, detail, ran_at):
@@ -981,14 +1003,11 @@ def _persist_audit24_point_result(point, boolean_result, detail, ran_at):
     is_ai_free/is_boolean_software describe this point's real CHECK
     MECHANISM (always YES once a real check has genuinely run);
     solution_applied/issue_resolved_permanently mirror the real HEALTH
-    verdict -- which is boolean_result directly for every point except
-    _ALERT_CONDITION_POINTS (14, 20), where TRUE means a problem was just
-    detected, so the persisted health verdict is the inverse (see that
-    set's own comment above). check_again_notes always records the raw,
-    unmodified boolean_result too, so the two are never conflated even
-    where they differ."""
+    verdict from _point_is_healthy(), not the raw boolean_result directly.
+    check_again_notes always records the raw, unmodified boolean_result
+    too, so the two are never conflated even where they differ."""
     issue_id = f"UMR171945-{point:04d}"
-    healthy = (not boolean_result) if point in _ALERT_CONDITION_POINTS else boolean_result
+    healthy = _point_is_healthy(point, boolean_result)
     outcome = "YES" if healthy else "NO"
     note = (
         f"[{ran_at}] audit-24-points point {point}: raw_boolean={boolean_result} "
@@ -1284,11 +1303,18 @@ def cmd_audit_24_points(args):
         except Exception as e:
             passed, detail = False, f"check itself raised {type(e).__name__}: {e}"
         who_acts, how_told, verify_done = _AUDIT_24_REMEDIATION[point]
+        # Real, confirmed bug fixed 2026-08-08 (independent tier1 review,
+        # PR #280 round 2): remediation guidance must key off the
+        # alert-aware HEALTH verdict (_point_is_healthy()), not the raw
+        # `passed` boolean -- for points 14/20, passed=True means a real
+        # alert is firing, exactly when who-acts/how-told guidance is
+        # needed most, not when it should go blank.
+        healthy = _point_is_healthy(point, passed)
         entry = {
             "point": point,
             "boolean": passed,
-            "if_false_who_acts": None if passed else who_acts,
-            "if_false_how_told": None if passed else how_told,
+            "if_false_who_acts": None if healthy else who_acts,
+            "if_false_how_told": None if healthy else how_told,
             "how_software_verifies_done": verify_done,
             "detail": detail,
         }

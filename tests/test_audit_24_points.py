@@ -12,7 +12,10 @@ real synthetic FALSE case are genuinely exercised (not narration), (3) a
 second run persists into the SAME rows (no duplication), reflected back via
 `list-issues --linked-umr-id`.
 """
+import argparse
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import sqlite3
@@ -88,19 +91,30 @@ def test_audit_24_points_runs_all_12_and_persists():
         assert {r["point"] for r in results} == set(AUDIT_24_POINTS_SUBSET)
 
         # Real, deterministic, verifiable per-point evidence -- not narration.
+        # Points 14/20 are alert-condition checks (real boolean=True means a
+        # live problem, not a healthy state) -- if_false_who_acts/how_told
+        # must key off that alert-aware HEALTH verdict, not the raw boolean
+        # directly. Real, confirmed round-2 review bug: this assertion used
+        # to enforce the raw-boolean mapping uniformly, which would have
+        # silently accepted the inverted (buggy) output for these two
+        # points had either genuinely returned True in this run.
+        alert_points = {14, 20}
         saw_true = saw_false = False
         by_point = {}
         for r in results:
             assert isinstance(r["boolean"], bool), r
             assert r["detail"], f"point {r['point']} has no real evidence detail"
             assert r["how_software_verifies_done"], f"point {r['point']} missing verify-done field"
+            healthy = (not r["boolean"]) if r["point"] in alert_points else r["boolean"]
             if r["boolean"]:
                 saw_true = True
-                assert r["if_false_who_acts"] is None and r["if_false_how_told"] is None, r
             else:
                 saw_false = True
+            if healthy:
+                assert r["if_false_who_acts"] is None and r["if_false_how_told"] is None, r
+            else:
                 assert r["if_false_who_acts"] and r["if_false_how_told"], (
-                    f"point {r['point']} is FALSE but missing who-acts/how-told"
+                    f"point {r['point']} is unhealthy but missing who-acts/how-told"
                 )
             by_point[r["point"]] = r
         assert saw_true, "no point returned TRUE at all -- suspicious for a real, live scratch DB"
@@ -175,6 +189,64 @@ def _load_gateway_module(modname):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def test_point_is_healthy_helper():
+    """Direct unit test of the one, shared _point_is_healthy() helper --
+    the single source of truth both _persist_audit24_point_result() and
+    cmd_audit_24_points() now use, per this round's fix (round 1 only fixed
+    the persistence call site; the printed-output call site still used the
+    raw boolean directly until this round)."""
+    tg = _load_gateway_module("tg_point_is_healthy_check")
+    assert tg._point_is_healthy(14, True) is False   # alert firing -> unhealthy
+    assert tg._point_is_healthy(14, False) is True    # no alert -> healthy
+    assert tg._point_is_healthy(20, True) is False
+    assert tg._point_is_healthy(20, False) is True
+    assert tg._point_is_healthy(16, True) is True     # normal point, unaffected
+    assert tg._point_is_healthy(16, False) is False
+    print("PASS: test_point_is_healthy_helper")
+
+
+def test_cmd_audit_24_points_output_uses_healthy_for_alert_point_remediation():
+    """Real, confirmed round-2 review bug, direct regression test:
+    cmd_audit_24_points()'s printed JSON output must null if_false_who_acts/
+    if_false_how_told based on the alert-aware HEALTH verdict, not the raw
+    boolean directly -- for Point 14 with boolean=True (a real alert
+    firing), remediation guidance must be POPULATED, not None (round 1
+    fixed this for the persisted master_issue_tracker row; this round fixes
+    the identical bug in the printed/returned JSON output)."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        sbr = _seed_scratch_db(scratch_db)
+        tg = _load_gateway_module("tg_cmd_audit_output_check")
+        os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
+        try:
+            # Force point 14 True (alert firing), everything else False --
+            # bypasses the real check functions entirely, isolating this
+            # test to the output-construction logic under review, not real
+            # check mechanics (already covered by other tests).
+            tg._AUDIT_24_CHECKS = {
+                p: (lambda p=p: (p == 14, "synthetic")) for p in tg.AUDIT_24_POINTS_SUBSET
+            }
+            args = argparse.Namespace(no_persist=True)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                tg.cmd_audit_24_points(args)
+            output = json.loads(buf.getvalue())
+        finally:
+            os.environ.pop("SUPERBOSS_REGISTER_DB", None)
+
+        by_point = {r["point"]: r for r in output["results"]}
+        # Point 14: boolean=True (alert firing) -- healthy=False -- remediation
+        # guidance MUST be populated, not None.
+        assert by_point[14]["boolean"] is True, by_point[14]
+        assert by_point[14]["if_false_who_acts"] is not None, by_point[14]
+        assert by_point[14]["if_false_how_told"] is not None, by_point[14]
+        # Control: a normal point with boolean=False is also unhealthy --
+        # remediation guidance also populated (unaffected control case).
+        assert by_point[16]["boolean"] is False, by_point[16]
+        assert by_point[16]["if_false_who_acts"] is not None, by_point[16]
+        print("PASS: test_cmd_audit_24_points_output_uses_healthy_for_alert_point_remediation")
 
 
 def test_alert_condition_point_14_true_persists_as_unhealthy():

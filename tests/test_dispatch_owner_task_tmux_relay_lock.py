@@ -87,6 +87,11 @@ def relay_env():
         env["SUPERBOSS_REGISTER_DB"] = db_path
         env["DISPATCH_TMUX_SESSION"] = "relay-lock-test-session"
         env["VERIDIAN_DISPATCH_LOCK_DIR"] = locks_dir
+        # Real issue #980's standing stop-work-order gate is out of scope for
+        # this file (the tmux-relay mutual-exclusion lock, not governance) --
+        # disabled via the same real env-var override STOP_WORK_ORDER_TASK_IDS
+        # itself reads, not a real exemption.
+        env["VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS"] = ""
         yield env, os.path.join(d, "tmux.log")
 
 

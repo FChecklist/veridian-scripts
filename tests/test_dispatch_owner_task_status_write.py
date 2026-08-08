@@ -281,6 +281,11 @@ def _run_wrapper(scratch_db, fake_tmux_path, tmux_session, live_sessions, tmp_pa
     env["DISPATCH_TMUX_SESSION"] = tmux_session
     env["TMUX_FAKE_LIVE_SESSIONS"] = str(live_file)
     env["TMUX_FAKE_LOG"] = str(log_file)
+    # Real issue #980's standing stop-work-order gate is out of scope for
+    # this file (dispatch-owner-task.sh's relay/status-write bookkeeping,
+    # not governance) -- disabled via the same real env-var override
+    # STOP_WORK_ORDER_TASK_IDS itself reads, not a real exemption.
+    env["VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS"] = ""
     result = subprocess.run(
         ["./dispatch-owner-task.sh", "unit-test dispatch title",
          "unit-test dispatch prompt body, unique-" + tmux_session, "2",

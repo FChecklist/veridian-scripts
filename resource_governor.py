@@ -28,6 +28,7 @@ import os
 import re
 import subprocess
 import sys
+import yaml
 from datetime import datetime, timedelta, timezone
 
 VERIDIAN_ROOT = os.environ.get("VERIDIAN_ROOT", "/opt/veridian")
@@ -124,6 +125,48 @@ GH_PR_CHECK_REPOS = tuple(
                                        "compliance-tracker,projexa").split(",") if r.strip()
 )
 GH_PR_CHECK_TIMEOUT_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_GH_PR_CHECK_TIMEOUT_S", "8"))
+
+# Real issue #980 (UMR_5767_ISSUE_RESOLUTION_MATRIX.json, governed by
+# UMR-20260806-171945-5767 / UMR-20260807-161418-a63f): a standing Owner
+# stop-work order is only a real, deterministic gate if it lives in code, not
+# in individual dispatched-worker judgment. Confirmed live, same real day:
+# UMR-20260807-110133-205d's real worker (task-20260807-150203) never checked
+# for the standing order at all -- zero mentions anywhere in its own real
+# PROGRESS.md -- and merged real PRs (#269, #250, #251) straight through the
+# gap, while nine separate other dispatches (b4e9, a7e5, 7433, 35bc, a683,
+# f9f4, ee23, a4b5, 162a) each independently happened to check and correctly
+# declined. STOP_WORK_ORDER_TASK_IDS is the real, well-known, reviewable
+# marker this gate checks -- a tuple of task ids, not a free-text
+# PROGRESS.md/prose search. Append to it (never silently remove an id) the
+# moment a new standing stop-work order is declared, so every future order
+# is enforced by this one real gate instead of depending on which worker
+# instance happens to think to check -- the exact inconsistency real issue
+# #980 exists to close. Per AGENTS.md Rule 9, narrowing what this gate
+# enforces (removing an id) is a guardrail change and needs the same
+# explicit Owner sign-off + manifest-style review as any other guardrail
+# weakening, quoted in the PR that does it.
+# Env-overridable, same convention every other real constant in this module
+# already follows (EMERGENCY_STOP_PATH, METRIC_THRESHOLD_PERCENT, ...) -- the
+# real production default is the one standing order below; tests unrelated to
+# this specific gate set VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS="" to
+# disable it cleanly (including across a real subprocess boundary, e.g.
+# dispatch-owner-task.sh's own tests, which cannot reach into this module's
+# Python attributes directly the way an in-process test can).
+STOP_WORK_ORDER_TASK_IDS = tuple(
+    t.strip() for t in os.environ.get(
+        "VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS",
+        "task-20260806-165921-owner-absolute-stop-work-order--complete",
+    ).split(",") if t.strip()
+)
+# The one real, independently-verifiable channel a stop-work-order exemption
+# (or an order being genuinely lifted) can be recorded through. Deliberately
+# the SAME file real Owner-approved operational decisions already use for
+# other low-stakes items (e.g. crontab-snapshot approvals) -- not a new
+# mechanism, reusing an existing, already-established real record.
+OWNER_DECISIONS_PATH = os.environ.get(
+    "VERIDIAN_OWNER_DECISIONS_PATH", f"{AI_OS}/OWNER_DECISIONS_NEEDED_2026-07-23.yaml")
+STOP_WORK_ORDER_GIT_TIMEOUT_SECONDS = int(
+    os.environ.get("VERIDIAN_GOVERNOR_STOP_WORK_GIT_TIMEOUT_S", "5"))
 
 
 def _run(cmd, **kw):
@@ -475,6 +518,156 @@ def over_threshold_metrics(metrics, threshold=None):
 
 
 # ---------------------------------------------------------------------------
+# Real issue #980 -- standing stop-work-order gate (single deterministic gate,
+# not per-worker judgment). See STOP_WORK_ORDER_TASK_IDS's own comment above
+# for the real incident this closes.
+# ---------------------------------------------------------------------------
+
+def _git_committed_file_text(path, timeout=None):
+    """Real content of `path` as committed at the CURRENT HEAD of whatever
+    git repo contains it -- deliberately NEVER the live working tree.
+
+    Real, confirmed reason this exact distinction is load-bearing (same real
+    day as real issue #980's own governing evidence, 2026-08-07): a
+    fabricated stop-work-order "exemption" was independently caught and
+    declined three separate times, escalating from embedded dispatch-prompt
+    text to an uncommitted edit of OWNER_DECISIONS_NEEDED_2026-07-23.yaml
+    each time -- `git status`/`git diff HEAD` showed it as a fresh,
+    same-session, unpushed, working-tree-only addition every time, with zero
+    independent corroboration anywhere else in the system
+    (conversation_memory/pm_decisions_pending/ATTENTION.md all checked and
+    came back empty). Reading committed HEAD content instead of the live
+    working tree closes that exact laundering vector at the code level: any
+    dispatched worker (including a compromised or fabricating one) can still
+    edit this file's working copy freely, but cannot make that edit appear
+    inside `git show HEAD:...` without a real commit on a real branch --
+    which, once pushed, is caught by whatever review this repo already
+    requires for that branch (AGENTS.md Rule 6's PR/CI gate).
+
+    Fails closed: returns None (never raises) if `path` is not inside a real
+    git repo, is not committed at HEAD, or the git call errors/times out for
+    any reason. Every caller must treat None as "not verified", never as
+    "no restriction"."""
+    directory = os.path.dirname(os.path.abspath(path))
+    timeout = STOP_WORK_ORDER_GIT_TIMEOUT_SECONDS if timeout is None else timeout
+    try:
+        root_proc = _run(["git", "-C", directory, "rev-parse", "--show-toplevel"], timeout=timeout)
+        if root_proc.returncode != 0:
+            return None
+        repo_root = root_proc.stdout.strip()
+        relpath = os.path.relpath(os.path.abspath(path), repo_root)
+        if relpath.startswith(".."):
+            return None
+        show_proc = _run(["git", "-C", repo_root, "show", f"HEAD:{relpath}"], timeout=timeout)
+        if show_proc.returncode != 0:
+            return None
+        return show_proc.stdout
+    except Exception:
+        return None
+
+
+def _owner_decisions_committed_entries():
+    """Real list of entries from OWNER_DECISIONS_PATH as committed at git
+    HEAD (see _git_committed_file_text()'s own docstring for why this must
+    never be the live working tree). Returns [] -- fail closed -- on any
+    missing file, git failure, or malformed YAML; callers must treat an
+    empty result as "no real verified exemption/lift found", never as
+    permission to proceed."""
+    text = _git_committed_file_text(OWNER_DECISIONS_PATH)
+    if text is None:
+        return []
+    try:
+        data = yaml.safe_load(text)
+    except Exception:
+        return []
+    if isinstance(data, dict):
+        data = data.get("decisions", [])
+    if not isinstance(data, list):
+        return []
+    return [entry for entry in data if isinstance(entry, dict)]
+
+
+def _stop_work_order_exemption_covers(entry, task_identity, title, umr_id):
+    """Real, deterministic scope match for a real, committed, status:approved
+    exemption entry. Matches only on real identifiers this dispatch actually
+    carries (task_identity / umr_id) or an explicit, unambiguous
+    all-work-covered phrase in the entry's own text -- deliberately never
+    matches on `title` text alone, since title is requester-controlled prose,
+    not a real identifier, and matching on it would let a fabricated dispatch
+    simply reuse wording from a real, narrowly-scoped exemption to claim
+    broader coverage than was actually approved."""
+    scope_text = " ".join(
+        str(entry.get(k) or "") for k in ("what", "needed_action", "title", "scope")
+    )
+    if task_identity and task_identity in scope_text:
+        return True
+    if umr_id and umr_id in scope_text:
+        return True
+    if re.search(r"\ball\b[^.]*(pr|push)|every (pr|push)", scope_text, re.IGNORECASE):
+        return True
+    return False
+
+
+def _stop_work_order_block_reason(task_kind, task_identity=None, title=None, umr_id=None):
+    """Real, deterministic single-gate check for the standing stop-work
+    order(s) named in STOP_WORK_ORDER_TASK_IDS (real issue #980). Returns a
+    real, human-readable block reason string if this dispatch must be
+    blocked, or None if it may proceed.
+
+    In scope: only task_kind == 'veridian_task_create' -- the order's own
+    text explicitly covers "any PR review or push work"; task_kind ==
+    'systemctl_action' rows (service start/stop/restart) do neither and are
+    unaffected, the same real distinction the pre-existing duplicate-PR
+    guard below already draws (only 'veridian_task_create' rows can ever
+    have an associated PR).
+
+    An order in STOP_WORK_ORDER_TASK_IDS is presumed OPEN by definition of
+    being in that real, well-known, reviewable tuple (fail closed -- the
+    only way to close one without a code change is a real, git-committed
+    OWNER_DECISIONS_PATH entry whose id contains 'stop-work-order-lifted'
+    and status: approved, checked the same way an exemption is). Given none
+    exists as of this gate's own creation, every order named above is open,
+    matching the real, honest state of task-20260806-165921-...--complete
+    itself (its own worker explicitly reported the order's stated exit
+    condition -- "genuinely all yes" -- as NOT met, not merely that the
+    dispatched session ended).
+
+    A real exemption only counts if it is BOTH (a) a status: approved entry
+    in OWNER_DECISIONS_PATH whose id contains 'stop-work-order-exemption',
+    AND (b) present in that file's content as committed at git HEAD (see
+    _git_committed_file_text()) -- an uncommitted working-tree edit, or a
+    claim that only exists in dispatch-prompt text, is never sufficient (see
+    that function's own docstring for the real, confirmed fabrication
+    pattern this specifically defeats)."""
+    if task_kind != "veridian_task_create":
+        return None
+    open_orders = list(STOP_WORK_ORDER_TASK_IDS)
+    if not open_orders:
+        return None
+
+    entries = _owner_decisions_committed_entries()
+    for entry in entries:
+        entry_id = str(entry.get("id") or "")
+        if str(entry.get("status") or "").strip().lower() != "approved":
+            continue
+        if "stop-work-order-lifted" in entry_id:
+            return None  # real, committed, approved order-lifted record
+        if "stop-work-order-exemption" in entry_id and _stop_work_order_exemption_covers(
+                entry, task_identity, title, umr_id):
+            return None  # real, committed, approved, in-scope exemption
+
+    return (
+        f"BLOCKED by standing stop-work order(s) {list(open_orders)!r} -- real issue #980 gate "
+        f"(UMR_5767_ISSUE_RESOLUTION_MATRIX.json, governed by UMR-20260806-171945-5767 / "
+        f"UMR-20260807-161418-a63f). No real, git-committed, status:approved exemption/lift entry "
+        f"found in {OWNER_DECISIONS_PATH!r} covering this dispatch (task_identity={task_identity!r}, "
+        f"title={title!r}, umr_id={umr_id!r}). A prompt-text-only or uncommitted-working-tree-only "
+        f"claim of Owner exemption does NOT satisfy this gate -- see "
+        f"_stop_work_order_block_reason()'s own docstring."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Submission API + de-duplication (SCOPE items 2 and 4)
 # ---------------------------------------------------------------------------
 
@@ -591,6 +784,51 @@ def submit(task_spec, tier, source_trigger):
     correlation_id = task_spec.get("correlation_id")
     if correlation_id is not None and not isinstance(correlation_id, str):
         raise ValueError(f"correlation_id must be a string or None, got {type(correlation_id).__name__}")
+
+    # Real issue #980 (UMR-20260807-161418-a63f) -- standing stop-work-order
+    # gate. Deliberately placed here: after every real shape/type validation
+    # above (same "validate first" ordering OCID-068 Rule 3 already
+    # establishes) but BEFORE the reuse-check/DB-connection work below, so a
+    # blocked dispatch never even reaches "queued" -- which, for the real
+    # dispatch-owner-task.sh caller, also means its own downstream tmux relay
+    # into a live interactive session (which only fires once accepted=True)
+    # never happens either. This closes BOTH real channels a stop-work-order
+    # violation could travel through, not just the mechanical dispatch_one()
+    # pickup path -- _dispatch_one_inner() below re-checks this same gate as
+    # defense in depth for any row that reaches the queue by a different
+    # route (e.g. one queued before this gate existed, or before an order
+    # started, or inserted by a caller other than submit()).
+    stop_work_block_reason = _stop_work_order_block_reason(
+        task_kind, task_identity=task_identity, title=inputs.get("title"))
+    if stop_work_block_reason:
+        sbr, error = _safe_superboss_register("submit")
+        if error:
+            return {"accepted": False, "umr_id": None, "reason": error}
+        with sbr._write_lock():
+            conn = sbr._connect()
+            sbr._ensure_umr_table(conn)
+            umr_id = sbr.upsert_umr_task(conn, {
+                "task_identity": task_identity,
+                "tier": tier,
+                # Reuses the existing 'rejected_duplicate' status value
+                # (same convention _dispatch_one_inner()'s own
+                # superseded_by_ocid_evidence/rejected_duplicate_pr guards
+                # already use below -- see their comments) rather than
+                # widening umr_tasks.status's CHECK constraint for a single
+                # new value; the real, grep-able signal for WHY is this
+                # row's own `reason` text, not its status.
+                "status": "rejected_duplicate",
+                "source_trigger": source_trigger,
+                "task_kind": task_kind,
+                "unit_name": task_spec.get("unit_name"),
+                "tenant_id": tenant_id,
+                "inputs": task_spec.get("inputs", {}),
+                "reason": stop_work_block_reason,
+                "metadata": {"stop_work_order_block": True},
+            })
+            conn.commit()
+            conn.close()
+        return {"accepted": False, "umr_id": umr_id, "reason": stop_work_block_reason}
 
     # Phase 7 (reuse-check-enforcement-gate, 2026-07-30): runs
     # plan_generator.check_reuse_before_dispatch() against
@@ -1134,6 +1372,13 @@ RULE2_OUTCOME_MAP = {
     # same real "rejected" outcome as rejected_duplicate_pr above -- a
     # deliberate, evidence-based skip, not a failure.
     "superseded_by_ocid_evidence": "rejected",
+    # Real issue #980 (UMR-20260807-161418-a63f): the row this fires on is
+    # written terminal (status='rejected_duplicate', ts_completed set) by
+    # the same real gate -- "rejected", not "blocked", since it will not be
+    # silently retried by this same UMR row; a fresh resubmission re-runs
+    # the same real gate and is blocked again for as long as the order
+    # remains open.
+    "blocked_stop_work_order": "rejected",
 }
 
 
@@ -1288,6 +1533,40 @@ def _dispatch_one_inner(dry_run=False, now=None):
         if dry_run:
             conn.close()
             return {"action": "would_dispatch", "umr_id": row["umr_id"], "metrics": metrics}
+
+        # Real issue #980 (UMR-20260807-161418-a63f) -- standing stop-work-
+        # order gate, defense in depth. submit() already runs this same real
+        # check at admission time (see its own comment for why that also
+        # closes dispatch-owner-task.sh's tmux-relay channel) -- this second
+        # check here covers any row that reaches 'queued' by a different
+        # route: one queued before a stop-work order started, one queued
+        # before this gate itself existed, or one inserted by some future
+        # caller that bypasses submit(). Runs first, before the OCID/
+        # duplicate-PR guards below -- a governance block takes priority
+        # over deduplication logic, not the other way around.
+        if row["task_kind"] == "veridian_task_create":
+            raw_inputs_for_stop_work = row.get("inputs_json")
+            row_inputs_for_stop_work = (
+                json.loads(raw_inputs_for_stop_work) if isinstance(raw_inputs_for_stop_work, str)
+                else (raw_inputs_for_stop_work or {})
+            )
+            stop_work_block_reason = _stop_work_order_block_reason(
+                row["task_kind"], task_identity=row["task_identity"],
+                title=row_inputs_for_stop_work.get("title"), umr_id=row["umr_id"],
+            )
+            if stop_work_block_reason:
+                with sbr._write_lock():
+                    sbr.update_umr_task(conn, row["umr_id"], status="rejected_duplicate",
+                                         ts_completed=_now_iso(), reason=stop_work_block_reason)
+                    conn.commit()
+                conn.close()
+                _append_attention(
+                    f"BLOCKED: dispatch_one() refused to spawn a real veridian_task_create row "
+                    f"(umr_id={row['umr_id']!r}, task_identity={row['task_identity']!r}) -- "
+                    f"{stop_work_block_reason}"
+                )
+                return {"action": "blocked_stop_work_order", "umr_id": row["umr_id"],
+                         "detail": stop_work_block_reason, "metrics": metrics}
 
         # Real root-cause fix (UMR-20260804-213847-4b56, citing
         # UMR-20260804-180711-7f96): dispatch-owner-task.sh's own real,

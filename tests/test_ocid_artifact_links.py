@@ -72,6 +72,10 @@ def test_call_site_1_resource_governor_submit():
         env = {"SUPERBOSS_REGISTER_DB": scratch_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
         rg = _load("rg_test_call_site_1", "resource_governor.py", env=env)
         sbr = _load("sbr_test_call_site_1", "superboss-register.py", env=env)
+        # Real issue #980's standing stop-work-order gate is out of scope for
+        # this file (OCID<->UMR linkage wiring, not governance) -- direct
+        # module-attribute override, not a real exemption.
+        rg.STOP_WORK_ORDER_TASK_IDS = ()
 
         os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
         try:
@@ -115,6 +119,10 @@ def test_call_site_2_supervisor_merge_wiring():
         _seed_scratch_db(scratch_db)
         env = {"SUPERBOSS_REGISTER_DB": scratch_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
         rg = _load("rg_test_call_site_2", "resource_governor.py", env=env)
+        # Real issue #980's standing stop-work-order gate is out of scope for
+        # this file -- see the sibling test above for why this override is
+        # the right fix, not a real exemption.
+        rg.STOP_WORK_ORDER_TASK_IDS = ()
 
         task_id = "test-ocid-links-call-site-2"
         os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db

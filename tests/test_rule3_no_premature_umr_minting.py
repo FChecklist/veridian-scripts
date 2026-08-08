@@ -105,6 +105,10 @@ def test_valid_ocid_number_still_accepted_and_mints_normally():
         _seed_scratch_db(scratch_db)
         env = {"SUPERBOSS_REGISTER_DB": scratch_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
         rg = _load("rg_rule3_good_ocid", "resource_governor.py", env=env)
+        # Real issue #980's standing stop-work-order gate is out of scope for
+        # this file (Rule 3 input validation, not governance) -- direct
+        # module-attribute override, not a real exemption.
+        rg.STOP_WORK_ORDER_TASK_IDS = ()
 
         os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
         try:

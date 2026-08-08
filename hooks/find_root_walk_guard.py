@@ -74,8 +74,17 @@ _VAR_OR_SUBST_RE = re.compile(r"\$|`")
 
 # Control-operator tokens that end one command segment and start another,
 # once shlex (punctuation_chars=True) has split them out as their own
-# tokens.
-_SEGMENT_BREAKS = {";", "&&", "||", "|", "(", ")"}
+# tokens. Real, confirmed bug (2026-08-08, independent tier1 review of this
+# exact hook): the plain background operator "&" was missing here -- shlex
+# already tokenizes it as its own punctuation token (its default
+# punctuation_chars set includes "&"), so `<anything> & find /` (e.g.
+# `true & find /`, `cd /opt/veridian & find /`) was folded into a single
+# segment whose first word was never "find", bypassing this guard entirely.
+# Verified live before the fix: both examples exited 0 (allow), reproducing
+# the exact real incident class (unbounded find / walk) this hook exists to
+# prevent. "&" is now a real segment break, same as every other control
+# operator here.
+_SEGMENT_BREAKS = {";", "&", "&&", "||", "|", "(", ")"}
 
 # Roots (after normalization relative to cwd) that count as an unbounded
 # walk. "/" is the one the real incidents used; the trailing-slash and

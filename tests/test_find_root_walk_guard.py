@@ -115,6 +115,30 @@ def test_chained_unbounded_find_is_rejected():
     assert result.returncode == 2
 
 
+def test_backgrounded_unbounded_find_is_rejected():
+    """Real, confirmed bug (2026-08-08, independent tier1 review): the plain
+    background operator '&' was missing from _SEGMENT_BREAKS, so a command
+    of the shape '<anything> & find /' was folded into one segment whose
+    first word was never 'find', bypassing this guard entirely -- verified
+    live before the fix, both examples below exited 0 (allow). Regression
+    coverage for the fix (adding '&' to _SEGMENT_BREAKS)."""
+    result = run_hook("true & find /")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+    assert "BLOCKED" in result.stderr
+
+    result2 = run_hook("cd /opt/veridian & find /")
+    assert result2.returncode == 2, f"expected block (rc=2), got rc={result2.returncode}, stderr={result2.stderr}"
+    assert "BLOCKED" in result2.stderr
+
+
+def test_backgrounded_scoped_find_is_still_allowed():
+    """The fix must not turn '&' into a blanket rejection -- a backgrounded
+    command followed by a real, properly-scoped find must still be
+    allowed."""
+    result = run_hook("true & find /opt/veridian/scripts -iname 'x'")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
 def test_multiple_roots_one_unbounded_is_rejected():
     result = run_hook("find /opt/veridian / -iname 'x'")
     assert result.returncode == 2

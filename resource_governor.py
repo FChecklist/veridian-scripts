@@ -3667,6 +3667,21 @@ def main():
         sbr._ensure_umr_table(conn)
         rows = sbr.query_umr_tasks(conn, limit=args.limit, status=args.status,
                                     task_identity=args.task_identity, query_text=args.search)
+        # Point 2 (task-gateway.py audit-24-points, UMR-20260808-145030-f3d1):
+        # this IS the other canonical query path (alongside task-gateway.py
+        # status) -- log it. Best-effort: a broken log write must never break
+        # this real --query-umr response, same fail-open convention as
+        # _safe_superboss_register() itself.
+        try:
+            sbr._ensure_governance_cycle_log_table(conn)
+            with sbr._write_lock():
+                sbr.log_governance_cycle_event(
+                    conn, "query", caller="resource_governor.py:--query-umr",
+                    detail=f"limit={args.limit} status={args.status} search={args.search!r}",
+                )
+                conn.commit()
+        except Exception:
+            pass
         conn.close()
         print(json.dumps({"count": len(rows), "matches": rows}, indent=2, default=str))
         return

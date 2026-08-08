@@ -37,6 +37,7 @@ AI_OS = f"{VERIDIAN_ROOT}/ai-os"
 SUPERBOSS = f"{SCRIPTS}/superboss-register.py"
 VERIDIAN_TASK = f"{SCRIPTS}/veridian-task.py"
 CREDIT_ACCOUNTANT = f"{SCRIPTS}/credit-accountant.py"
+RESOURCE_GOVERNOR = f"{SCRIPTS}/resource_governor.py"
 # OWNER_ENGINE software (OWNER DIRECTIVE 2026-07-25 / KE-20260725-061008-8423),
 # a pre-processing filter upstream of this dispatcher -- see PROMPT_GATEWAY
 # below and run_owner_engine_gate().
@@ -59,6 +60,40 @@ def fail(message, **extra):
     payload.update(extra)
     print(json.dumps(payload, indent=2, default=str))
     sys.exit(1)
+
+
+def run_task_start_gate(task_identity, title, umr_id=None):
+    """UMR-20260808-121334-e122 (Owner-decided Option B, PM decision cycle
+    UMR-20260808-141807-7f38, 2026-08-08): cmd_start spawns a real systemd
+    unit synchronously and, before this, had ZERO reference to
+    resource_governor.py/stop_work anywhere in this file -- dispatch-owner-
+    task.sh's OTHER real channel (resource_governor.py's submit()/
+    dispatch_one()) already gets the real stop-work-order + resource-
+    threshold gate, this one didn't. Option B deliberately keeps cmd_start's
+    existing synchronous, direct-spawn calling convention unchanged (vs.
+    restructuring it into dispatch_one()'s async submit-and-queue shape) --
+    same real protection, materially lower risk to whatever else currently
+    depends on cmd_start's calling convention.
+
+    Calls resource_governor.py --check-task-start-gate (the real, shared
+    check dispatch_one() itself now also calls, via
+    resource_threshold_block_reason() + _stop_work_order_block_reason() --
+    see that file's own docstrings) as a subprocess, same composition
+    convention this file already uses for every other wrapped script
+    (SUPERBOSS/TIGHT_VALIDATION/DDL_AUTHORIZATION_CHECK/CREDIT_ACCOUNTANT).
+    Returns the parsed {"blocked": bool, "check": str|None, "detail":
+    str|None} dict; raises via fail() (like every other real wrapper-level
+    failure in this file) if resource_governor.py itself doesn't exit 0
+    with parseable JSON -- a broken governor is treated as a real gate
+    failure here, not silently skipped, matching this file's own fail-
+    closed posture on every other real precondition check above."""
+    cmd = [
+        "python3", RESOURCE_GOVERNOR, "--check-task-start-gate",
+        "--task-identity", task_identity, "--title", title,
+    ]
+    if umr_id:
+        cmd += ["--umr-id", umr_id]
+    return run_json(cmd, "resource_governor.py --check-task-start-gate")
 
 
 def run(cmd):
@@ -443,6 +478,20 @@ def cmd_start(args):
             existing_ts=claim_result.get("existing_ts"),
             guidance="if this is a genuine new task, give it a title that isn't "
                      "identical (after lowercasing/slugifying to 40 chars) to the prior one",
+        )
+
+    # Real gate (UMR-20260808-121334-e122, Option B) -- see
+    # run_task_start_gate()'s own docstring. Runs immediately after the
+    # duplicate-task-key claim (cheap, no real resources spent yet) and
+    # before veridian-task.py create below (the real spawn -- worktree/
+    # branch/systemd unit), so a blocked start never reaches that point.
+    gate_result = run_task_start_gate(task_key, args.title, umr_id=args.umr_id)
+    if gate_result.get("blocked"):
+        fail(
+            "blocked by resource_governor.py's real stop-work-order/resource-threshold gate "
+            "-- the same real protection dispatch_one() applies to every queued task",
+            check=gate_result.get("check"),
+            detail=gate_result.get("detail"),
         )
 
     # Real, machine-readable hold-for-signoff (2026-07-26, root-caused against
@@ -869,6 +918,11 @@ def build_parser():
     st.add_argument("--title", required=True)
     st.add_argument("--repo", required=True)
     st.add_argument("--prompt-file", dest="prompt_file", required=True)
+    st.add_argument("--umr-id", dest="umr_id", default=None,
+                     help="optional -- if this start traces back to a real UMR, passing it lets the "
+                          "stop-work-order gate (see run_task_start_gate()) match a real, "
+                          "UMR-scoped exemption the same way dispatch_one() can; omitting it just "
+                          "means no UMR-scoped exemption can match, which is the safe default")
     st.set_defaults(func=cmd_start)
 
     lg = sub.add_parser("log")

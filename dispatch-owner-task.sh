@@ -121,9 +121,59 @@ if [ "$DUP_FOUND" = "True" ]; then
   exit 1
 fi
 
-# 2. Log the raw ask (input side of the Owner<->AI operational dialogue).
-INS_JSON=$(python3 superboss-register.py log-instruction --text "$PROMPT" --source owner --medium "$MEDIUM")
-INSTRUCTION_ID=$(echo "$INS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['instruction_id'])")
+# 2. Real, confirmed bug fixed 2026-08-08 (independent tier1 review,
+#    UMR171945-0006, governing chain UMR-20260806-171945-5767): this used to
+#    log the raw ask directly via superboss-register.py log-instruction,
+#    completely bypassing task-gateway.py's real software-first pipeline
+#    (ai-os/STANDING_DIRECTIVE.yaml's v2_task_lifecycle_pipeline) -- the
+#    OWNER_ENGINE gate, capability_registry ai_required check, and
+#    mechanical dedup/search that task-gateway.py submit already implements
+#    for every OTHER real dispatch entrypoint. Confirmed live before this
+#    fix: zero cross-references between this file and task-gateway.py.
+#
+#    Fixed as the minimal real bridge, not a wholesale swap of the dispatch
+#    mechanism: `task-gateway.py submit` runs the real classification
+#    (OWNER_ENGINE gate, capability_registry lookup, dedup/search) and logs
+#    the instruction itself (replacing this script's own former direct
+#    log-instruction call -- calling both would double-log the same real
+#    ask under two instruction_ids). It does NOT spawn or queue anything by
+#    itself (confirmed by reading cmd_submit() directly: it only classifies
+#    and prints a JSON summary) -- step 3 below still submits to
+#    resource_governor.py's real queue/tier/concurrency-slot-respecting
+#    dispatch_one() scheduler, exactly as before. Deliberately NOT routed
+#    through task-gateway.py's own cmd_start (the synchronous, unqueued,
+#    direct-spawn path) -- that would remove the real tier-priority-ordered,
+#    concurrency-slot-capped scheduling this script's real Owner-dispatch
+#    use case (potentially many instructions arriving close together) has
+#    always relied on, a materially higher-risk change than closing the
+#    real classification gap this UMR actually asks for. Same real
+#    calling-convention-preservation reasoning as UMR-20260808-121334-e122's
+#    own Option B resolution.
+#
+#    Deliberately fail-open, not fail-closed: cmd_submit() internally calls
+#    several real subsystems (OWNER_ENGINE gate, capability_registry lookup,
+#    dedup/search, systemctl) via run_json()/fail(), any one of which
+#    exiting non-zero would -- under this script's own `set -euo pipefail`
+#    -- abort the ENTIRE dispatch attempt, a real new fragility this
+#    script's previous single direct log-instruction call never had. The
+#    classification step is informational (it does not decide whether this
+#    dispatch proceeds), so a transient failure in it must never block a
+#    real Owner-directed dispatch -- it falls back to this script's own
+#    original direct log-instruction call instead, so real Owner-directed
+#    work always still gets logged and dispatched even if task-gateway.py
+#    submit's classification machinery has a bad moment.
+SESSION_ID="dispatch-owner-task.sh:${MEDIUM}:$$"
+SUBMIT_CLASSIFY_ERR="$(mktemp)"
+if SUBMIT_CLASSIFY_JSON=$(python3 task-gateway.py submit --text "$PROMPT" --source owner --session-id "$SESSION_ID" 2>"$SUBMIT_CLASSIFY_ERR"); then
+  INSTRUCTION_ID=$(echo "$SUBMIT_CLASSIFY_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['instruction_id'])")
+  rm -f "$SUBMIT_CLASSIFY_ERR"
+else
+  echo "WARNING: task-gateway.py submit (real software-first classification) failed -- falling back to direct log-instruction so this real dispatch is not blocked by a classification-step hiccup. Failure detail:" >&2
+  cat "$SUBMIT_CLASSIFY_ERR" >&2 2>/dev/null || true
+  rm -f "$SUBMIT_CLASSIFY_ERR"
+  INS_JSON=$(python3 superboss-register.py log-instruction --text "$PROMPT" --source owner --medium "$MEDIUM")
+  INSTRUCTION_ID=$(echo "$INS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['instruction_id'])")
+fi
 
 # 3. Register the real task with resource_governor.py -- this is what actually
 #    gets it a UMR ID and puts it under governance (concurrency cap, EMERGENCY_STOP).

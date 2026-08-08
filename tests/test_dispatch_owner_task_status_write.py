@@ -406,3 +406,57 @@ def test_wrapper_no_relay_leaves_row_queued_untouched(scratch_db, fake_tmux_path
     assert row["status"] == "queued"
     assert row["ts_dispatched"] is None
     assert row["ts_completed"] is None
+
+
+# --- UMR171945-0006: real software-first classification bridge ---------
+
+def test_wrapper_produces_a_real_task_gateway_submit_classification_entry(scratch_db, fake_tmux_path, tmp_path):
+    """Real, confirmed bug fixed 2026-08-08 (UMR171945-0006, governing chain
+    UMR-20260806-171945-5767): dispatch-owner-task.sh used to log the raw
+    ask directly, with zero real reference to task-gateway.py's own
+    software-first pipeline (OWNER_ENGINE gate, capability_registry check,
+    dedup/search). This is this UMR's own stated real boolean test: a real
+    dispatch through dispatch-owner-task.sh now produces a real
+    task-gateway.py submit log entry, independently verifiable via
+    superboss-register.py search, BEFORE any worker spawns -- proven here
+    by querying the real instructions table for the exact prompt text and
+    confirming a real instruction_id/source='owner'/medium='task_gateway'
+    row exists (task_gateway is cmd_submit's own real, hardcoded medium
+    value -- proof this specific row came from task-gateway.py's real
+    log-instruction call, not dispatch-owner-task.sh's own former direct
+    one, which always logged medium=$MEDIUM, e.g. 'claude_code_cli')."""
+    result, _tmux_log = _run_wrapper(
+        scratch_db, fake_tmux_path, "irrelevant-session-classify-test",
+        live_sessions=["irrelevant-session-classify-test"], tmp_path=tmp_path,
+        extra_args=("--no-relay",),
+    )
+    assert result.returncode == 0, result.stderr
+
+    umr_id = None
+    for line in result.stdout.splitlines():
+        if line.startswith("DISPATCHED:"):
+            umr_id = line.split("umr_id=")[1].split()[0]
+    assert umr_id, result.stdout
+
+    # Real, confirmed live finding while writing this test: run_owner_engine_gate()
+    # (called internally by cmd_submit for --source owner) logs its OWN separate
+    # decision-log row (utm_medium='owner_engine_gateway_decision_log',
+    # utm_source='ai_agent') in addition to cmd_submit's own explicit
+    # log-instruction call -- real, pre-existing OWNER_ENGINE behavior, not
+    # introduced by this fix. This test targets specifically the row THIS fix
+    # is responsible for (utm_medium='task_gateway', cmd_submit's own
+    # hardcoded value), not "exactly one row total" (which would be a false
+    # assumption about a system this fix doesn't own).
+    conn = sqlite3.connect(scratch_db)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT instruction_id, utm_source, utm_medium, raw_text FROM instructions "
+        "WHERE utm_medium='task_gateway' AND raw_text LIKE ?",
+        ("%unit-test dispatch prompt body, unique-irrelevant-session-classify-test%",),
+    ).fetchall()
+    conn.close()
+    assert len(rows) == 1, (
+        f"expected exactly one real task-gateway.py submit log-instruction row for this "
+        f"dispatch, found {len(rows)}: {[dict(r) for r in rows]}"
+    )
+    assert rows[0]["utm_source"] == "owner", dict(rows[0])

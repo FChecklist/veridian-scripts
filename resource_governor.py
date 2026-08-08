@@ -3553,6 +3553,30 @@ def _shed_load(state, metrics=None):
         f"CRITICAL: sustained over-threshold ticks {state}{metrics_note} -- shed load by SIGTERM to "
         f"lowest-tier running unit {victim['unit_name']} (umr_id={victim['umr_id']}, tier={victim['tier']})."
     )
+    # UMR-20260808-074726-d105 / UMR171945-0018 (real, currently-uncovered
+    # event class found 2026-08-08): Stage 3's hard-stop cascade
+    # (_write_emergency_stop() above) already writes a real
+    # master_issue_tracker row for its own trip; Stage 2's own real
+    # load-shedding cascade (this function) never did -- confirmed live
+    # before this fix: grep of every _record_master_issue_if_new( call site
+    # found none inside _shed_load(). A real, sustained metric overload
+    # severe enough to SIGTERM a live running task is exactly the same
+    # class of "software also has to write it down" event Stage 3's own
+    # comment already argues for -- not a per-task condition (real per-shed
+    # evidence lives in ATTENTION.md, same convention as Stage 3), so this
+    # uses the same fixed, deduplicated issue_id/dedup contract, not a
+    # fresh row per shed.
+    _record_master_issue_if_new(
+        "RG-EMERGENCY-STOP-SHEDLOAD",
+        "resource_governor.py's real Stage 2 load-shedding cascade (_shed_load()) tripped: at least "
+        f"one real metric stayed at/over {METRIC_THRESHOLD_PERCENT}% for "
+        f"{EMERGENCY_CONSECUTIVE_TICKS_SHED} consecutive governor ticks, SIGTERMing the lowest-tier "
+        "real running unit to free real resources. Real per-shed evidence (which unit, which tier, "
+        "consecutive-tick counts, metrics) lives in ATTENTION.md -- not duplicated onto this row.",
+        linked_umr_id="UMR-20260808-074726-d105",
+        linked_source="resource_governor.py:_shed_load",
+        file_path="scripts/resource_governor.py",
+    )
     return victim["unit_name"]
 
 

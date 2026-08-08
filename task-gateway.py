@@ -88,6 +88,12 @@ TIGHT_VALIDATION = f"{SCRIPTS}/tight_task_validation.py"
 DDL_AUTHORIZATION_CHECK = f"{SCRIPTS}/ddl_authorization_check.py"
 DB_PATH = f"{AI_OS}/memory/superboss-register.sqlite"
 MASTER_INDEX_REGISTRIES_SYNC = f"{AI_OS}/scripts/sync_master_index_registries.py"
+# UMR171945-0017 (real ops infra audit, 2026-08-08): veridian-zoekt-webserver.service,
+# confirmed live/real (~1.7GB index over compliance-tracker/veridian-scripts/
+# claude-control/scripts, 2-hourly reindex timer). Env override exists for
+# tests only -- the real default always points at this box's real running
+# service.
+ZOEKT_URL = os.environ.get("ZOEKT_URL", "http://127.0.0.1:6070")
 
 STOPWORDS = {
     "the", "a", "an", "of", "to", "for", "and", "or", "in", "on", "vs",
@@ -273,6 +279,63 @@ def lookup_work_item(task_id):
     return dict(row) if row else None
 
 
+def run_zoekt_search(query, limit=10):
+    """UMR171945-0017 (governing chain UMR-20260806-171945-5767): real HTTP
+    call to the real, running Zoekt code-search webserver
+    (veridian-zoekt-webserver.service, ZOEKT_URL, confirmed live 2026-08-08:
+    ~1.7GB real trigram index over compliance-tracker/veridian-scripts/
+    claude-control/scripts). Folded into cmd_submit's existing search step
+    alongside check-duplicate/search/query-knowledge, never replacing them
+    -- those three query superboss-register.sqlite's own FTS5 tables (short
+    instruction/capability/knowledge text); this queries Zoekt's separate,
+    real index of actual file contents, which can surface real matches
+    those FTS5 tables structurally cannot (they never ingest source-file
+    bodies at all).
+
+    Fail-open by design, same convention as _audit_point_23's Grafana call
+    below: a real infra hiccup (service down, timeout, malformed response)
+    must never block or crash cmd_submit's own search step -- returns an
+    empty, honestly-flagged result instead of raising.
+
+    Zoekt's own /search endpoint supports &format=json (confirmed live: the
+    default is an HTML results page) and &num=<n> to bound the result count
+    server-side, so `limit` is a real, enforced cap, not just a client-side
+    truncation. json.loads(..., strict=False) is required -- Zoekt's own
+    real JSON output can contain raw, unescaped control characters inside
+    matched code-snippet strings (confirmed live against the real index),
+    which Python's strict-mode JSON parser otherwise rejects outright."""
+    if not query or not query.strip():
+        return {"ok": False, "hits": [], "error": "empty query", "query": query}
+    try:
+        import urllib.parse
+        import urllib.request
+        qs = urllib.parse.urlencode({"q": query, "format": "json", "num": limit})
+        req = urllib.request.Request(f"{ZOEKT_URL.rstrip('/')}/search?{qs}")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            raw = resp.read()
+        parsed = json.loads(raw, strict=False)
+        file_matches = parsed.get("result", {}).get("FileMatches", []) or []
+        hits = []
+        for fm in file_matches[:limit]:
+            matches = fm.get("Matches") or []
+            first = matches[0] if matches else {}
+            fragments = first.get("Fragments") or []
+            snippet = "".join(
+                f"{frag.get('Pre', '')}{frag.get('Match', '')}{frag.get('Post', '')}"
+                for frag in fragments[:1]
+            )
+            hits.append({
+                "repo": fm.get("Repo"),
+                "file": fm.get("FileName"),
+                "line": first.get("LineNum"),
+                "snippet": snippet,
+                "match_count": len(matches),
+            })
+        return {"ok": True, "hits": hits, "query": query, "total_file_matches": len(file_matches)}
+    except Exception as e:
+        return {"ok": False, "hits": [], "error": f"{type(e).__name__}: {e}", "query": query}
+
+
 def extract_keywords_mechanical(text):
     """STANDING_DIRECTIVE.yaml v2_task_lifecycle_pipeline.phase_1_software_first_search
     .keyword_extraction_baseline_mechanical_first.step_1_mechanical: regex-extract
@@ -365,6 +428,11 @@ def cmd_submit(args):
         ["python3", SUPERBOSS, "query-knowledge", keyword_str],
         "query-knowledge",
     )
+    # UMR171945-0017: real Zoekt code-search hit, folded in alongside the
+    # three superboss-register.sqlite FTS5 lookups above -- see
+    # run_zoekt_search()'s own docstring for why this is additive, not a
+    # replacement for any of them.
+    zoekt_result = run_zoekt_search(keyword_str, limit=10)
     # Phase 1 Capability Registry live wiring (task-20260724-083420,
     # closes_engines: [3]): lookup_contract's call_site_requirement --
     # "any code path about to construct an LLM prompt to accomplish a named
@@ -425,6 +493,7 @@ def cmd_submit(args):
         "duplicate_evidence": dup_result.get("matches", []),
         "prior_search_results": search_result,
         "knowledge_matches": knowledge_result,
+        "zoekt_matches": zoekt_result,
         "capability_matches": capability_result.get("matches", []),
         "capability_deterministic_path_available": any(
             (not m.get("ai_required")) and m.get("apis") for m in capability_result.get("matches", [])

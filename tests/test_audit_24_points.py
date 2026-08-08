@@ -374,6 +374,116 @@ def test_point_22_returns_true_when_all_matched_closes_succeed():
     print("PASS: test_point_22_returns_true_when_all_matched_closes_succeed")
 
 
+def test_point_22_evidence_regex_rejects_negated_merge_claim():
+    """Real, confirmed round-3 review bug, direct regression test: text
+    describing UNMERGED work in an ordinary way ('has NOT been merged
+    yet ... PR #310') must NOT match as real evidence -- live-verified
+    before this fix: the plain evidence regex matched it outright, which
+    would have auto-closed a genuinely still-open row. Both the negated
+    real-world phrasing and a genuinely positive one (same PR number, no
+    negation) are tested, so the fix is proven to reject the bad case
+    without also rejecting the good one."""
+    tg = _load_gateway_module("tg_point22_negation_check")
+    negated = "has NOT been merged yet ... PR #310"
+    assert tg._point_22_real_evidence_match(negated) is None, negated
+    positive = "real fix landed, merged via PR #310"
+    m = tg._point_22_real_evidence_match(positive)
+    assert m is not None, positive
+    print("PASS: test_point_22_evidence_regex_rejects_negated_merge_claim")
+
+
+def test_point_22_does_not_auto_close_a_row_with_negated_evidence_text():
+    """End-to-end version of the negation test: a real open row whose own
+    apply_fix_notes describes UNMERGED work must survive a real
+    _audit_point_22() run untouched, not get auto-closed."""
+    tg = _load_gateway_module("tg_point22_negation_e2e_check")
+
+    calls = []
+
+    def fake_run_json(cmd, step):
+        calls.append(cmd)
+        if cmd[2] == "list-issues":
+            return {"matches": [
+                {"issue_id": "UMR171945-0001",
+                 "apply_fix_notes": "Investigated -- has NOT been merged yet, blocked on PR #310's own CI",
+                 "audit_notes": None},
+            ]}
+        if cmd[2] == "close-issue":
+            raise AssertionError(f"close-issue must never be called for a negated-evidence row: {cmd}")
+        raise AssertionError(f"unexpected run_json call: {cmd}")
+
+    tg.run_json = fake_run_json
+    passed, detail = tg._audit_point_22()
+    assert passed is True, detail  # nothing matched, nothing failed to close -> real pass
+    assert "0 auto-closed" in detail, detail
+    print("PASS: test_point_22_does_not_auto_close_a_row_with_negated_evidence_text")
+
+
+def test_cmd_audit_24_points_survives_a_check_raising_systemexit():
+    """Real, confirmed round-3 review bug, direct regression test:
+    `except Exception` does not catch SystemExit (task-gateway.py's own
+    fail()/run_json() helpers raise it via sys.exit(1) on any transient
+    subprocess/JSON failure) -- a single point's check raising it used to
+    abort the entire run before the final report was ever printed, losing
+    every already-computed result. Forces one point's check to raise
+    SystemExit and asserts the run still completes and prints a full
+    report covering every point, with the failing point marked False and
+    a real error detail instead of crashing."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        sbr = _seed_scratch_db(scratch_db)
+        tg = _load_gateway_module("tg_systemexit_check")
+        os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
+        try:
+            def raising_check():
+                raise SystemExit(1)
+            tg._AUDIT_24_CHECKS = dict(tg._AUDIT_24_CHECKS)
+            tg._AUDIT_24_CHECKS[2] = raising_check
+            args = argparse.Namespace(no_persist=True)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                tg.cmd_audit_24_points(args)  # must NOT raise/exit
+            output = json.loads(buf.getvalue())
+        finally:
+            os.environ.pop("SUPERBOSS_REGISTER_DB", None)
+
+        by_point = {r["point"]: r for r in output["results"]}
+        assert set(by_point.keys()) == set(tg.AUDIT_24_POINTS_SUBSET), by_point.keys()
+        assert by_point[2]["boolean"] is False, by_point[2]
+        assert "SystemExit" in by_point[2]["detail"], by_point[2]
+        print("PASS: test_cmd_audit_24_points_survives_a_check_raising_systemexit")
+
+
+def test_cmd_audit_24_points_survives_a_persist_call_raising_systemexit():
+    """Same real bug class as the check-raising-SystemExit test, for the
+    persistence call site specifically (round 3's review named the
+    persistence step as one of the affected call sites, separately from
+    the check functions themselves)."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        sbr = _seed_scratch_db(scratch_db)
+        tg = _load_gateway_module("tg_systemexit_persist_check")
+        os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
+        try:
+            def raising_persist(point, boolean_result, detail, ran_at):
+                raise SystemExit(1)
+            tg._persist_audit24_point_result = raising_persist
+            args = argparse.Namespace(no_persist=False)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                tg.cmd_audit_24_points(args)  # must NOT raise/exit
+            output = json.loads(buf.getvalue())
+        finally:
+            os.environ.pop("SUPERBOSS_REGISTER_DB", None)
+
+        by_point = {r["point"]: r for r in output["results"]}
+        assert set(by_point.keys()) == set(tg.AUDIT_24_POINTS_SUBSET), by_point.keys()
+        for r in by_point.values():
+            assert r["persisted"] is False, r
+            assert "SystemExit" in r.get("persist_error", ""), r
+        print("PASS: test_cmd_audit_24_points_survives_a_persist_call_raising_systemexit")
+
+
 if __name__ == "__main__":
     test_audit_24_points_runs_all_12_and_persists()
     test_audit_24_points_query_event_flips_point_02_true()

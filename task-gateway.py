@@ -1197,17 +1197,48 @@ def _audit_point_20():
 
 
 _POINT_22_EVIDENCE_RE = re.compile(r"\bmerged\b.{0,200}?(PR\s*#\d+|commit\s+[0-9a-f]{7,40})", re.I | re.S)
+# Real, confirmed bug fixed 2026-08-08 (independent tier1 review, PR #280
+# round 3): _POINT_22_EVIDENCE_RE alone matches "merged" followed anywhere
+# within 200 chars by a PR/commit reference, with NO awareness of an
+# intervening negation -- ordinary phrasing like "has NOT been merged yet
+# ... PR #310" (a real, common way to describe UNMERGED work) matched, and
+# would have auto-closed a genuinely still-open row: a real, destructive
+# false positive triggered by a false match inside what is nominally a
+# read-only audit check. Verified live before this fix against the actual
+# compiled regex. _POINT_22_NEGATION_RE below checks a real window
+# immediately before each match for a negation word; a match preceded by
+# one is rejected, not auto-closed.
+_POINT_22_NEGATION_RE = re.compile(
+    r"\b(not|never|n't|hasn't|wasn't|isn't|doesn't|didn't|won't|no longer|yet to be|"
+    r"still pending|still open|still unmerged)\b", re.I,
+)
+_POINT_22_NEGATION_WINDOW = 40
+
+
+def _point_22_real_evidence_match(text):
+    """Returns the first real, non-negated evidence match in `text` (a
+    'merged ... PR #N'/'merged ... commit <sha>' phrase with no negation
+    word in the _POINT_22_NEGATION_WINDOW chars immediately before it), or
+    None. See _POINT_22_NEGATION_RE's own comment above for the real,
+    live-verified false-positive this closes."""
+    for m in _POINT_22_EVIDENCE_RE.finditer(text):
+        window = text[max(0, m.start() - _POINT_22_NEGATION_WINDOW):m.start()]
+        if _POINT_22_NEGATION_RE.search(window):
+            continue
+        return m
+    return None
 
 
 def _audit_point_22():
     """For each open master_issue_tracker row linked to this governing UMR,
     does apply_fix_notes/audit_notes already contain a real, specific,
-    parseable evidence citation (a 'merged ... PR #N' or 'merged ... commit
-    <sha>' phrase) sufficient to conservatively auto-close it via the real
-    close-issue CLI? Deliberately conservative and scoped only to this
-    governing UMR's own 24 rows (never a platform-wide scan) -- a vague or
-    partial citation never matches this strict regex, so this never auto-
-    closes on a guess.
+    parseable, non-negated evidence citation (a 'merged ... PR #N' or
+    'merged ... commit <sha>' phrase, with no negation word immediately
+    before it -- see _point_22_real_evidence_match()) sufficient to
+    conservatively auto-close it via the real close-issue CLI?
+    Deliberately conservative and scoped only to this governing UMR's own
+    24 rows (never a platform-wide scan) -- a vague, partial, or negated
+    citation never matches, so this never auto-closes on a guess.
 
     Real, confirmed bug fixed 2026-08-08 (independent tier1 review, PR #280
     round 1): this used to unconditionally `return True, ...` regardless of
@@ -1224,7 +1255,7 @@ def _audit_point_22():
     failed = []
     for row in rows:
         text = " ".join(filter(None, [row.get("apply_fix_notes"), row.get("audit_notes")]))
-        match = _POINT_22_EVIDENCE_RE.search(text or "")
+        match = _point_22_real_evidence_match(text or "")
         if match:
             resolution = f"auto-closed by audit-24-points Point 22: conservative evidence match ({match.group(0)[:150]!r})"
             close_resp = run_json(["python3", SUPERBOSS, "close-issue", "--issue-id", row["issue_id"],
@@ -1296,11 +1327,25 @@ def cmd_audit_24_points(args):
     _log_governance_event_best_effort("memory_check", "task-gateway.py:audit-24-points", detail=ran_at)
     _log_governance_event_best_effort("audit_performed", "task-gateway.py:audit-24-points", detail=ran_at)
 
+    # Real, confirmed bug fixed 2026-08-08 (independent tier1 review, PR
+    # #280 round 3): `except Exception` does NOT catch SystemExit --
+    # SystemExit inherits from BaseException directly, not Exception -- and
+    # task-gateway.py's own fail()/run_json() helpers (used by points 2, 8,
+    # 9, 22, and the persistence step for EVERY point) raise SystemExit via
+    # sys.exit(1) on any transient subprocess/JSON failure. Before this fix,
+    # a single such failure inside any one point's check OR its persist
+    # step aborted the entire audit-24-points run before the final report
+    # was ever printed -- silently losing every already-computed result,
+    # not degrading gracefully as this loop's own intent requires. Both the
+    # check call and the persist call below now explicitly catch
+    # `(Exception, SystemExit)` -- deliberately NOT bare BaseException,
+    # which would also swallow a real KeyboardInterrupt that should still
+    # propagate.
     results = []
     for point in AUDIT_24_POINTS_SUBSET:
         try:
             passed, detail = _AUDIT_24_CHECKS[point]()
-        except Exception as e:
+        except (Exception, SystemExit) as e:
             passed, detail = False, f"check itself raised {type(e).__name__}: {e}"
         who_acts, how_told, verify_done = _AUDIT_24_REMEDIATION[point]
         # Real, confirmed bug fixed 2026-08-08 (independent tier1 review,
@@ -1320,8 +1365,12 @@ def cmd_audit_24_points(args):
         }
         results.append(entry)
         if not args.no_persist:
-            persist_resp = _persist_audit24_point_result(point, passed, detail, ran_at)
-            entry["persisted"] = persist_resp.get("ok", False)
+            try:
+                persist_resp = _persist_audit24_point_result(point, passed, detail, ran_at)
+                entry["persisted"] = persist_resp.get("ok", False)
+            except (Exception, SystemExit) as e:
+                entry["persisted"] = False
+                entry["persist_error"] = f"{type(e).__name__}: {e}"
 
     print(json.dumps({"ran_at": ran_at, "results": results}, indent=2, default=str))
 

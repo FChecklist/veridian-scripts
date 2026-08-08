@@ -1051,39 +1051,49 @@ def _audit_point_04():
 
 def _audit_point_08():
     """Does a real, timestamped memory-check log entry exist within the
-    last 24h? This run's own audit-24-points invocation logs a real
-    memory_check event before checking (a genuine memory check does happen
-    at the start of every real session per CLAUDE.md's own Memory
-    protocol) -- so a healthy, regularly-run audit cycle is self-
-    sustaining TRUE."""
+    last 24h -- from BEFORE this invocation, not counting this run's own
+    event? Real, confirmed bug fixed 2026-08-08 (independent tier1 review,
+    PR #280 round 4): cmd_audit_24_points() used to log its own
+    memory_check event immediately before this check ran, so once
+    audit-24-points had been run even once, this check could never again
+    return False regardless of whether any real memory-check activity
+    happened elsewhere -- the identical 'can never itself fail' defect
+    class already fixed for Point 22 in round 1, left unaddressed here.
+    cmd_audit_24_points() now logs its own event AFTER every point has
+    been checked (see its own comment), so this only ever sees a real,
+    PRIOR event -- genuinely testing whether audit-24-points (or anything
+    else logging this event type) has run within the last 24h, not
+    whether this exact invocation is currently in progress."""
     resp = run_json(["python3", SUPERBOSS, "list-governance-events", "--event-type", "memory_check",
                       "--limit", "1"], "list-governance-events")
     rows = resp.get("matches", [])
     if not rows:
-        return False, "no memory_check event ever logged"
+        return False, "no PRIOR memory_check event logged (this run's own event is logged after checking, not before)"
     ts = rows[0].get("ts")
     try:
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(ts)).total_seconds()
     except Exception as e:
         return False, f"unparseable ts {ts!r}: {e}"
-    return age <= 24 * 3600, f"most recent memory_check at {ts}, age={age:.0f}s (threshold 86400s)"
+    return age <= 24 * 3600, f"most recent PRIOR memory_check at {ts}, age={age:.0f}s (threshold 86400s)"
 
 
 def _audit_point_09():
-    """Does a real, timestamped audit-performed log entry exist for the
-    current cycle? Same self-sustaining mechanism as Point 8: this
-    invocation logs its own audit_performed event before checking."""
+    """Does a real, timestamped audit-performed log entry exist within the
+    last 24h -- from BEFORE this invocation? Same real fix as Point 8 (see
+    its own docstring): cmd_audit_24_points() now logs this run's own
+    audit_performed event AFTER checking, not before, so this only ever
+    sees a real, prior run."""
     resp = run_json(["python3", SUPERBOSS, "list-governance-events", "--event-type", "audit_performed",
                       "--limit", "1"], "list-governance-events")
     rows = resp.get("matches", [])
     if not rows:
-        return False, "no audit_performed event ever logged"
+        return False, "no PRIOR audit_performed event logged (this run's own event is logged after checking, not before)"
     ts = rows[0].get("ts")
     try:
         age = (datetime.now(timezone.utc) - datetime.fromisoformat(ts)).total_seconds()
     except Exception as e:
         return False, f"unparseable ts {ts!r}: {e}"
-    return age <= 24 * 3600, f"most recent audit_performed at {ts}, age={age:.0f}s (threshold 86400s, 'current cycle')"
+    return age <= 24 * 3600, f"most recent PRIOR audit_performed at {ts}, age={age:.0f}s (threshold 86400s)"
 
 
 def _audit_point_12():
@@ -1205,25 +1215,37 @@ _POINT_22_EVIDENCE_RE = re.compile(r"\bmerged\b.{0,200}?(PR\s*#\d+|commit\s+[0-9
 # would have auto-closed a genuinely still-open row: a real, destructive
 # false positive triggered by a false match inside what is nominally a
 # read-only audit check. Verified live before this fix against the actual
-# compiled regex. _POINT_22_NEGATION_RE below checks a real window
-# immediately before each match for a negation word; a match preceded by
-# one is rejected, not auto-closed.
+# compiled regex. _POINT_22_NEGATION_RE below checks a real window around
+# each match for a negation word.
+#
+# Real, confirmed bug fixed 2026-08-08 (independent tier1 review, PR #280
+# round 4): round 3's fix only checked the window BEFORE the "merged"
+# token, so a negation that follows the merge claim -- e.g. "...was
+# reverted after being merged in PR #310", describing since-reverted, NOT
+# actually resolved work -- went undetected and would still auto-close the
+# row. The window is now checked on BOTH sides of the match, and
+# revert/rollback words (not just grammatical negation) are added to the
+# set, since "reverted"/"rolled back"/"undone" describe exactly this real
+# unresolved-despite-a-past-merge condition Point 22 must not auto-close.
 _POINT_22_NEGATION_RE = re.compile(
     r"\b(not|never|n't|hasn't|wasn't|isn't|doesn't|didn't|won't|no longer|yet to be|"
-    r"still pending|still open|still unmerged)\b", re.I,
+    r"still pending|still open|still unmerged|reverted|revert|rolled back|rolled-back|"
+    r"rollback|undone|reversed)\b", re.I,
 )
 _POINT_22_NEGATION_WINDOW = 40
 
 
 def _point_22_real_evidence_match(text):
     """Returns the first real, non-negated evidence match in `text` (a
-    'merged ... PR #N'/'merged ... commit <sha>' phrase with no negation
-    word in the _POINT_22_NEGATION_WINDOW chars immediately before it), or
-    None. See _POINT_22_NEGATION_RE's own comment above for the real,
-    live-verified false-positive this closes."""
+    'merged ... PR #N'/'merged ... commit <sha>' phrase with no negation/
+    revert word in the _POINT_22_NEGATION_WINDOW chars immediately before
+    OR after it), or None. See _POINT_22_NEGATION_RE's own comment above
+    for the real, live-verified false-positives (both directions) this
+    closes."""
     for m in _POINT_22_EVIDENCE_RE.finditer(text):
-        window = text[max(0, m.start() - _POINT_22_NEGATION_WINDOW):m.start()]
-        if _POINT_22_NEGATION_RE.search(window):
+        before = text[max(0, m.start() - _POINT_22_NEGATION_WINDOW):m.start()]
+        after = text[m.end():m.end() + _POINT_22_NEGATION_WINDOW]
+        if _POINT_22_NEGATION_RE.search(before) or _POINT_22_NEGATION_RE.search(after):
             continue
         return m
     return None
@@ -1324,8 +1346,6 @@ _AUDIT_24_REMEDIATION = {
 
 def cmd_audit_24_points(args):
     ran_at = _now_iso_utc()
-    _log_governance_event_best_effort("memory_check", "task-gateway.py:audit-24-points", detail=ran_at)
-    _log_governance_event_best_effort("audit_performed", "task-gateway.py:audit-24-points", detail=ran_at)
 
     # Real, confirmed bug fixed 2026-08-08 (independent tier1 review, PR
     # #280 round 3): `except Exception` does NOT catch SystemExit --
@@ -1371,6 +1391,19 @@ def cmd_audit_24_points(args):
             except (Exception, SystemExit) as e:
                 entry["persisted"] = False
                 entry["persist_error"] = f"{type(e).__name__}: {e}"
+
+    # Real, confirmed bug fixed 2026-08-08 (independent tier1 review, PR
+    # #280 round 4): this run's own memory_check/audit_performed events are
+    # logged HERE, AFTER every point (including Points 8/9 themselves) has
+    # already been checked -- not before, as the original code did. Logging
+    # before checking meant Points 8/9 always found their own freshly-
+    # logged event and could never again return False once audit-24-points
+    # had run even once, the identical 'can never itself fail' defect class
+    # already fixed for Point 22 in round 1. This still logs real telemetry
+    # every real invocation -- it just no longer contaminates the very
+    # check it would otherwise make tautological.
+    _log_governance_event_best_effort("memory_check", "task-gateway.py:audit-24-points", detail=ran_at)
+    _log_governance_event_best_effort("audit_performed", "task-gateway.py:audit-24-points", detail=ran_at)
 
     print(json.dumps({"ran_at": ran_at, "results": results}, indent=2, default=str))
 

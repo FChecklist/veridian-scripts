@@ -3414,20 +3414,36 @@ def _record_master_issue_if_new(issue_id, issue_identified, linked_umr_id=None, 
     not be merged as-is, so this function and its two real call sites were
     carried forward by hand onto current main instead of a raw branch
     merge, per that task's own instruction to finish landing this real work
-    rather than build a second, competing implementation."""
+    rather than build a second, competing implementation.
+
+    Real, confirmed bug fixed 2026-08-08 (independent tier1 review, PR #280
+    round 4): the existence check used to run BEFORE acquiring
+    sbr._write_lock(), only the insert itself was inside it -- a genuine
+    check-then-act race window where two concurrent callers could both
+    observe "not found" before either held the lock. The real, live schema
+    already has a UNIQUE constraint on issue_id (master_issue_tracker's own
+    CREATE TABLE), so this could never actually produce a silent duplicate
+    row -- the second racing caller's insert would raise a real
+    IntegrityError, caught by this function's own outer try/except below
+    and returned as a normal False -- but the check-then-act pattern still
+    didn't match this function's own documented "genuinely new class
+    inserts exactly once" dedup contract. The existence check now runs
+    INSIDE the same _write_lock() as the insert, making the whole
+    check-and-insert genuinely atomic, not just eventually-safe-by-
+    accident of the schema."""
     try:
         sbr, error = _safe_superboss_register("_record_master_issue_if_new")
         if error:
             return False
         conn = sbr._connect()
         sbr._ensure_master_issue_tracker_table(conn)
-        existing = conn.execute(
-            "SELECT tracker_id FROM master_issue_tracker WHERE issue_id=?", (issue_id,)
-        ).fetchone()
-        if existing:
-            conn.close()
-            return False
         with sbr._write_lock():
+            existing = conn.execute(
+                "SELECT tracker_id FROM master_issue_tracker WHERE issue_id=?", (issue_id,)
+            ).fetchone()
+            if existing:
+                conn.close()
+                return False
             sbr.add_master_issue(
                 conn, issue_id, issue_identified, linked_umr_id=linked_umr_id,
                 linked_ocid=linked_ocid, linked_source=linked_source or "resource_governor.py",

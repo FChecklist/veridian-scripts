@@ -484,6 +484,99 @@ def test_cmd_audit_24_points_survives_a_persist_call_raising_systemexit():
         print("PASS: test_cmd_audit_24_points_survives_a_persist_call_raising_systemexit")
 
 
+def test_points_08_09_false_on_first_ever_invocation():
+    """Real, confirmed round-4 review bug, direct regression test: Points
+    8/9 used to be structurally self-certifying (cmd_audit_24_points()
+    logged its own memory_check/audit_performed event BEFORE checking for
+    one), so they could never return False once audit-24-points had run
+    even once. On a genuinely fresh scratch DB with zero prior events, a
+    single real run must now see Points 8/9 as FALSE -- proving the check
+    runs before this invocation's own event is logged, not after."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        sbr = _seed_scratch_db(scratch_db)
+        resp = _run_gateway(scratch_db, ["audit-24-points", "--no-persist"])
+        by_point = {r["point"]: r for r in resp["results"]}
+        assert by_point[8]["boolean"] is False, by_point[8]
+        assert by_point[9]["boolean"] is False, by_point[9]
+        print("PASS: test_points_08_09_false_on_first_ever_invocation")
+
+
+def test_points_08_09_true_on_second_invocation_after_a_prior_real_run():
+    """Control case: a SECOND real run, shortly after a first one, must see
+    Points 8/9 as TRUE -- the first run's own event (logged after it
+    finished, per the round-4 fix) is now a genuine PRIOR event for this
+    second run to find. Proves the fix doesn't just make Points 8/9
+    permanently False either."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        sbr = _seed_scratch_db(scratch_db)
+        _run_gateway(scratch_db, ["audit-24-points", "--no-persist"])
+        resp = _run_gateway(scratch_db, ["audit-24-points", "--no-persist"])
+        by_point = {r["point"]: r for r in resp["results"]}
+        assert by_point[8]["boolean"] is True, by_point[8]
+        assert by_point[9]["boolean"] is True, by_point[9]
+        print("PASS: test_points_08_09_true_on_second_invocation_after_a_prior_real_run")
+
+
+def test_point_22_evidence_regex_rejects_revert_following_merge_claim():
+    """Real, confirmed round-4 review bug, direct regression test: a
+    negation that FOLLOWS the merge claim (round 3's fix only checked
+    before it) -- e.g. "...was reverted after being merged in PR #310",
+    describing since-reverted, NOT actually resolved work -- must not
+    match as real evidence."""
+    tg = _load_gateway_module("tg_point22_revert_after_check")
+    reverted_after = "the fix was reverted after being merged in PR #310"
+    assert tg._point_22_real_evidence_match(reverted_after) is None, reverted_after
+    # Control: a genuinely clean positive citation, no revert language
+    # anywhere nearby, still matches.
+    clean_positive = "real fix landed cleanly, merged via PR #405, still live on main"
+    m = tg._point_22_real_evidence_match(clean_positive)
+    assert m is not None, clean_positive
+    print("PASS: test_point_22_evidence_regex_rejects_revert_following_merge_claim")
+
+
+def test_record_master_issue_if_new_still_dedups_correctly():
+    """Real, confirmed round-4 review bug (check-then-act race on
+    _record_master_issue_if_new in resource_governor.py, fixed by moving
+    the existence check inside the same _write_lock() as the insert) --
+    this proves the ordinary, non-concurrent dedup contract still holds
+    after that fix: a first call for a given issue_id inserts a real row
+    and returns True; a second call for the SAME issue_id is a real,
+    verified no-op and returns False, with no duplicate row created."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        sbr = _seed_scratch_db(scratch_db)
+        rg_spec = importlib.util.spec_from_file_location(
+            "rg_dedup_check", os.path.join(SCRIPTS_DIR, "resource_governor.py")
+        )
+        rg = importlib.util.module_from_spec(rg_spec)
+        os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
+        try:
+            rg_spec.loader.exec_module(rg)
+            first = rg._record_master_issue_if_new(
+                "TEST-DEDUP-ISSUE-1", "real synthetic issue for this test",
+                linked_umr_id=GOVERNING_UMR,
+            )
+            second = rg._record_master_issue_if_new(
+                "TEST-DEDUP-ISSUE-1", "real synthetic issue for this test",
+                linked_umr_id=GOVERNING_UMR,
+            )
+        finally:
+            os.environ.pop("SUPERBOSS_REGISTER_DB", None)
+
+        assert first is True, "first call for a new issue_id must insert and return True"
+        assert second is False, "second call for the SAME issue_id must be a real no-op, not a duplicate"
+
+        conn = sqlite3.connect(scratch_db)
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM master_issue_tracker WHERE issue_id=?", ("TEST-DEDUP-ISSUE-1",)
+        ).fetchone()
+        conn.close()
+        assert rows[0] == 1, f"expected exactly 1 row, found {rows[0]}"
+        print("PASS: test_record_master_issue_if_new_still_dedups_correctly")
+
+
 if __name__ == "__main__":
     test_audit_24_points_runs_all_12_and_persists()
     test_audit_24_points_query_event_flips_point_02_true()

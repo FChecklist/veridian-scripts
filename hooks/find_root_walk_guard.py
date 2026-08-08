@@ -120,6 +120,26 @@ _WRAPPER_VALUE_FLAGS = {
 _SHELL_STRING_EXEC_CMDS = {"bash", "sh", "zsh", "ksh", "dash"}
 _EVAL_CMDS = {"eval"}
 
+# Explicit, documented scope boundary (raised as a real, non-blocking
+# finding in independent tier1 review round 7): a non-shell interpreter's
+# own -c/-e string-execution form -- `python3 -c "import os;
+# os.system('find / ...')"`, `perl -e 'system(\"find / ...\")'`, `ruby -e
+# ...`, `node -e ...`, and similarly-shaped forms in any other language
+# runtime -- is NOT recognized here and returns "allow" with no recursive
+# check, unlike every shell-string-exec/eval/-exec/backtick/process-
+# substitution form above, which this file otherwise goes out of its way
+# to close. This is a deliberate scope boundary, not an oversight: doing
+# this generally would mean this guard parsing arbitrary target-language
+# syntax (Python/Perl/Ruby/JS source, as opposed to the one shell grammar
+# this whole file is already built to parse), which is a materially
+# different and much larger problem than the shell-quoting/escaping/
+# tokenization gaps this file's other rounds of hardening have closed.
+# Real, live incidents this hook was built to prevent (see module
+# docstring) were direct shell `find /` invocations, not one further
+# removed through another language's own subprocess-execution API -- if
+# that real incident pattern is ever observed, it should be closed as its
+# own real, scoped fix, not folded silently into this one.
+
 # xargs forwards its trailing command name (and any literal, non-templated
 # arguments after it) directly to exec -- `xargs find /` (or
 # `echo | xargs find /`) really does run an unbounded find / walk, same
@@ -143,11 +163,30 @@ _VAR_OR_SUBST_RE = re.compile(r"\$|`")
 # punctuation_chars set includes "&"), so `<anything> & find /` (e.g.
 # `true & find /`, `cd /opt/veridian & find /`) was folded into a single
 # segment whose first word was never "find", bypassing this guard entirely.
-# Verified live before the fix: both examples exited 0 (allow), reproducing
-# the exact real incident class (unbounded find / walk) this hook exists to
-# prevent. "&" is now a real segment break, same as every other control
-# operator here.
-_SEGMENT_BREAKS = {";", "&", "&&", "||", "|", "(", ")"}
+# Verified live before the fix, both examples exited 0 (allow). "&" is now
+# a real segment break, same as every other control operator here.
+#
+# Real, confirmed bug fixed 2026-08-08 (independent tier1 review, round 7):
+# "(" and ")" were ALSO unconditional segment breaks here, but shlex's
+# posix-mode escape handling strips the backslash from a real, ordinary
+# find expression's escaped grouping parens (\( ... \)) and returns the
+# exact same bare "(" / ")" token a real, unescaped shell subshell-grouping
+# operator would produce -- there is no way to distinguish the two after
+# tokenization; the escape information is genuinely lost. Splitting on them
+# unconditionally fractured a single find invocation using ordinary -o/-a
+# grouping syntax (e.g. `find /opt/veridian \( -name a -o -name b \)
+# -exec find / -iname x \;`) into fake segments, hiding a nested unbounded
+# `-exec find / ...` from BOTH the primary find-segment scan and
+# _scan_nested_execs (round 3's own fix) -- confirmed live before this fix:
+# exactly that example returned ('allow', None). "(" / ")" are no longer
+# unconditional segment breaks; real shell subshell grouping is instead
+# handled explicitly and recursively, see _strip_subshell_grouping() below,
+# which does not share this ambiguity because it only fires on a segment
+# that STARTS with "(" and ENDS with ")" as a whole (find's own escaped
+# expression-grouping parens appear in the MIDDLE of a find invocation,
+# never bounding an entire segment this way).
+_SEGMENT_BREAKS = {";", "&", "&&", "||", "|"}
+_SUBSHELL_BOUNDS = ("(", ")")
 
 # Roots (after normalization relative to cwd) that count as an unbounded
 # walk. "/" is the one the real incidents used; the trailing-slash and
@@ -557,6 +596,29 @@ def evaluate(command, cwd):
                 continue
             tokens = _tokenize_line(line)
             for segment in _split_segments(tokens):
+                # Real, confirmed bug fixed 2026-08-08 (independent tier1
+                # review, round 7, same pass as removing "("/")" from
+                # _SEGMENT_BREAKS above): a genuine shell subshell-grouping
+                # segment -- one whose tokens are entirely bounded by a
+                # single "(" ... ")" pair, e.g. `(find / -iname x)` -- would
+                # otherwise start with the literal token "(", never "find"
+                # or a recognized wrapper, so it would silently fall through
+                # to allow now that "("/")" no longer fracture segments.
+                # Stripped and recursively evaluated as its own fresh
+                # command line the same way bash -c/eval content already
+                # is. Only fires when the WHOLE segment is bounded this way
+                # (never a bare "(" in the middle, which is find's own
+                # escaped expression-grouping syntax, not a real subshell --
+                # see _SEGMENT_BREAKS's own comment for why the two are
+                # indistinguishable after tokenization and why this
+                # start/end-bounded check is what avoids conflating them).
+                if len(segment) >= 2 and segment[0] == "(" and segment[-1] == ")":
+                    inner = segment[1:-1]
+                    if inner:
+                        subshell = evaluate(" ".join(inner), cwd)
+                        if subshell[0] != "allow":
+                            return subshell
+                    continue
                 is_find, unbounded_root = _segment_unbounded_root(segment, cwd)
                 if is_find and unbounded_root is not None:
                     return "reject_unbounded", unbounded_root

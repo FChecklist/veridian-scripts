@@ -465,3 +465,57 @@ def test_bash_c_with_scoped_find_is_still_allowed():
 def test_non_find_pipe_is_still_allowed():
     result = run_hook("echo hello | cat")
     assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# Real, confirmed bug fixed 2026-08-08 (independent tier1 review, round 7):
+# escaped find-expression grouping parens (\( ... \)), ordinary -o/-a
+# syntax, were indistinguishable after shlex tokenization from a real,
+# unescaped shell control-operator "(" / ")" -- splitting on them
+# unconditionally fractured a single find invocation into fake segments,
+# hiding a nested -exec find / from both the primary scan and round 3's
+# own nested-exec fix. "("/")" are no longer unconditional segment breaks;
+# real shell subshell grouping is instead handled explicitly.
+# ---------------------------------------------------------------------------
+
+def test_escaped_grouping_parens_with_nested_exec_unbounded_find_is_rejected():
+    result = run_hook(r"find /opt/veridian \( -o \) -exec find / -iname x \;")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+    assert "BLOCKED" in result.stderr
+
+
+def test_escaped_grouping_parens_scoped_find_is_still_allowed():
+    result = run_hook(r"find /opt/veridian \( -name a -o -name b \)")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_escaped_grouping_parens_with_scoped_nested_exec_is_still_allowed():
+    result = run_hook(
+        r"find /opt/veridian \( -name a -o -name b \) -exec find /opt/veridian/scripts -iname x \;")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_subshell_wrapped_unbounded_find_is_rejected():
+    result = run_hook("(find / -iname secret)")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+    assert "BLOCKED" in result.stderr
+
+
+def test_subshell_wrapped_scoped_find_is_still_allowed():
+    result = run_hook("(find /opt/veridian/scripts -iname x)")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_subshell_wrapped_non_find_is_still_allowed():
+    result = run_hook("(echo hello)")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_python_interpreter_c_form_is_documented_boundary_allowed():
+    """Real, documented, non-blocking scope boundary per independent tier1
+    review round 7: another language runtime's own -c/-e string-execution
+    form is not recognized by this guard (parsing arbitrary target-language
+    syntax is a materially larger, different problem than shell
+    quoting/escaping) -- explicitly allowed, not a silent gap."""
+    result = run_hook('python3 -c "import os; os.system(\'find / -iname secret\')"')
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"

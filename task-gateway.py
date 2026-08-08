@@ -14,6 +14,45 @@ lookup_work_item(), is a read-only lookup used to correctly sequence later
 calls, not a substitute for any wrapped script).
 
 Subcommands: submit, start, log, close, register-automation, status
+
+UMR171945-0001 (single input gate audit, 2026-08-08): a grep across
+.py/.sh files in this directory for direct subprocess/import call sites to
+resource_governor.py or superboss-register.py found a consistent, real
+pattern: every one checked is a legitimate, low-level/internal caller this
+gate was never meant to cover -- not a task-lifecycle bypass. Confirmed
+real examples (illustrative, deliberately NOT claimed as an exhaustive
+enumeration -- a first draft of this note claimed completeness and an
+independent review found a real, missed example, veridian-task.py, so this
+note no longer makes that claim):
+  - resource_governor_tick_loop.sh: the canonical 30s driver of
+    resource_governor.py's own --tick/--reconcile-stale/
+    --umr-staleness-scan -- this IS the real dispatcher, not a caller of it.
+  - dispatch-tick.py, veridian-task-watchdog.py: in-process
+    `import resource_governor` for the same real, low-level dispatch/resume
+    machinery, not a task-lifecycle bypass.
+  - directive_engine.py, gtm_check_ai_testing.py, dispatch-owner-task.sh:
+    call resource_governor.py's own real --submit CLI directly (the real,
+    governed queue-entry point) -- dispatch-owner-task.sh additionally
+    routes its own instruction logging through THIS file's real `submit`
+    subcommand (UMR171945-0006, PR #282) before reaching --submit.
+  - generate_prompt_coverage_report.py, intent_engine.py,
+    knowledge_registry_multisource.py, prompt_gateway/gateway_persistence.py,
+    quality-gate.sh, supervisor-entrypoint.sh, worker-entrypoint.sh,
+    doc-worker-entrypoint.sh, run-logged.sh, veridian-task.py: call
+    superboss-register.py's own real capability-registry/knowledge/
+    log-instruction/log-action/log-work primitives directly -- none of
+    these are task-lifecycle writes this file's own subcommands
+    (submit/start/log/close/status) cover; forcing them through this file
+    would add an unnecessary hop, not close a real gap.
+"Single input gate" therefore means: every real task-lifecycle operation
+(submit/start/log/close/status) goes through this file. Other real, direct
+callers of the two wrapped scripts are expected to keep existing for
+non-task-lifecycle primitives (logging, capability/knowledge lookups, the
+tick loop's own dispatch machinery) -- the real signal that would mean
+this gate has an actual gap is a caller performing a genuine
+task-lifecycle operation (creating/starting/closing a task, or writing its
+canonical status) OUTSIDE this file's own subcommands, not merely the
+existence of another low-level caller of a shared primitive.
 """
 import argparse
 import importlib.util

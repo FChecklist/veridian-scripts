@@ -7001,6 +7001,23 @@ def cmd_mark_umr_terminal(args):
     real code paths (resource_governor.py's duplicate check, SIGTERM
     handling), not this generic CLI.
 
+    UMR171945-0002 (single output gate audit, 2026-08-08): this is the ONE
+    real, generic, CLI-facing entry point for an AI/PM caller to ASSERT a
+    completion claim, and the ONLY writer that enforces
+    validate_umr_terminal_completion_evidence() -- but it is deliberately
+    not the only place resource_governor.py itself writes a real terminal
+    status. reconcile_stale_heartbeats()/backfill_null_heartbeats() (see
+    their own comments at each real write site) write status='completed'
+    directly via update_umr_task(), bypassing this function and its
+    evidence gate on purpose: their real evidence basis is live,
+    directly-observed systemd/session state, not a PR/commit claim the gate
+    was built to catch fabrication of. Every real terminal write in this
+    codebase still goes through the SAME single underlying update_umr_task()
+    function under the same real _write_lock() -- "single output gate"
+    holds at the write-function level; the PR/commit evidence gate itself
+    is correctly scoped to this CLI's own AI/PM-claimed-completion use
+    case, not universal to every real terminal write.
+
     UMR-20260806-130914-e7f1 (real dispatch UMR-20260806-130914-e7f1,
     governed by UMR-20260806-071025-1d28): status=completed and
     status=completed_unmerged now structurally REQUIRE real, structured,

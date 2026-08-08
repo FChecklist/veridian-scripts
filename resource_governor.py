@@ -2785,6 +2785,29 @@ def reconcile_stale_heartbeats(now=None, ttl_seconds=None, execute=False):
         # because is_active is already confirmed False above -- disable never
         # touches a running unit's live state, only its boot-time wiring.
         _run(["systemctl", "--user", "disable", unit])
+        # Real, documented answer to UMR171945-0002 (single output gate audit,
+        # 2026-08-08): this writes status=terminal via update_umr_task()
+        # DIRECTLY, not through superboss-register.py's cmd_mark_umr_terminal()
+        # -- and so does NOT go through that CLI's own
+        # validate_umr_terminal_completion_evidence() gate (the real
+        # commit-sha/file-path requirement UMR-20260806-130914-e7f1 built for
+        # a *claimed* completion). That is deliberate, not a gap: this sweep's
+        # own real evidence basis is different in kind, not absent -- it is
+        # live, directly-observed systemd unit state (confirmed is_active=
+        # False above, a real, present-tense fact this function checked
+        # itself), not a claim about a commit/PR that could be fabricated or
+        # stale. Forcing this through the PR/commit-evidence gate would be
+        # wrong: there is no commit or PR to cite for "a systemd unit exited
+        # and its status column never got reconciled," and requiring one
+        # would just make this sweep unable to do the one real thing it
+        # exists for. Every real terminal-status write in this file (this
+        # one, backfill_null_heartbeats() below, and dispatch_one()'s own
+        # rejected_duplicate/sigterm_sent/killed/failed writes) still goes
+        # through the SAME single underlying writer -- update_umr_task(),
+        # inside the same real sbr._write_lock() -- so "single output gate"
+        # is true at the write-FUNCTION level; it is the evidence-gate
+        # specifically that is (correctly) scoped to cmd_mark_umr_terminal()'s
+        # own AI/PM-claimed-completion use case, not universal.
         with sbr._write_lock():
             sbr.update_umr_task(
                 conn, row["umr_id"], status=terminal, ts_completed=_now_iso(),
@@ -3274,6 +3297,13 @@ def backfill_null_heartbeats(now=None, execute=False, email=None):
         }
 
         if decided_status == "completed":
+            # UMR171945-0002 (single output gate audit): same real, direct
+            # update_umr_task() write path as reconcile_stale_heartbeats()
+            # above -- see that function's own real-evidence-basis comment
+            # for why bypassing cmd_mark_umr_terminal()'s PR/commit-evidence
+            # gate is correct here, not a gap (this "completed" verdict is
+            # grounded in real, directly-observed systemd + task.yaml
+            # cross-check state, a different but equally real evidence kind).
             entry["decision"] = "marked_completed" if execute else "would_mark_completed"
             if execute:
                 with sbr._write_lock():
@@ -3357,6 +3387,10 @@ def backfill_null_heartbeats(now=None, execute=False, email=None):
             "reason": reason,
         }
         if execute:
+            # UMR171945-0002: same real, documented direct-write path as the
+            # other two "completed" writers above -- evidence basis here is
+            # external_ai_state_machine.py's own real, independently-checked
+            # session status, not a PR/commit claim.
             entry["mark_complete_call_result"] = _external_ai_mark_complete(match["id"])
             with sbr._write_lock():
                 sbr.update_umr_task(conn, row["umr_id"], status="completed", ts_completed=_now_iso(), reason=reason)

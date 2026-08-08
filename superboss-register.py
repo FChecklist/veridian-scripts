@@ -754,6 +754,7 @@ def _migrate_schema(conn):
     _migrate_wiring_registry_vector(conn)
     _migrate_capability_registry_vector(conn)
     _ensure_external_agent_dispatch_table(conn)
+    _ensure_master_issue_tracker_table(conn)
 
 
 def _migrate_wiring_registry_content_hash(conn):
@@ -7135,6 +7136,314 @@ def cmd_reset_umr_to_queued(args):
                       indent=2, default=str))
 
 
+# ---------------------------------------------------------------------------
+# master_issue_tracker -- the ONE permanent, callable mechanism for real issue
+# tracking (Owner directive, governing chain UMR-20260806-171945-5767 ->
+# UMR-20260808-074726-d105). The table itself is real and was already
+# populated before this section existed (986 rows: 981 migrated from
+# UMR_5767_ISSUE_RESOLUTION_MATRIX.json, plus 5 real OCID-020 GTM-
+# certification category failures) -- what was missing was a real,
+# permanent, callable WRITE path: the only way to add a row was a one-off
+# script run once from /tmp (/tmp/build_master_issue_tracker.py), never
+# re-runnable, never callable by a live agent or by this codebase's own
+# deterministic gates. This section is that path -- add-issue/close-issue/
+# update-issue/list-issues, following the exact same "function does the real
+# work and does NOT commit, caller owns the transaction; cmd_* is the thin
+# CLI wrapper that opens the connection, calls under _write_lock(), commits"
+# convention every other write path in this file already uses (see
+# update_gtm_certification_category()/cmd_update_gtm_category() above for
+# the closest real precedent). Real schema below is byte-identical to the
+# real, live table already on disk -- confirmed via PRAGMA table_info() /
+# sqlite_master.sql before writing this, not guessed, and cross-checked
+# against /tmp/build_master_issue_tracker.py's own CREATE TABLE statement.
+# ---------------------------------------------------------------------------
+
+def _ensure_master_issue_tracker_table(conn):
+    """Idempotent CREATE TABLE IF NOT EXISTS -- makes the real, already-live
+    master_issue_tracker schema re-creatable on any DB (including a fresh
+    test fixture) that doesn't already have it, same convention
+    _ensure_umr_table()/_ensure_pm_decisions_pending_table() already
+    established. Also registered in _migrate_schema() so `init` and every
+    write-path CLI command picks it up on a pre-existing DB, same dual call
+    site as _ensure_umr_table()."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS master_issue_tracker (
+            tracker_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            issue_id TEXT UNIQUE NOT NULL,
+            issue_number INTEGER,
+            linked_umr_id TEXT,
+            linked_ocid TEXT,
+            linked_source TEXT,
+            issue_identified TEXT NOT NULL,
+            file_name TEXT,
+            file_path TEXT,
+            existing_solution_in_system TEXT,
+            solution_applied TEXT CHECK (solution_applied IN ('YES','NO','PARTIAL','UNKNOWN')),
+            issue_resolved_permanently TEXT CHECK (issue_resolved_permanently IN ('YES','NO','PARTIAL','UNKNOWN')),
+            new_script_needed TEXT CHECK (new_script_needed IN ('YES','NO','UNKNOWN')),
+            new_script_details TEXT,
+            apply_fix_notes TEXT,
+            audit_notes TEXT,
+            check_again_notes TEXT,
+            is_closed TEXT NOT NULL DEFAULT 'NO' CHECK (is_closed IN ('YES','NO')),
+            is_deterministic TEXT,
+            is_ai_free TEXT,
+            is_boolean_software TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_mit_ocid ON master_issue_tracker(linked_ocid)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_mit_closed ON master_issue_tracker(is_closed)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_mit_issue_number ON master_issue_tracker(issue_number)")
+
+
+def _next_master_issue_number(conn):
+    row = conn.execute(
+        "SELECT COALESCE(MAX(issue_number), 0) + 1 AS n FROM master_issue_tracker"
+    ).fetchone()
+    return row["n"]
+
+
+def add_master_issue(conn, issue_id, issue_identified, linked_ocid=None, linked_umr_id=None,
+                      linked_source=None, file_name=None, file_path=None, existing_solution=None):
+    """Real INSERT -- the one, real, permanent, callable mechanism to add a
+    row to master_issue_tracker (Owner directive: any AI agent or
+    deterministic script that finds a real issue writes it in here, not into
+    a chat message, a one-off file, or nowhere at all -- see this codebase's
+    own README-SERVER.md mandatory-recording section). Does NOT commit --
+    caller owns the transaction, same convention as every other write
+    function in this file.
+
+    Required, real: issue_id (caller-chosen, stable, must not already
+    exist -- raises ValueError rather than a silent overwrite; call
+    update_master_issue() for an already-existing issue_id),
+    issue_identified (a real, non-empty description of the real issue
+    found), and at least one of linked_ocid / linked_umr_id -- every real
+    row already in this table traces to a real governing OCID or UMR, and an
+    issue with neither is not yet traceable enough to record here.
+    issue_number is assigned automatically, one past the current real
+    MAX(issue_number) -- never caller-supplied, so numbering stays gapless
+    and monotonic the same way the 986 pre-existing rows already are."""
+    issue_id = (issue_id or "").strip()
+    issue_identified = (issue_identified or "").strip()
+    if not issue_id:
+        raise ValueError("add_master_issue: --issue-id is required and must be non-empty")
+    if not issue_identified:
+        raise ValueError("add_master_issue: --issue-identified is required and must be non-empty")
+    if not linked_ocid and not linked_umr_id:
+        raise ValueError("add_master_issue: at least one of --linked-ocid / --linked-umr-id is required")
+    existing = conn.execute(
+        "SELECT tracker_id FROM master_issue_tracker WHERE issue_id=?", (issue_id,)
+    ).fetchone()
+    if existing:
+        raise ValueError(f"add_master_issue: issue_id {issue_id!r} already exists "
+                          f"(tracker_id={existing['tracker_id']}) -- use update_master_issue instead")
+    now = _now_iso()
+    issue_number = _next_master_issue_number(conn)
+    conn.execute(
+        "INSERT INTO master_issue_tracker "
+        "(issue_id, issue_number, linked_umr_id, linked_ocid, linked_source, issue_identified, "
+        "file_name, file_path, existing_solution_in_system, is_closed, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'NO', ?, ?)",
+        (issue_id, issue_number, linked_umr_id, linked_ocid, linked_source, issue_identified,
+         file_name, file_path, existing_solution, now, now),
+    )
+    return issue_id, issue_number
+
+
+def close_master_issue(conn, issue_id, resolution_notes):
+    """Real UPDATE -- sets issue_resolved_permanently='YES' and
+    is_closed='YES' ONLY if resolution_notes is real and non-empty (Owner/
+    task requirement -- an issue is never marked resolved without real
+    resolution evidence). Appends resolution_notes onto apply_fix_notes --
+    the same column the 673 real already-closed pre-existing rows use for
+    exactly this purpose, confirmed by direct SELECT before writing this,
+    not guessed. Appends rather than overwrites, so an issue closed a second
+    time (re-opened, then re-fixed) never silently loses its own prior real
+    resolution history. Does NOT commit -- caller owns the transaction."""
+    resolution_notes = (resolution_notes or "").strip()
+    if not resolution_notes:
+        raise ValueError("close_master_issue: --resolution-notes is required and must be non-empty "
+                          "-- an issue is never marked resolved without real resolution evidence")
+    row = conn.execute(
+        "SELECT apply_fix_notes FROM master_issue_tracker WHERE issue_id=?", (issue_id,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"close_master_issue: no master_issue_tracker row for issue_id={issue_id!r}")
+    prior = (row["apply_fix_notes"] or "").strip()
+    combined = f"{prior}\n---\n{resolution_notes}" if prior else resolution_notes
+    conn.execute(
+        "UPDATE master_issue_tracker SET solution_applied='YES', issue_resolved_permanently='YES', "
+        "is_closed='YES', apply_fix_notes=?, updated_at=? WHERE issue_id=?",
+        (combined, _now_iso(), issue_id),
+    )
+
+
+_MASTER_ISSUE_MUTABLE_COLUMNS = (
+    "issue_number", "linked_umr_id", "linked_ocid", "linked_source", "issue_identified",
+    "file_name", "file_path", "existing_solution_in_system", "solution_applied",
+    "issue_resolved_permanently", "new_script_needed", "new_script_details", "apply_fix_notes",
+    "audit_notes", "check_again_notes", "is_closed", "is_deterministic", "is_ai_free",
+    "is_boolean_software",
+)
+
+
+def update_master_issue(conn, issue_id, **fields):
+    """Partial UPDATE of any real, mutable master_issue_tracker column
+    (everything except tracker_id/issue_id/created_at, which are immutable
+    by design -- issue_id is this table's own real stable key, never
+    reassignable through this path). Raises on an unknown/protected column,
+    same convention as update_gtm_certification_category() above. Enum-
+    constrained columns (solution_applied/issue_resolved_permanently/
+    new_script_needed/is_closed) are enforced by the table's own real CHECK
+    constraints -- an invalid value raises sqlite3.IntegrityError, never
+    silently accepted. Does NOT commit -- caller owns the transaction."""
+    unknown = set(fields) - set(_MASTER_ISSUE_MUTABLE_COLUMNS)
+    if unknown:
+        raise ValueError(
+            f"update_master_issue: refusing to write protected/unknown column(s) {sorted(unknown)} "
+            f"-- only {_MASTER_ISSUE_MUTABLE_COLUMNS} are mutable through this function"
+        )
+    if not fields:
+        return
+    row = conn.execute(
+        "SELECT tracker_id FROM master_issue_tracker WHERE issue_id=?", (issue_id,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"update_master_issue: no master_issue_tracker row for issue_id={issue_id!r}")
+    set_clauses, values = [], []
+    for column, value in fields.items():
+        set_clauses.append(f"{column}=?")
+        values.append(value)
+    set_clauses.append("updated_at=?")
+    values.append(_now_iso())
+    values.append(issue_id)
+    conn.execute(
+        f"UPDATE master_issue_tracker SET {', '.join(set_clauses)} WHERE issue_id=?",
+        values,
+    )
+
+
+def query_master_issues(conn, linked_ocid=None, is_closed=None, limit=50):
+    """Real SELECT, the same two-filter shape this table's own real callers
+    need (--linked-ocid or --is-closed), newest-updated-first. Both filters
+    may be combined; neither is required (omit both to list the most
+    recently updated rows overall)."""
+    clauses, params = [], []
+    if linked_ocid:
+        clauses.append("linked_ocid=?")
+        params.append(linked_ocid)
+    if is_closed:
+        clauses.append("is_closed=?")
+        params.append(is_closed.strip().upper())
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    rows = conn.execute(
+        f"SELECT * FROM master_issue_tracker {where} ORDER BY updated_at DESC LIMIT ?", params
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def cmd_add_issue(args):
+    """CLI entry point for add_master_issue() above.
+
+    Usage:
+      python3 superboss-register.py add-issue --issue-id ID --issue-identified "..." \\
+          (--linked-ocid OCID-NNN | --linked-umr-id UMR-...) \\
+          [--file-name NAME] [--file-path PATH] [--existing-solution "..."] \\
+          [--linked-source "..."]
+    """
+    init_db_silent()
+    conn = _connect()
+    _ensure_master_issue_tracker_table(conn)
+    try:
+        with _write_lock():
+            issue_id, issue_number = add_master_issue(
+                conn, args.issue_id, args.issue_identified,
+                linked_ocid=args.linked_ocid, linked_umr_id=args.linked_umr_id,
+                linked_source=args.linked_source, file_name=args.file_name,
+                file_path=args.file_path, existing_solution=args.existing_solution,
+            )
+            conn.commit()
+    except ValueError as e:
+        conn.close()
+        print(json.dumps({"ok": False, "error": str(e)}))
+        sys.exit(1)
+    conn.close()
+    print(json.dumps({"ok": True, "issue_id": issue_id, "issue_number": issue_number},
+                      indent=2, default=str))
+
+
+def cmd_close_issue(args):
+    """CLI entry point for close_master_issue() above.
+
+    Usage:
+      python3 superboss-register.py close-issue --issue-id ID --resolution-notes "..."
+    """
+    init_db_silent()
+    conn = _connect()
+    _ensure_master_issue_tracker_table(conn)
+    try:
+        with _write_lock():
+            close_master_issue(conn, args.issue_id, args.resolution_notes)
+            conn.commit()
+    except ValueError as e:
+        conn.close()
+        print(json.dumps({"ok": False, "error": str(e)}))
+        sys.exit(1)
+    conn.close()
+    print(json.dumps({"ok": True, "issue_id": args.issue_id, "is_closed": "YES",
+                       "issue_resolved_permanently": "YES"}, indent=2, default=str))
+
+
+def cmd_update_issue(args):
+    """CLI entry point for update_master_issue() above -- repeatable
+    --field NAME=VALUE. master_issue_tracker has 19 real mutable columns and
+    the task spec explicitly asks for 'any real field to update', so a
+    repeatable --field NAME=VALUE is the real minimal surface rather than 19
+    new individual flags.
+
+    Usage:
+      python3 superboss-register.py update-issue --issue-id ID \\
+          --field solution_applied=YES --field audit_notes="..."
+    """
+    init_db_silent()
+    conn = _connect()
+    _ensure_master_issue_tracker_table(conn)
+    fields = {}
+    for item in (args.field or []):
+        if "=" not in item:
+            conn.close()
+            print(json.dumps({"ok": False, "error": f"--field must be NAME=VALUE, got {item!r}"}))
+            sys.exit(1)
+        name, value = item.split("=", 1)
+        fields[name.strip()] = value
+    try:
+        with _write_lock():
+            update_master_issue(conn, args.issue_id, **fields)
+            conn.commit()
+    except (ValueError, sqlite3.IntegrityError) as e:
+        conn.close()
+        print(json.dumps({"ok": False, "error": str(e)}))
+        sys.exit(1)
+    conn.close()
+    print(json.dumps({"ok": True, "issue_id": args.issue_id, "updated": fields}, indent=2, default=str))
+
+
+def cmd_list_issues(args):
+    """CLI entry point for query_master_issues() above. JSON output matches
+    this session's own --query-umr convention (resource_governor.py
+    main()): {"count": N, "matches": [...]}."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_master_issue_tracker_table(conn)
+    rows = query_master_issues(conn, linked_ocid=args.linked_ocid, is_closed=args.is_closed,
+                                limit=args.limit)
+    conn.close()
+    print(json.dumps({"count": len(rows), "matches": rows}, indent=2, default=str))
+
+
 EXTERNAL_AGENT_ALLOWED_TASK_TYPES = (
     "isolated_bugfix", "doc_update", "single_file_refactor", "test_addition_only",
 )
@@ -8953,6 +9262,44 @@ if __name__ == "__main__":
     p_resetq.add_argument("--umr-id", dest="umr_id", required=True)
     p_resetq.add_argument("--reason", required=True)
 
+    # UMR-20260808-074726-d105 (governing chain UMR-20260806-171945-5767):
+    # the one real, permanent, callable write path into master_issue_tracker
+    # -- see the section comment above add_master_issue() for full context.
+    p_addissue = sub.add_parser("add-issue",
+                                 help="add a real row to master_issue_tracker -- the mandatory real "
+                                      "mechanism any AI agent or deterministic script must use to "
+                                      "record a real issue found (never a chat message, a one-off "
+                                      "file, or nowhere at all)")
+    p_addissue.add_argument("--issue-id", dest="issue_id", required=True)
+    p_addissue.add_argument("--issue-identified", dest="issue_identified", required=True)
+    p_addissue.add_argument("--linked-ocid", dest="linked_ocid", default=None)
+    p_addissue.add_argument("--linked-umr-id", dest="linked_umr_id", default=None)
+    p_addissue.add_argument("--linked-source", dest="linked_source", default=None)
+    p_addissue.add_argument("--file-name", dest="file_name", default=None)
+    p_addissue.add_argument("--file-path", dest="file_path", default=None)
+    p_addissue.add_argument("--existing-solution", dest="existing_solution", default=None)
+
+    p_closeissue = sub.add_parser("close-issue",
+                                   help="mark a master_issue_tracker row issue_resolved_permanently="
+                                        "YES and is_closed=YES -- only if --resolution-notes is real "
+                                        "and non-empty")
+    p_closeissue.add_argument("--issue-id", dest="issue_id", required=True)
+    p_closeissue.add_argument("--resolution-notes", dest="resolution_notes", required=True)
+
+    p_updissue = sub.add_parser("update-issue",
+                                 help="partial UPDATE of any real, mutable master_issue_tracker "
+                                      "column, repeatable --field NAME=VALUE")
+    p_updissue.add_argument("--issue-id", dest="issue_id", required=True)
+    p_updissue.add_argument("--field", action="append", default=[],
+                             help="NAME=VALUE, repeatable, e.g. --field audit_notes=\"...\"")
+
+    p_listissue = sub.add_parser("list-issues",
+                                  help="list/filter master_issue_tracker rows, JSON output matching "
+                                       "--query-umr's own {count, matches} convention")
+    p_listissue.add_argument("--linked-ocid", dest="linked_ocid", default=None)
+    p_listissue.add_argument("--is-closed", dest="is_closed", default=None, choices=["YES", "NO"])
+    p_listissue.add_argument("--limit", type=int, default=50)
+
     # Real Owner directive UMR-20260806-095416-b6f0: fourth real worker
     # channel, a fully manual human-paste bridge to chat.z.ai. NEVER any
     # browser automation against chat.z.ai (hard ToS constraint).
@@ -9133,6 +9480,14 @@ if __name__ == "__main__":
         cmd_update_gtm_category(args)
     elif args.cmd == "reset-umr-to-queued":
         cmd_reset_umr_to_queued(args)
+    elif args.cmd == "add-issue":
+        cmd_add_issue(args)
+    elif args.cmd == "close-issue":
+        cmd_close_issue(args)
+    elif args.cmd == "update-issue":
+        cmd_update_issue(args)
+    elif args.cmd == "list-issues":
+        cmd_list_issues(args)
     elif args.cmd == "mark-external-agent-eligible":
         cmd_mark_external_agent_eligible(args)
     elif args.cmd == "get-next-external-agent-task":

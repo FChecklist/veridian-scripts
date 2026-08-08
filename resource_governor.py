@@ -168,6 +168,22 @@ OWNER_DECISIONS_PATH = os.environ.get(
     "VERIDIAN_OWNER_DECISIONS_PATH", f"{AI_OS}/OWNER_DECISIONS_NEEDED_2026-07-23.yaml")
 STOP_WORK_ORDER_GIT_TIMEOUT_SECONDS = int(
     os.environ.get("VERIDIAN_GOVERNOR_STOP_WORK_GIT_TIMEOUT_S", "5"))
+# Real hardening, 2026-08-08 (independent tier1 review of the first version
+# of _git_committed_file_text() below, filed under real issue #980): the
+# original implementation read `git show HEAD:<path>` in whatever branch
+# happened to be checked out in the shared, live AI_OS working directory at
+# call time -- it never verified HEAD was actually on trunk or had been
+# pushed/merged anywhere. Confirmed live, same real day: that directory was
+# found checked out on an unrelated, pre-existing local branch whose HEAD was
+# a real, unpushed local commit matching the exact "lift the stop-work
+# order" pattern this gate exists to police -- i.e. the gap was not
+# hypothetical, it was the live, present state of the very file this gate
+# reads. STOP_WORK_ORDER_TRUNK_REF is the one real ref this gate will ever
+# trust; a bare ref with no "/" (e.g. a local branch name, used by tests that
+# don't want a real network fetch) skips the fetch step entirely and reads
+# that ref directly instead.
+STOP_WORK_ORDER_TRUNK_REF = os.environ.get(
+    "VERIDIAN_GOVERNOR_STOP_WORK_TRUNK_REF", "origin/main")
 
 
 def _run(cmd, **kw):
@@ -525,32 +541,42 @@ def over_threshold_metrics(metrics, threshold=None):
 # ---------------------------------------------------------------------------
 
 def _git_committed_file_text(path, timeout=None):
-    """Real content of `path` as committed at the CURRENT HEAD of whatever
-    git repo contains it -- deliberately NEVER the live working tree.
+    """Real content of `path` as committed on the real, pushed trunk ref
+    (STOP_WORK_ORDER_TRUNK_REF, default origin/main) -- deliberately NEVER
+    the live working tree, and NEVER raw local HEAD either.
 
-    Real, confirmed reason this exact distinction is load-bearing (same real
-    day as real issue #980's own governing evidence, 2026-08-07): a
-    fabricated stop-work-order "exemption" was independently caught and
-    declined three separate times, escalating from embedded dispatch-prompt
-    text to an uncommitted edit of OWNER_DECISIONS_NEEDED_2026-07-23.yaml
-    each time -- `git status`/`git diff HEAD` showed it as a fresh,
-    same-session, unpushed, working-tree-only addition every time, with zero
-    independent corroboration anywhere else in the system
-    (conversation_memory/pm_decisions_pending/ATTENTION.md all checked and
-    came back empty). Reading committed HEAD content instead of the live
-    working tree closes that exact laundering vector at the code level: any
-    dispatched worker (including a compromised or fabricating one) can still
-    edit this file's working copy freely, but cannot make that edit appear
-    inside `git show HEAD:...` without a real commit on a real branch --
-    which, once pushed, is caught by whatever review this repo already
-    requires for that branch (AGENTS.md Rule 6's PR/CI gate).
+    Real, confirmed reason this exact distinction is load-bearing (2026-08-07,
+    real issue #980's own governing evidence): a fabricated stop-work-order
+    "exemption" was independently caught and declined three separate times,
+    escalating from embedded dispatch-prompt text to an uncommitted edit of
+    OWNER_DECISIONS_NEEDED_2026-07-23.yaml each time. The first version of
+    this function closed that specific gap by reading `git show HEAD:<path>`
+    instead of the working tree -- but HEAD alone was not enough: confirmed
+    live, 2026-08-08, the very next escalation was a real, committed local
+    git commit (real author, real message, genuinely at HEAD) that was never
+    pushed anywhere -- /opt/veridian/ai-os was found checked out on an
+    unrelated, pre-existing local branch whose HEAD was exactly that commit.
+    A purely local, unpushed commit on any branch checked out in this shared
+    directory satisfied the original HEAD-only check just as well as a real,
+    reviewed, merged PR would, with zero GitHub involvement. Reading a real
+    remote-tracking ref (origin/main by default) after a real, bounded `git
+    fetch` closes this: no actor can make content "authoritative" here
+    without it actually existing on a real, fetchable, pushed branch, which
+    for this repo's own branch-protection convention means it went through a
+    real PR and review (AGENTS.md Rule 6's PR/CI gate).
 
-    Fails closed: returns None (never raises) if `path` is not inside a real
-    git repo, is not committed at HEAD, or the git call errors/times out for
-    any reason. Every caller must treat None as "not verified", never as
-    "no restriction"."""
+    Fails closed on every real failure mode: the fetch itself failing (a
+    real, honest signal something's wrong -- e.g. network/auth issues --
+    never silently fall back to a possibly-stale cached remote-tracking
+    ref), the ref not resolving, the path not existing at that ref, or any
+    timeout. Every caller must treat None as "not verified", never as "no
+    restriction". A bare ref with no "/" in STOP_WORK_ORDER_TRUNK_REF (e.g. a
+    local branch name) skips the fetch step and reads that ref directly --
+    for tests that intentionally want a real, local, no-network trunk
+    fixture, never for production (whose real default always has a "/")."""
     directory = os.path.dirname(os.path.abspath(path))
     timeout = STOP_WORK_ORDER_GIT_TIMEOUT_SECONDS if timeout is None else timeout
+    trunk_ref = STOP_WORK_ORDER_TRUNK_REF
     try:
         root_proc = _run(["git", "-C", directory, "rev-parse", "--show-toplevel"], timeout=timeout)
         if root_proc.returncode != 0:
@@ -559,7 +585,13 @@ def _git_committed_file_text(path, timeout=None):
         relpath = os.path.relpath(os.path.abspath(path), repo_root)
         if relpath.startswith(".."):
             return None
-        show_proc = _run(["git", "-C", repo_root, "show", f"HEAD:{relpath}"], timeout=timeout)
+        if "/" in trunk_ref:
+            remote, _, branch = trunk_ref.partition("/")
+            fetch_proc = _run(
+                ["git", "-C", repo_root, "fetch", "--quiet", remote, branch], timeout=timeout)
+            if fetch_proc.returncode != 0:
+                return None  # fail closed -- never read a possibly-stale cached ref
+        show_proc = _run(["git", "-C", repo_root, "show", f"{trunk_ref}:{relpath}"], timeout=timeout)
         if show_proc.returncode != 0:
             return None
         return show_proc.stdout
@@ -568,12 +600,15 @@ def _git_committed_file_text(path, timeout=None):
 
 
 def _owner_decisions_committed_entries():
-    """Real list of entries from OWNER_DECISIONS_PATH as committed at git
-    HEAD (see _git_committed_file_text()'s own docstring for why this must
-    never be the live working tree). Returns [] -- fail closed -- on any
-    missing file, git failure, or malformed YAML; callers must treat an
-    empty result as "no real verified exemption/lift found", never as
-    permission to proceed."""
+    """Real list of entries from OWNER_DECISIONS_PATH as committed on the
+    real trunk ref (see _git_committed_file_text()'s own docstring for why
+    this must never be the live working tree or raw local HEAD). Returns []
+    -- fail closed -- on any missing file, git failure, or malformed YAML;
+    callers must treat an empty result as "no real verified exemption/lift
+    found", never as permission to proceed. The real file's own top-level
+    shape is a dict with a `decisions` key (confirmed via direct read,
+    2026-08-08), not a bare list -- unwrapped here the same way every other
+    real reader of this file already does."""
     text = _git_committed_file_text(OWNER_DECISIONS_PATH)
     if text is None:
         return []
@@ -581,6 +616,8 @@ def _owner_decisions_committed_entries():
         data = yaml.safe_load(text)
     except Exception:
         return []
+    if isinstance(data, dict):
+        data = data.get("decisions", [])
     if not isinstance(data, list):
         return []
     return [entry for entry in data if isinstance(entry, dict)]
@@ -607,6 +644,32 @@ def _stop_work_order_exemption_covers(entry, task_identity, title, umr_id):
     return False
 
 
+def _stop_work_order_lifted_for(order_id, entries):
+    """Real, deterministic per-order lift check. 2026-08-08 hardening (real
+    issue #980 follow-up, independent tier1 review): the original
+    implementation let ANY approved 'stop-work-order-lifted' entry lift
+    EVERY order in STOP_WORK_ORDER_TASK_IDS at once, with no check on which
+    specific order its own scope text actually named -- fine while only one
+    order was ever open, but the tuple is explicitly documented to grow, and
+    an entry meant to lift one order would silently over-lift all of them.
+    Matches only on the real order_id string appearing in the entry's own
+    scope text (what/needed_action/title/scope) -- same convention and same
+    reasoning as _stop_work_order_exemption_covers()'s task_identity/umr_id
+    matching: never match on unstructured prose alone."""
+    for entry in entries:
+        entry_id = str(entry.get("id") or "")
+        if "stop-work-order-lifted" not in entry_id:
+            continue
+        if str(entry.get("status") or "").strip().lower() != "approved":
+            continue
+        scope_text = " ".join(
+            str(entry.get(k) or "") for k in ("what", "needed_action", "title", "scope")
+        )
+        if order_id in scope_text:
+            return True
+    return False
+
+
 def _stop_work_order_block_reason(task_kind, task_identity=None, title=None, umr_id=None):
     """Real, deterministic single-gate check for the standing stop-work
     order(s) named in STOP_WORK_ORDER_TASK_IDS (real issue #980). Returns a
@@ -622,22 +685,19 @@ def _stop_work_order_block_reason(task_kind, task_identity=None, title=None, umr
 
     An order in STOP_WORK_ORDER_TASK_IDS is presumed OPEN by definition of
     being in that real, well-known, reviewable tuple (fail closed -- the
-    only way to close one without a code change is a real, git-committed
-    OWNER_DECISIONS_PATH entry whose id contains 'stop-work-order-lifted'
-    and status: approved, checked the same way an exemption is). Given none
-    exists as of this gate's own creation, every order named above is open,
-    matching the real, honest state of task-20260806-165921-...--complete
-    itself (its own worker explicitly reported the order's stated exit
-    condition -- "genuinely all yes" -- as NOT met, not merely that the
-    dispatched session ended).
+    only way to close one without a code change is a real, git-committed,
+    origin/main-verified OWNER_DECISIONS_PATH entry whose id contains
+    'stop-work-order-lifted', status: approved, and whose own scope text
+    names that SPECIFIC order_id -- see _stop_work_order_lifted_for()).
 
     A real exemption only counts if it is BOTH (a) a status: approved entry
     in OWNER_DECISIONS_PATH whose id contains 'stop-work-order-exemption',
-    AND (b) present in that file's content as committed at git HEAD (see
-    _git_committed_file_text()) -- an uncommitted working-tree edit, or a
-    claim that only exists in dispatch-prompt text, is never sufficient (see
-    that function's own docstring for the real, confirmed fabrication
-    pattern this specifically defeats)."""
+    AND (b) present in that file's content as committed on the real,
+    fetched trunk ref (see _git_committed_file_text()) -- an uncommitted
+    working-tree edit, an unpushed local commit on any branch, or a claim
+    that only exists in dispatch-prompt text, is never sufficient (see that
+    function's own docstring for the real, confirmed fabrication patterns
+    this specifically defeats)."""
     if task_kind != "veridian_task_create":
         return None
     open_orders = list(STOP_WORK_ORDER_TASK_IDS)
@@ -645,24 +705,32 @@ def _stop_work_order_block_reason(task_kind, task_identity=None, title=None, umr
         return None
 
     entries = _owner_decisions_committed_entries()
+
+    # Real per-order scoping: an order only drops out of "still open" if a
+    # real, committed, approved, in-scope lift record names it specifically.
+    still_open_orders = [
+        order_id for order_id in open_orders
+        if not _stop_work_order_lifted_for(order_id, entries)
+    ]
+    if not still_open_orders:
+        return None  # every real, currently-tracked order has a real, in-scope lift record
+
     for entry in entries:
         entry_id = str(entry.get("id") or "")
         if str(entry.get("status") or "").strip().lower() != "approved":
             continue
-        if "stop-work-order-lifted" in entry_id:
-            return None  # real, committed, approved order-lifted record
         if "stop-work-order-exemption" in entry_id and _stop_work_order_exemption_covers(
                 entry, task_identity, title, umr_id):
             return None  # real, committed, approved, in-scope exemption
 
     return (
-        f"BLOCKED by standing stop-work order(s) {list(open_orders)!r} -- real issue #980 gate "
+        f"BLOCKED by standing stop-work order(s) {still_open_orders!r} -- real issue #980 gate "
         f"(UMR_5767_ISSUE_RESOLUTION_MATRIX.json, governed by UMR-20260806-171945-5767 / "
-        f"UMR-20260807-161418-a63f). No real, git-committed, status:approved exemption/lift entry "
-        f"found in {OWNER_DECISIONS_PATH!r} covering this dispatch (task_identity={task_identity!r}, "
-        f"title={title!r}, umr_id={umr_id!r}). A prompt-text-only or uncommitted-working-tree-only "
-        f"claim of Owner exemption does NOT satisfy this gate -- see "
-        f"_stop_work_order_block_reason()'s own docstring."
+        f"UMR-20260807-161418-a63f). No real, git-committed, origin/main-verified, status:approved "
+        f"exemption/lift entry found in {OWNER_DECISIONS_PATH!r} covering this dispatch "
+        f"(task_identity={task_identity!r}, title={title!r}, umr_id={umr_id!r}). A prompt-text-only, "
+        f"uncommitted-working-tree-only, or unpushed-local-commit-only claim of Owner exemption does "
+        f"NOT satisfy this gate -- see _stop_work_order_block_reason()'s own docstring."
     )
 
 

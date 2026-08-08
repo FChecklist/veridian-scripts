@@ -64,17 +64,48 @@ If you genuinely need a filesystem search, scope it to a real subtree, e.g.:
 """
 
 # Wrapper commands that may legitimately precede `find` in a segment without
-# themselves being the thing invoked (their own flag tokens are also
-# skipped, best-effort). Real, confirmed bug fixed 2026-08-08 (independent
-# tier1 review, round 2): "timeout" was missing -- a very common,
-# non-adversarial prefix for a potentially slow `find` (e.g. `timeout 300
-# find / -iname x`) bypassed this guard entirely, since "timeout" was never
-# recognized at all. Unlike every other wrapper here, "timeout" takes a real
-# positional duration argument (not just flags) before the wrapped command --
-# handled specially in _find_invocation_argv below, not just added to this
-# flag-only-skip set.
+# themselves being the thing invoked. Real, confirmed bug fixed 2026-08-08
+# (independent tier1 review, round 2): "timeout" was missing -- a very
+# common, non-adversarial prefix for a potentially slow `find` (e.g.
+# `timeout 300 find / -iname x`) bypassed this guard entirely, since
+# "timeout" was never recognized at all. Unlike every other wrapper here,
+# "timeout" takes a real positional duration argument (not just flags)
+# before the wrapped command -- handled specially in _find_invocation_argv
+# below, not just added to this flag-only-skip set.
 _SKIP_WRAPPER_CMDS = {"sudo", "nice", "ionice", "time", "nohup", "exec", "command", "env"}
 _TIMEOUT_WRAPPER_CMDS = {"timeout"}
+
+# Real, confirmed bug fixed 2026-08-08 (independent tier1 review, round 4):
+# the wrapper-flag-skip loop originally assumed EVERY flag on every wrapper
+# above was value-less -- but sudo -u USER, nice -n N, ionice -c/-n/-p N,
+# and env -u NAME/-C DIR/-S STRING all take a real value token immediately
+# after the flag. Blindly skipping one token per flag desynced the parser:
+# the flag's VALUE (e.g. "root" after "-u") was then treated as the next
+# thing to check against "find", which it never equals, so the whole
+# invocation fell through to allow. Empirically verified live before this
+# fix: `sudo -u root find / -iname secret`, `nice -n 19 find / -iname
+# secret`, and `env -u FOO find / -iname secret` all exited 0 (allowed).
+#
+# This is the third real bypass found in this exact flag-skip logic across
+# four independent review rounds (background operator, timeout's own
+# positional arg, now wrapper value-flags) -- rather than keep enumerating
+# one more flag shape each round, this adopts the reviewer's own suggested,
+# more robust design: known value-taking flags (below) are skipped along
+# with their value; any OTHER flag-looking token for a wrapper in
+# _SKIP_WRAPPER_CMDS is now Unclassifiable (fail closed -- reject) rather
+# than silently assumed value-less, since this guard can no longer
+# confidently resolve whether a find invocation follows. This matches the
+# guard's own documented fail-closed philosophy (see module docstring) and
+# closes the whole bug CLASS, not just the three instances found so far.
+_WRAPPER_VALUE_FLAGS = {
+    "sudo": {"-u", "-g", "-h", "-p", "-C", "-R", "-r", "-t"},
+    "nice": {"-n"},
+    "ionice": {"-c", "-n", "-p"},
+    "env": {"-u", "-C", "-S"},
+    # time/nohup/exec/command take no common value-bearing flags in real
+    # usage -- any flag encountered for these is Unclassifiable (reject),
+    # never silently skipped, per the fail-closed redesign above.
+}
 
 # Real, confirmed bug fixed 2026-08-08 (independent tier1 review, round 2):
 # this guard only ever looked at the literal first word of a segment -- a
@@ -185,11 +216,35 @@ def _cmd_name(token):
     return os.path.basename(token)
 
 
+def _skip_wrapper_flags(segment, i, n, value_flags):
+    """Real, shared, fail-closed flag-skip for one wrapper command's own
+    argv, starting at segment[i] (the token right after the wrapper name).
+    A flag in `value_flags` is skipped along with its value token; any
+    OTHER flag-looking token raises Unclassifiable (reject) rather than
+    being silently assumed value-less -- see _WRAPPER_VALUE_FLAGS's own
+    comment for why (three real, empirically-confirmed bypasses came from
+    the opposite assumption). Returns the new index, positioned at the
+    first non-flag token (the wrapped command, or end of segment)."""
+    while i < n and segment[i].startswith("-"):
+        if segment[i] in value_flags:
+            if i + 1 >= n:
+                raise Unclassifiable(
+                    f"wrapper flag {segment[i]!r} takes a value but none follows in this segment")
+            i += 2
+        else:
+            raise Unclassifiable(
+                f"unrecognized wrapper flag {segment[i]!r} -- cannot confidently determine "
+                f"whether a find invocation follows (fail closed, not silently allowed)")
+    return i
+
+
 def _find_invocation_argv(segment):
     """If `segment` invokes the real `find` command (as the command itself,
     optionally after env-var assignments and/or a small set of benign
     wrapper commands), returns the argv that follows `find`. Otherwise
-    returns None (this segment is out of this guard's scope)."""
+    returns None (this segment is out of this guard's scope). Raises
+    Unclassifiable (fail closed) if a wrapper's own flags can't be
+    confidently parsed -- see _skip_wrapper_flags()."""
     i, n = 0, len(segment)
     while i < n and _ENV_ASSIGN_RE.match(segment[i]):
         i += 1
@@ -199,21 +254,19 @@ def _find_invocation_argv(segment):
         wrapper = _cmd_name(segment[i])
         i += 1
         if wrapper in _XARGS_CMDS:
-            while i < n and segment[i].startswith("-"):
-                if segment[i] in _XARGS_VALUE_FLAGS and i + 1 < n:
-                    i += 2
-                else:
-                    i += 1
+            i = _skip_wrapper_flags(segment, i, n, _XARGS_VALUE_FLAGS)
         else:
-            while i < n and segment[i].startswith("-"):
-                i += 1
+            i = _skip_wrapper_flags(segment, i, n, _WRAPPER_VALUE_FLAGS.get(wrapper, set()))
             if wrapper in _TIMEOUT_WRAPPER_CMDS and i < n and _cmd_name(segment[i]) != "find":
                 # timeout's own positional DURATION argument (e.g. "300",
                 # "30s") -- real, not a flag, must be skipped too, unlike
-                # every other wrapper here which takes only flags.
+                # every other wrapper here which takes only flags. Its own
+                # flags (-k/-s/--foreground/--preserve-status) are handled
+                # by the fail-closed _skip_wrapper_flags call above --
+                # timeout has no entry in _WRAPPER_VALUE_FLAGS, so ANY flag
+                # before the duration is Unclassifiable, same principle.
                 i += 1
-                while i < n and segment[i].startswith("-"):
-                    i += 1
+                i = _skip_wrapper_flags(segment, i, n, set())
     if i < n and _cmd_name(segment[i]) == "find":
         return segment[i + 1:]
     return None

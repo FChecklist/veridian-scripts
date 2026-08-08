@@ -250,6 +250,56 @@ def test_nested_exec_non_find_command_is_still_allowed():
     assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
 
 
+# ---------------------------------------------------------------------------
+# Real, confirmed bug fixed 2026-08-08 (independent tier1 review, round 4):
+# wrapper commands (sudo/nice/ionice/env) can take real value-bearing flags
+# (sudo -u USER, nice -n N, env -u VAR) that the original flag-skip loop
+# assumed didn't exist, desyncing the parser and falling through to allow.
+# Redesigned to a fail-closed model: known value flags are skipped with
+# their value, any other flag is Unclassifiable (reject), closing the whole
+# bug class rather than one more instance of it.
+# ---------------------------------------------------------------------------
+
+def test_sudo_value_flag_wrapped_unbounded_find_is_rejected():
+    result = run_hook("sudo -u root find / -iname secret")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+    assert "BLOCKED" in result.stderr
+
+
+def test_nice_value_flag_wrapped_unbounded_find_is_rejected():
+    result = run_hook("nice -n 19 find / -iname secret")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+    assert "BLOCKED" in result.stderr
+
+
+def test_env_value_flag_wrapped_unbounded_find_is_rejected():
+    result = run_hook("env -u FOO find / -iname secret")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+    assert "BLOCKED" in result.stderr
+
+
+def test_sudo_value_flag_wrapped_scoped_find_is_still_allowed():
+    result = run_hook("sudo -u root find /opt/veridian/scripts -iname secret")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_nice_value_flag_wrapped_scoped_find_is_still_allowed():
+    result = run_hook("nice -n 19 find /opt/veridian/scripts -iname secret")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_env_value_flag_wrapped_scoped_find_is_still_allowed():
+    result = run_hook("env -u FOO find /opt/veridian/scripts -iname secret")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_unrecognized_wrapper_flag_fails_closed():
+    """The fail-closed redesign's whole point: an unrecognized flag on a
+    known wrapper must reject, not silently assume value-less and allow."""
+    result = run_hook("sudo --unknown-flag find / -iname x")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
 def test_multiple_roots_one_unbounded_is_rejected():
     result = run_hook("find /opt/veridian / -iname 'x'")
     assert result.returncode == 2

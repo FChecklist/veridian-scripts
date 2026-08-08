@@ -107,6 +107,21 @@ SIGTERM_TO_SIGKILL_GRACE_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_SIGKILL
 # ever considered stale. Overridable for tests only.
 HEARTBEAT_STALE_TTL_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_HEARTBEAT_TTL_S", str(15 * 60)))
 
+# Point 14/16 of task-gateway.py audit-24-points (UMR-20260808-145030-f3d1,
+# governing chain UMR-20260806-171945-5767): the exact two-condition
+# staleness definition this session's own PM review cycles have been
+# checking manually via ad-hoc sqlite queries against umr_tasks throughout
+# 2026-08 -- deliberately distinct from MAX_QUEUED_AGE_SECONDS (4h,
+# flag_stale_queued_tasks()'s own real-remediation threshold above) and
+# HEARTBEAT_STALE_TTL_SECONDS (15min, reconcile_stale_heartbeats()'s own
+# real-remediation threshold) -- see detect_stale_umr_rows()'s own
+# docstring for why a third, read-only detection-only pair of thresholds is
+# correct here rather than reusing either existing one.
+UMR_STALE_QUEUED_DISPATCH_NULL_SECONDS = int(os.environ.get(
+    "VERIDIAN_GOVERNOR_STALE_QUEUED_DISPATCH_NULL_S", str(90 * 60)))
+UMR_STALE_RUNNING_HEARTBEAT_SECONDS = int(os.environ.get(
+    "VERIDIAN_GOVERNOR_STALE_RUNNING_HEARTBEAT_S", str(45 * 60)))
+
 # Emergency fail-safe cascade (design doc Section 7).
 EMERGENCY_CONSECUTIVE_TICKS_SHED = int(os.environ.get("VERIDIAN_GOVERNOR_EMERGENCY_SHED_TICKS", "3"))
 EMERGENCY_CONSECUTIVE_TICKS_HARDSTOP = int(os.environ.get("VERIDIAN_GOVERNOR_EMERGENCY_HARDSTOP_TICKS", "6"))
@@ -790,7 +805,7 @@ def _stop_work_order_block_reason(task_kind, task_identity=None, title=None, umr
                 entry, task_identity, title, umr_id):
             return None  # real, committed, approved, in-scope exemption
 
-    return (
+    reason = (
         f"BLOCKED by standing stop-work order(s) {still_open_orders!r} -- real issue #980 gate "
         f"(UMR_5767_ISSUE_RESOLUTION_MATRIX.json, governed by UMR-20260806-171945-5767 / "
         f"UMR-20260807-161418-a63f). No real, git-committed, origin/main-verified, status:approved "
@@ -799,6 +814,24 @@ def _stop_work_order_block_reason(task_kind, task_identity=None, title=None, umr
         f"uncommitted-working-tree-only, or unpushed-local-commit-only claim of Owner exemption does "
         f"NOT satisfy this gate -- see _stop_work_order_block_reason()'s own docstring."
     )
+    # UMR-20260808-074726-d105 (governing chain UMR-20260806-171945-5767): the
+    # 'software also has to write to it' half of the master_issue_tracker
+    # permanence directive -- see _record_master_issue_if_new()'s own
+    # docstring. Dedup-checked against the real issue_id this gate's own
+    # already-migrated row uses ('UMR5767-0980', real issue #980 cited
+    # throughout this function's own comments above) -- a real no-op against
+    # production today, live-verified to actually insert against a DB that
+    # doesn't already have that row.
+    _record_master_issue_if_new(
+        "UMR5767-0980",
+        "The standing stop-work order is only a real, deterministic gate if it lives in code, not "
+        "individual dispatched-worker judgment -- resource_governor.py's own "
+        "_stop_work_order_block_reason() gate is that real, code-level enforcement.",
+        linked_umr_id="UMR-20260806-171945-5767",
+        linked_source="resource_governor.py:_stop_work_order_block_reason",
+        file_path="scripts/resource_governor.py",
+    )
+    return reason
 
 
 # ---------------------------------------------------------------------------
@@ -2544,6 +2577,82 @@ def scan_stuck_tasks(now=None):
     return actions
 
 
+def detect_stale_umr_rows(now=None):
+    """Real, READ-ONLY staleness scan across live umr_tasks: a row matches if
+    EITHER (a) status='queued' AND ts_dispatched IS NULL for at least
+    UMR_STALE_QUEUED_DISPATCH_NULL_SECONDS (default 90 minutes), age measured
+    from ts_submitted since a never-dispatched row has no other real
+    timestamp to measure from; OR (b) status='running' AND its heartbeat is
+    stale -- last_heartbeat older than UMR_STALE_RUNNING_HEARTBEAT_SECONDS
+    (default 45 minutes) if it has ever heartbeated, else its unit's real
+    ActiveEnterTimestamp (same anchor scan_stuck_tasks() above already uses)
+    if it has never heartbeated, so a genuinely freshly-started running row
+    with no heartbeat yet is not falsely flagged.
+
+    This is the exact two-condition definition this session's own PM review
+    cycles have been checking manually via ad-hoc sqlite queries against
+    umr_tasks throughout 2026-08 -- extracted here as one real, callable,
+    deterministic function so task-gateway.py audit-24-points (Point 14) and
+    the existing 30-second resource_governor_tick_loop.sh (Point 16) share
+    the identical definition instead of each carrying its own, potentially-
+    divergent one (UMR-20260808-145030-f3d1).
+
+    Deliberately detection-only, no remediation: flag_stale_queued_tasks()
+    and scan_stuck_tasks() already own real remediation on their own,
+    different thresholds/conditions above -- this function only answers
+    'do any real rows match', matching Point 14's own framing. Returns the
+    list of matching rows (each a dict: umr_id, status, condition,
+    age_seconds, task_identity), empty if none. Fails open (empty list) if
+    Superboss Register is unavailable, same convention as every other real
+    scan in this module."""
+    now = now or _utcnow()
+    sbr, error = _safe_superboss_register("detect_stale_umr_rows")
+    if error:
+        return []
+    conn = sbr._connect()
+    sbr._ensure_umr_table(conn)
+    matches = []
+
+    for row in conn.execute(
+        "SELECT * FROM umr_tasks WHERE status='queued' AND ts_dispatched IS NULL"
+    ).fetchall():
+        row = dict(row)
+        ts_submitted = row.get("ts_submitted")
+        if not ts_submitted:
+            continue
+        if isinstance(ts_submitted, str):
+            ts_submitted = datetime.fromisoformat(ts_submitted)
+        age_seconds = max(0.0, (now - ts_submitted).total_seconds())
+        if age_seconds >= UMR_STALE_QUEUED_DISPATCH_NULL_SECONDS:
+            matches.append({
+                "umr_id": row["umr_id"], "status": "queued", "condition": "queued_ts_dispatched_null",
+                "age_seconds": age_seconds, "task_identity": row.get("task_identity"),
+            })
+
+    for row in conn.execute("SELECT * FROM umr_tasks WHERE status='running'").fetchall():
+        row = dict(row)
+        last_heartbeat = row.get("last_heartbeat")
+        if last_heartbeat:
+            anchor = last_heartbeat
+            if isinstance(anchor, str):
+                anchor = datetime.fromisoformat(anchor)
+            age_seconds = max(0.0, (now - anchor).total_seconds())
+        else:
+            unit_name = row.get("unit_name")
+            started = _unit_active_enter_timestamp(unit_name) if unit_name else None
+            if started is None:
+                continue  # no real anchor to measure staleness from -- never falsely flag
+            age_seconds = max(0.0, (now - started).total_seconds())
+        if age_seconds >= UMR_STALE_RUNNING_HEARTBEAT_SECONDS:
+            matches.append({
+                "umr_id": row["umr_id"], "status": "running", "condition": "running_no_heartbeat",
+                "age_seconds": age_seconds, "task_identity": row.get("task_identity"),
+            })
+
+    conn.close()
+    return matches
+
+
 # ---------------------------------------------------------------------------
 # Heartbeat reconciliation sweep (Stage 3, 2026-07-29)
 # ---------------------------------------------------------------------------
@@ -3269,6 +3378,72 @@ def _append_attention(message):
         f.write(f"\n## {_now_iso()} -- SERVER RESOURCE GOVERNOR\n{message}\n")
 
 
+def _record_master_issue_if_new(issue_id, issue_identified, linked_umr_id=None, linked_ocid=None,
+                                 linked_source=None, file_path=None):
+    """UMR-20260808-074726-d105 (governing chain UMR-20260806-171945-5767):
+    the 'software also has to write to it' half of the master_issue_tracker
+    permanence directive -- a real deterministic gate/pipeline block records
+    itself into the one real, permanent issue tracker, not just
+    ATTENTION.md/umr_tasks' own per-task reason field (which every real
+    caller here already writes separately -- this is additive, not a
+    replacement).
+
+    Deliberately dedup-checked by issue_id, never a bare unconditional
+    add-issue call: a recurring trip of an already-known, already-tracked
+    issue CLASS must never spam a fresh row per occurrence. Every real
+    caller below passes a fixed, deterministic issue_id per issue class
+    (never a timestamp/run-specific one) -- a genuinely new class inserts
+    exactly once; every later recurrence of that same class is a real,
+    verified no-op here, which is what keeps this scoped and minimal per
+    the governing directive ('do not duplicate umr_tasks' own existing
+    failure/reason recording, only add a row for genuinely new, distinct
+    issue classes not already captured').
+
+    Best-effort by design, same fail-open convention as
+    _safe_superboss_register()/_append_attention() -- a problem recording
+    this secondary bookkeeping entry must never crash or block the real
+    gate/cascade logic calling it. Returns True if a new row was actually
+    inserted, False otherwise (already existed, or recording itself
+    failed).
+
+    Ported forward 2026-08-08 (UMR-20260808-145030-f3d1, Point 19 of the
+    task-gateway.py audit-24-points scope) from the unmerged
+    feat/master-issue-tracker-add-issue-cli branch (originally
+    task-20260807-074739/UMR-20260807-074739-dde3) -- that branch had gone
+    stale behind main's later STOP_WORK_ORDER_TRUNK_REF hardening and could
+    not be merged as-is, so this function and its two real call sites were
+    carried forward by hand onto current main instead of a raw branch
+    merge, per that task's own instruction to finish landing this real work
+    rather than build a second, competing implementation."""
+    try:
+        sbr, error = _safe_superboss_register("_record_master_issue_if_new")
+        if error:
+            return False
+        conn = sbr._connect()
+        sbr._ensure_master_issue_tracker_table(conn)
+        existing = conn.execute(
+            "SELECT tracker_id FROM master_issue_tracker WHERE issue_id=?", (issue_id,)
+        ).fetchone()
+        if existing:
+            conn.close()
+            return False
+        with sbr._write_lock():
+            sbr.add_master_issue(
+                conn, issue_id, issue_identified, linked_umr_id=linked_umr_id,
+                linked_ocid=linked_ocid, linked_source=linked_source or "resource_governor.py",
+                file_path=file_path,
+            )
+            conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        try:
+            _append_attention(f"WARNING: _record_master_issue_if_new({issue_id!r}) failed: {e}")
+        except Exception:
+            pass
+        return False
+
+
 def _shed_load(state, metrics=None):
     """Stage 2: SIGTERM the governor's own lowest-tier-priority currently
     running tracked unit, freeing real resources instead of just refusing new
@@ -3340,6 +3515,24 @@ def _write_emergency_stop(state, metrics=None):
         f"counts: {state}{metrics_note}). All new dispatch is halted until an operator runs "
         f"`python3 scripts/resource_governor.py --clear-emergency-stop`."
     )
+    # UMR-20260808-074726-d105: genuinely new, distinct issue class -- this
+    # system-wide hard-stop cascade was previously recorded only in
+    # ATTENTION.md/EMERGENCY_STOP_PATH, never in master_issue_tracker (checked
+    # live before adding this), and it is not a per-task condition so it does
+    # not duplicate any umr_tasks row's own reason field. See
+    # _record_master_issue_if_new()'s own docstring for the dedup contract.
+    _record_master_issue_if_new(
+        "RG-EMERGENCY-STOP-HARDSTOP",
+        "resource_governor.py's real emergency fail-safe cascade (Stage 3 hard-stop, "
+        "_write_emergency_stop()) tripped: at least one real metric stayed at/over "
+        f"{METRIC_THRESHOLD_PERCENT}% for {EMERGENCY_CONSECUTIVE_TICKS_HARDSTOP} consecutive "
+        "governor ticks, halting all new dispatch until an operator runs "
+        "`python3 scripts/resource_governor.py --clear-emergency-stop`. Real per-trip evidence "
+        "(consecutive-tick counts, metrics) lives in ATTENTION.md -- not duplicated onto this row.",
+        linked_umr_id="UMR-20260808-074726-d105",
+        linked_source="resource_governor.py:_write_emergency_stop",
+        file_path="scripts/resource_governor.py",
+    )
 
 
 def _record_emergency_tick(over_metrics, metrics=None):
@@ -3390,6 +3583,11 @@ def main():
     ap.add_argument("--tier", type=int, default=DEFAULT_TIER, help="0 (highest) .. 4 (lowest)")
     ap.add_argument("--source-trigger", default="manual")
     ap.add_argument("--scan-stuck", action="store_true", help="run only the stuck-task SIGTERM/SIGKILL scan")
+    ap.add_argument("--umr-staleness-scan", dest="umr_staleness_scan", action="store_true",
+                     help="Point 14/16 (task-gateway.py audit-24-points): read-only scan for "
+                          "queued+ts_dispatched-NULL rows older than 90min or running rows with a "
+                          "heartbeat/ActiveEnterTimestamp older than 45min -- see "
+                          "detect_stale_umr_rows()'s own docstring. Takes no remediation action.")
     ap.add_argument("--reconcile-stale", action="store_true",
                      help="Stage 3: sweep umr_tasks rows in running/dispatched with a stale "
                           "last_heartbeat (NULL heartbeats are always skipped) and report/write back "
@@ -3502,6 +3700,17 @@ def main():
 
     if args.scan_stuck:
         print(json.dumps({"actions": scan_stuck_tasks()}, default=str))
+        return
+
+    if args.umr_staleness_scan:
+        stale = detect_stale_umr_rows()
+        if stale:
+            _append_attention(
+                f"STALE-UMR-SCAN: {len(stale)} real umr_tasks row(s) matched Point 14/16 staleness "
+                f"thresholds (queued+ts_dispatched NULL >{UMR_STALE_QUEUED_DISPATCH_NULL_SECONDS//60}min "
+                f"or running+no-heartbeat >{UMR_STALE_RUNNING_HEARTBEAT_SECONDS//60}min): {stale}"
+            )
+        print(json.dumps({"stale_rows": stale}, default=str))
         return
 
     if args.reconcile_stale:

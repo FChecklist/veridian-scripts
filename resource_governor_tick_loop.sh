@@ -61,5 +61,15 @@ while true; do
   # resource_governor.py's own argparse CLI, so that specific historical
   # failure mode does not apply here).
   python3 /opt/veridian/scripts/reconcile_dispatched_dead_zone.py >> "$LOG" 2>&1
+  # Point 14/16 (task-gateway.py audit-24-points, UMR-20260808-145030-f3d1):
+  # same real staleness definition Point 14's audit check uses
+  # (resource_governor.py detect_stale_umr_rows() -- queued+ts_dispatched
+  # NULL >90min, running+no-heartbeat >45min), wired into this EXISTING
+  # 30-second loop rather than a new parallel timer. Read-only: logs matches
+  # to ATTENTION.md (inside detect_stale_umr_rows()'s own CLI wrapper) but
+  # takes no remediation action itself -- flag_stale_queued_tasks() and
+  # scan_stuck_tasks() above already own real remediation on their own,
+  # different thresholds.
+  run_governor --umr-staleness-scan
   sleep 30
 done

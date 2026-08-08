@@ -28,6 +28,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import yaml
 from datetime import datetime, timedelta, timezone
 
@@ -184,6 +185,15 @@ STOP_WORK_ORDER_GIT_TIMEOUT_SECONDS = int(
 # that ref directly instead.
 STOP_WORK_ORDER_TRUNK_REF = os.environ.get(
     "VERIDIAN_GOVERNOR_STOP_WORK_TRUNK_REF", "origin/main")
+# Real, bounded retry for the real `git fetch` the trunk-ref pinning above
+# requires -- rides out a genuinely transient network/auth blip without
+# weakening the fail-closed security property (a real, sustained failure
+# still blocks; see _git_committed_file_text()'s own docstring for why
+# that's correct, not a bug).
+STOP_WORK_ORDER_GIT_FETCH_RETRIES = int(
+    os.environ.get("VERIDIAN_GOVERNOR_STOP_WORK_GIT_FETCH_RETRIES", "2"))
+STOP_WORK_ORDER_GIT_FETCH_RETRY_DELAY_SECONDS = float(
+    os.environ.get("VERIDIAN_GOVERNOR_STOP_WORK_GIT_FETCH_RETRY_DELAY_S", "0.5"))
 
 
 def _run(cmd, **kw):
@@ -573,7 +583,21 @@ def _git_committed_file_text(path, timeout=None):
     restriction". A bare ref with no "/" in STOP_WORK_ORDER_TRUNK_REF (e.g. a
     local branch name) skips the fetch step and reads that ref directly --
     for tests that intentionally want a real, local, no-network trunk
-    fixture, never for production (whose real default always has a "/")."""
+    fixture, never for production (whose real default always has a "/").
+
+    Real operational risk flagged 2026-08-08 (independent tier1 review,
+    round 2, not yet an incident -- a real, worth-confirming caveat on the
+    hardening above): every veridian_task_create call while a stop-work
+    order is open now requires a live git fetch to succeed, including to
+    recognize a real, already-pushed, approved exemption/lift entry -- a
+    sustained network/credential outage on this box would block ALL task
+    creation with no way to lift it short of a code/env change.
+    STOP_WORK_ORDER_GIT_FETCH_RETRIES (default 2, bounded, short fixed
+    backoff) rides out a genuinely transient blip without weakening the
+    real security property -- a real, SUSTAINED failure still fails closed,
+    which is the correct, intended behavior for a security gate (better to
+    block real work than silently accept unverified authorization), not a
+    bug to route around."""
     directory = os.path.dirname(os.path.abspath(path))
     timeout = STOP_WORK_ORDER_GIT_TIMEOUT_SECONDS if timeout is None else timeout
     trunk_ref = STOP_WORK_ORDER_TRUNK_REF
@@ -587,10 +611,17 @@ def _git_committed_file_text(path, timeout=None):
             return None
         if "/" in trunk_ref:
             remote, _, branch = trunk_ref.partition("/")
-            fetch_proc = _run(
-                ["git", "-C", repo_root, "fetch", "--quiet", remote, branch], timeout=timeout)
-            if fetch_proc.returncode != 0:
-                return None  # fail closed -- never read a possibly-stale cached ref
+            fetch_ok = False
+            for attempt in range(STOP_WORK_ORDER_GIT_FETCH_RETRIES + 1):
+                if attempt > 0:
+                    time.sleep(STOP_WORK_ORDER_GIT_FETCH_RETRY_DELAY_SECONDS)
+                fetch_proc = _run(
+                    ["git", "-C", repo_root, "fetch", "--quiet", remote, branch], timeout=timeout)
+                if fetch_proc.returncode == 0:
+                    fetch_ok = True
+                    break
+            if not fetch_ok:
+                return None  # fail closed -- a real, sustained fetch failure, never a stale cached ref
         show_proc = _run(["git", "-C", repo_root, "show", f"{trunk_ref}:{relpath}"], timeout=timeout)
         if show_proc.returncode != 0:
             return None

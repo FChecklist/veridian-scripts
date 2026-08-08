@@ -139,6 +139,60 @@ def test_backgrounded_scoped_find_is_still_allowed():
     assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
 
 
+# ---------------------------------------------------------------------------
+# Real, confirmed bugs fixed 2026-08-08 (independent tier1 review, round 2):
+# `timeout`-wrapped find, find embedded as a string argument to bash -c/
+# sh -c/eval, and find forwarded to via xargs all bypassed this guard
+# entirely -- verified live before the fix, every one of these exited 0
+# (allow).
+# ---------------------------------------------------------------------------
+
+def test_timeout_wrapped_unbounded_find_is_rejected():
+    result = run_hook("timeout 300 find / -iname pattern")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+    assert "BLOCKED" in result.stderr
+
+
+def test_timeout_wrapped_scoped_find_is_still_allowed():
+    result = run_hook("timeout 300 find /opt/veridian/scripts -iname pattern")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_bash_c_embedded_unbounded_find_is_rejected():
+    result = run_hook('bash -c "find / -iname pattern"')
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+    assert "BLOCKED" in result.stderr
+
+
+def test_sh_c_embedded_unbounded_find_is_rejected():
+    result = run_hook("sh -c 'find / -iname pattern'")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+    assert "BLOCKED" in result.stderr
+
+
+def test_eval_embedded_unbounded_find_is_rejected():
+    result = run_hook('eval "find / -iname pattern"')
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+    assert "BLOCKED" in result.stderr
+
+
+def test_bash_c_embedded_scoped_find_is_still_allowed():
+    result = run_hook('bash -c "find /opt/veridian/scripts -iname x"')
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_xargs_forwarded_unbounded_find_is_rejected():
+    result = run_hook("xargs find /")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+    assert "BLOCKED" in result.stderr
+
+
+def test_piped_xargs_forwarded_unbounded_find_is_rejected():
+    result = run_hook("echo x | xargs find /")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+    assert "BLOCKED" in result.stderr
+
+
 def test_multiple_roots_one_unbounded_is_rejected():
     result = run_hook("find /opt/veridian / -iname 'x'")
     assert result.returncode == 2

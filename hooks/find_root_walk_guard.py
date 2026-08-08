@@ -65,8 +65,40 @@ If you genuinely need a filesystem search, scope it to a real subtree, e.g.:
 
 # Wrapper commands that may legitimately precede `find` in a segment without
 # themselves being the thing invoked (their own flag tokens are also
-# skipped, best-effort).
+# skipped, best-effort). Real, confirmed bug fixed 2026-08-08 (independent
+# tier1 review, round 2): "timeout" was missing -- a very common,
+# non-adversarial prefix for a potentially slow `find` (e.g. `timeout 300
+# find / -iname x`) bypassed this guard entirely, since "timeout" was never
+# recognized at all. Unlike every other wrapper here, "timeout" takes a real
+# positional duration argument (not just flags) before the wrapped command --
+# handled specially in _find_invocation_argv below, not just added to this
+# flag-only-skip set.
 _SKIP_WRAPPER_CMDS = {"sudo", "nice", "ionice", "time", "nohup", "exec", "command", "env"}
+_TIMEOUT_WRAPPER_CMDS = {"timeout"}
+
+# Real, confirmed bug fixed 2026-08-08 (independent tier1 review, round 2):
+# this guard only ever looked at the literal first word of a segment -- a
+# `find` invoked as a STRING ARGUMENT to a shell-invocation command
+# (`bash -c "find / ..."`, `sh -c '...'`, `eval "..."`) was invisible to it
+# entirely, since shlex correctly parses the quoted string as one opaque
+# token, not further tokenized. Every command here takes the embedded shell
+# text as its own single string argument (the token immediately after -c
+# for bash/sh/zsh/ksh/dash, or the first non-flag argument for eval) --
+# recursively re-evaluated as a fresh command line, see
+# _recursive_shell_string_verdict() below.
+_SHELL_STRING_EXEC_CMDS = {"bash", "sh", "zsh", "ksh", "dash"}
+_EVAL_CMDS = {"eval"}
+
+# xargs forwards its trailing command name (and any literal, non-templated
+# arguments after it) directly to exec -- `xargs find /` (or
+# `echo | xargs find /`) really does run an unbounded find / walk, same
+# real incident class as every other case here. xargs's OWN flags are
+# skipped first (best-effort; the value-taking ones below are the real,
+# common ones -- an unrecognized flag with a value would misparse, which
+# fails toward Unclassifiable/reject via the normal argv-shape checks
+# downstream, never toward silently allowing).
+_XARGS_CMDS = {"xargs"}
+_XARGS_VALUE_FLAGS = {"-I", "-n", "-P", "-L", "-s", "-a", "-d", "-E", "-e", "-l"}
 
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 _FIND_WORD_RE = re.compile(r"(?<![\w-])find(?![\w-])")
@@ -148,12 +180,59 @@ def _find_invocation_argv(segment):
     i, n = 0, len(segment)
     while i < n and _ENV_ASSIGN_RE.match(segment[i]):
         i += 1
-    while i < n and segment[i] in _SKIP_WRAPPER_CMDS:
+    while i < n and (segment[i] in _SKIP_WRAPPER_CMDS or segment[i] in _TIMEOUT_WRAPPER_CMDS
+                      or segment[i] in _XARGS_CMDS):
+        wrapper = segment[i]
         i += 1
-        while i < n and segment[i].startswith("-"):
-            i += 1
+        if wrapper in _XARGS_CMDS:
+            while i < n and segment[i].startswith("-"):
+                if segment[i] in _XARGS_VALUE_FLAGS and i + 1 < n:
+                    i += 2
+                else:
+                    i += 1
+        else:
+            while i < n and segment[i].startswith("-"):
+                i += 1
+            if wrapper in _TIMEOUT_WRAPPER_CMDS and i < n and segment[i] != "find":
+                # timeout's own positional DURATION argument (e.g. "300",
+                # "30s") -- real, not a flag, must be skipped too, unlike
+                # every other wrapper here which takes only flags.
+                i += 1
+                while i < n and segment[i].startswith("-"):
+                    i += 1
     if i < n and segment[i] == "find":
         return segment[i + 1:]
+    return None
+
+
+def _recursive_shell_string_verdict(segment, cwd, evaluate_fn):
+    """If `segment` is a shell-invocation command (bash -c STRING, sh -c
+    STRING, eval STRING, ...) carrying embedded shell text as one of its own
+    argv tokens, recursively evaluates that text as a fresh command line via
+    `evaluate_fn` (the real evaluate() below -- passed in rather than called
+    by name to keep this a pure, testable function). Returns the recursive
+    (verdict, reason) tuple, or None if `segment` doesn't match this shape
+    at all (out of scope, caller falls through to its normal handling)."""
+    i, n = 0, len(segment)
+    while i < n and _ENV_ASSIGN_RE.match(segment[i]):
+        i += 1
+    if i >= n:
+        return None
+    cmd = segment[i]
+    if cmd in _SHELL_STRING_EXEC_CMDS:
+        rest = segment[i + 1:]
+        if "-c" not in rest:
+            return None
+        c_idx = rest.index("-c")
+        string_args = [t for t in rest[c_idx + 1:] if t not in ("-c",)]
+        if not string_args:
+            return None
+        return evaluate_fn(string_args[0], cwd)
+    if cmd in _EVAL_CMDS:
+        string_args = [t for t in segment[i + 1:] if not t.startswith("-")]
+        if not string_args:
+            return None
+        return evaluate_fn(" ".join(string_args), cwd)
     return None
 
 
@@ -216,6 +295,15 @@ def evaluate(command, cwd):
                 is_find, unbounded_root = _segment_unbounded_root(segment, cwd)
                 if is_find and unbounded_root is not None:
                     return "reject_unbounded", unbounded_root
+                if not is_find:
+                    # Real, confirmed bug fixed 2026-08-08 (independent
+                    # tier1 review, round 2): a `find` embedded as a STRING
+                    # ARGUMENT to bash -c/sh -c/eval was invisible to the
+                    # literal-first-word check above -- recursively evaluate
+                    # the embedded shell text as its own fresh command line.
+                    recursive = _recursive_shell_string_verdict(segment, cwd, evaluate)
+                    if recursive is not None and recursive[0] != "allow":
+                        return recursive
     except Unclassifiable as exc:
         return "reject_unclassifiable", str(exc)
 

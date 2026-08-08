@@ -7281,7 +7281,14 @@ def close_master_issue(conn, issue_id, resolution_notes):
 
 
 _MASTER_ISSUE_MUTABLE_COLUMNS = (
-    "issue_number", "linked_umr_id", "linked_ocid", "linked_source", "issue_identified",
+    # Real, confirmed bug fixed 2026-08-08 (independent tier1 review):
+    # issue_number was listed here, letting `update-issue --field
+    # issue_number=NNN` renumber/collide rows through this path -- directly
+    # contradicting add_master_issue()'s own documented invariant that
+    # issue_number is "never caller-supplied, so numbering stays gapless
+    # and monotonic". Removed; issue_number is immutable through this
+    # function, same as tracker_id/issue_id/created_at.
+    "linked_umr_id", "linked_ocid", "linked_source", "issue_identified",
     "file_name", "file_path", "existing_solution_in_system", "solution_applied",
     "issue_resolved_permanently", "new_script_needed", "new_script_details", "apply_fix_notes",
     "audit_notes", "check_again_notes", "is_closed", "is_deterministic", "is_ai_free",
@@ -7291,9 +7298,12 @@ _MASTER_ISSUE_MUTABLE_COLUMNS = (
 
 def update_master_issue(conn, issue_id, **fields):
     """Partial UPDATE of any real, mutable master_issue_tracker column
-    (everything except tracker_id/issue_id/created_at, which are immutable
-    by design -- issue_id is this table's own real stable key, never
-    reassignable through this path). Raises on an unknown/protected column,
+    (everything except tracker_id/issue_id/issue_number/created_at, which
+    are immutable by design -- issue_id is this table's own real stable
+    key, never reassignable through this path, and issue_number is
+    assigned once, automatically, by add_master_issue() and must stay
+    gapless/monotonic, never caller-reassignable through this path either).
+    Raises on an unknown/protected column,
     same convention as update_gtm_certification_category() above. Enum-
     constrained columns (solution_applied/issue_resolved_permanently/
     new_script_needed/is_closed) are enforced by the table's own real CHECK

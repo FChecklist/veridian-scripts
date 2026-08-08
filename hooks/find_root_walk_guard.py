@@ -629,6 +629,50 @@ def _cd_target(segment, cwd):
 _SUBST_TRIGGER_CHARS = ("$", "<", ">")
 
 
+def _mask_inert_regions(command):
+    """Returns a copy of `command` with any backtick/$/</> character that is
+    PROVABLY inert -- inside a real single-quoted span (single quotes
+    suppress ALL expansion in POSIX sh, no exceptions, not even backslash),
+    or itself immediately escaped by a backslash outside single quotes --
+    replaced with a placeholder byte ("\\0") that can never match
+    _extract_command_substitutions' delimiter/trigger-char scan below.
+    Masking only replaces single characters in place; the string's length
+    and every other character's position are unchanged, so positions found
+    against the masked copy stay valid offsets into the original.
+
+    Deliberately conservative in the safe direction: a bare, unquoted
+    trigger character, or one inside DOUBLE quotes (where backtick/$()
+    substitution genuinely is still live in real bash), is left untouched
+    and still scanned as a real trigger, same as before this function
+    existed."""
+    chars = list(command)
+    n = len(chars)
+    out = chars[:]
+    in_single = False
+    i = 0
+    while i < n:
+        c = chars[i]
+        if in_single:
+            if c == "'":
+                in_single = False
+            elif c == "`" or c in _SUBST_TRIGGER_CHARS:
+                out[i] = "\0"
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            nxt = chars[i + 1]
+            if nxt == "`" or nxt in _SUBST_TRIGGER_CHARS:
+                out[i + 1] = "\0"
+            i += 2
+            continue
+        if c == "'":
+            in_single = True
+            i += 1
+            continue
+        i += 1
+    return "".join(out)
+
+
 def _extract_command_substitutions(command):
     """Real, confirmed bugs fixed 2026-08-08 (independent tier1 reviews,
     rounds 5 and 6): backtick command substitution (`` `find / -iname
@@ -644,21 +688,42 @@ def _extract_command_substitutions(command):
     backtick pairs (real POSIX shell backtick substitution never nests
     without escaping, so simple non-nested extraction is correct for the
     real, common case) and $(...)/<(...)/>(...) pairs (balanced-paren scan,
-    since these genuinely can nest, e.g. $(find $(dirname .) -name x))."""
+    since these genuinely can nest, e.g. $(find $(dirname .) -name x)).
+
+    Real, confirmed bug fixed 2026-08-08 (independent tier1 review, round
+    9): the scan below runs against `masked`, a quote/escape-aware copy of
+    `command` (see _mask_inert_regions above) -- not the raw command
+    string. Before this fix, a backtick-quoted EXAMPLE fully inert inside
+    real single quotes (e.g. a commit message like `git commit -m 'text
+    with `find / -iname secret` as an example'`) was misidentified as a
+    live command substitution and its content evaluated as though it would
+    really execute -- confirmed live: exactly that safe commit message was
+    rejected as reject_unbounded. The escaped-backtick spelling of the same
+    safe pattern (`"text with \\`find\\` here"`) failed a second, different
+    way: the unmasked scan captured everything between the two literal
+    backtick characters -- INCLUDING the escaping backslash immediately
+    before the closing one -- as the "substituted" text, producing a
+    garbled, backslash-dangling fragment that then failed to even tokenize
+    on its own (reject_unclassifiable). Positions found in `masked` are
+    used to slice the substituted CONTENT out of the ORIGINAL, unmasked
+    `command` (masking never changes string length, so positions stay
+    aligned) -- the recursive evaluate() call below must see real,
+    unmodified text, never placeholder bytes."""
+    masked = _mask_inert_regions(command)
     substitutions = []
     # Backtick pairs: `...`
-    for m in re.finditer(r"`([^`]*)`", command):
-        substitutions.append(m.group(1))
+    for m in re.finditer(r"`([^`]*)`", masked):
+        substitutions.append(command[m.start(1):m.end(1)])
     # $(...) / <(...) / >(...) pairs, balanced.
-    i, n = 0, len(command)
+    i, n = 0, len(masked)
     while i < n:
-        if command[i] in _SUBST_TRIGGER_CHARS and i + 1 < n and command[i + 1] == "(":
+        if masked[i] in _SUBST_TRIGGER_CHARS and i + 1 < n and masked[i + 1] == "(":
             depth = 1
             j = i + 2
             while j < n and depth > 0:
-                if command[j] == "(":
+                if masked[j] == "(":
                     depth += 1
-                elif command[j] == ")":
+                elif masked[j] == ")":
                     depth -= 1
                 j += 1
             if depth == 0:

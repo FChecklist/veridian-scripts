@@ -616,3 +616,54 @@ def test_find_before_any_cd_is_unaffected_by_a_later_cd():
 def test_cd_to_root_then_scoped_find_then_unbounded_find_is_rejected():
     result = run_hook("cd /opt/veridian/scripts && find . -iname secret && cd / && find . -iname secret2")
     assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# Round 9 (independent tier1 review, 2026-08-08): _extract_command_
+# substitutions() had no quote/escape awareness, so a backtick-quoted
+# EXAMPLE inert inside real single quotes -- or the escaped-backtick
+# spelling of the same safe pattern -- was misidentified as a live command
+# substitution and wrongly rejected (a false positive, the mirror-image
+# direction from every prior round's bypass-class findings).
+# ---------------------------------------------------------------------------
+def test_single_quoted_backtick_example_is_allowed():
+    """Real, live-verified false positive this exact hook's own commit
+    history repeatedly uses this style of commit message -- single quotes
+    suppress ALL expansion in POSIX sh, no exceptions, so this text never
+    executes anything."""
+    result = run_hook("git commit -m 'Fixes the incident caused by `find / -iname secret` walks'")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_double_quoted_escaped_backtick_example_is_allowed():
+    result = run_hook(r'git commit -m "Fixes the incident caused by \`find / -iname secret\` walks"')
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_single_quoted_dollar_paren_example_is_allowed():
+    result = run_hook("git commit -m 'looks like $(find / -iname secret) to a naive scanner'")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_unquoted_backtick_substitution_is_still_rejected():
+    """Control case: an unquoted, LIVE backtick substitution must still be
+    caught -- masking must not overreach into real, unquoted triggers."""
+    result = run_hook("echo `find / -iname secret`")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_double_quoted_unescaped_backtick_substitution_is_still_rejected():
+    """Control case: backtick substitution genuinely IS still live inside
+    double quotes in real bash (unlike single quotes) -- must still be
+    caught."""
+    result = run_hook('echo "result: `find / -iname secret`"')
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_single_quoted_dollar_paren_real_substitution_after_is_still_rejected():
+    """A safe, single-quoted example followed by a real, unquoted
+    substitution in the SAME command must still reject on the real one --
+    masking the quoted example must not blind the scan to a genuine later
+    trigger."""
+    result = run_hook("echo 'example: `find / -iname secret`'; echo `find / -iname secret2`")
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"

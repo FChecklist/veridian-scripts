@@ -7335,15 +7335,24 @@ def update_master_issue(conn, issue_id, **fields):
     )
 
 
-def query_master_issues(conn, linked_ocid=None, is_closed=None, limit=50):
-    """Real SELECT, the same two-filter shape this table's own real callers
-    need (--linked-ocid or --is-closed), newest-updated-first. Both filters
-    may be combined; neither is required (omit both to list the most
-    recently updated rows overall)."""
+def query_master_issues(conn, linked_ocid=None, linked_umr_id=None, is_closed=None, limit=50):
+    """Real SELECT, the same real filter shape this table's own real callers
+    need (--linked-ocid / --linked-umr-id / --is-closed), newest-updated-
+    first. Any combination of filters may be combined; none is required
+    (omit all to list the most recently updated rows overall).
+
+    linked_umr_id added 2026-08-08 (addendum to UMR-20260808-122929-bc77):
+    the real, sanctioned way to pull every point of a UMR-scoped point set
+    (e.g. the 24 real UMR171945-00NN rows under UMR-20260806-171945-5767) in
+    one call, mirroring linked_ocid's existing real filter for OCID-scoped
+    rows -- same column, same convention, no new table."""
     clauses, params = [], []
     if linked_ocid:
         clauses.append("linked_ocid=?")
         params.append(linked_ocid)
+    if linked_umr_id:
+        clauses.append("linked_umr_id=?")
+        params.append(linked_umr_id)
     if is_closed:
         clauses.append("is_closed=?")
         params.append(is_closed.strip().upper())
@@ -7448,8 +7457,8 @@ def cmd_list_issues(args):
     init_db_silent()
     conn = _connect()
     _ensure_master_issue_tracker_table(conn)
-    rows = query_master_issues(conn, linked_ocid=args.linked_ocid, is_closed=args.is_closed,
-                                limit=args.limit)
+    rows = query_master_issues(conn, linked_ocid=args.linked_ocid, linked_umr_id=args.linked_umr_id,
+                                is_closed=args.is_closed, limit=args.limit)
     conn.close()
     print(json.dumps({"count": len(rows), "matches": rows}, indent=2, default=str))
 
@@ -9307,6 +9316,18 @@ if __name__ == "__main__":
                                   help="list/filter master_issue_tracker rows, JSON output matching "
                                        "--query-umr's own {count, matches} convention")
     p_listissue.add_argument("--linked-ocid", dest="linked_ocid", default=None)
+    # Added 2026-08-08 (addendum to UMR-20260808-122929-bc77, governing chain
+    # UMR-20260806-171945-5767): the linked_umr_id column has been real and
+    # queryable via raw SQL since this table's own creation, but this CLI's
+    # own list-issues subcommand -- the ONE sanctioned, non-raw-SQL read path
+    # every other real caller of this table already uses -- had no way to
+    # filter by it, only --linked-ocid. That blocked the addendum's own real
+    # boolean test ("list-issues --linked-umr-id UMR-20260806-171945-5767
+    # shows the real, current boolean result for each of the 12 points"),
+    # which needs exactly this filter to make master_issue_tracker itself
+    # the live, queryable record of a UMR-scoped point set, the same real
+    # pattern --linked-ocid already established for OCID-scoped ones.
+    p_listissue.add_argument("--linked-umr-id", dest="linked_umr_id", default=None)
     p_listissue.add_argument("--is-closed", dest="is_closed", default=None, choices=["YES", "NO"])
     p_listissue.add_argument("--limit", type=int, default=50)
 

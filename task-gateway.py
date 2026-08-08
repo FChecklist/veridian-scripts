@@ -14,6 +14,38 @@ lookup_work_item(), is a read-only lookup used to correctly sequence later
 calls, not a substitute for any wrapped script).
 
 Subcommands: submit, start, log, close, register-automation, status
+
+UMR171945-0001 (single input gate audit, 2026-08-08): a real, thorough grep
+across every real .py/.sh file in this directory (excluding this file, its
+own two wrapped scripts, and tests/) found every remaining direct
+subprocess/import call site to resource_governor.py or
+superboss-register.py, and confirmed each is a legitimate, documented,
+low-level/internal caller this gate was never meant to cover -- not a real
+bypass of task lifecycle governance. The real, bounded exception list:
+  - resource_governor_tick_loop.sh: the canonical 30s driver of
+    resource_governor.py's own --tick/--reconcile-stale/
+    --umr-staleness-scan -- this IS the real dispatcher, not a caller of it.
+  - dispatch-tick.py, veridian-task-watchdog.py: in-process
+    `import resource_governor` for the same real, low-level dispatch/resume
+    machinery, not a task-lifecycle bypass.
+  - directive_engine.py, gtm_check_ai_testing.py, dispatch-owner-task.sh:
+    call resource_governor.py's own real --submit CLI directly (the real,
+    governed queue-entry point) -- dispatch-owner-task.sh additionally
+    routes its own instruction logging through THIS file's real `submit`
+    subcommand (UMR171945-0006, PR #282) before reaching --submit.
+  - generate_prompt_coverage_report.py, intent_engine.py,
+    knowledge_registry_multisource.py, prompt_gateway/gateway_persistence.py,
+    quality-gate.sh, supervisor-entrypoint.sh, worker-entrypoint.sh,
+    doc-worker-entrypoint.sh, run-logged.sh: call superboss-register.py's
+    own real capability-registry/knowledge/log-instruction/log-action
+    primitives directly -- none of these are task-lifecycle writes this
+    file's own subcommands (submit/start/log/close/status) cover; forcing
+    them through this file would add an unnecessary hop, not close a real
+    gap.
+No other real call site exists. "Single input gate" therefore means: every
+real task-lifecycle operation (submit/start/log/close/status) goes through
+this file; every other real, direct caller above is a documented,
+intentional exception operating outside that scope, not an unbounded gap.
 """
 import argparse
 import importlib.util

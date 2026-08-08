@@ -117,6 +117,21 @@ this UMR's "second amendment", task-20260807-053232-second-amendment...).
     DO UPDATE`), so a fresh registration is unnecessary noise, not new
     information.
 
+- [x] Closed this UMR's own still-open `umr_tasks` row (it had sat
+  `status='running'` across 3 worker dispatches since 2026-08-06) via the
+  real `mark-umr-terminal` chokepoint -- `status=completed`,
+  evidence=this file. Produced the first real production row with a
+  populated `output_contract`; re-read from a fresh independent process to
+  confirm real persistence (not just the write-time echo):
+  ```
+  status: completed
+  "output_contract" in outputs_json: True
+  meta: {"deterministic": true, "close_ended": true, "boolean": true,
+         "work_id": "UMR-20260806-171945-5767"}
+  ```
+- [x] `record-completion` written back to `ai_agent_registry`
+  (AGENT-20260806-171945-5767, total_tasks_handled now 3).
+
 ## Remaining
 - [ ] (Out of this UMR's scope, tracked separately) migrate the 46
   `sqlite3.connect()` callers onto `superboss_gateway.py`.

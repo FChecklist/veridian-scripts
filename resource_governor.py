@@ -655,7 +655,7 @@ def _stop_work_order_block_reason(task_kind, task_identity=None, title=None, umr
                 entry, task_identity, title, umr_id):
             return None  # real, committed, approved, in-scope exemption
 
-    return (
+    reason = (
         f"BLOCKED by standing stop-work order(s) {list(open_orders)!r} -- real issue #980 gate "
         f"(UMR_5767_ISSUE_RESOLUTION_MATRIX.json, governed by UMR-20260806-171945-5767 / "
         f"UMR-20260807-161418-a63f). No real, git-committed, status:approved exemption/lift entry "
@@ -664,6 +664,24 @@ def _stop_work_order_block_reason(task_kind, task_identity=None, title=None, umr
         f"claim of Owner exemption does NOT satisfy this gate -- see "
         f"_stop_work_order_block_reason()'s own docstring."
     )
+    # UMR-20260808-074726-d105 (governing chain UMR-20260806-171945-5767): the
+    # 'software also has to write to it' half of the master_issue_tracker
+    # permanence directive -- see _record_master_issue_if_new()'s own
+    # docstring. Dedup-checked against the real issue_id this gate's own
+    # already-migrated row uses ('UMR5767-0980', real issue #980 cited
+    # throughout this function's own comments above) -- a real no-op against
+    # production today, live-verified to actually insert against a DB that
+    # doesn't already have that row (see tests/test_resource_governor.py).
+    _record_master_issue_if_new(
+        "UMR5767-0980",
+        "The standing stop-work order is only a real, deterministic gate if it lives in code, not "
+        "individual dispatched-worker judgment -- resource_governor.py's own "
+        "_stop_work_order_block_reason() gate is that real, code-level enforcement.",
+        linked_umr_id="UMR-20260806-171945-5767",
+        linked_source="resource_governor.py:_stop_work_order_block_reason",
+        file_path="scripts/resource_governor.py",
+    )
+    return reason
 
 
 # ---------------------------------------------------------------------------
@@ -3130,6 +3148,62 @@ def _append_attention(message):
         f.write(f"\n## {_now_iso()} -- SERVER RESOURCE GOVERNOR\n{message}\n")
 
 
+def _record_master_issue_if_new(issue_id, issue_identified, linked_umr_id=None, linked_ocid=None,
+                                 linked_source=None, file_path=None):
+    """UMR-20260808-074726-d105 (governing chain UMR-20260806-171945-5767):
+    the 'software also has to write to it' half of the master_issue_tracker
+    permanence directive -- a real deterministic gate/pipeline block records
+    itself into the one real, permanent issue tracker, not just
+    ATTENTION.md/umr_tasks' own per-task reason field (which every real
+    caller here already writes separately -- this is additive, not a
+    replacement).
+
+    Deliberately dedup-checked by issue_id, never a bare unconditional
+    add-issue call: a recurring trip of an already-known, already-tracked
+    issue CLASS must never spam a fresh row per occurrence. Every real
+    caller below passes a fixed, deterministic issue_id per issue class
+    (never a timestamp/run-specific one) -- a genuinely new class inserts
+    exactly once; every later recurrence of that same class is a real,
+    verified no-op here, which is what keeps this scoped and minimal per
+    the governing directive ('do not duplicate umr_tasks' own existing
+    failure/reason recording, only add a row for genuinely new, distinct
+    issue classes not already captured').
+
+    Best-effort by design, same fail-open convention as
+    _safe_superboss_register()/_append_attention() -- a problem recording
+    this secondary bookkeeping entry must never crash or block the real
+    gate/cascade logic calling it. Returns True if a new row was actually
+    inserted, False otherwise (already existed, or recording itself
+    failed)."""
+    try:
+        sbr, error = _safe_superboss_register("_record_master_issue_if_new")
+        if error:
+            return False
+        conn = sbr._connect()
+        sbr._ensure_master_issue_tracker_table(conn)
+        existing = conn.execute(
+            "SELECT tracker_id FROM master_issue_tracker WHERE issue_id=?", (issue_id,)
+        ).fetchone()
+        if existing:
+            conn.close()
+            return False
+        with sbr._write_lock():
+            sbr.add_master_issue(
+                conn, issue_id, issue_identified, linked_umr_id=linked_umr_id,
+                linked_ocid=linked_ocid, linked_source=linked_source or "resource_governor.py",
+                file_path=file_path,
+            )
+            conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        try:
+            _append_attention(f"WARNING: _record_master_issue_if_new({issue_id!r}) failed: {e}")
+        except Exception:
+            pass
+        return False
+
+
 def _shed_load(state, metrics=None):
     """Stage 2: SIGTERM the governor's own lowest-tier-priority currently
     running tracked unit, freeing real resources instead of just refusing new
@@ -3200,6 +3274,24 @@ def _write_emergency_stop(state, metrics=None):
         f"{EMERGENCY_CONSECUTIVE_TICKS_HARDSTOP} consecutive governor ticks (consecutive-tick "
         f"counts: {state}{metrics_note}). All new dispatch is halted until an operator runs "
         f"`python3 scripts/resource_governor.py --clear-emergency-stop`."
+    )
+    # UMR-20260808-074726-d105: genuinely new, distinct issue class -- this
+    # system-wide hard-stop cascade was previously recorded only in
+    # ATTENTION.md/EMERGENCY_STOP_PATH, never in master_issue_tracker (checked
+    # live before adding this), and it is not a per-task condition so it does
+    # not duplicate any umr_tasks row's own reason field. See
+    # _record_master_issue_if_new()'s own docstring for the dedup contract.
+    _record_master_issue_if_new(
+        "RG-EMERGENCY-STOP-HARDSTOP",
+        "resource_governor.py's real emergency fail-safe cascade (Stage 3 hard-stop, "
+        "_write_emergency_stop()) tripped: at least one real metric stayed at/over "
+        f"{METRIC_THRESHOLD_PERCENT}% for {EMERGENCY_CONSECUTIVE_TICKS_HARDSTOP} consecutive "
+        "governor ticks, halting all new dispatch until an operator runs "
+        "`python3 scripts/resource_governor.py --clear-emergency-stop`. Real per-trip evidence "
+        "(consecutive-tick counts, metrics) lives in ATTENTION.md -- not duplicated onto this row.",
+        linked_umr_id="UMR-20260808-074726-d105",
+        linked_source="resource_governor.py:_write_emergency_stop",
+        file_path="scripts/resource_governor.py",
     )
 
 

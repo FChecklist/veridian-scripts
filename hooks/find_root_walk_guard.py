@@ -321,12 +321,38 @@ def _scan_nested_execs(argv, cwd, evaluate_fn):
 
 def _recursive_shell_string_verdict(segment, cwd, evaluate_fn):
     """If `segment` is a shell-invocation command (bash -c STRING, sh -c
-    STRING, eval STRING, ...) carrying embedded shell text as one of its own
-    argv tokens, recursively evaluates that text as a fresh command line via
-    `evaluate_fn` (the real evaluate() below -- passed in rather than called
-    by name to keep this a pure, testable function). Returns the recursive
-    (verdict, reason) tuple, or None if `segment` doesn't match this shape
-    at all (out of scope, caller falls through to its normal handling)."""
+    STRING, eval STRING, bash <<< STRING, ...) carrying embedded shell text
+    as one of its own argv tokens, recursively evaluates that text as a
+    fresh command line via `evaluate_fn` (the real evaluate() below --
+    passed in rather than called by name to keep this a pure, testable
+    function). Returns the recursive (verdict, reason) tuple, or None if
+    `segment` doesn't match this shape at all (out of scope, caller falls
+    through to its normal handling).
+
+    Real, confirmed bug fixed 2026-08-08 (independent tier1 review, round
+    6): a bare `bash`/`sh` invocation with no -c and no real positional
+    script-file argument -- e.g. `echo "find / ..." | bash`, `bash <(echo
+    "find / ...")`, `bash <<< "find / ..."` -- was invisible to this
+    guard entirely: it reads its script from stdin by default, and the
+    original implementation only ever looked for a -c token, never
+    considered that shape at all. This is the SIXTH real bypass found
+    across six independent review rounds on this one file, each a
+    different way to get shell text executed without it looking like a
+    literal `find` invocation to a token-by-token scanner -- rather than
+    add a seventh narrow patch for the next shell idiom, this closes the
+    whole CLASS: a shell-string-exec command with no -c and no real
+    positional argument is now Unclassifiable (fail closed) by default,
+    since this guard cannot verify what it will actually execute. A real
+    herestring (<<< STRING) is still positively resolved and recursively
+    checked, since its content is genuinely available at hook time; a real
+    script-FILE argument (`bash script.sh`) is still allowed, since that's
+    an auditable, on-disk artifact this guard was never scoped to read the
+    contents of (same real scope boundary this file's own module docstring
+    already documents for e.g. find's own -exec sh -c wrapping before this
+    round). A heredoc (<<EOF ... EOF) is also Unclassifiable -- this
+    guard's per-line tokenization has no way to associate a heredoc body on
+    later lines with the invocation that opened it, and guessing would
+    defeat the fail-closed point."""
     i, n = 0, len(segment)
     while i < n and _ENV_ASSIGN_RE.match(segment[i]):
         i += 1
@@ -335,13 +361,80 @@ def _recursive_shell_string_verdict(segment, cwd, evaluate_fn):
     cmd = _cmd_name(segment[i])
     if cmd in _SHELL_STRING_EXEC_CMDS:
         rest = segment[i + 1:]
-        if "-c" not in rest:
-            return None
-        c_idx = rest.index("-c")
-        string_args = [t for t in rest[c_idx + 1:] if t not in ("-c",)]
-        if not string_args:
-            return None
-        return evaluate_fn(string_args[0], cwd)
+        if "-c" in rest:
+            c_idx = rest.index("-c")
+            string_args = [t for t in rest[c_idx + 1:] if t not in ("-c",)]
+            if not string_args:
+                return "reject_unclassifiable", (
+                    f"{cmd} -c given with no following string argument -- cannot verify "
+                    "what would execute")
+            return evaluate_fn(string_args[0], cwd)
+        if "<<<" in rest:
+            here_idx = rest.index("<<<")
+            if here_idx + 1 >= len(rest):
+                return "reject_unclassifiable", (
+                    f"{cmd} <<< given with no following herestring content -- cannot verify "
+                    "what would execute")
+            return evaluate_fn(rest[here_idx + 1], cwd)
+        if any(t.startswith("<<") for t in rest):
+            return "reject_unclassifiable", (
+                f"{cmd} invoked with a heredoc (<<...) -- this guard's per-line tokenization "
+                "cannot associate the heredoc body with this invocation, so it cannot verify "
+                "what would execute; fail closed, not silently allowed")
+        if any(t.startswith("<(") or t.startswith(">(") for t in rest):
+            # Real, confirmed bug fixed 2026-08-08 (same round-6 review
+            # pass): `bash <(echo "find / ...")` -- the process-substituted
+            # command's real OUTPUT (not its source text) is what bash
+            # actually executes, so _extract_command_substitutions()'s own
+            # recursive check on the substitution's literal source (an
+            # `echo` invocation, not a `find` invocation) correctly finds
+            # nothing dangerous there and cannot substitute for this check.
+            # Detected directly and explicitly here (rather than relying on
+            # the general "no real positional argument" fallback below,
+            # which does not apply -- shlex's punctuation_chars mode keeps
+            # the substitution's own inner tokens, e.g. "echo", in this SAME
+            # segment as bash's real argv, so a positional-argument count
+            # alone can't distinguish this case) -- fail closed.
+            return "reject_unclassifiable", (
+                f"{cmd} invoked with process substitution (<(...) or >(...))"
+                " -- cannot verify what its content will actually produce/execute; "
+                "fail closed, not silently allowed")
+        # Real, confirmed bug fixed 2026-08-08 (same round-6 review pass):
+        # a dangling redirection-operator token -- never itself a valid
+        # positional argument in real shell usage -- appears here as a
+        # fragment when a <(...)/>(...) process substitution gets tokenized
+        # by this file's segment logic. Empirically confirmed (not assumed):
+        # shlex's punctuation_chars mode combines "<" and "(" into ONE
+        # token, "<(" (not two separate tokens), and only the isolated
+        # trailing ")" matches _SEGMENT_BREAKS, so the real observed
+        # segment for `bash <(echo "find / ...")` is
+        # ['bash', '<(', 'echo', 'find / -iname secret'] -- a bare "<"
+        # exclusion alone does not match. Without excluding "<(" (and ">("
+        # for the >(...) form, and the bare single-char forms for
+        # robustness against any other real tokenization variant), that
+        # token was misread as a real script-file argument, wrongly
+        # returning None (allowed) here -- even though
+        # _extract_command_substitutions() (called separately, before this
+        # function ever runs) already recurses into the substitution's own
+        # real content and would independently catch a real find invocation
+        # embedded directly in it. Excluding these closes the remaining
+        # gap: a process substitution whose OWN content merely produces
+        # (rather than literally contains) a dangerous string -- e.g.
+        # `bash <(echo "find / -iname secret")`, where the substituted
+        # command's real OUTPUT, not its source text, is what bash actually
+        # executes -- still correctly falls through to the bare-invocation
+        # fail-closed check below.
+        _REDIRECTION_FRAGMENTS = ("<", ">", "<(", ">(")
+        real_args = [t for t in rest if not t.startswith("-") and t not in _REDIRECTION_FRAGMENTS]
+        if not real_args:
+            return "reject_unclassifiable", (
+                f"bare {cmd} invocation with no -c, no herestring, and no script-file argument "
+                "-- reads its commands from stdin by default (e.g. a pipe, process substitution, "
+                "or an interactive/redirected input this guard cannot inspect); cannot verify "
+                "what would execute, fail closed, not silently allowed (the exact real incident "
+                "class this guard exists to prevent: `echo \"find / ...\" | bash` and "
+                "`bash <(echo \"find / ...\")` both reach here)")
+        return None  # a real, positional script-FILE argument -- out of this guard's real scope
     if cmd in _EVAL_CMDS:
         string_args = [t for t in segment[i + 1:] if not t.startswith("-")]
         if not string_args:
@@ -391,27 +484,33 @@ def _segment_unbounded_root(segment, cwd):
     return True, None
 
 
+_SUBST_TRIGGER_CHARS = ("$", "<", ">")
+
+
 def _extract_command_substitutions(command):
-    """Real, confirmed bug fixed 2026-08-08 (independent tier1 review, round
-    5): backtick command substitution (`` `find / -iname secret` ``) and
-    $(...) command substitution both let a `find` invocation's raw text be
-    glued to adjacent punctuation (a backtick token never equals the literal
-    word "find" after tokenization) or be embedded somewhere the segment-
-    based tokenizer never isolates as its own command. Extracted here, as
-    raw substring content, for recursive evaluation the same way bash -c/
-    eval/-exec are handled -- backtick pairs (real POSIX shell backtick
-    substitution never nests without escaping, so simple non-nested
-    extraction is correct for the real, common case) and $(...) pairs
-    (balanced-paren scan, since these genuinely can nest, e.g.
-    $(find $(dirname .) -name x))."""
+    """Real, confirmed bugs fixed 2026-08-08 (independent tier1 reviews,
+    rounds 5 and 6): backtick command substitution (`` `find / -iname
+    secret` ``), $(...) command substitution, and <(...)/>(...) process
+    substitution all let a `find` invocation's raw text be glued to
+    adjacent punctuation (a backtick token never equals the literal word
+    "find" after tokenization) or be embedded somewhere the segment-based
+    tokenizer never isolates as its own command -- and for <(...)/>(...)
+    specifically, the unconditional ( / ) segment-break logic elsewhere in
+    this file would otherwise mis-split the outer command around it before
+    any of that logic ever runs. Extracted here, as raw substring content,
+    for recursive evaluation the same way bash -c/eval/-exec are handled --
+    backtick pairs (real POSIX shell backtick substitution never nests
+    without escaping, so simple non-nested extraction is correct for the
+    real, common case) and $(...)/<(...)/>(...) pairs (balanced-paren scan,
+    since these genuinely can nest, e.g. $(find $(dirname .) -name x))."""
     substitutions = []
     # Backtick pairs: `...`
     for m in re.finditer(r"`([^`]*)`", command):
         substitutions.append(m.group(1))
-    # $(...) pairs, balanced.
+    # $(...) / <(...) / >(...) pairs, balanced.
     i, n = 0, len(command)
     while i < n:
-        if command[i] == "$" and i + 1 < n and command[i + 1] == "(":
+        if command[i] in _SUBST_TRIGGER_CHARS and i + 1 < n and command[i + 1] == "(":
             depth = 1
             j = i + 2
             while j < n and depth > 0:

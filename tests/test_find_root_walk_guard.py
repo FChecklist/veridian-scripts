@@ -400,3 +400,68 @@ def test_backslash_escaped_unbounded_find_is_rejected():
 def test_quote_fragment_scoped_find_is_still_allowed():
     result = run_hook("'f'ind /opt/veridian/scripts")
     assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# Real, confirmed bugs fixed 2026-08-08 (independent tier1 review, round 6,
+# the sixth consecutive round of finding a real bypass in this one file):
+# a bare shell interpreter invocation with no -c and no real positional
+# script-file argument reads its commands from stdin by default -- piped
+# input, process substitution, and herestrings/heredocs are all common,
+# non-adversarial ways to feed one a command. Rather than patch each shape
+# individually (as the prior five rounds did for other bypass classes),
+# this redesigns the whole check to fail closed by default on any bare
+# shell-interpreter invocation this guard cannot positively verify.
+# ---------------------------------------------------------------------------
+
+def test_piped_stdin_unbounded_find_via_bash_is_rejected():
+    result = run_hook('echo "find / -iname secret" | bash')
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+    assert "BLOCKED" in result.stderr
+
+
+def test_piped_stdin_unbounded_find_via_sh_is_rejected():
+    result = run_hook('echo "find / -iname secret" | sh')
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_process_substitution_unbounded_find_via_bash_is_rejected():
+    result = run_hook('bash <(echo "find / -iname secret")')
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+    assert "BLOCKED" in result.stderr
+
+
+def test_herestring_unbounded_find_via_bash_is_rejected():
+    result = run_hook('bash <<< "find / -iname secret"')
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+    assert "BLOCKED" in result.stderr
+
+
+def test_herestring_scoped_find_via_bash_is_still_allowed():
+    result = run_hook('bash <<< "find /opt/veridian/scripts -iname x"')
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_piped_stdin_bash_is_rejected_even_when_content_would_be_scoped():
+    """A bare bash fed via pipe is unclassifiable under the fail-closed
+    redesign regardless of whether the piped content would itself have
+    been safe -- this guard cannot verify pipe-adjacency content in
+    general, and accepts this as the real cost of closing the whole
+    vulnerability class rather than the next narrow patch."""
+    result = run_hook('echo "find /opt/veridian/scripts -iname x" | bash')
+    assert result.returncode == 2, f"expected block (rc=2), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_bash_with_real_script_file_argument_is_still_allowed():
+    result = run_hook("bash /opt/veridian/scripts/some_real_script.sh")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_bash_c_with_scoped_find_is_still_allowed():
+    result = run_hook('bash -c "find /opt/veridian/scripts -iname x"')
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"
+
+
+def test_non_find_pipe_is_still_allowed():
+    result = run_hook("echo hello | cat")
+    assert result.returncode == 0, f"expected allow (rc=0), got rc={result.returncode}, stderr={result.stderr}"

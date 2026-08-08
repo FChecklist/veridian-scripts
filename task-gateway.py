@@ -473,6 +473,12 @@ def cmd_submit(args):
     print(json.dumps({
         "workflow_phase": phase_for_task_gateway_subcommand("submit"),
         "instruction_id": instruction_id,
+        # UMR171945-0024: real caller_identity LABEL for this request, one of the 5
+        # real classes registered on --source above -- same real value already
+        # persisted onto instructions.utm_source via log-instruction below (this key
+        # is an explicit, discoverable alias for it in this command's own output, not
+        # a second, separately-computed value that could drift from what was logged).
+        "caller_identity": args.source,
         "owner_engine_gate": {
             "applied": owner_engine_gate is not None,
             "chat_id": owner_engine_gate["chat_id"] if owner_engine_gate else None,
@@ -1522,7 +1528,31 @@ def build_parser():
 
     s = sub.add_parser("submit")
     s.add_argument("--text", required=True)
-    s.add_argument("--source", required=True, choices=["owner", "ai_agent"])
+    # UMR171945-0024 (governing chain UMR-20260806-171945-5767, real caller-identity
+    # LABELING, not liveness/cryptographic proof -- this file already established no
+    # server-side credential can prove that): the real 5-class model of distinct
+    # caller identities that all land on this same gate --
+    #   owner              -- Owner (laptop/PM), unchanged, gates through
+    #                         run_owner_engine_gate() below exactly as before.
+    #   ai_agent           -- dispatched AI worker (pre-existing choice, unchanged
+    #                         meaning); conceptually "ai_worker" in this UMR's own
+    #                         prose, kept as "ai_agent" here since it is the real,
+    #                         already-live value every existing caller passes --
+    #                         renaming it would be a breaking change to real callers,
+    #                         not a labeling improvement.
+    #   trusted_executor   -- the trusted executor (a direct, interactive tmux Claude
+    #                         CLI session on this server), a real, currently-live
+    #                         class this file previously had no label for.
+    #   end_user           -- a real class this UMR explicitly reserves for a future
+    #                         web-app end user that does not exist yet -- accepted
+    #                         here so the label exists in advance, not because any
+    #                         real caller uses it today.
+    #   external_integration -- external AI models / external APIs / third-party
+    #                         integrations, a real class with no live channel into
+    #                         this file today (task-gateway.py is a local CLI, not a
+    #                         network service) -- reserved the same way as end_user.
+    s.add_argument("--source", required=True,
+                    choices=["owner", "ai_agent", "trusted_executor", "end_user", "external_integration"])
     s.add_argument("--session-id", dest="session_id", required=True)
     s.set_defaults(func=cmd_submit)
 

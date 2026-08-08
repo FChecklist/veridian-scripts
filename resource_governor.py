@@ -701,6 +701,42 @@ def _stop_work_order_lifted_for(order_id, entries):
     return False
 
 
+def resource_threshold_block_reason(now=None):
+    """Real, shared resource-protection gate (UMR-20260808-121334-e122,
+    Owner-decided Option B, PM decision cycle UMR-20260808-141807-7f38,
+    2026-08-08): the EMERGENCY_STOP sentinel-file check and the live
+    metric-threshold ("frozen") check _dispatch_one_inner() already ran,
+    unconditionally, before selecting or spawning any real work, are
+    extracted here -- pure extraction, same two checks, same order, same
+    real return values -- so task-gateway.py's cmd_start (a different,
+    synchronous, direct-spawn calling convention Option B deliberately
+    leaves unchanged, rather than restructuring cmd_start into
+    dispatch_one()'s async submit-and-queue shape) gets the identical real
+    protection before IT spawns a real systemd unit too, instead of a
+    parallel, divergent reimplementation of these same two checks.
+
+    Returns (blocked: bool, detail: str|None, metrics: dict|None). metrics
+    is None only for the emergency-stop case (sample_metrics() never runs
+    there -- unnecessary once already blocked, matching the original
+    inline code's own short-circuit).
+
+    Deliberately does NOT call _record_emergency_tick() -- that is
+    dispatch_one()'s own tick-cadence-specific escalation bookkeeping (a
+    consecutive-TICKS-over-threshold counter that can itself write the
+    EMERGENCY_STOP sentinel or shed load). Calling it from here would let
+    cmd_start's on-demand, non-periodic calls corrupt that real "consecutive
+    ticks" semantics. _record_emergency_tick() stays dispatch_one()-only,
+    called by it after this function returns, exactly as before this
+    extraction."""
+    if os.path.exists(EMERGENCY_STOP_PATH):
+        return True, "EMERGENCY_STOP sentinel present -- clear via --clear-emergency-stop", None
+    metrics = sample_metrics(now=now)
+    over = over_threshold_metrics(metrics)
+    if over:
+        return True, f"metric(s) at/over {METRIC_THRESHOLD_PERCENT}%: {over}", metrics
+    return False, None, metrics
+
+
 def _stop_work_order_block_reason(task_kind, task_identity=None, title=None, umr_id=None):
     """Real, deterministic single-gate check for the standing stop-work
     order(s) named in STOP_WORK_ORDER_TASK_IDS (real issue #980). Returns a
@@ -1971,16 +2007,20 @@ def _dispatch_one_inner(dry_run=False, now=None):
     ("callers must check this WHILE holding acquire_dispatch_lock(), never
     before/after"). Never raises for a normal 'nothing to do'/'frozen'
     outcome."""
-    if os.path.exists(EMERGENCY_STOP_PATH):
-        return {"action": "emergency_stopped",
-                "detail": "EMERGENCY_STOP sentinel present -- clear via --clear-emergency-stop"}
+    # UMR-20260808-121334-e122 (Option B, 2026-08-08): these two checks are
+    # now resource_threshold_block_reason() (see its own docstring) --
+    # behavior here is UNCHANGED, this is a pure extraction so task-
+    # gateway.py's cmd_start can share the identical real checks.
+    resource_blocked, resource_detail, metrics = resource_threshold_block_reason(now=now)
+    if metrics is None:
+        # EMERGENCY_STOP sentinel -- short-circuited before sample_metrics()
+        # ever ran, exactly as this function's own pre-extraction code did.
+        return {"action": "emergency_stopped", "detail": resource_detail}
 
-    metrics = sample_metrics(now=now)
     over = over_threshold_metrics(metrics)
     _record_emergency_tick(over, metrics=metrics)
-    if over:
-        return {"action": "frozen", "detail": f"metric(s) at/over {METRIC_THRESHOLD_PERCENT}%: {over}",
-                "metrics": metrics}
+    if resource_blocked:
+        return {"action": "frozen", "detail": resource_detail, "metrics": metrics}
 
     dc = _dispatch_core()
     # Real fix (independent review round 2, PR #20): see
@@ -3378,11 +3418,42 @@ def main():
     ap.add_argument("--search", default=None, help="free-text FTS5 query over task_identity/source_trigger/logs_ref")
     ap.add_argument("--task-identity", dest="task_identity", default=None)
     ap.add_argument("--clear-emergency-stop", action="store_true")
+    ap.add_argument("--check-task-start-gate", action="store_true",
+                     help="UMR-20260808-121334-e122 (Option B): real, shared stop-work-order + "
+                          "resource-threshold check for a caller OUTSIDE dispatch_one()'s own queue "
+                          "(currently: task-gateway.py's cmd_start, before it spawns a real systemd "
+                          "unit) -- same real gate dispatch_one() applies to every queued row, exposed "
+                          "as its own callable check rather than a parallel/divergent reimplementation. "
+                          "Prints {\"blocked\": bool, \"check\": str|None, \"detail\": str|None} and "
+                          "exits 0 regardless of blocked (the caller decides what a block means; this "
+                          "command's own exit code is not the gate signal, exactly like --query-umr "
+                          "above).")
+    ap.add_argument("--task-kind", dest="task_kind", default="veridian_task_create",
+                     help="only 'veridian_task_create' triggers the stop-work-order check (matches "
+                          "dispatch_one()'s own real scoping) -- default matches cmd_start's only "
+                          "real use, since task-gateway.py has no other task_kind")
+    ap.add_argument("--title", default=None)
+    ap.add_argument("--umr-id", dest="umr_id", default=None)
     args = ap.parse_args()
 
     if args.clear_emergency_stop:
         clear_emergency_stop()
         print(json.dumps({"ok": True, "cleared": True}))
+        return
+
+    if args.check_task_start_gate:
+        resource_blocked, resource_detail, _metrics = resource_threshold_block_reason()
+        if resource_blocked:
+            print(json.dumps({"blocked": True, "check": "resource_threshold", "detail": resource_detail}))
+            return
+        if args.task_kind == "veridian_task_create":
+            stop_work_detail = _stop_work_order_block_reason(
+                args.task_kind, task_identity=args.task_identity, title=args.title, umr_id=args.umr_id,
+            )
+            if stop_work_detail:
+                print(json.dumps({"blocked": True, "check": "stop_work_order", "detail": stop_work_detail}))
+                return
+        print(json.dumps({"blocked": False, "check": None, "detail": None}))
         return
 
     if args.query_umr:

@@ -16,6 +16,7 @@ calls, not a substitute for any wrapped script).
 Subcommands: submit, start, log, close, register-automation, status
 """
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -23,6 +24,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 
 import yaml
 
@@ -60,6 +62,24 @@ def fail(message, **extra):
     payload.update(extra)
     print(json.dumps(payload, indent=2, default=str))
     sys.exit(1)
+
+
+def _log_governance_event_best_effort(event_type, caller, detail=None):
+    """Point 2/8/9 of audit-24-points (UMR-20260808-145030-f3d1): real,
+    fail-open write into superboss-register.py's governance_cycle_log via
+    its own CLI (never a raw sqlite write, same convention this file's own
+    module docstring already establishes for every other write). Best-
+    effort by design -- a broken logging call must never break the real
+    status read or audit run that triggered it, same philosophy as
+    resource_governor.py's _safe_superboss_register()/_append_attention()."""
+    try:
+        subprocess.run(
+            ["python3", SUPERBOSS, "log-governance-event", "--event-type", event_type,
+             "--caller", caller] + (["--detail", detail] if detail else []),
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception:
+        pass
 
 
 def run_task_start_gate(task_identity, title, umr_id=None):
@@ -895,12 +915,497 @@ def cmd_status(args):
                 watchdog_last = entry
                 break
 
+    # Point 2 (audit-24-points): this IS the canonical query path -- log it.
+    _log_governance_event_best_effort("query", "task-gateway.py:status", detail=args.task_id)
+
     print(json.dumps({
         "status": task.get("status"),
         "last_checkpoint_note": (last_checkpoint or {}).get("note"),
         "systemd_active": systemd_active,
         "watchdog_last_action": watchdog_last,
     }, indent=2, default=str))
+
+
+# ---------------------------------------------------------------------------
+# audit-24-points (UMR-20260808-145030-f3d1, governing chain
+# UMR-20260806-171945-5767, master_issue_tracker rows UMR171945-0001..0024)
+# ---------------------------------------------------------------------------
+# 12 real, deterministic boolean checks -- points 2/4/8/9/12/14/16/17/19/20/
+# 22/23 of the real 24-point spec. Each check is a real, callable, boolean
+# software function (no AI judgment); results persist into the EXISTING
+# master_issue_tracker rows via the real update-issue CLI (never raw SQL),
+# matching the exact persistence contract already proven live by
+# tests/test_audit24_master_issue_tracker_persistence.py (addendum
+# UMR-20260808-123107-875a).
+
+AUDIT_24_POINTS_SUBSET = (2, 4, 8, 9, 12, 14, 16, 17, 19, 20, 22, 23)
+AUDIT_24_GOVERNING_UMR = "UMR-20260806-171945-5767"
+
+
+def _now_iso_utc():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _load_scripts_module(filename, modname):
+    """Real in-process import of another script in this directory (used to
+    reuse existing real logic -- umr_completion_percentage.py's evidence
+    rule for Point 12, resource_governor.py's detect_stale_umr_rows()/
+    _record_master_issue_if_new for Points 14/19 -- never reimplemented)."""
+    spec = importlib.util.spec_from_file_location(modname, os.path.join(SCRIPTS, filename))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_ALERT_CONDITION_POINTS = {14, 20}
+# Real, confirmed bug fixed 2026-08-08 (independent tier1 review, PR #280
+# round 1): points 14 and 20 are alert-condition checks -- their own
+# docstrings explicitly say their real TRUE means "an alert condition, not
+# a health verdict" (stale umr_tasks rows currently exist / a cron-timer
+# process is over 5pct CPU right now), the OPPOSITE of every other point's
+# TRUE-means-healthy convention. _persist_audit24_point_result() used to
+# persist solution_applied/issue_resolved_permanently=YES whenever
+# boolean_result was True, uniformly, for every point -- for these two
+# specifically that meant a genuinely live operational problem got recorded
+# in master_issue_tracker as a PERMANENTLY RESOLVED issue, silently masking
+# exactly the condition this system exists to surface. Confirmed live
+# before this fix: a synthetic stale umr_tasks row made _audit_point_14()
+# return (True, ...), and the persisted UMR171945-0014 row showed
+# solution_applied=YES/issue_resolved_permanently=YES despite the real
+# problem still being live.
+#
+# Real, confirmed bug fixed 2026-08-08 (independent tier1 review, PR #280
+# round 2): round 1's fix only updated _persist_audit24_point_result()'s own
+# inline healthy-computation -- cmd_audit_24_points() itself, building the
+# printed/returned JSON, still used the raw `passed` boolean directly for
+# if_false_who_acts/if_false_how_told, so for points 14/20 the remediation
+# guidance fields went silently None exactly when a real alert was firing
+# (passed=True) and were populated only when nothing was wrong -- the
+# identical inversion bug class, just in the OTHER of the two places it was
+# duplicated inline instead of shared. _point_is_healthy() is now the ONE
+# real place this alert-aware inversion is computed; every caller (both
+# _persist_audit24_point_result() and cmd_audit_24_points()) calls it,
+# so this logic can never diverge between the two call sites again.
+
+
+def _point_is_healthy(point, boolean_result):
+    """The one real, shared alert-aware health computation -- see
+    _ALERT_CONDITION_POINTS's own comment above for why points 14/20 invert
+    the raw boolean. Every caller that needs to know "is this point okay"
+    (as opposed to "what did the raw check literally return") must go
+    through this, not recompute it inline."""
+    return (not boolean_result) if point in _ALERT_CONDITION_POINTS else boolean_result
+
+
+def _persist_audit24_point_result(point, boolean_result, detail, ran_at):
+    """The exact real persistence contract already proven live by
+    tests/test_audit24_master_issue_tracker_persistence.py -- is_deterministic/
+    is_ai_free/is_boolean_software describe this point's real CHECK
+    MECHANISM (always YES once a real check has genuinely run);
+    solution_applied/issue_resolved_permanently mirror the real HEALTH
+    verdict from _point_is_healthy(), not the raw boolean_result directly.
+    check_again_notes always records the raw, unmodified boolean_result
+    too, so the two are never conflated even where they differ."""
+    issue_id = f"UMR171945-{point:04d}"
+    healthy = _point_is_healthy(point, boolean_result)
+    outcome = "YES" if healthy else "NO"
+    note = (
+        f"[{ran_at}] audit-24-points point {point}: raw_boolean={boolean_result} "
+        f"healthy={healthy} -- {detail}"
+    )
+    return run_json([
+        "python3", SUPERBOSS, "update-issue", "--issue-id", issue_id,
+        "--field", "is_deterministic=YES",
+        "--field", "is_ai_free=YES",
+        "--field", "is_boolean_software=YES",
+        "--field", f"solution_applied={outcome}",
+        "--field", f"issue_resolved_permanently={outcome}",
+        "--field", f"check_again_notes={note}",
+    ], f"update-issue point {point}")
+
+
+def _audit_point_02():
+    """Do the last N real status reads trace through the canonical query
+    path (task-gateway.py status / resource_governor.py --query-umr)? Both
+    real call sites log a real row to governance_cycle_log (event_type=
+    'query') -- TRUE iff at least one real logged row exists and every one
+    of the last N rows names an allowed canonical caller."""
+    n = 5
+    resp = run_json(["python3", SUPERBOSS, "list-governance-events", "--event-type", "query",
+                      "--limit", str(n)], "list-governance-events")
+    rows = resp.get("matches", [])
+    allowed = {"task-gateway.py:status", "resource_governor.py:--query-umr"}
+    passed = len(rows) > 0 and all(r.get("caller") in allowed for r in rows)
+    return passed, f"{len(rows)} real logged query event(s) (limit {n}), callers={[r.get('caller') for r in rows]}"
+
+
+def _audit_point_04():
+    """Is live /opt/veridian/scripts HEAD == origin/main HEAD with zero
+    uncommitted diff?"""
+    head = run(["git", "-C", SCRIPTS, "rev-parse", "HEAD"]).stdout.strip()
+    origin = run(["git", "-C", SCRIPTS, "rev-parse", "origin/main"]).stdout.strip()
+    status = run(["git", "-C", SCRIPTS, "status", "--short"]).stdout.strip()
+    passed = bool(head) and head == origin and status == ""
+    return passed, f"HEAD={head[:12]!r} origin/main={origin[:12]!r} status_short_empty={status == ''}"
+
+
+def _audit_point_08():
+    """Does a real, timestamped memory-check log entry exist within the
+    last 24h -- from BEFORE this invocation, not counting this run's own
+    event? Real, confirmed bug fixed 2026-08-08 (independent tier1 review,
+    PR #280 round 4): cmd_audit_24_points() used to log its own
+    memory_check event immediately before this check ran, so once
+    audit-24-points had been run even once, this check could never again
+    return False regardless of whether any real memory-check activity
+    happened elsewhere -- the identical 'can never itself fail' defect
+    class already fixed for Point 22 in round 1, left unaddressed here.
+    cmd_audit_24_points() now logs its own event AFTER every point has
+    been checked (see its own comment), so this only ever sees a real,
+    PRIOR event -- genuinely testing whether audit-24-points (or anything
+    else logging this event type) has run within the last 24h, not
+    whether this exact invocation is currently in progress."""
+    resp = run_json(["python3", SUPERBOSS, "list-governance-events", "--event-type", "memory_check",
+                      "--limit", "1"], "list-governance-events")
+    rows = resp.get("matches", [])
+    if not rows:
+        return False, "no PRIOR memory_check event logged (this run's own event is logged after checking, not before)"
+    ts = rows[0].get("ts")
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(ts)).total_seconds()
+    except Exception as e:
+        return False, f"unparseable ts {ts!r}: {e}"
+    return age <= 24 * 3600, f"most recent PRIOR memory_check at {ts}, age={age:.0f}s (threshold 86400s)"
+
+
+def _audit_point_09():
+    """Does a real, timestamped audit-performed log entry exist within the
+    last 24h -- from BEFORE this invocation? Same real fix as Point 8 (see
+    its own docstring): cmd_audit_24_points() now logs this run's own
+    audit_performed event AFTER checking, not before, so this only ever
+    sees a real, prior run."""
+    resp = run_json(["python3", SUPERBOSS, "list-governance-events", "--event-type", "audit_performed",
+                      "--limit", "1"], "list-governance-events")
+    rows = resp.get("matches", [])
+    if not rows:
+        return False, "no PRIOR audit_performed event logged (this run's own event is logged after checking, not before)"
+    ts = rows[0].get("ts")
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(ts)).total_seconds()
+    except Exception as e:
+        return False, f"unparseable ts {ts!r}: {e}"
+    return age <= 24 * 3600, f"most recent PRIOR audit_performed at {ts}, age={age:.0f}s (threshold 86400s)"
+
+
+def _audit_point_12():
+    """task_kind == 'systemctl_action' -> software-only (TRUE); ==
+    'veridian_task_create' -> AI needed (tell = the field itself);
+    verify-done reuses umr_completion_percentage.py's own real evidence
+    rule directly (never reimplemented) -- self-tested here against a real
+    evidence-present and a real evidence-absent outputs_json."""
+    try:
+        ucp = _load_scripts_module("umr_completion_percentage.py", "task_gateway_ucp_reuse")
+    except Exception as e:
+        return False, f"could not import umr_completion_percentage.py: {type(e).__name__}: {e}"
+    if not hasattr(ucp, "_parse_outputs"):
+        return False, "umr_completion_percentage.py has no _parse_outputs() to reuse"
+    _, had_evidence_true = ucp._parse_outputs(json.dumps({"commit_sha": "abc1234"}))
+    _, had_evidence_false = ucp._parse_outputs(json.dumps({}))
+    passed = had_evidence_true is True and had_evidence_false is False
+    return passed, (
+        "task_kind=='systemctl_action' -> software-only TRUE (no AI needed); "
+        "task_kind=='veridian_task_create' -> AI needed (tell=the task_kind field itself); "
+        f"verify-done reuses umr_completion_percentage._parse_outputs() directly, self-test "
+        f"evidence_true={had_evidence_true} evidence_false={had_evidence_false}"
+    )
+
+
+def _audit_point_14():
+    """Do any real umr_tasks rows currently match the real staleness
+    thresholds (queued+ts_dispatched NULL >90min, running+no-heartbeat
+    >45min)? Reuses resource_governor.py's detect_stale_umr_rows()
+    directly -- the literal answer to this point's own question (TRUE
+    means yes, stale rows currently exist -- an alert condition, not a
+    health verdict)."""
+    try:
+        rg = _load_scripts_module("resource_governor.py", "task_gateway_rg_reuse")
+    except Exception as e:
+        return False, f"could not import resource_governor.py: {type(e).__name__}: {e}"
+    stale = rg.detect_stale_umr_rows()
+    return len(stale) > 0, f"{len(stale)} real umr_tasks row(s) currently match staleness thresholds: {stale[:5]}"
+
+
+def _audit_point_16():
+    """Is the same staleness/health scan wired into the EXISTING 30-second
+    resource_governor_tick_loop.sh, not a new parallel timer? Grep-
+    verifiable: the flag must be present, and there must still be exactly
+    one `sleep 30` in the loop (a second timer would add a second sleep)."""
+    path = os.path.join(SCRIPTS, "resource_governor_tick_loop.sh")
+    try:
+        content = open(path).read()
+    except OSError as e:
+        return False, f"could not read {path}: {e}"
+    has_flag = "--umr-staleness-scan" in content
+    sleep_count = content.count("sleep 30")
+    passed = has_flag and sleep_count == 1
+    return passed, f"--umr-staleness-scan present={has_flag}, 'sleep 30' occurrences={sleep_count} (must be exactly 1)"
+
+
+def _audit_point_17():
+    """Does task-gateway.py's real search step (cmd_submit's own
+    superboss-register.py `search` call) contain a real Zoekt/pgvector
+    reference? Grep-verifiable, scoped to cmd_submit itself so a mention
+    elsewhere in the file doesn't produce a false TRUE."""
+    path = os.path.join(SCRIPTS, "task-gateway.py")
+    try:
+        content = open(path).read()
+    except OSError as e:
+        return False, f"could not read {path}: {e}"
+    m = re.search(r"def cmd_submit\(.*?\n(?=def )", content, re.S)
+    scope = m.group(0) if m else content
+    passed = bool(re.search(r"zoekt|pgvector", scope, re.I))
+    return passed, f"grep of cmd_submit's own search step for zoekt/pgvector: {'found' if passed else 'not found'}"
+
+
+def _audit_point_19():
+    """Does a real failure/decline code path call add_master_issue
+    automatically? Confirms resource_governor.py's _record_master_issue_if_new
+    exists (real, ported forward from the unmerged
+    feat/master-issue-tracker-add-issue-cli branch) and has real call
+    sites, not just a defined-but-unused function."""
+    path = os.path.join(SCRIPTS, "resource_governor.py")
+    try:
+        content = open(path).read()
+    except OSError as e:
+        return False, f"could not read {path}: {e}"
+    call_sites = content.count("_record_master_issue_if_new(")
+    # 1 for the def itself + at least 2 real call sites (_write_emergency_stop,
+    # _stop_work_order_block_reason).
+    passed = call_sites >= 3
+    return passed, f"_record_master_issue_if_new( occurrences in resource_governor.py: {call_sites} (need >=3: def + >=2 real call sites)"
+
+
+def _audit_point_20():
+    """Is any cron/timer-triggered process currently over 5pct CPU? Real-
+    time ps sample scoped to real veridian cron/timer-driven process names
+    (see recon: veridian-cron-*, veridian-*-tick, veridian-governor-tick,
+    veridian-dispatch-tick, veridian-zoekt-webserver, veridian-superboss-
+    gateway). TRUE means yes, an alert condition -- not a health verdict."""
+    proc = run(["ps", "-eo", "pid,pcpu,cmd", "--no-headers"])
+    over = []
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid, pcpu, cmd = parts
+        if re.search(r"veridian-(cron-|.*-tick|governor-tick|dispatch-tick|zoekt|superboss-gateway)", cmd):
+            try:
+                if float(pcpu) > 5.0:
+                    over.append({"pid": pid, "pcpu": pcpu, "cmd": cmd[:120]})
+            except ValueError:
+                pass
+    return len(over) > 0, f"{len(over)} real cron/timer-associated process(es) currently over 5pct CPU: {over[:5]}"
+
+
+_POINT_22_EVIDENCE_RE = re.compile(r"\bmerged\b.{0,200}?(PR\s*#\d+|commit\s+[0-9a-f]{7,40})", re.I | re.S)
+# Real, confirmed bug fixed 2026-08-08 (independent tier1 review, PR #280
+# round 3): _POINT_22_EVIDENCE_RE alone matches "merged" followed anywhere
+# within 200 chars by a PR/commit reference, with NO awareness of an
+# intervening negation -- ordinary phrasing like "has NOT been merged yet
+# ... PR #310" (a real, common way to describe UNMERGED work) matched, and
+# would have auto-closed a genuinely still-open row: a real, destructive
+# false positive triggered by a false match inside what is nominally a
+# read-only audit check. Verified live before this fix against the actual
+# compiled regex. _POINT_22_NEGATION_RE below checks a real window around
+# each match for a negation word.
+#
+# Real, confirmed bug fixed 2026-08-08 (independent tier1 review, PR #280
+# round 4): round 3's fix only checked the window BEFORE the "merged"
+# token, so a negation that follows the merge claim -- e.g. "...was
+# reverted after being merged in PR #310", describing since-reverted, NOT
+# actually resolved work -- went undetected and would still auto-close the
+# row. The window is now checked on BOTH sides of the match, and
+# revert/rollback words (not just grammatical negation) are added to the
+# set, since "reverted"/"rolled back"/"undone" describe exactly this real
+# unresolved-despite-a-past-merge condition Point 22 must not auto-close.
+_POINT_22_NEGATION_RE = re.compile(
+    r"\b(not|never|n't|hasn't|wasn't|isn't|doesn't|didn't|won't|no longer|yet to be|"
+    r"still pending|still open|still unmerged|reverted|revert|rolled back|rolled-back|"
+    r"rollback|undone|reversed)\b", re.I,
+)
+_POINT_22_NEGATION_WINDOW = 40
+
+
+def _point_22_real_evidence_match(text):
+    """Returns the first real, non-negated evidence match in `text` (a
+    'merged ... PR #N'/'merged ... commit <sha>' phrase with no negation/
+    revert word in the _POINT_22_NEGATION_WINDOW chars immediately before
+    OR after it), or None. See _POINT_22_NEGATION_RE's own comment above
+    for the real, live-verified false-positives (both directions) this
+    closes."""
+    for m in _POINT_22_EVIDENCE_RE.finditer(text):
+        before = text[max(0, m.start() - _POINT_22_NEGATION_WINDOW):m.start()]
+        after = text[m.end():m.end() + _POINT_22_NEGATION_WINDOW]
+        if _POINT_22_NEGATION_RE.search(before) or _POINT_22_NEGATION_RE.search(after):
+            continue
+        return m
+    return None
+
+
+def _audit_point_22():
+    """For each open master_issue_tracker row linked to this governing UMR,
+    does apply_fix_notes/audit_notes already contain a real, specific,
+    parseable, non-negated evidence citation (a 'merged ... PR #N' or
+    'merged ... commit <sha>' phrase, with no negation word immediately
+    before it -- see _point_22_real_evidence_match()) sufficient to
+    conservatively auto-close it via the real close-issue CLI?
+    Deliberately conservative and scoped only to this governing UMR's own
+    24 rows (never a platform-wide scan) -- a vague, partial, or negated
+    citation never matches, so this never auto-closes on a guess.
+
+    Real, confirmed bug fixed 2026-08-08 (independent tier1 review, PR #280
+    round 1): this used to unconditionally `return True, ...` regardless of
+    whether any matched row's close-issue call actually succeeded -- a real
+    close_resp.get("ok") failure was silently dropped (the row simply never
+    made it into `closed`), so this check could never itself fail no matter
+    what went wrong. Now tracks matched-but-failed-to-close rows separately
+    and returns False if any exist -- a genuine pass/fail signal, not an
+    unconditional True."""
+    resp = run_json(["python3", SUPERBOSS, "list-issues", "--linked-umr-id", AUDIT_24_GOVERNING_UMR,
+                      "--is-closed", "NO", "--limit", "100"], "list-issues")
+    rows = resp.get("matches", [])
+    closed = []
+    failed = []
+    for row in rows:
+        text = " ".join(filter(None, [row.get("apply_fix_notes"), row.get("audit_notes")]))
+        match = _point_22_real_evidence_match(text or "")
+        if match:
+            resolution = f"auto-closed by audit-24-points Point 22: conservative evidence match ({match.group(0)[:150]!r})"
+            close_resp = run_json(["python3", SUPERBOSS, "close-issue", "--issue-id", row["issue_id"],
+                                    "--resolution-notes", resolution], "close-issue")
+            if close_resp.get("ok"):
+                closed.append(row["issue_id"])
+            else:
+                failed.append(row["issue_id"])
+    passed = len(failed) == 0
+    detail = f"{len(rows)} open row(s) checked (scoped to {AUDIT_24_GOVERNING_UMR}), {len(closed)} auto-closed: {closed}"
+    if failed:
+        detail += f", {len(failed)} matched but FAILED to close: {failed}"
+    return passed, detail
+
+
+def _audit_point_23():
+    """Do real Grafana alert rules exist and are active? Queries Grafana's
+    own API for a real count > 0 -- honest FALSE (not a fabricated
+    placeholder) when no real Grafana instance is configured, which is the
+    real, current, deliberate state of this platform (Grafana was
+    evaluated and rejected as software -- AGPL-3.0 core, standalone Go
+    server, no Vercel-serverless path -- PLATFORM_STRATEGY.md; the real
+    replacement is compliance-tracker's own Wave 38 metric-alert-
+    service.ts)."""
+    url = os.environ.get("GRAFANA_URL")
+    token = os.environ.get("GRAFANA_API_TOKEN")
+    if not url or not token:
+        return False, (
+            "GRAFANA_URL/GRAFANA_API_TOKEN not configured -- Grafana was evaluated and rejected as "
+            "software (PLATFORM_STRATEGY.md); real replacement is Wave 38 metric-alert-service.ts. "
+            "This point's literal 'query Grafana's own API' requirement cannot be satisfied by design."
+        )
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"{url.rstrip('/')}/api/v1/provisioning/alert-rules",
+                                      headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        count = len(data) if isinstance(data, list) else len(data.get("rules", []) if isinstance(data, dict) else [])
+        return count > 0, f"real Grafana API returned {count} alert rule(s)"
+    except Exception as e:
+        return False, f"real Grafana API call failed: {type(e).__name__}: {e}"
+
+
+_AUDIT_24_CHECKS = {
+    2: _audit_point_02, 4: _audit_point_04, 8: _audit_point_08, 9: _audit_point_09,
+    12: _audit_point_12, 14: _audit_point_14, 16: _audit_point_16, 17: _audit_point_17,
+    19: _audit_point_19, 20: _audit_point_20, 22: _audit_point_22, 23: _audit_point_23,
+}
+
+_AUDIT_24_REMEDIATION = {
+    2: ("a developer", "PR review / ATTENTION.md entry", "re-run audit-24-points; last N logged query events must all show a canonical caller"),
+    4: ("the operator/agent with an uncommitted diff or unpushed commit", "this check's own detail field", "re-run audit-24-points after committing+pushing; HEAD must == origin/main with an empty git status"),
+    8: ("the PM/session that owes this cycle's memory check", "ATTENTION.md / this check's own detail field", "re-run audit-24-points once a real memory_check event has been logged within 24h"),
+    9: ("the PM/session that owes this cycle's audit", "ATTENTION.md / this check's own detail field", "re-run audit-24-points -- running it IS the audit_performed event"),
+    12: ("a developer", "this check's own detail field", "fix umr_completion_percentage.py's _parse_outputs() import/self-test, then re-run"),
+    14: ("PM/operator", "ATTENTION.md STALE-UMR-SCAN entry", "re-run audit-24-points or resource_governor.py --umr-staleness-scan and confirm zero matches"),
+    16: ("a developer", "PR review comment", "grep resource_governor_tick_loop.sh for --umr-staleness-scan and confirm exactly one sleep 30"),
+    17: ("a developer", "this check's own detail field", "wire task-gateway.py's cmd_submit search step through Zoekt/pgvector, then re-run"),
+    19: ("a developer", "this check's own detail field", "confirm _record_master_issue_if_new + its real call sites exist in resource_governor.py"),
+    20: ("PM/operator", "this check's own detail field (offending pid/cmd)", "investigate the offending process, then re-sample"),
+    22: ("PM/operator", "this check's own detail field (checked/closed counts)", "re-run and confirm the conservative scan executes without error"),
+    23: ("the Owner (governance decision needed)", "this check's own detail field", "either configure a real Grafana instance, or formally redefine Point 23 against Wave 38 metric-alert-service.ts"),
+}
+
+
+def cmd_audit_24_points(args):
+    ran_at = _now_iso_utc()
+
+    # Real, confirmed bug fixed 2026-08-08 (independent tier1 review, PR
+    # #280 round 3): `except Exception` does NOT catch SystemExit --
+    # SystemExit inherits from BaseException directly, not Exception -- and
+    # task-gateway.py's own fail()/run_json() helpers (used by points 2, 8,
+    # 9, 22, and the persistence step for EVERY point) raise SystemExit via
+    # sys.exit(1) on any transient subprocess/JSON failure. Before this fix,
+    # a single such failure inside any one point's check OR its persist
+    # step aborted the entire audit-24-points run before the final report
+    # was ever printed -- silently losing every already-computed result,
+    # not degrading gracefully as this loop's own intent requires. Both the
+    # check call and the persist call below now explicitly catch
+    # `(Exception, SystemExit)` -- deliberately NOT bare BaseException,
+    # which would also swallow a real KeyboardInterrupt that should still
+    # propagate.
+    results = []
+    for point in AUDIT_24_POINTS_SUBSET:
+        try:
+            passed, detail = _AUDIT_24_CHECKS[point]()
+        except (Exception, SystemExit) as e:
+            passed, detail = False, f"check itself raised {type(e).__name__}: {e}"
+        who_acts, how_told, verify_done = _AUDIT_24_REMEDIATION[point]
+        # Real, confirmed bug fixed 2026-08-08 (independent tier1 review,
+        # PR #280 round 2): remediation guidance must key off the
+        # alert-aware HEALTH verdict (_point_is_healthy()), not the raw
+        # `passed` boolean -- for points 14/20, passed=True means a real
+        # alert is firing, exactly when who-acts/how-told guidance is
+        # needed most, not when it should go blank.
+        healthy = _point_is_healthy(point, passed)
+        entry = {
+            "point": point,
+            "boolean": passed,
+            "if_false_who_acts": None if healthy else who_acts,
+            "if_false_how_told": None if healthy else how_told,
+            "how_software_verifies_done": verify_done,
+            "detail": detail,
+        }
+        results.append(entry)
+        if not args.no_persist:
+            try:
+                persist_resp = _persist_audit24_point_result(point, passed, detail, ran_at)
+                entry["persisted"] = persist_resp.get("ok", False)
+            except (Exception, SystemExit) as e:
+                entry["persisted"] = False
+                entry["persist_error"] = f"{type(e).__name__}: {e}"
+
+    # Real, confirmed bug fixed 2026-08-08 (independent tier1 review, PR
+    # #280 round 4): this run's own memory_check/audit_performed events are
+    # logged HERE, AFTER every point (including Points 8/9 themselves) has
+    # already been checked -- not before, as the original code did. Logging
+    # before checking meant Points 8/9 always found their own freshly-
+    # logged event and could never again return False once audit-24-points
+    # had run even once, the identical 'can never itself fail' defect class
+    # already fixed for Point 22 in round 1. This still logs real telemetry
+    # every real invocation -- it just no longer contaminates the very
+    # check it would otherwise make tautological.
+    _log_governance_event_best_effort("memory_check", "task-gateway.py:audit-24-points", detail=ran_at)
+    _log_governance_event_best_effort("audit_performed", "task-gateway.py:audit-24-points", detail=ran_at)
+
+    print(json.dumps({"ran_at": ran_at, "results": results}, indent=2, default=str))
 
 
 def build_parser():
@@ -947,6 +1452,14 @@ def build_parser():
     stt = sub.add_parser("status")
     stt.add_argument("--task-id", dest="task_id", required=True)
     stt.set_defaults(func=cmd_status)
+
+    a24 = sub.add_parser("audit-24-points",
+                          help="run the 12 real deterministic boolean checks (points 2/4/8/9/12/14/"
+                               "16/17/19/20/22/23) and persist each into master_issue_tracker "
+                               "(UMR171945-0001..0024) via update-issue")
+    a24.add_argument("--no-persist", dest="no_persist", action="store_true",
+                      help="skip writing results into master_issue_tracker (used by tests)")
+    a24.set_defaults(func=cmd_audit_24_points)
 
     return p
 

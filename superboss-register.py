@@ -755,6 +755,7 @@ def _migrate_schema(conn):
     _migrate_capability_registry_vector(conn)
     _ensure_external_agent_dispatch_table(conn)
     _ensure_master_issue_tracker_table(conn)
+    _ensure_governance_cycle_log_table(conn)
 
 
 def _migrate_wiring_registry_content_hash(conn):
@@ -7335,15 +7336,24 @@ def update_master_issue(conn, issue_id, **fields):
     )
 
 
-def query_master_issues(conn, linked_ocid=None, is_closed=None, limit=50):
-    """Real SELECT, the same two-filter shape this table's own real callers
-    need (--linked-ocid or --is-closed), newest-updated-first. Both filters
-    may be combined; neither is required (omit both to list the most
-    recently updated rows overall)."""
+def query_master_issues(conn, linked_ocid=None, linked_umr_id=None, is_closed=None, limit=50):
+    """Real SELECT, the same real filter shape this table's own real callers
+    need (--linked-ocid / --linked-umr-id / --is-closed), newest-updated-
+    first. Any combination of filters may be combined; none is required
+    (omit all to list the most recently updated rows overall).
+
+    linked_umr_id added 2026-08-08 (addendum to UMR-20260808-122929-bc77):
+    the real, sanctioned way to pull every point of a UMR-scoped point set
+    (e.g. the 24 real UMR171945-00NN rows under UMR-20260806-171945-5767) in
+    one call, mirroring linked_ocid's existing real filter for OCID-scoped
+    rows -- same column, same convention, no new table."""
     clauses, params = [], []
     if linked_ocid:
         clauses.append("linked_ocid=?")
         params.append(linked_ocid)
+    if linked_umr_id:
+        clauses.append("linked_umr_id=?")
+        params.append(linked_umr_id)
     if is_closed:
         clauses.append("is_closed=?")
         params.append(is_closed.strip().upper())
@@ -7353,6 +7363,96 @@ def query_master_issues(conn, linked_ocid=None, is_closed=None, limit=50):
         f"SELECT * FROM master_issue_tracker {where} ORDER BY updated_at DESC LIMIT ?", params
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Governance cycle log (task-gateway.py audit-24-points, UMR-20260808-145030-f3d1)
+# ---------------------------------------------------------------------------
+# Point 2 needs a real query-log table (every real status read through the
+# canonical query path -- task-gateway.py status / resource_governor.py
+# --query-umr -- gets a logged row); Points 8/9 need a real, timestamped
+# memory-check / audit-performed log entry per cycle. Rather than three
+# separate one-off tables/files for three closely-related "a real event of
+# type X happened at time T" facts, one small, generic, append-only table
+# covers all three (event_type discriminates); this is additive, not a
+# duplicate of master_issue_tracker (which tracks issue *state*, not *events*)
+# or umr_tasks (which tracks task *lifecycle*, not ad-hoc governance events).
+
+def _ensure_governance_cycle_log_table(conn):
+    """Idempotent CREATE TABLE IF NOT EXISTS, same convention as
+    _ensure_master_issue_tracker_table() above."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS governance_cycle_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT NOT NULL,
+            caller TEXT,
+            detail TEXT,
+            ts TEXT NOT NULL
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_gcl_event_type_ts ON governance_cycle_log(event_type, ts)"
+    )
+
+
+def log_governance_cycle_event(conn, event_type, caller=None, detail=None):
+    """Real INSERT -- the one, real, permanent mechanism real callers use to
+    record a real governance-cycle event (a canonical-path query, a memory
+    check, an audit run). Does NOT commit -- caller owns the transaction,
+    same convention as add_master_issue()/update_master_issue() above.
+    event_type is caller-chosen but expected to be one of 'query',
+    'memory_check', 'audit_performed' by this module's own real callers
+    (task-gateway.py's cmd_status/cmd_audit_24_points, resource_governor.py's
+    --query-umr branch) -- not enforced by a CHECK constraint since a
+    genuinely new event class should never require a schema migration to
+    record."""
+    event_type = (event_type or "").strip()
+    if not event_type:
+        raise ValueError("log_governance_cycle_event: event_type is required and must be non-empty")
+    conn.execute(
+        "INSERT INTO governance_cycle_log (event_type, caller, detail, ts) VALUES (?, ?, ?, ?)",
+        (event_type, caller, detail, _now_iso()),
+    )
+
+
+def query_governance_cycle_log(conn, event_type=None, limit=50):
+    """Real SELECT, newest-first, optionally filtered by event_type -- same
+    shape convention as query_master_issues() above."""
+    clauses, params = [], []
+    if event_type:
+        clauses.append("event_type=?")
+        params.append(event_type)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(limit)
+    rows = conn.execute(
+        f"SELECT * FROM governance_cycle_log {where} ORDER BY ts DESC LIMIT ?", params
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def cmd_log_governance_event(args):
+    """CLI entry point for log_governance_cycle_event() above -- the one
+    real, non-raw-SQL write path task-gateway.py/resource_governor.py use to
+    record a real governance-cycle event."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_governance_cycle_log_table(conn)
+    with _write_lock():
+        log_governance_cycle_event(conn, args.event_type, caller=args.caller, detail=args.detail)
+        conn.commit()
+    conn.close()
+    print(json.dumps({"ok": True, "event_type": args.event_type}, indent=2, default=str))
+
+
+def cmd_list_governance_events(args):
+    """CLI entry point for query_governance_cycle_log() above. JSON output
+    matches this session's own --query-umr/list-issues convention."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_governance_cycle_log_table(conn)
+    rows = query_governance_cycle_log(conn, event_type=args.event_type, limit=args.limit)
+    conn.close()
+    print(json.dumps({"count": len(rows), "matches": rows}, indent=2, default=str))
 
 
 def cmd_add_issue(args):
@@ -7448,8 +7548,8 @@ def cmd_list_issues(args):
     init_db_silent()
     conn = _connect()
     _ensure_master_issue_tracker_table(conn)
-    rows = query_master_issues(conn, linked_ocid=args.linked_ocid, is_closed=args.is_closed,
-                                limit=args.limit)
+    rows = query_master_issues(conn, linked_ocid=args.linked_ocid, linked_umr_id=args.linked_umr_id,
+                                is_closed=args.is_closed, limit=args.limit)
     conn.close()
     print(json.dumps({"count": len(rows), "matches": rows}, indent=2, default=str))
 
@@ -9307,8 +9407,34 @@ if __name__ == "__main__":
                                   help="list/filter master_issue_tracker rows, JSON output matching "
                                        "--query-umr's own {count, matches} convention")
     p_listissue.add_argument("--linked-ocid", dest="linked_ocid", default=None)
+    # Added 2026-08-08 (addendum to UMR-20260808-122929-bc77, governing chain
+    # UMR-20260806-171945-5767): the linked_umr_id column has been real and
+    # queryable via raw SQL since this table's own creation, but this CLI's
+    # own list-issues subcommand -- the ONE sanctioned, non-raw-SQL read path
+    # every other real caller of this table already uses -- had no way to
+    # filter by it, only --linked-ocid. That blocked the addendum's own real
+    # boolean test ("list-issues --linked-umr-id UMR-20260806-171945-5767
+    # shows the real, current boolean result for each of the 12 points"),
+    # which needs exactly this filter to make master_issue_tracker itself
+    # the live, queryable record of a UMR-scoped point set, the same real
+    # pattern --linked-ocid already established for OCID-scoped ones.
+    p_listissue.add_argument("--linked-umr-id", dest="linked_umr_id", default=None)
     p_listissue.add_argument("--is-closed", dest="is_closed", default=None, choices=["YES", "NO"])
     p_listissue.add_argument("--limit", type=int, default=50)
+
+    p_logevent = sub.add_parser("log-governance-event",
+                                 help="record a real governance-cycle event (query/memory_check/"
+                                      "audit_performed) into governance_cycle_log -- task-gateway.py "
+                                      "audit-24-points Points 2/8/9")
+    p_logevent.add_argument("--event-type", dest="event_type", required=True)
+    p_logevent.add_argument("--caller", default=None)
+    p_logevent.add_argument("--detail", default=None)
+
+    p_listevents = sub.add_parser("list-governance-events",
+                                   help="list/filter governance_cycle_log rows, JSON output matching "
+                                        "list-issues' own {count, matches} convention")
+    p_listevents.add_argument("--event-type", dest="event_type", default=None)
+    p_listevents.add_argument("--limit", type=int, default=50)
 
     # Real Owner directive UMR-20260806-095416-b6f0: fourth real worker
     # channel, a fully manual human-paste bridge to chat.z.ai. NEVER any
@@ -9498,6 +9624,10 @@ if __name__ == "__main__":
         cmd_update_issue(args)
     elif args.cmd == "list-issues":
         cmd_list_issues(args)
+    elif args.cmd == "log-governance-event":
+        cmd_log_governance_event(args)
+    elif args.cmd == "list-governance-events":
+        cmd_list_governance_events(args)
     elif args.cmd == "mark-external-agent-eligible":
         cmd_mark_external_agent_eligible(args)
     elif args.cmd == "get-next-external-agent-task":

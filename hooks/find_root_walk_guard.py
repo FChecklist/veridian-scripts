@@ -172,6 +172,19 @@ def _split_segments(tokens):
     return [s for s in segments if s]
 
 
+def _cmd_name(token):
+    """Real, confirmed bug fixed 2026-08-08 (independent tier1 review,
+    round 3): every command-name comparison in this file used to be a
+    strict string equality (e.g. segment[i] == "find"), so any absolute- or
+    relative-path invocation (/usr/bin/find /, /bin/find /, ./find /) was
+    never recognized and silently allowed through -- not an adversarial
+    edge case, an ordinary, common shell idiom. Every real comparison below
+    now goes through this: os.path.basename() of the token, so /usr/bin/
+    find and find compare equal, the same way a real shell's PATH lookup
+    would treat them as the same program."""
+    return os.path.basename(token)
+
+
 def _find_invocation_argv(segment):
     """If `segment` invokes the real `find` command (as the command itself,
     optionally after env-var assignments and/or a small set of benign
@@ -180,9 +193,10 @@ def _find_invocation_argv(segment):
     i, n = 0, len(segment)
     while i < n and _ENV_ASSIGN_RE.match(segment[i]):
         i += 1
-    while i < n and (segment[i] in _SKIP_WRAPPER_CMDS or segment[i] in _TIMEOUT_WRAPPER_CMDS
-                      or segment[i] in _XARGS_CMDS):
-        wrapper = segment[i]
+    while i < n and (_cmd_name(segment[i]) in _SKIP_WRAPPER_CMDS
+                      or _cmd_name(segment[i]) in _TIMEOUT_WRAPPER_CMDS
+                      or _cmd_name(segment[i]) in _XARGS_CMDS):
+        wrapper = _cmd_name(segment[i])
         i += 1
         if wrapper in _XARGS_CMDS:
             while i < n and segment[i].startswith("-"):
@@ -193,15 +207,62 @@ def _find_invocation_argv(segment):
         else:
             while i < n and segment[i].startswith("-"):
                 i += 1
-            if wrapper in _TIMEOUT_WRAPPER_CMDS and i < n and segment[i] != "find":
+            if wrapper in _TIMEOUT_WRAPPER_CMDS and i < n and _cmd_name(segment[i]) != "find":
                 # timeout's own positional DURATION argument (e.g. "300",
                 # "30s") -- real, not a flag, must be skipped too, unlike
                 # every other wrapper here which takes only flags.
                 i += 1
                 while i < n and segment[i].startswith("-"):
                     i += 1
-    if i < n and segment[i] == "find":
+    if i < n and _cmd_name(segment[i]) == "find":
         return segment[i + 1:]
+    return None
+
+
+_EXEC_FLAGS = {"-exec", "-execdir"}
+_EXEC_TERMINATORS = {";", "+"}
+
+
+def _scan_nested_execs(argv, cwd, evaluate_fn):
+    """Real, confirmed bug fixed 2026-08-08 (independent tier1 review,
+    round 3): a find invocation correctly scoped to a safe subtree can
+    still embed a second, unbounded find via `-exec`/`-execdir` (e.g.
+    `find /opt/veridian -exec find / -iname '*secret*' \\;`, or
+    `-exec sh -c 'find / ...' \\;`) -- _extract_root_tokens() stops at the
+    first flag-like token (-exec itself), so the embedded command was never
+    looked at. Scans `argv` for every -exec/-execdir occurrence, extracts
+    the embedded command up to its own real terminator (a literal ';' or
+    '+' token -- shlex, posix mode, correctly preserves a shell-escaped
+    \\; as one such token, distinct from an unescaped segment-breaking ';'),
+    and recursively evaluates that embedded command the same way any other
+    segment is evaluated (real find invocation, or a shell-string wrapper
+    around one). Returns the first real (verdict, reason) that isn't
+    'allow', or None if nothing embedded is a problem."""
+    i, n = 0, len(argv)
+    while i < n:
+        if argv[i] in _EXEC_FLAGS:
+            i += 1
+            embedded = []
+            while i < n and argv[i] not in _EXEC_TERMINATORS:
+                embedded.append(argv[i])
+                i += 1
+            if embedded:
+                is_find, unbounded_root = _segment_unbounded_root(embedded, cwd)
+                if is_find and unbounded_root is not None:
+                    return "reject_unbounded", unbounded_root
+                if not is_find:
+                    recursive = _recursive_shell_string_verdict(embedded, cwd, evaluate_fn)
+                    if recursive is not None and recursive[0] != "allow":
+                        return recursive
+                # A nested find/-exec inside the embedded command itself
+                # (real, if unlikely, recursion) -- re-scan its own argv too.
+                nested_argv = _find_invocation_argv(embedded)
+                if nested_argv is not None:
+                    deeper = _scan_nested_execs(nested_argv, cwd, evaluate_fn)
+                    if deeper is not None:
+                        return deeper
+        else:
+            i += 1
     return None
 
 
@@ -218,7 +279,7 @@ def _recursive_shell_string_verdict(segment, cwd, evaluate_fn):
         i += 1
     if i >= n:
         return None
-    cmd = segment[i]
+    cmd = _cmd_name(segment[i])
     if cmd in _SHELL_STRING_EXEC_CMDS:
         rest = segment[i + 1:]
         if "-c" not in rest:
@@ -295,6 +356,17 @@ def evaluate(command, cwd):
                 is_find, unbounded_root = _segment_unbounded_root(segment, cwd)
                 if is_find and unbounded_root is not None:
                     return "reject_unbounded", unbounded_root
+                if is_find:
+                    # Real, confirmed bug fixed 2026-08-08 (independent
+                    # tier1 review, round 3): a find invocation correctly
+                    # scoped to a safe subtree can still embed a SECOND,
+                    # unbounded find (or a shell-string-wrapped one) via
+                    # -exec/-execdir -- scan this find's own argv for that.
+                    nested_argv = _find_invocation_argv(segment)
+                    if nested_argv is not None:
+                        nested = _scan_nested_execs(nested_argv, cwd, evaluate)
+                        if nested is not None and nested[0] != "allow":
+                            return nested
                 if not is_find:
                     # Real, confirmed bug fixed 2026-08-08 (independent
                     # tier1 review, round 2): a `find` embedded as a STRING

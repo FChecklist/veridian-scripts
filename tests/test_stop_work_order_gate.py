@@ -104,6 +104,16 @@ def _base_env(scratch_db, owner_decisions_path):
         "SUPERBOSS_REGISTER_DB": scratch_db,
         "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR,
         "VERIDIAN_OWNER_DECISIONS_PATH": owner_decisions_path,
+        # 2026-08-08 hardening: _git_committed_file_text() now defaults to
+        # fetching+reading origin/main (real issue #980 follow-up), which
+        # these tests' own isolated repos (_init_owner_decisions_repo, no
+        # real remote) can't satisfy. "HEAD" is a bare ref (no "/"), which
+        # the real code explicitly skips the fetch step for -- reads local
+        # HEAD directly, same real semantics these tests were written
+        # against, still exercising the real committed-vs-working-tree
+        # distinction, just without requiring a real origin/main fixture for
+        # every test that isn't specifically testing the trunk-ref pinning.
+        "VERIDIAN_GOVERNOR_STOP_WORK_TRUNK_REF": "HEAD",
     }
 
 
@@ -262,15 +272,19 @@ def test_committed_exemption_wrong_scope_still_blocks():
 
 
 def test_committed_lifted_entry_allows_everything():
-    """A real, committed, approved 'stop-work-order-lifted' entry closes the
-    order entirely -- every task_identity proceeds, not just a named one."""
+    """A real, committed, approved 'stop-work-order-lifted' entry that
+    explicitly names the real, specific order_id in its own scope text
+    closes that order -- every task_identity proceeds, not just a named one.
+    (2026-08-08 hardening: the entry must name the specific order_id it
+    lifts -- see test_committed_lifted_entry_is_scoped_per_order_id below
+    for the real, confirmed-fixed over-lift this replaces.)"""
     with tempfile.TemporaryDirectory() as d:
         scratch_db = os.path.join(d, "scratch.sqlite")
         sbr = _schema_helpers()
         _seed_scratch_db(scratch_db, sbr)
         entries = """\
 - id: owner-absolute-stop-work-order-lifted
-  what: "The standing stop-work order is genuinely, fully complete."
+  what: "The standing stop-work order (task-20260806-165921-owner-absolute-stop-work-order--complete) is genuinely, fully complete."
   status: approved
 """
         owner_decisions_path = _init_owner_decisions_repo(d, entries, commit=True)
@@ -288,6 +302,116 @@ def test_committed_lifted_entry_allows_everything():
                 os.environ.pop(k, None)
 
         assert result["accepted"] is True, result
+
+
+def test_committed_lifted_entry_is_scoped_per_order_id():
+    """2026-08-08 hardening (real issue #980 follow-up, independent tier1
+    review): a real, committed, approved 'stop-work-order-lifted' entry that
+    does NOT name the real, open order_id in its own scope text must NOT
+    lift it -- confirmed-fixed regression test for the real bug where any
+    approved lifted-entry, regardless of which order (if any) it actually
+    named, unconditionally cleared every order in STOP_WORK_ORDER_TASK_IDS."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        sbr = _schema_helpers()
+        _seed_scratch_db(scratch_db, sbr)
+        entries = """\
+- id: some-other-order-lifted
+  what: "A real, different standing order (task-99999999-some-other-order) is lifted."
+  status: approved
+"""
+        owner_decisions_path = _init_owner_decisions_repo(d, entries, commit=True)
+        rg = _load_rg("rg_sw_6b", _base_env(scratch_db, owner_decisions_path))
+
+        os.environ.update(_base_env(scratch_db, owner_decisions_path))
+        try:
+            result = rg.submit(
+                {"task_identity": "test-lifted-wrong-order-1", "task_kind": "veridian_task_create",
+                 "inputs": {"repo": "compliance-tracker", "title": "t", "prompt": "p"}},
+                tier=2, source_trigger="unit_test",
+            )
+        finally:
+            for k in _base_env(scratch_db, owner_decisions_path):
+                os.environ.pop(k, None)
+
+        assert result["accepted"] is False, result
+        assert "task-20260806-165921-owner-absolute-stop-work-order--complete" in result["reason"]
+
+
+def test_git_committed_file_text_requires_real_trunk_ref_when_configured():
+    """2026-08-08 hardening (real issue #980 follow-up, independent tier1
+    review): a real, committed local HEAD on an unrelated branch that was
+    NEVER pushed anywhere must NOT satisfy this gate when
+    VERIDIAN_GOVERNOR_STOP_WORK_TRUNK_REF is configured to a real
+    remote-tracking ref (the real production default, origin/main) --
+    confirmed-fixed regression test for the real gap where the original
+    implementation trusted whatever branch happened to be checked out at
+    local HEAD, with no verification it was ever pushed or reviewed. Uses a
+    real second (bare) repo as the "origin" remote and a real fetch to
+    prove the distinction is enforced, not just documented."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        sbr = _schema_helpers()
+        _seed_scratch_db(scratch_db, sbr)
+
+        # Real bare repo standing in for "origin" -- has NO stop-work-order-
+        # lifted entry pushed to it.
+        origin_dir = os.path.join(d, "origin.git")
+        subprocess.run(["git", "init", "--bare", origin_dir], capture_output=True, text=True, check=True)
+
+        work_dir = os.path.join(d, "owner_decisions_work")
+        os.makedirs(work_dir, exist_ok=True)
+        subprocess.run(["git", "init", work_dir], capture_output=True, text=True, check=True)
+        _git(work_dir, "config", "user.email", "test@example.com")
+        _git(work_dir, "config", "user.name", "Test")
+        _git(work_dir, "remote", "add", "origin", origin_dir)
+        owner_decisions_path = os.path.join(work_dir, "OWNER_DECISIONS_NEEDED_2026-07-23.yaml")
+        with open(owner_decisions_path, "w") as f:
+            f.write("- id: placeholder\n  status: approved\n  what: unrelated\n")
+        _git(work_dir, "add", "OWNER_DECISIONS_NEEDED_2026-07-23.yaml")
+        _git(work_dir, "commit", "-m", "real initial commit, pushed to origin")
+        _git(work_dir, "branch", "-M", "main")
+        _git(work_dir, "push", "-u", "origin", "main")
+
+        # Real second, unrelated LOCAL-ONLY branch with a real commit adding
+        # the exact lift entry this gate looks for -- genuinely committed,
+        # genuinely at local HEAD, but NEVER pushed to origin.
+        _git(work_dir, "checkout", "-b", "unrelated-local-branch")
+        with open(owner_decisions_path, "w") as f:
+            f.write(
+                "- id: owner-absolute-stop-work-order-lifted\n"
+                "  status: approved\n"
+                "  what: \"task-20260806-165921-owner-absolute-stop-work-order--complete lifted, "
+                "decided directly on server\"\n"
+            )
+        _git(work_dir, "add", "OWNER_DECISIONS_NEEDED_2026-07-23.yaml")
+        _git(work_dir, "commit", "-m", "Owner: lift stop-work order, decided directly on server")
+
+        env = {
+            "SUPERBOSS_REGISTER_DB": scratch_db,
+            "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR,
+            "VERIDIAN_OWNER_DECISIONS_PATH": owner_decisions_path,
+            "VERIDIAN_GOVERNOR_STOP_WORK_TRUNK_REF": "origin/main",  # the real production default
+        }
+        rg = _load_rg("rg_sw_trunk1", env)
+        os.environ.update(env)
+        try:
+            # The real primitive: reading via the pinned trunk ref must NOT
+            # see the unpushed local-branch commit's content.
+            committed_text = rg._git_committed_file_text(owner_decisions_path)
+            assert committed_text is not None
+            assert "owner-absolute-stop-work-order-lifted" not in committed_text
+
+            result = rg.submit(
+                {"task_identity": "test-unpushed-local-branch-1", "task_kind": "veridian_task_create",
+                 "inputs": {"repo": "compliance-tracker", "title": "t", "prompt": "p"}},
+                tier=2, source_trigger="unit_test",
+            )
+        finally:
+            for k in env:
+                os.environ.pop(k, None)
+
+        assert result["accepted"] is False, result
 
 
 def test_committed_exemption_wrong_status_still_blocks():

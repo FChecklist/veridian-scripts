@@ -957,16 +957,43 @@ def _load_scripts_module(filename, modname):
     return mod
 
 
+_ALERT_CONDITION_POINTS = {14, 20}
+# Real, confirmed bug fixed 2026-08-08 (independent tier1 review, PR #280
+# round 1): points 14 and 20 are alert-condition checks -- their own
+# docstrings explicitly say their real TRUE means "an alert condition, not
+# a health verdict" (stale umr_tasks rows currently exist / a cron-timer
+# process is over 5pct CPU right now), the OPPOSITE of every other point's
+# TRUE-means-healthy convention. _persist_audit24_point_result() used to
+# persist solution_applied/issue_resolved_permanently=YES whenever
+# boolean_result was True, uniformly, for every point -- for these two
+# specifically that meant a genuinely live operational problem got recorded
+# in master_issue_tracker as a PERMANENTLY RESOLVED issue, silently masking
+# exactly the condition this system exists to surface. Confirmed live
+# before this fix: a synthetic stale umr_tasks row made _audit_point_14()
+# return (True, ...), and the persisted UMR171945-0014 row showed
+# solution_applied=YES/issue_resolved_permanently=YES despite the real
+# problem still being live.
+
+
 def _persist_audit24_point_result(point, boolean_result, detail, ran_at):
     """The exact real persistence contract already proven live by
     tests/test_audit24_master_issue_tracker_persistence.py -- is_deterministic/
     is_ai_free/is_boolean_software describe this point's real CHECK
     MECHANISM (always YES once a real check has genuinely run);
-    solution_applied/issue_resolved_permanently mirror the real boolean
-    result itself."""
+    solution_applied/issue_resolved_permanently mirror the real HEALTH
+    verdict -- which is boolean_result directly for every point except
+    _ALERT_CONDITION_POINTS (14, 20), where TRUE means a problem was just
+    detected, so the persisted health verdict is the inverse (see that
+    set's own comment above). check_again_notes always records the raw,
+    unmodified boolean_result too, so the two are never conflated even
+    where they differ."""
     issue_id = f"UMR171945-{point:04d}"
-    outcome = "YES" if boolean_result else "NO"
-    note = f"[{ran_at}] audit-24-points point {point}: {outcome} -- {detail}"
+    healthy = (not boolean_result) if point in _ALERT_CONDITION_POINTS else boolean_result
+    outcome = "YES" if healthy else "NO"
+    note = (
+        f"[{ran_at}] audit-24-points point {point}: raw_boolean={boolean_result} "
+        f"healthy={healthy} -- {detail}"
+    )
     return run_json([
         "python3", SUPERBOSS, "update-issue", "--issue-id", issue_id,
         "--field", "is_deterministic=YES",
@@ -1161,11 +1188,21 @@ def _audit_point_22():
     close-issue CLI? Deliberately conservative and scoped only to this
     governing UMR's own 24 rows (never a platform-wide scan) -- a vague or
     partial citation never matches this strict regex, so this never auto-
-    closes on a guess."""
+    closes on a guess.
+
+    Real, confirmed bug fixed 2026-08-08 (independent tier1 review, PR #280
+    round 1): this used to unconditionally `return True, ...` regardless of
+    whether any matched row's close-issue call actually succeeded -- a real
+    close_resp.get("ok") failure was silently dropped (the row simply never
+    made it into `closed`), so this check could never itself fail no matter
+    what went wrong. Now tracks matched-but-failed-to-close rows separately
+    and returns False if any exist -- a genuine pass/fail signal, not an
+    unconditional True."""
     resp = run_json(["python3", SUPERBOSS, "list-issues", "--linked-umr-id", AUDIT_24_GOVERNING_UMR,
                       "--is-closed", "NO", "--limit", "100"], "list-issues")
     rows = resp.get("matches", [])
     closed = []
+    failed = []
     for row in rows:
         text = " ".join(filter(None, [row.get("apply_fix_notes"), row.get("audit_notes")]))
         match = _POINT_22_EVIDENCE_RE.search(text or "")
@@ -1175,7 +1212,13 @@ def _audit_point_22():
                                     "--resolution-notes", resolution], "close-issue")
             if close_resp.get("ok"):
                 closed.append(row["issue_id"])
-    return True, f"{len(rows)} open row(s) checked (scoped to {AUDIT_24_GOVERNING_UMR}), {len(closed)} auto-closed: {closed}"
+            else:
+                failed.append(row["issue_id"])
+    passed = len(failed) == 0
+    detail = f"{len(rows)} open row(s) checked (scoped to {AUDIT_24_GOVERNING_UMR}), {len(closed)} auto-closed: {closed}"
+    if failed:
+        detail += f", {len(failed)} matched but FAILED to close: {failed}"
+    return passed, detail
 
 
 def _audit_point_23():

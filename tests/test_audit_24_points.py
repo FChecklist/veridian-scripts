@@ -121,13 +121,24 @@ def test_audit_24_points_runs_all_12_and_persists():
         # honest, not fabricated.
         assert by_point[23]["boolean"] is False, by_point[23]
 
+        # Points 14/20 are alert-condition checks (their own docstrings say
+        # TRUE means "an alert condition, not a health verdict") -- the
+        # persisted health verdict (solution_applied/issue_resolved_
+        # permanently) is the INVERSE of the raw boolean for these two,
+        # same as every other point's boolean directly otherwise. Real,
+        # confirmed round-1 review bug: the original code persisted the raw
+        # boolean uniformly, which for these two meant a live problem got
+        # recorded as permanently resolved.
+        alert_points = {14, 20}
         listed = _run_sbr(scratch_db, ["list-issues", "--linked-umr-id", GOVERNING_UMR, "--limit", "50"])
         by_id = {m["issue_id"]: m for m in listed["matches"]}
         for point in AUDIT_24_POINTS_SUBSET:
             issue_id = f"UMR171945-{point:04d}"
             assert issue_id in by_id, issue_id
             row = by_id[issue_id]
-            expected_outcome = "YES" if by_point[point]["boolean"] else "NO"
+            raw = by_point[point]["boolean"]
+            healthy = (not raw) if point in alert_points else raw
+            expected_outcome = "YES" if healthy else "NO"
             assert row["solution_applied"] == expected_outcome, (point, row)
             assert row["is_deterministic"] == "YES", (point, row)
             assert row["is_ai_free"] == "YES", (point, row)
@@ -157,6 +168,138 @@ def test_audit_24_points_query_event_flips_point_02_true():
         by_point = {r["point"]: r for r in resp["results"]}
         assert by_point[2]["boolean"] is True, by_point[2]
         print("PASS: test_audit_24_points_query_event_flips_point_02_true")
+
+
+def _load_gateway_module(modname):
+    spec = importlib.util.spec_from_file_location(modname, GATEWAY_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_alert_condition_point_14_true_persists_as_unhealthy():
+    """Real, confirmed round-1 review bug, direct regression test: Point 14's
+    own docstring says TRUE means "an alert condition, not a health
+    verdict" (stale umr_tasks rows currently exist) -- so persisting
+    boolean_result=True must write solution_applied=NO/issue_resolved_
+    permanently=NO (a live problem, not a resolved one), not YES."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        sbr = _seed_scratch_db(scratch_db)
+        tg = _load_gateway_module("tg_point14_check")
+        os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
+        try:
+            tg._persist_audit24_point_result(14, True, "3 real stale rows found", "2026-08-08T00:00:00Z")
+        finally:
+            os.environ.pop("SUPERBOSS_REGISTER_DB", None)
+
+        conn = sqlite3.connect(scratch_db)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM master_issue_tracker WHERE issue_id=?", ("UMR171945-0014",)).fetchone()
+        conn.close()
+        assert row["solution_applied"] == "NO", dict(row)
+        assert row["issue_resolved_permanently"] == "NO", dict(row)
+        assert "raw_boolean=True" in row["check_again_notes"], row["check_again_notes"]
+        assert "healthy=False" in row["check_again_notes"], row["check_again_notes"]
+        print("PASS: test_alert_condition_point_14_true_persists_as_unhealthy")
+
+
+def test_alert_condition_point_20_true_persists_as_unhealthy():
+    """Same real bug class as Point 14, for Point 20 (a cron/timer process
+    currently over 5pct CPU is also an alert condition, not a health
+    verdict)."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        sbr = _seed_scratch_db(scratch_db)
+        tg = _load_gateway_module("tg_point20_check")
+        os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
+        try:
+            tg._persist_audit24_point_result(20, True, "1 real process over 5pct CPU", "2026-08-08T00:00:00Z")
+        finally:
+            os.environ.pop("SUPERBOSS_REGISTER_DB", None)
+
+        conn = sqlite3.connect(scratch_db)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM master_issue_tracker WHERE issue_id=?", ("UMR171945-0020",)).fetchone()
+        conn.close()
+        assert row["solution_applied"] == "NO", dict(row)
+        assert row["issue_resolved_permanently"] == "NO", dict(row)
+        print("PASS: test_alert_condition_point_20_true_persists_as_unhealthy")
+
+
+def test_normal_point_true_still_persists_as_healthy_control():
+    """Control case: a normal (non-alert-condition) point's TRUE must still
+    persist as healthy (YES) -- the point-14/20 fix must not have
+    accidentally inverted every point's semantics."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        sbr = _seed_scratch_db(scratch_db)
+        tg = _load_gateway_module("tg_point16_control_check")
+        os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
+        try:
+            tg._persist_audit24_point_result(16, True, "wired correctly", "2026-08-08T00:00:00Z")
+        finally:
+            os.environ.pop("SUPERBOSS_REGISTER_DB", None)
+
+        conn = sqlite3.connect(scratch_db)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM master_issue_tracker WHERE issue_id=?", ("UMR171945-0016",)).fetchone()
+        conn.close()
+        assert row["solution_applied"] == "YES", dict(row)
+        assert row["issue_resolved_permanently"] == "YES", dict(row)
+        print("PASS: test_normal_point_true_still_persists_as_healthy_control")
+
+
+def test_point_22_returns_false_when_a_matched_close_fails():
+    """Real, confirmed round-1 review bug, direct regression test: Point 22
+    used to unconditionally return True regardless of whether any matched
+    row's close-issue call actually succeeded. Monkeypatches run_json to
+    simulate one real close-issue failure among the calls Point 22 makes,
+    and asserts the check now genuinely fails (passed=False)."""
+    tg = _load_gateway_module("tg_point22_check")
+
+    calls = []
+
+    def fake_run_json(cmd, step):
+        calls.append(cmd)
+        if cmd[2] == "list-issues":
+            return {"matches": [
+                {"issue_id": "UMR171945-0001", "apply_fix_notes": "merged via PR #1", "audit_notes": None},
+                {"issue_id": "UMR171945-0002", "apply_fix_notes": "merged via PR #2", "audit_notes": None},
+            ]}
+        if cmd[2] == "close-issue":
+            # Simulate a real failure for the second row only.
+            if "UMR171945-0002" in cmd:
+                return {"ok": False}
+            return {"ok": True}
+        raise AssertionError(f"unexpected run_json call: {cmd}")
+
+    tg.run_json = fake_run_json
+    passed, detail = tg._audit_point_22()
+    assert passed is False, detail
+    assert "UMR171945-0002" in detail and "FAILED" in detail, detail
+    print("PASS: test_point_22_returns_false_when_a_matched_close_fails")
+
+
+def test_point_22_returns_true_when_all_matched_closes_succeed():
+    """Control case: Point 22 must still return True when every matched
+    close-issue call genuinely succeeds -- the fix must not make it
+    unconditionally False either."""
+    tg = _load_gateway_module("tg_point22_control_check")
+
+    def fake_run_json(cmd, step):
+        if cmd[2] == "list-issues":
+            return {"matches": [
+                {"issue_id": "UMR171945-0001", "apply_fix_notes": "merged via PR #1", "audit_notes": None},
+            ]}
+        if cmd[2] == "close-issue":
+            return {"ok": True}
+        raise AssertionError(f"unexpected run_json call: {cmd}")
+
+    tg.run_json = fake_run_json
+    passed, detail = tg._audit_point_22()
+    assert passed is True, detail
+    print("PASS: test_point_22_returns_true_when_all_matched_closes_succeed")
 
 
 if __name__ == "__main__":

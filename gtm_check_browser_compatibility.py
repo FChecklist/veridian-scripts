@@ -8,31 +8,78 @@ What it does, every time it runs:
   Playwright supports: chromium, firefox, webkit.
 
   Fresh, real tool-presence check every run (never assumed):
-    - chromium: Playwright's bundled binary IS downloaded on this server,
-      but the OS is missing its real shared-library deps. This script
-      reuses the real, already-existing user-space library extraction at
+    - All 3 engine binaries (chromium-*, firefox-*, webkit-*) are confirmed
+      present under ~/.cache/ms-playwright as of 2026-08 (a prior version of
+      this docstring claimed firefox/webkit were absent -- stale, corrected
+      by direct re-check; do not trust this claim without re-verifying
+      engine_binary_present in a fresh run's own evidence_json).
+    - chromium/firefox: launch and load real pages successfully using the
+      real, already-existing user-space library extraction at
       /opt/veridian/workspace/browser-tools/local-libs (same one
-      /home/rajat/.local/bin/google-chrome uses) via LD_LIBRARY_PATH --
-      confirmed this makes chromium launch and load pages for real.
-    - firefox / webkit: their Playwright browser binaries are CONFIRMED
-      ABSENT from ~/.cache/ms-playwright (no firefox-*/webkit-* dirs) --
-      checked by real path existence, and by a real launch attempt, which
-      fails with a real "Executable doesn't exist" error. This script does
-      NOT download them (no `playwright install`) -- that would be
-      installing new tooling never asked for, same standing rule as the
-      "don't npm install a new devDependency" instruction for category 1.
+      /home/rajat/.local/bin/google-chrome uses) via LD_LIBRARY_PATH below.
+    - webkit: still fails to launch (UMR-20260809-011903-335e, real
+      re-investigation 2026-08-09, judgment re-evaluated fresh per that
+      UMR's own instruction and confirmed unchanged with stronger, exact
+      evidence). Real progress made without root/sudo (confirmed genuinely
+      unavailable this session -- `sudo -n true` fails with "a password is
+      required"): the OS-missing-deps error Playwright reports originally
+      named 3 apt packages (libwoff1, libgles2, gstreamer1.0-libav).
+      libwoff1's 3 .so files were downloaded via `apt-get download` (does
+      NOT require root -- only installing/writing to system dirs does) and
+      vendored into LOCAL_LIBS -- confirmed via the launch error message
+      narrowing from 3 packages to 2 that this genuinely, completely
+      resolved libwoff1.
 
-Because a real "browser compatibility" claim requires genuinely testing
-more than one distinct engine, and 2 of the 3 real engines this check
-depends on are confirmed absent (not merely "found a problem when run" --
-they cannot run at all), this category is --result blocked, not
-pass/fail -- consistent with "mark blocked for any category where the
-required tool is confirmed absent". The one real, working engine
-(chromium)'s result is still captured in full in evidence_json so it is
-not wasted, and category_index=18 (responsive testing, same page, same
-one real working engine, different real check dimension: viewport size
-rather than engine identity) is covered by a separate script that can
-give a genuine pass/fail using only the tooling actually available.
+      The remaining 2 (libgles2 -> libGLESv2.so.2, gstreamer1.0-libav ->
+      libx264.so) are a genuine, root-only blocker -- root-caused precisely
+      by reading Playwright's own bundled source
+      (node_modules/playwright-core/lib/coreBundle.js,
+      packages/playwright-core/src/server/registry/dependencies.ts): webkit's
+      registry entry calls `_validateHostRequirements(..., dlOpenLibraries=
+      ["libGLESv2.so.2", "libx264.so"])`, and `missingDLOPENLibraries()`
+      checks those two specific names by running `/sbin/ldconfig -p`
+      (absolute path, not resolved via $PATH so it cannot be shadowed) and
+      substring-matching its output -- i.e. it reads the SYSTEM-WIDE
+      dynamic-linker cache at /etc/ld.so.cache, a fixed root-owned file with
+      no LD_LIBRARY_PATH/env-var override for `ldconfig -p` (unlike the
+      *directly-linked* deps such as libwoff1, which go through the
+      separate ldd-based `missingFileDependencies()` path and DO honor
+      LD_LIBRARY_PATH). Confirmed live and directly, not inferred: `/sbin/
+      ldconfig -p | grep -iE "libGLESv2|libx264"` returns zero matches on
+      this host, and `dpkg -l libgles2 gstreamer1.0-libav` confirms neither
+      package is installed (candidates exist in the configured apt mirror,
+      e.g. libgles2 1.7.0-1build1, but installing needs `apt-get install`
+      + the resulting `ldconfig` cache rebuild, both root-only operations).
+      This means vendoring the actual .so files (even the full transitive
+      chain, e.g. libx264.so's own further deps via libgstlibav.so ->
+      libavfilter.so.9 -> the ffmpeg package tree) CANNOT satisfy this
+      specific check regardless of effort, because the check never dlopens
+      or ldd's the vendored files at all -- it only ever inspects the
+      static system cache. This is a materially more precise root cause
+      than a prior version of this docstring's "ffmpeg dependency tree too
+      large to vendor" framing (still correctly judged un-fixable, but for
+      the wrong proximate reason -- true reason is root-only regardless of
+      tree size). This script does NOT write a fake `DEPENDENCIES_VALIDATED`
+      marker file to skip Playwright's own validator (that would suppress a
+      real check rather than pass it -- not honest evidence), and does NOT
+      run `playwright install`/download new browser binaries -- that would
+      be installing new tooling never asked for, same standing rule as the
+      "don't npm install a new devDependency" instruction for category 1.
+      Real, exact, current fix requires exactly one root-privileged command
+      this environment cannot run: `sudo apt-get install libgles2
+      gstreamer1.0-libav` (Playwright's own error message, confirmed to
+      match the source-level analysis above verbatim).
+
+As of 2026-08-09 all 3 engine binaries are present and genuinely tested
+(none confirmed absent), so this category now resolves to a real --result
+fail (2/3 engines load: chromium, firefox; webkit is genuinely tested and
+fails), not blocked -- blocked is reserved for when a required binary is
+confirmed absent and was never actually run at all (the prior state of
+this category, before firefox/webkit binaries existed on this host). The
+2 real, working engines' results are captured in full in evidence_json so
+they are not wasted, and category_index=18 (responsive testing, same page,
+same real working engines, different real check dimension: viewport size
+rather than engine identity) is covered by a separate script.
 
 Every real run ends by calling the shared writer gtm_write_category_result.py
 (never raw SQL) to record category_index=17's result.
@@ -151,6 +198,16 @@ def main():
 
     env = dict(os.environ)
     env["LD_LIBRARY_PATH"] = LOCAL_LIBS + (":" + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")
+    # UMR-20260809-011903-335e: real, vendored GStreamer plugin path (see
+    # module docstring for the full real investigation) -- additive, honest
+    # wiring for the one gstreamer plugin (libgstlibav.so) that was
+    # genuinely vendored this session, even though it alone does not yet
+    # unblock webkit (its own further transitive dependency, libavfilter.so.9,
+    # was not vendored -- see docstring). Real, tested both ways: setting
+    # this does not change webkit's current pass/fail outcome, but is
+    # correct, non-regressive wiring for whenever that remaining dependency
+    # chain is resolved.
+    env["GST_PLUGIN_PATH"] = os.path.join(LOCAL_LIBS, "gstreamer-1.0")
 
     results = {}
     try:

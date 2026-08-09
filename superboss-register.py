@@ -46,6 +46,19 @@ utm_medium (channel: ssh_session|claude_code_cli|chat_ui|api|cron),
 utm_campaign (initiative/project grouping, freeform slug),
 utm_content (short structured label of what, not a sentence),
 utm_term (comma-separated search keywords).
+NOTE (UMR171945-0024, real, disclosed divergence found in independent PR
+review 2026-08-08, deliberately NOT silently reconciled): task-gateway.py's
+own `submit --source` uses a second, purpose-specific 5-class caller-
+identity vocabulary for real-time request LABELING (not proof of
+liveness) -- owner|ai_agent|trusted_executor|end_user|external_integration
+-- which also flows into this column (utm_source) via log-instruction.
+This is not the same 5 values as this docstring's own owner|end_user|org|
+ai_agent|software. No column-level CHECK constraint enforces either list as
+a strict whitelist, so nothing breaks today, but a caller/reader relying on
+one list should be aware the other is real and also writes here. A real
+reconciliation (or an explicit decision to keep them intentionally
+distinct -- "software"/"org" describe write-path/event classes, not live
+caller identity) is real, disclosed follow-up work, not done here.
 
 CANONICAL SCRIPT (Owner directive, UMR-20260806-031211-64de / UMR-20260806-033108-9839
 / UMR-20260806-033709-82d7): this is the one real canonical script for every real read

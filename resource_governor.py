@@ -3740,7 +3740,8 @@ def main():
         conn = sbr._connect()
         sbr._ensure_umr_table(conn)
         rows = sbr.query_umr_tasks(conn, limit=args.limit, status=args.status,
-                                    task_identity=args.task_identity, query_text=args.search)
+                                    task_identity=args.task_identity, query_text=args.search,
+                                    umr_id=args.umr_id)
         # Point 2 (task-gateway.py audit-24-points, UMR-20260808-145030-f3d1):
         # this IS the other canonical query path (alongside task-gateway.py
         # status) -- log it. Best-effort: a broken log write must never break

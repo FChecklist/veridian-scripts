@@ -1908,6 +1908,94 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
     return None, None
 
 
+def target_pr_already_resolved(title, hint_repo=None):
+    """UMR-20260813-135626 (reconcile-stale-queued-rows-whose-target,
+    addendum to P1 UMR-20260806-171945-5767): real, dispatch-time re-check
+    of a queued row's own TARGET PR state -- the specific gap the governing
+    SPEC's own evidence gathering found live: 3 real queued rows each named
+    a real PR in their own title that GitHub had already resolved (merged
+    or, for the conflict case, moved past mergeable) before/shortly after
+    the row was even queued --
+      - UMR-20260813-111356-3677 ("...existing PR 249..."): veridian-scripts
+        PR #249 MERGED 2026-08-13T10:39:54Z, 34 real minutes BEFORE this row
+        queued at 11:13:56.
+      - UMR-20260813-101609-9a69 ("Resolve PR 135 conflict..."):
+        claude-control PR #135 MERGED 10:40:46Z -- no conflict was left to
+        resolve.
+      - UMR-20260813-111352-6973 ("...audit-approved PR 136"): PR #136 was
+        real, current DIRTY/mergeable=false at dispatch time, not the
+        UNKNOWN/"still computing" state the row was queued against.
+
+    Every existing guard above this one (Stage 4/5/6 duplicate-PR,
+    OCID-evidence supersession, reuse_verdict_engine) checks whether THIS
+    task_identity already produced a PR, or whether an OCID named in the
+    title has newer registry evidence -- none of them re-check the actual
+    live state of a PR the task's own title explicitly names as its work
+    target. This closes that specific gap: re-derive the target PR number
+    from the row's own title by reusing _referenced_pr_number() (the same
+    real Stage-6 extractor already proven against this exact "PR #NNN in a
+    title" shape, not a new parser), then ask GitHub directly for that PR's
+    REAL CURRENT state -- computed at the moment of dispatch, not the
+    queue-time snapshot the task's own prompt was written against.
+
+    Same fail-open philosophy and the same bounded GH_PR_CHECK_TIMEOUT_SECONDS
+    as every other real `gh` call in this module (see
+    find_pr_for_task_identity()'s own docstring, point 3): a GitHub outage,
+    rate-limit, or an unresolvable PR number/repo must degrade to "old
+    behavior, no guard, dispatch proceeds", never to a wedged queue. An
+    OPEN PR (even DIRTY/conflicted -- see UMR-20260813-111352-6973 above,
+    where the real right answer was "dispatch a fresh rebase+audit", not a
+    self-reject) is deliberately NOT blocked here: only a real, confirmed
+    MERGED or CLOSED state means the queue-time premise itself is dead.
+
+    Returns (blocked: bool, evidence: dict|None). evidence, when blocked,
+    always carries repo/number/state/url plus mergedAt (MERGED) or
+    closedAt (CLOSED) -- real, structured evidence for the row's own
+    outputs_json/reason, never bare prose."""
+    pr_num = _referenced_pr_number(title)
+    if not pr_num:
+        return False, None
+    if hint_repo and hint_repo in GH_PR_CHECK_REPOS:
+        repos = [hint_repo] + [r for r in GH_PR_CHECK_REPOS if r != hint_repo]
+    elif hint_repo:
+        repos = [hint_repo] + list(GH_PR_CHECK_REPOS)
+    else:
+        repos = list(GH_PR_CHECK_REPOS)
+    for repo in repos:
+        try:
+            r = _run(
+                ["gh", "pr", "view", pr_num, "--repo", f"{GH_ORG}/{repo}",
+                 "--json", "number,state,mergedAt,closedAt,url"],
+                timeout=GH_PR_CHECK_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            _append_attention(
+                f"WARNING: target-PR dispatch-time re-check timed out checking "
+                f"{GH_ORG}/{repo}#{pr_num} (>{GH_PR_CHECK_TIMEOUT_SECONDS}s) -- failing open, "
+                f"dispatch proceeding WITHOUT this check against this repo for this row."
+            )
+            continue
+        if r.returncode != 0:
+            continue  # not this PR number's repo (or a transient gh error) -- fail open, try next repo
+        try:
+            pr = json.loads(r.stdout)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        state = pr.get("state")
+        if state == "MERGED":
+            return True, {"repo": repo, "number": pr.get("number"), "state": state,
+                           "merged_at": pr.get("mergedAt"), "url": pr.get("url")}
+        if state == "CLOSED":
+            return True, {"repo": repo, "number": pr.get("number"), "state": state,
+                           "closed_at": pr.get("closedAt"), "url": pr.get("url")}
+        # A real PR number resolved in this repo but its state is OPEN (or
+        # anything else) -- not resolved yet, and PR numbers are per-repo, so
+        # the search stops here rather than risking a same-number collision
+        # in a different repo.
+        return False, None
+    return False, None
+
+
 # OCID-068 seven-rule guardrails addendum, Rule 2 (UMR-20260804-180711-7f96,
 # UMR-20260804-203846-e722, UMR-20260804-170055-a069): "every dispatch shall
 # return exactly one of five allowed results, success, failed, blocked,
@@ -1940,6 +2028,11 @@ RULE2_OUTCOME_MAP = {
     # the same real gate and is blocked again for as long as the order
     # remains open.
     "blocked_stop_work_order": "rejected",
+    # UMR-20260813-135626: target_pr_already_resolved()'s real dispatch-time
+    # re-check -- same real "rejected" outcome as the other evidence-based
+    # skips above (the row is written terminal by the same gate; a fresh
+    # resubmission naming the same already-resolved PR is rejected again).
+    "rejected_target_pr_already_resolved": "rejected",
 }
 
 
@@ -2132,6 +2225,53 @@ def _dispatch_one_inner(dry_run=False, now=None):
                 )
                 return {"action": "blocked_stop_work_order", "umr_id": row["umr_id"],
                          "detail": stop_work_block_reason, "metrics": metrics}
+
+        # UMR-20260813-135626 (reconcile-stale-queued-rows-whose-target,
+        # addendum to P1 UMR-20260806-171945-5767): real dispatch-time
+        # re-check of this row's own TARGET PR state -- see
+        # target_pr_already_resolved()'s own docstring for the 3 real queued
+        # rows (UMR-20260813-111356-3677/-101609-9a69/-111352-6973) this
+        # closes. Runs first among the PR/OCID-evidence guards below since
+        # it is the cheapest real check (one `gh pr view` by number, no
+        # branch-name guessing) and the most direct match for the root
+        # cause the governing SPEC's own evidence gathering found: a row can
+        # sit queued long enough that the real PR it names as its work
+        # target gets merged or closed out from under it before dispatch.
+        if row["task_kind"] == "veridian_task_create":
+            raw_inputs_for_target_pr = row.get("inputs_json")
+            row_inputs_for_target_pr = (
+                json.loads(raw_inputs_for_target_pr) if isinstance(raw_inputs_for_target_pr, str)
+                else (raw_inputs_for_target_pr or {})
+            )
+            target_pr_blocked, target_pr_evidence = target_pr_already_resolved(
+                row_inputs_for_target_pr.get("title"), row_inputs_for_target_pr.get("repo"))
+            if target_pr_blocked:
+                when = (f"mergedAt={target_pr_evidence.get('merged_at')}"
+                        if target_pr_evidence["state"] == "MERGED"
+                        else f"closedAt={target_pr_evidence.get('closed_at')}")
+                reason = (
+                    f"target-PR dispatch-time re-check: {GH_ORG}/{target_pr_evidence['repo']}"
+                    f"#{target_pr_evidence['number']} (this row's own title names it as its work "
+                    f"target) is real, current state={target_pr_evidence['state']!r} ({when}), "
+                    f"{target_pr_evidence.get('url')} -- the queue-time premise no longer holds, "
+                    f"redispatch skipped, not spawned"
+                )
+                with sbr._write_lock():
+                    sbr.update_umr_task(
+                        conn, row["umr_id"], status="rejected_duplicate",
+                        ts_completed=_now_iso(), reason=reason,
+                        outputs=_orchestrator_output_contract(
+                            sbr, row["umr_id"], "rejected_duplicate", reason,
+                            {"target_pr": target_pr_evidence}),
+                    )
+                    conn.commit()
+                conn.close()
+                _append_attention(
+                    f"INFO: dispatch_one() skipped a real veridian_task_create spawn for "
+                    f"umr_id={row['umr_id']!r} (task_identity={row['task_identity']!r}): {reason}"
+                )
+                return {"action": "rejected_target_pr_already_resolved", "umr_id": row["umr_id"],
+                         "detail": reason, "pr": target_pr_evidence, "metrics": metrics}
 
         # Real root-cause fix (UMR-20260804-213847-4b56, citing
         # UMR-20260804-180711-7f96): dispatch-owner-task.sh's own real,

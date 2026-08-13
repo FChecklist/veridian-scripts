@@ -1267,16 +1267,28 @@ _TARGET_ID_PR_BARE_RE = re.compile(r'\bPR\s*#\s*(\d+)\b', re.IGNORECASE)
 _TARGET_ID_FILE_PATH_RE = re.compile(
     r'\b[A-Za-z0-9_][\w./-]*/[\w.-]+\.(?:py|sh|md|yaml|yml|json|ts|tsx|js|jsx|txt|sql|cfg|ini|toml)\b')
 _TARGET_ID_SCRIPT_NAME_RE = re.compile(r'(?<![\w/.-])([A-Za-z0-9_-]+\.(?:py|sh))\b')
+# UMR-20260813-150004 addendum (self-amplifying RCA cascade): a killed
+# umr_tasks row is itself a real target identifier -- the exact class of
+# duplicate this addendum's own real incident hit (UMR-20260813-091810-5045
+# and UMR-20260813-124141-7641 both titled "RCA: UMR-20260813-060311-6eea
+# killed", ~3h15m apart, the second dispatched even though the first had
+# already reached status=completed_unmerged with a real primary deliverable
+# produced). None of PR #297's three original identifier classes (PR
+# number+repo, file path, script name) ever match a bare "UMR-YYYYMMDD-
+# HHMMSS-xxxx" token, so this addendum extends the SAME extractor with a
+# fourth class rather than adding a second, competing extraction function.
+_TARGET_ID_UMR_RE = re.compile(r'\bUMR-\d{8}-\d{6}-[0-9a-fA-F]{4}\b')
 
 
 def extract_target_identifiers(text, default_repo=None):
     """Real, deterministic (regex, no fuzziness) extraction of "target
-    identifiers" from free text -- PR number+repo, exact file paths, and
-    exact script names -- see the module comment above this function for
-    why this exists (the exact recent-incident dedup gap --search /
-    check_content_duplicate() both missed). Returns a sorted list of
-    normalized identifier strings, e.g. ["pr:claude-control#131",
-    "path:scripts/resource_governor.py"]. Deliberately conservative: a bare
+    identifiers" from free text -- PR number+repo, exact file paths, exact
+    script names, and (UMR-20260813-150004 addendum) exact UMR ids -- see
+    the module comment above this function for why this exists (the exact
+    recent-incident dedup gap --search / check_content_duplicate() both
+    missed). Returns a sorted list of normalized identifier strings, e.g.
+    ["pr:claude-control#131", "path:scripts/resource_governor.py",
+    "umr:umr-20260813-060311-6eea"]. Deliberately conservative: a bare
     "PR #131" with no repo anywhere (neither an explicit "<repo>#131" in
     the text nor a `default_repo` passed in) is skipped rather than
     guessed at -- a repo-less PR number is not a real target identifier on
@@ -1299,39 +1311,65 @@ def extract_target_identifiers(text, default_repo=None):
     for m in _TARGET_ID_SCRIPT_NAME_RE.finditer(text):
         ids.add(f"script:{m.group(1)}")
 
+    for m in _TARGET_ID_UMR_RE.finditer(text):
+        ids.add(f"umr:{m.group(0).lower()}")
+
     return sorted(ids)
 
 
-def find_target_identifier_duplicate(conn, title, prompt, repo=None, window_hours=4, limit=30):
+def find_target_identifier_duplicate(conn, title, prompt, repo=None, window_hours=4, limit=30,
+                                      statuses=("queued", "running")):
     """The real check itself: pulls query_umr_tasks(conn, limit=limit) --
-    deliberately no status filter, newest-first, exactly the shape this
-    incident's own fix requirement specifies (never --search alone) --
-    and returns the first row (dict) within `window_hours` whose own real
-    prompt/title (from inputs_json) shares an exact target identifier with
-    (title, prompt), and whose status is still 'queued' or 'running' (a row
-    that already finished/failed/was rejected is not a live duplicate to
-    skip against). Returns None if there is no real match."""
+    deliberately no status filter at the SQL level, newest-first, exactly
+    the shape this incident's own fix requirement specifies (never --search
+    alone) -- and returns the first row (dict) within `window_hours` whose
+    own real prompt/title (from inputs_json) shares an exact target
+    identifier with (title, prompt), and whose status is in `statuses`.
+    Returns None if there is no real match.
+
+    UMR-20260813-150004 addendum (self-amplifying RCA cascade) extends this
+    with two caller-controlled, backward-compatible parameters -- PR #297's
+    own default call site (dispatch-owner-task.sh step 1b, PR/file/script
+    dedup) is unaffected since both new params default to its original
+    behavior:
+      - `statuses`: PR #297's original hardcoded `('queued', 'running')`
+        filter is correct for its own use (a row that already
+        finished/failed/was rejected is not a live duplicate to refuse a
+        NEW dispatch against) but is wrong for RCA-target dedup, where the
+        real gap was a row that had already reached status=completed /
+        completed_unmerged -- exactly the case a killed row's RCA should
+        never be re-dispatched against. Callers that need that (e.g.
+        pm-sentinel-tick.sh's RCA guard) pass
+        statuses=(...,'completed','completed_unmerged').
+      - `window_hours`: a value <= 0 means "no cutoff" -- a killed row can
+        sit unreconciled for far longer than 4h (the real incident's own
+        gap was ~3h15m, inside the original 4h default, but a killed row
+        that resurfaces days later because it never left status=killed is
+        the more common real case, per this addendum's own RCA)."""
     my_ids = set(extract_target_identifiers(f"{title or ''} {prompt or ''}", default_repo=repo))
     if not my_ids:
         return None
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+    cutoff = None
+    if window_hours and window_hours > 0:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
     rows = query_umr_tasks(conn, limit=limit)
     for row in rows:
-        if row.get("status") not in ("queued", "running"):
+        if row.get("status") not in statuses:
             continue
-        ts_submitted = row.get("ts_submitted")
-        if not ts_submitted:
-            continue
-        if isinstance(ts_submitted, str):
-            try:
-                ts_submitted = datetime.fromisoformat(ts_submitted)
-            except ValueError:
+        if cutoff is not None:
+            ts_submitted = row.get("ts_submitted")
+            if not ts_submitted:
                 continue
-        if ts_submitted.tzinfo is None:
-            ts_submitted = ts_submitted.replace(tzinfo=timezone.utc)
-        if ts_submitted < cutoff:
-            continue
+            if isinstance(ts_submitted, str):
+                try:
+                    ts_submitted = datetime.fromisoformat(ts_submitted)
+                except ValueError:
+                    continue
+            if ts_submitted.tzinfo is None:
+                ts_submitted = ts_submitted.replace(tzinfo=timezone.utc)
+            if ts_submitted < cutoff:
+                continue
 
         inputs = row.get("inputs_json") or {}
         if isinstance(inputs, str):
@@ -1351,9 +1389,10 @@ def find_target_identifier_duplicate(conn, title, prompt, repo=None, window_hour
 def cmd_check_target_identifier_duplicate(args):
     conn = _connect()
     _ensure_umr_table(conn)
+    statuses = tuple(s.strip() for s in args.statuses.split(",") if s.strip())
     row = find_target_identifier_duplicate(
         conn, args.title, args.prompt, repo=args.repo,
-        window_hours=args.window_hours, limit=args.limit,
+        window_hours=args.window_hours, limit=args.limit, statuses=statuses,
     )
     conn.close()
     print(json.dumps({
@@ -9278,8 +9317,19 @@ if __name__ == "__main__":
                           help="target repo, used both to scope a bare 'PR #N' mention "
                                "in --title/--prompt and as the fallback repo for rows "
                                "whose own inputs_json has none")
-    p_tidup.add_argument("--window-hours", dest="window_hours", type=float, default=4)
+    p_tidup.add_argument("--window-hours", dest="window_hours", type=float, default=4,
+                          help="0 or negative means no cutoff -- match against "
+                               "matching rows regardless of age (UMR-20260813-150004 "
+                               "addendum, needed for RCA-target dedup: a killed row can "
+                               "sit unreconciled far longer than 4h)")
     p_tidup.add_argument("--limit", type=int, default=30)
+    p_tidup.add_argument("--statuses", default="queued,running",
+                          help="comma-separated umr_tasks.status values to match against "
+                               "(default: 'queued,running', PR #297's original behavior). "
+                               "UMR-20260813-150004 addendum: pass "
+                               "'queued,dispatched,running,completed,completed_unmerged' "
+                               "for RCA-target dedup, which must also catch an "
+                               "already-completed prior RCA, not just a still-live one.")
 
     p_exec = sub.add_parser("log-execution")
     p_exec.add_argument("--phase", required=True, choices=["PRE", "POST"])

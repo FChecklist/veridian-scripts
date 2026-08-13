@@ -63,6 +63,7 @@ import contextlib
 import datetime
 import fcntl
 import glob as globmod
+import importlib.util
 import json
 import os
 import re
@@ -1286,6 +1287,69 @@ def module_queue_tick(tasks):
 
 
 # ---------------------------------------------------------------------------
+# Stale-running-worker reconciliation (UMR-20260813-090037-9a34, addendum to
+# UMR-20260806-171945-5767)
+# ---------------------------------------------------------------------------
+
+def _load_reconcile_stale_running_workers():
+    """Lazy, in-process import of reconcile_stale_running_workers.py -- same
+    importlib pattern status-remediation-tick.py's own
+    _load_reconcile_owner_dispatch_status() already uses for the analogous
+    reconcile_owner_dispatch_status.py wiring, reused here for the same reason
+    (one real, already-tested, already-audited script, called in-process
+    instead of a second standalone cron entry -- the
+    ~/.config/systemd/user/README.md STANDING RULE: a periodic need whose
+    cadence/purpose fits an existing unit goes in as a new step inside that
+    unit/script, not a new one)."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location(
+        "reconcile_stale_running_workers", os.path.join(script_dir, "reconcile_stale_running_workers.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def run_stale_running_workers_reconciliation():
+    """UMR-20260813-090037-9a34 (residue of PR #249's own real AUDIT:FAIL
+    finding "(c) reconcile_stale_running_workers.py ... is a ONE-SHOT and is
+    not wired to run periodically"): real, ongoing wiring for that script's
+    own sweep(), previously only ever invoked by hand.
+
+    Deliberately NOT the same mechanism as status-remediation-tick.py's own
+    run_owner_dispatch_reconciliation() (PR #290, UMR-20260813-065157-ba95) --
+    checked on real evidence before adding this, not assumed: that reconciler's
+    own load_rows() scopes to `source_trigger='owner_dispatch_gateway'` only
+    (769 of several thousand real umr_tasks rows on this box, live-confirmed
+    via a direct `GROUP BY source_trigger` query), while
+    reconcile_stale_running_workers.py's own _fetch_affected_rows() scopes to
+    `status='running' AND unit_name LIKE 'veridian-worker@%'` with NO
+    source_trigger filter at all -- a real, broader, non-overlapping set (e.g.
+    `dispatch-tick:resume_interrupted_workers`, 6388 rows alone, is entirely
+    outside PR #290's own coverage). PR #290 landing does NOT supersede this
+    gap; this wiring is the real fix for it, called from dispatch-tick.py
+    (not status-remediation-tick.py/reconcile_owner_dispatch_status.py, both
+    off-limits per this task's own SPEC) since dispatch-tick.py is the
+    existing unit that already owns real veridian-worker@ unit lifecycle
+    decisions (resume_interrupted_workers_tick above).
+
+    Always real writes (`execute=True`) -- dispatch-tick.py itself has no
+    dry-run mode anywhere else (every other tick function above performs real
+    actions unconditionally each run); reconcile_stale_running_workers.py's
+    own module docstring already describes itself as "safely re-runnable /
+    idempotent", the same property this periodic call now depends on. Fully
+    fail-open: a real exception here is caught and reported the same way
+    run_owner_dispatch_reconciliation() reports its own, never load-bearing
+    for the rest of this tick's own dispatch/resume work."""
+    try:
+        mod = _load_reconcile_stale_running_workers()
+        report = mod.sweep(execute=True)
+        return {"ok": True, "examined": report["examined"], "counts": report["counts"]}
+    except Exception as e:
+        print(f"WARNING: stale-running-worker reconciliation failed (non-fatal): {e}", file=sys.stderr)
+        return {"ok": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -1321,6 +1385,8 @@ def main():
         print(f"PM TRIAGE ALERT ({'; '.join(pm_triage_result['reasons'])}): "
               f"see {pm_triage_result['alert_path']}")
 
+    stale_running_result = run_stale_running_workers_reconciliation()
+
     dispatched_this_tick = (
         len(sweep_result.get("started", []))
         + len(resume_result.get("resumed", []))
@@ -1336,6 +1402,7 @@ def main():
             "module_queue_dispatched": module_result.get("dispatched", []),
             "stuck_tasks_found": len(stuck_tasks),
             "pm_triage_invoked": pm_triage_result["invoked"],
+            "stale_running_workers_reconciliation": stale_running_result,
         },
     )
 
@@ -1346,6 +1413,7 @@ def main():
         "module_queue": module_result,
         "stuck_tasks_heartbeat": heartbeat,
         "pm_triage": pm_triage_result,
+        "stale_running_workers_reconciliation": stale_running_result,
     }, indent=2, default=str))
 
 

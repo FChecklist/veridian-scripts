@@ -72,7 +72,30 @@ AI_OS = "/opt/veridian/ai-os"
 TASKS_DIR = os.path.join(AI_OS, "tasks")
 SCRIPTS = "/opt/veridian/scripts"
 SUPERBOSS_REGISTER = os.path.join(SCRIPTS, "superboss-register.py")
-SUPERBOSS_DB = os.path.join(AI_OS, "memory", "superboss-register.sqlite")
+
+# Real, canonical DB-path resolution -- same lazy-import-cached convention
+# resource_governor.py's own _superboss_register() established and
+# worker-exit-status-bridge.py now also uses (see that module's own comment for the
+# full rationale): never a hardcoded path, always the one real SUPERBOSS_REGISTER_DB
+# override every other real caller already honors, and hermetically testable against
+# a real scratch DB.
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_stale_reconcile", SUPERBOSS_REGISTER)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
 
 REPO_LOCAL_PATHS = {
     "compliance-tracker": "/opt/veridian/repos/compliance-tracker",
@@ -102,7 +125,7 @@ def _fetch_affected_rows():
     """Real, read-only sqlite3 query -- the one and only direct DB read this script does;
     every WRITE goes through superboss-register.py's own CLI (see module docstring)."""
     import sqlite3
-    conn = sqlite3.connect(SUPERBOSS_DB)
+    conn = sqlite3.connect(_resolve_db_path())
     conn.row_factory = sqlite3.Row
     rows = [dict(r) for r in conn.execute(
         "SELECT umr_id, unit_name, task_identity, outputs_json, status "
@@ -445,19 +468,32 @@ def decide_and_apply(row, execute):
     return entry
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--execute", action="store_true", help="apply real writes (default: dry run)")
-    args = ap.parse_args()
-
+def sweep(execute):
+    """Real, callable entry point factored out of main() (UMR-20260813-090037-9a34,
+    addendum to UMR-20260806-171945-5767 / STEP 3's own original AUDIT:FAIL: this
+    script was a real, tested, one-time sweep with zero periodic caller). Returns the
+    exact same report dict main() used to only print -- lets a periodic caller (see
+    dispatch-tick.py's own run_stale_running_workers_reconciliation(), the same
+    in-process-import wiring convention status-remediation-tick.py already uses for
+    reconcile_owner_dispatch_status.py) get real, structured counts back instead of
+    re-parsing this script's own stdout JSON. Behavior is byte-for-byte identical to
+    the pre-refactor inline main() body -- pure extraction, no new decision logic."""
     rows = _fetch_affected_rows()
-    results = [decide_and_apply(row, args.execute) for row in rows]
+    results = [decide_and_apply(row, execute) for row in rows]
 
     counts = {}
     for e in results:
         counts[e["decision"]] = counts.get(e["decision"], 0) + 1
 
-    report = {"execute": args.execute, "examined": len(rows), "counts": counts, "rows": results}
+    return {"execute": execute, "examined": len(rows), "counts": counts, "rows": results}
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--execute", action="store_true", help="apply real writes (default: dry run)")
+    args = ap.parse_args()
+
+    report = sweep(args.execute)
     print(json.dumps(report, indent=2, default=str))
     return 0
 

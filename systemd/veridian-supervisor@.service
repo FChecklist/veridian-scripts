@@ -1,0 +1,25 @@
+[Unit]
+Description=VERIDIAN Superboss review for task %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/veridian/ai-os/tasks/%i
+EnvironmentFile=/opt/veridian/shared/.env
+ExecStart=/opt/veridian/scripts/supervisor-entrypoint.sh %i
+# 2026-08-13 fix (UMR-20260813-090037-9a34, addendum to UMR-20260806-171945-5767 --
+# supervisor-side half of the real AUDIT:FAIL finding "(b) NO SUPERVISOR-SIDE BRIDGE"
+# against this PR's own worker-side fix): confirmed live via `systemctl --user cat
+# veridian-supervisor@.service` that this unit had NO ExecStopPost at all --
+# supervisor-entrypoint.sh's own exit paths only ever call `veridian-task.py checkpoint`
+# (status completed/blocked), never `superboss-register.py mark-umr-terminal`, so a
+# umr_tasks row handed off to this unit (task.yaml status=pending_review) could get
+# stuck at status='running' forever the exact same way a worker unit could before the
+# worker-side fix in this same PR. Reuses worker-exit-status-bridge.py itself (never a
+# forked near-duplicate script -- see that script's own "Supervisor-side reuse"
+# docstring section) with the real, generic `unit_kind` selector this fix added to it.
+ExecStopPost=/opt/veridian/scripts/worker-exit-status-bridge.py %i supervisor
+Restart=no
+StandardOutput=append:/opt/veridian/ai-os/tasks/%i/supervisor-systemd.log
+StandardError=append:/opt/veridian/ai-os/tasks/%i/supervisor-systemd.log

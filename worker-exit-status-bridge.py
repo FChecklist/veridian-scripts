@@ -24,6 +24,24 @@ shell itself is SIGKILLed (bash traps do not fire for SIGKILL, only for signals 
 process can catch/ignore) -- exactly the "including timeout and kill" case this task's
 own SPEC requires and the entrypoint's own trap structurally cannot cover.
 
+Supervisor-side reuse (UMR-20260813-090037-9a34, addendum to UMR-20260806-171945-5767,
+closing the real AUDIT:FAIL finding "(b) NO SUPERVISOR-SIDE BRIDGE" against this PR):
+veridian-supervisor@.service's own success/failure paths (supervisor-entrypoint.sh) have
+the exact same shape as worker-entrypoint.sh's -- every exit path calls
+`veridian-task.py checkpoint` (status completed/blocked) and never `mark-umr-terminal` --
+so this same script, same decision rule, is wired a second time via
+`ExecStopPost=/opt/veridian/scripts/worker-exit-status-bridge.py %i supervisor` in
+systemd/veridian-supervisor@.service, rather than forking a near-duplicate script (this
+codebase's own zero-duplication convention). `unit_kind` (default "worker", the
+pre-existing, back-compatible behavior) selects the real unit-name template
+(`veridian-worker@<id>.service` / `veridian-supervisor@<id>.service`) and the real
+per-task log file (`worker.log` / `supervisor.log`, matching each entrypoint's own
+`StandardOutput=append:.../<name>.log` unit directive) -- everything else (the umr_tasks
+lookup, the self-reported-negative-only decision rule, the mark-umr-terminal call) is
+identical for both, since supervisor-entrypoint.sh's own vocabulary
+(`completed`/`blocked`) is already a strict subset of SELF_REPORTED_NEGATIVE_STATUSES
+below.
+
 Deliberately conservative in both directions:
   1. NEVER writes status=completed/completed_unmerged from here. This hook only ever has
      a process exit code to go on, and this task's own SPEC is explicit: a clean exit
@@ -71,7 +89,32 @@ import yaml
 AI_OS = "/opt/veridian/ai-os"
 SCRIPTS = "/opt/veridian/scripts"
 SUPERBOSS_REGISTER = os.path.join(SCRIPTS, "superboss-register.py")
-SUPERBOSS_DB = os.path.join(AI_OS, "memory", "superboss-register.sqlite")
+
+# Real, canonical DB-path resolution (OCID-068, see superboss-register.py's own
+# resolve_superboss_db_path() docstring) -- same lazy-import-cached convention
+# resource_governor.py's own _superboss_register() already established, reused here
+# instead of a hardcoded path so this module (a) never drifts from the one real
+# SUPERBOSS_REGISTER_DB override every other real caller already honors, and (b) is
+# genuinely, hermetically testable against a real scratch DB (see
+# tests/test_worker_exit_status_bridge.py) the same way tests/
+# test_mark_umr_terminal_structured_evidence.py already tests the CLI itself.
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_exit_bridge", SUPERBOSS_REGISTER)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
 
 # Same real vocabulary resource_governor.py's own _forward_progress_decision() already
 # treats as "no override, default failed retained" for a task.yaml that has already
@@ -99,7 +142,7 @@ def _find_umr_row_for_unit(unit_name):
     import sqlite3
     conn = None
     try:
-        conn = sqlite3.connect(SUPERBOSS_DB)
+        conn = sqlite3.connect(_resolve_db_path())
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT umr_id, status FROM umr_tasks WHERE unit_name=? ORDER BY ts_submitted DESC LIMIT 1",
@@ -116,16 +159,27 @@ def _find_umr_row_for_unit(unit_name):
                 pass
 
 
-def _log(task_id, message):
+# Real unit-name templates + per-task log file this bridge is wired against -- see the
+# "Supervisor-side reuse" docstring section above. Adding a 3rd real unit kind here is
+# the one, single place that would need a new entry; everything else in this module is
+# already generic over unit_kind.
+UNIT_KIND_CONFIG = {
+    "worker": {"unit_template": "veridian-worker@{task_id}.service", "log_name": "worker.log"},
+    "supervisor": {"unit_template": "veridian-supervisor@{task_id}.service", "log_name": "supervisor.log"},
+}
+
+
+def _log(task_id, unit_kind, message):
+    log_name = UNIT_KIND_CONFIG[unit_kind]["log_name"]
     try:
-        with open(f"{AI_OS}/tasks/{task_id}/worker.log", "a") as f:
-            f.write(f"[worker-exit-status-bridge] {message}\n")
+        with open(f"{AI_OS}/tasks/{task_id}/{log_name}", "a") as f:
+            f.write(f"[worker-exit-status-bridge:{unit_kind}] {message}\n")
     except OSError:
         pass
 
 
-def run(task_id):
-    unit_name = f"veridian-worker@{task_id}.service"
+def run(task_id, unit_kind="worker"):
+    unit_name = UNIT_KIND_CONFIG[unit_kind]["unit_template"].format(task_id=task_id)
 
     row = _find_umr_row_for_unit(unit_name)
     if row is None:
@@ -144,7 +198,7 @@ def run(task_id):
         # No task.yaml at all -- cannot determine a real self-reported outcome. Leave the
         # row at 'running'; reconcile_stale_running_workers.py's own no-task.yaml branch
         # is the real, evidence-gated place this gets resolved (requeue), not a guess here.
-        _log(task_id, f"no task.yaml for {task_id}, umr {row['umr_id']} left at running for STEP 3 reconciler")
+        _log(task_id, unit_kind, f"no task.yaml for {task_id}, umr {row['umr_id']} left at running for STEP 3 reconciler")
         return
 
     checkpoints = task.get("checkpoints") or []
@@ -155,13 +209,14 @@ def run(task_id):
         # in_progress / pending (ambiguous mid-work stop, maybe a systemd restart is
         # coming) -- none of these are a hasty, safe terminal write from an exit hook.
         # Leave alone.
-        _log(task_id, f"last task.yaml status={last_status!r} for umr {row['umr_id']} -- "
-                       f"not a self-reported negative outcome, leaving at running")
+        _log(task_id, unit_kind, f"last task.yaml status={last_status!r} for umr {row['umr_id']} -- "
+                                  f"not a self-reported negative outcome, leaving at running")
         return
 
     reason = (
         f"worker-exit-status-bridge (ExecStopPost, STEP 2 fix task-20260807-052027-platform-"
-        f"integrity--worker-units-exit-0): unit {unit_name} stopped with task.yaml's own last "
+        f"integrity--worker-units-exit-0{'  + supervisor-side extension UMR-20260813-090037-9a34' if unit_kind == 'supervisor' else ''}): "
+        f"unit {unit_name} stopped with task.yaml's own last "
         f"checkpoint status={last_status!r} (a self-reported, no-more-automatic-progress "
         f"outcome) -- bridging to umr_tasks so the row does not stay at 'running' forever with "
         f"no further exit ever coming."
@@ -172,20 +227,27 @@ def run(task_id):
              "--umr-id", row["umr_id"], "--status", "failed", "--reason", reason],
             capture_output=True, text=True, timeout=35,
         )
-        _log(task_id, f"mark-umr-terminal umr={row['umr_id']} status=failed rc={result.returncode} "
-                       f"stdout={result.stdout.strip()[:300]} stderr={result.stderr.strip()[:300]}")
+        _log(task_id, unit_kind, f"mark-umr-terminal umr={row['umr_id']} status=failed rc={result.returncode} "
+                                  f"stdout={result.stdout.strip()[:300]} stderr={result.stderr.strip()[:300]}")
     except Exception as e:
-        _log(task_id, f"mark-umr-terminal call raised (non-fatal): {e}")
+        _log(task_id, unit_kind, f"mark-umr-terminal call raised (non-fatal): {e}")
 
 
 def main():
     if len(sys.argv) < 2 or not sys.argv[1]:
         return 0
     task_id = sys.argv[1]
+    unit_kind = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else "worker"
+    if unit_kind not in UNIT_KIND_CONFIG:
+        # Unknown unit kind (a typo'd ExecStopPost, or a future unit this script hasn't
+        # been taught about yet) -- real fail-open, never guess, never crash the unit's
+        # own Result by exiting non-zero (see docstring point 5 above).
+        _log(task_id, "worker", f"unknown unit_kind {unit_kind!r} passed as argv[2] -- no-op")
+        return 0
     try:
-        run(task_id)
+        run(task_id, unit_kind)
     except Exception as e:
-        _log(task_id, f"worker-exit-status-bridge raised at top level (non-fatal): {e}")
+        _log(task_id, unit_kind, f"worker-exit-status-bridge raised at top level (non-fatal): {e}")
     return 0
 
 

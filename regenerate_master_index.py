@@ -91,9 +91,28 @@ import uuid
 
 import yaml
 
-DB = "/opt/veridian/ai-os/memory/superboss-register.sqlite"
 LIVE_PATH = "/opt/veridian/ai-os/MASTER_INDEX.yaml"
-_WRITE_LOCK_PATH = DB + ".writelock"
+
+SCRIPTS = "/opt/veridian/scripts"
+SUPERBOSS_REGISTER = os.path.join(SCRIPTS, "superboss-register.py")
+
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_regen_master_index", SUPERBOSS_REGISTER)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
 
 KNOWN_ROOTS = [
     "/opt/veridian/",
@@ -120,9 +139,14 @@ def _now_iso():
 @contextlib.contextmanager
 def write_lock():
     """Same flock convention as postflight_audit_gate.py / superboss-register.py --
-    this script is a writer to the same shared DB and must not skip it."""
-    os.makedirs(os.path.dirname(_WRITE_LOCK_PATH), exist_ok=True)
-    with open(_WRITE_LOCK_PATH, "w") as lockfile:
+    this script is a writer to the same shared DB and must not skip it. The
+    lock path is derived from the real resolved DB path (not a hardcoded
+    literal) so it always matches the SAME companion lock file
+    superboss-register.py's own writers lock against, even under a
+    SUPERBOSS_REGISTER_DB override."""
+    write_lock_path = _resolve_db_path() + ".writelock"
+    os.makedirs(os.path.dirname(write_lock_path), exist_ok=True)
+    with open(write_lock_path, "w") as lockfile:
         import fcntl
         fcntl.flock(lockfile, fcntl.LOCK_EX)
         try:
@@ -622,7 +646,7 @@ def main():
         pre_checksum_text = fh.read()
     base_model = yaml.safe_load(pre_checksum_text)
 
-    conn = sqlite3.connect(DB)
+    conn = sqlite3.connect(_resolve_db_path())
     cur = conn.cursor()
 
     run_id = "REGEN-" + datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]

@@ -28,17 +28,39 @@ import sys
 from datetime import datetime, timedelta
 
 AUTH_LOG = "/var/log/auth.log"
-DB = "/opt/veridian/ai-os/memory/superboss-register.sqlite"
 STATE_FILE = "/opt/veridian/ai-os/logs/security-check-state.json"
 NOTIFY_SCRIPT = "/opt/veridian/scripts/notify-owner.py"
+SCRIPTS = "/opt/veridian/scripts"
+SUPERBOSS_REGISTER = os.path.join(SCRIPTS, "superboss-register.py")
 
 WINDOW_MINUTES = 20  # 15-min cron cadence + grace, same reasoning as health-check's STALE_THRESHOLD_MIN
 BURST_THRESHOLD = 3  # >=3 failed attempts immediately before a success, same IP
 
 ACCEPTED_RE = re.compile(r"Accepted (\S+) for (?:invalid user )?(\S+) from ([0-9a-fA-F:.]+)")
 FAILED_RE = re.compile(r"Failed password for (?:invalid user )?\S+ from ([0-9a-fA-F:.]+)")
-SUPERBOSS_REGISTER = "/opt/veridian/scripts/superboss-register.py"
 TS_RE = re.compile(r"^(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})")
+
+# Real, canonical DB-path resolution -- same lazy-import-cached convention
+# reconcile_stale_running_workers.py / worker-exit-status-bridge.py already use:
+# never a hardcoded path, always the one real SUPERBOSS_REGISTER_DB override every
+# other real caller already honors.
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_security_check", SUPERBOSS_REGISTER)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
 
 
 def load_state():
@@ -155,10 +177,9 @@ def check_ssh_activity(state, now):
 
 
 def get_current_modes():
-    if not os.path.isfile(DB):
-        return {}, "superboss-register.sqlite not found"
     try:
-        conn = sqlite3.connect(f"file:{DB}?mode=ro", uri=True, timeout=5)
+        db = _resolve_db_path()
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
         cur = conn.cursor()
         cur.execute("SELECT path, mode FROM file_inventory WHERE mode IS NOT NULL")
         rows = cur.fetchall()

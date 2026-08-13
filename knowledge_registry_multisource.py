@@ -76,7 +76,6 @@ import urllib.request
 VERIDIAN_ROOT = "/opt/veridian"
 SUPERBOSS = f"{VERIDIAN_ROOT}/scripts/superboss-register.py"
 NOTIFICATION_ENGINE = f"{VERIDIAN_ROOT}/scripts/notification_engine.py"
-DB_PATH = f"{VERIDIAN_ROOT}/ai-os/memory/superboss-register.sqlite"
 REPOS_ROOT = f"{VERIDIAN_ROOT}/repos"
 SHARED_ENV = f"{VERIDIAN_ROOT}/shared/.env"
 DATABASE_CATALOG = f"{VERIDIAN_ROOT}/ai-os/DATABASE_CATALOG.json"
@@ -99,6 +98,27 @@ SERVER_ROWS = [
 ]
 
 
+# Real, canonical DB-path resolution -- same lazy-import-cached convention
+# reconcile_stale_running_workers.py / worker-exit-status-bridge.py already use.
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_knowledge_registry", SUPERBOSS)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
+
+
 def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=kw.pop("timeout", 60), **kw)
 
@@ -116,9 +136,7 @@ def sb(args_list):
 
 def row_exists(path):
     import sqlite3
-    if not os.path.isfile(DB_PATH):
-        return False
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(_resolve_db_path())
     row = conn.execute(
         "SELECT 1 FROM knowledge_engine WHERE artifact_path = ? ORDER BY ts DESC LIMIT 1", (path,)
     ).fetchone()

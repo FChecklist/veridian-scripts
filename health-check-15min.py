@@ -66,6 +66,29 @@ DISK_WARNING_PCT = 75  # governance item 10: distinct WARN tier below the DISK/M
 MEM_WARNING_PCT = 75
 ENV_FILE = "/opt/veridian/repos/compliance-tracker/.env.local"
 CREDIT_LEDGER_PATH = "/opt/veridian/ai-os/memory/credit-ledger.sqlite"
+SCRIPTS = "/opt/veridian/scripts"
+SUPERBOSS_REGISTER = os.path.join(SCRIPTS, "superboss-register.py")
+
+# Real, canonical DB-path resolution -- same lazy-import-cached convention
+# reconcile_stale_running_workers.py / worker-exit-status-bridge.py already use.
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_health_check", SUPERBOSS_REGISTER)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
+
 
 EXHAUSTION_PATTERNS = [
     r"credit balance is too low",
@@ -375,10 +398,6 @@ def check_credit_accountant_health():
         return {"reachable": False, "error": str(e)}
 
 
-SQLITE_DBS_TO_GUARD = [
-    "/opt/veridian/ai-os/memory/superboss-register.sqlite",
-    CREDIT_LEDGER_PATH,
-]
 SQLITE_BACKUP_DIR = "/opt/veridian/backups/sqlite-daily"
 SQLITE_BACKUP_RETENTION_DAYS = 14
 
@@ -405,7 +424,8 @@ def check_db_integrity_and_backup():
     results = []
     today = datetime.now(timezone.utc).strftime("%Y%m%d")
     os.makedirs(SQLITE_BACKUP_DIR, exist_ok=True)
-    for db_path in SQLITE_DBS_TO_GUARD:
+    sqlite_dbs_to_guard = [_resolve_db_path(), CREDIT_LEDGER_PATH]
+    for db_path in sqlite_dbs_to_guard:
         name = os.path.basename(db_path)
         if not os.path.isfile(db_path):
             results.append({"db": name, "ok": True, "note": "not yet created"})

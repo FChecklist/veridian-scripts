@@ -243,11 +243,23 @@ if [ "$IS_RESUME" -eq 0 ]; then
   # python3's own sqlite3 module, not the `sqlite3` CLI binary -- every other
   # DB read in this file already goes through python3 (see WORKSPACE/BRANCH
   # above), and the CLI binary is not a guaranteed-present dependency on
-  # every real deployment host.
+  # every real deployment host. DB path comes from the one real canonical
+  # resolver (superboss-register.py's resolve_superboss_db_path(), same
+  # lazy-import convention reconcile_stale_running_workers.py and
+  # worker-exit-status-bridge.py already use) instead of a hardcoded
+  # literal, so this never silently opens a relocated/decoy file -- the
+  # outer `except Exception: pass` is this call site's own pre-existing,
+  # deliberate fail-open contract (see this section's header comment: a
+  # failure here must never block real dispatch), unchanged by this fix.
   UMR_ID_FOR_BRIEFING=$(python3 -c "
 import sqlite3
 try:
-    conn = sqlite3.connect('/opt/veridian/ai-os/memory/superboss-register.sqlite')
+    import importlib.util as _ilu
+    _spec = _ilu.spec_from_file_location(
+        'superboss_register_worker_entrypoint', '/opt/veridian/scripts/superboss-register.py')
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    conn = sqlite3.connect(_mod.resolve_superboss_db_path())
     row = conn.execute(
         \"SELECT umr_id FROM umr_tasks WHERE unit_name=? ORDER BY ts_submitted DESC LIMIT 1\",
         ('veridian-worker@${TASK_ID}.service',),

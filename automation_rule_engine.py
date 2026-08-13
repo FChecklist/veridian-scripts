@@ -43,10 +43,32 @@ import uuid
 VERIDIAN_ROOT = "/opt/veridian"
 SCRIPTS = f"{VERIDIAN_ROOT}/scripts"
 AI_OS = f"{VERIDIAN_ROOT}/ai-os"
-DB_PATH = f"{AI_OS}/memory/superboss-register.sqlite"
 SUPERBOSS = f"{SCRIPTS}/superboss-register.py"
 TASK_GATEWAY = f"{SCRIPTS}/task-gateway.py"
 NOTIFY_OWNER = f"{SCRIPTS}/notify-owner.py"
+SUPERBOSS_REGISTER = SUPERBOSS
+
+# Real, canonical DB-path resolution -- same lazy-import-cached convention
+# reconcile_stale_running_workers.py and worker-exit-status-bridge.py already
+# use: never a hardcoded path, always the one real SUPERBOSS_REGISTER_DB
+# override every other real caller already honors.
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_automation_rule_engine", SUPERBOSS_REGISTER)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
 
 # action_type is a closed set, deliberately smaller than
 # automation-rule-service.ts's own 2-value set widened for this layer's
@@ -57,7 +79,7 @@ VALID_ACTION_TYPES = ["task_gateway_submit", "notify_owner", "log_action"]
 
 
 def _connect():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(_resolve_db_path())
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -95,7 +117,7 @@ def _now_iso():
     # Deliberately reuses sqlite's own clock (not Python's datetime.now())
     # so run timestamps are ordered consistently with every other table's
     # `ts` column, which superboss-register.py also derives from SQL.
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(_resolve_db_path())
     val = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')").fetchone()[0]
     conn.close()
     return val

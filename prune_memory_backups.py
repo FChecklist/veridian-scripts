@@ -57,10 +57,35 @@ from datetime import datetime, timezone
 
 MEMORY_DIR = "/opt/veridian/ai-os/memory"
 BACKUPS_DIR = os.path.join(MEMORY_DIR, "backups")
-LIVE_DB = os.path.join(MEMORY_DIR, "superboss-register.sqlite")
 DB_BASENAME = "superboss-register.sqlite"
+# Kept for backward compatibility: snapshot_memory_backup.py (out of scope for
+# this fix) imports this constant directly (`_pmb.LIVE_DB`). The real fix
+# below is that THIS module's own --live-db default no longer uses it --
+# see _resolve_db_path()/main().
+LIVE_DB = os.path.join(MEMORY_DIR, DB_BASENAME)
 KEEP_DEFAULT = 3
 _COMPANION_SUFFIXES = ("-wal", "-shm")
+
+SCRIPTS = "/opt/veridian/scripts"
+SUPERBOSS_REGISTER = os.path.join(SCRIPTS, "superboss-register.py")
+
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_prune_backups", SUPERBOSS_REGISTER)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
 
 # Files that belong to the LIVE database itself -- never discovery
 # candidates, regardless of --scan-dir.
@@ -243,8 +268,9 @@ def main(argv=None):
                      help="Print exactly what would be deleted; delete nothing.")
     ap.add_argument("--keep", type=int, default=KEEP_DEFAULT,
                      help=f"Number of most-recent verified backups to keep (default {KEEP_DEFAULT}).")
-    ap.add_argument("--live-db", default=LIVE_DB,
-                     help="Path to the live database whose integrity_check gates this whole run.")
+    ap.add_argument("--live-db", default=None,
+                     help="Path to the live database whose integrity_check gates this whole run. "
+                          "Defaults to the canonical resolve_superboss_db_path() result.")
     ap.add_argument("--scan-dir", action="append", default=None,
                      help="Directory to scan for backup files (repeatable). "
                           "Default: memory dir root + memory/backups.")
@@ -255,7 +281,8 @@ def main(argv=None):
         return 2
 
     scan_dirs = args.scan_dir or [MEMORY_DIR, BACKUPS_DIR]
-    report = run(args.live_db, scan_dirs, args.keep, args.dry_run)
+    live_db = args.live_db if args.live_db is not None else _resolve_db_path()
+    report = run(live_db, scan_dirs, args.keep, args.dry_run)
     print(json.dumps(report, indent=2))
     return 1 if "error" in report else 0
 

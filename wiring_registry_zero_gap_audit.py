@@ -42,7 +42,30 @@ import subprocess
 import sys
 from collections import defaultdict
 
-DEFAULT_DB_PATH = "/opt/veridian/ai-os/memory/superboss-register.sqlite"
+SCRIPTS = "/opt/veridian/scripts"
+SUPERBOSS_REGISTER = os.path.join(SCRIPTS, "superboss-register.py")
+
+# Real, canonical DB-path resolution -- same lazy-import-cached convention
+# reconcile_stale_running_workers.py / worker-exit-status-bridge.py already use:
+# never a hardcoded path, always the one real SUPERBOSS_REGISTER_DB override every
+# other real caller already honors.
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_zero_gap_audit", SUPERBOSS_REGISTER)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
 
 # Same 4 canonical roots + same prune list ai-os/MASTER_INDEX.yaml's
 # exclusion_rules already document (node_modules, .git, ai-os/tasks/*/workspace,
@@ -322,9 +345,12 @@ def run_audit(db_path):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db", default=DEFAULT_DB_PATH)
+    parser.add_argument("--db", default=None,
+                         help="override the DB path (default: resolved via "
+                              "superboss-register.py's own canonical resolver)")
     args = parser.parse_args()
-    result = run_audit(args.db)
+    db_path = args.db if args.db is not None else _resolve_db_path()
+    result = run_audit(db_path)
     print(json.dumps(result, indent=2))
     return 0
 

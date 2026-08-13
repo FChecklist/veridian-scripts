@@ -45,17 +45,41 @@ Subcommands: remember-turn, recall-context, list-sessions
 """
 import argparse
 import json
+import os
 import sqlite3
 import sys
 import uuid
 
 VERIDIAN_ROOT = "/opt/veridian"
 AI_OS = f"{VERIDIAN_ROOT}/ai-os"
-DB_PATH = f"{AI_OS}/memory/superboss-register.sqlite"
+SCRIPTS = "/opt/veridian/scripts"
+SUPERBOSS_REGISTER = os.path.join(SCRIPTS, "superboss-register.py")
+
+# Real, canonical DB-path resolution -- same lazy-import-cached convention
+# reconcile_stale_running_workers.py and worker-exit-status-bridge.py already
+# use: never a hardcoded path, always the one real SUPERBOSS_REGISTER_DB
+# override every other real caller already honors.
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_context_engine", SUPERBOSS_REGISTER)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
 
 
 def _connect():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(_resolve_db_path())
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -76,7 +100,7 @@ def _ensure_tables(conn):
 
 
 def _now_iso():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(_resolve_db_path())
     val = conn.execute("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')").fetchone()[0]
     conn.close()
     return val

@@ -86,8 +86,29 @@ PROMPT_GATEWAY = f"{SCRIPTS}/prompt_gateway/gateway.py"
 POSTFLIGHT = f"{AI_OS}/scripts/postflight_audit_gate.py"
 TIGHT_VALIDATION = f"{SCRIPTS}/tight_task_validation.py"
 DDL_AUTHORIZATION_CHECK = f"{SCRIPTS}/ddl_authorization_check.py"
-DB_PATH = f"{AI_OS}/memory/superboss-register.sqlite"
 MASTER_INDEX_REGISTRIES_SYNC = f"{AI_OS}/scripts/sync_master_index_registries.py"
+
+# Real, canonical DB-path resolution -- same lazy-import-cached convention
+# reconcile_stale_running_workers.py / worker-exit-status-bridge.py already use:
+# never a hardcoded path, always the one real SUPERBOSS_REGISTER_DB override every
+# other real caller already honors.
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_task_gateway", SUPERBOSS)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
 # UMR171945-0017 (real ops infra audit, 2026-08-08): veridian-zoekt-webserver.service,
 # confirmed live/real (~1.7GB index over compliance-tracker/veridian-scripts/
 # claude-control/scripts, 2-hourly reindex timer). Env override exists for
@@ -266,9 +287,7 @@ def lookup_work_item(task_id):
     software_task_id (the field name postflight_audit_gate.py and phase_7's
     exact_command use generically for whatever id is under audit). Returns
     None if no row is found -- callers must handle that, not assume it."""
-    if not os.path.isfile(DB_PATH):
-        return None
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(_resolve_db_path())
     conn.row_factory = sqlite3.Row
     row = conn.execute(
         "SELECT work_item_id, instruction_id FROM work_items "
@@ -845,10 +864,10 @@ def reverify_touched_knowledge_engine_rows(task_id):
     changed = [line.strip() for line in diff_proc.stdout.splitlines() if line.strip()]
     live_paths = sorted({p for p in (_map_repo_path_to_live(c) for c in changed) if p})
 
-    if not os.path.isfile(DB_PATH) or not live_paths:
+    if not live_paths:
         return {"status": "NO_TOUCHED_ROWS", "changed_files": changed, "touched_knowledge_engine_paths": [], "reverify_result": None}
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(_resolve_db_path())
     conn.row_factory = sqlite3.Row
     known_paths = {r["artifact_path"] for r in conn.execute("SELECT DISTINCT artifact_path FROM knowledge_engine")}
     conn.close()

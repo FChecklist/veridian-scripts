@@ -38,11 +38,33 @@ Endpoints:
   POST /write  {"op": "insert"|"update", "table": "...", "values": {...}, "where": {...}}
 """
 import json
+import os
 import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-DB_PATH = "/opt/veridian/ai-os/memory/superboss-register.sqlite"
+SCRIPTS = "/opt/veridian/scripts"
+SUPERBOSS_REGISTER = os.path.join(SCRIPTS, "superboss-register.py")
+
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_gateway", SUPERBOSS_REGISTER)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
+
+
 BIND = ("127.0.0.1", 8790)
 
 ALLOWED_TABLES = {
@@ -55,13 +77,13 @@ _write_lock = threading.Lock()
 
 
 def _ro_conn():
-    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=5)
+    conn = sqlite3.connect(f"file:{_resolve_db_path()}?mode=ro", uri=True, timeout=5)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def _rw_conn():
-    conn = sqlite3.connect(DB_PATH, timeout=5)
+    conn = sqlite3.connect(_resolve_db_path(), timeout=5)
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA busy_timeout=5000;")
     return conn
@@ -152,7 +174,7 @@ class Handler(BaseHTTPRequestHandler):
                 jm = conn.execute("PRAGMA journal_mode;").fetchone()[0]
             finally:
                 conn.close()
-            self._send(200, {"ok": True, "db": DB_PATH, "journal_mode": jm})
+            self._send(200, {"ok": True, "db": _resolve_db_path(), "journal_mode": jm})
         else:
             self._send(404, {"error": "not found"})
 

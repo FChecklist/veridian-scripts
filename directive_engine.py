@@ -29,8 +29,40 @@ except ImportError:
 # hardcoded, which meant a real test could only ever point at the live
 # production DB/files, or not exercise this module's file-touching functions
 # at all. Defaults are unchanged, so production behavior is 100% identical.
-SUPERBOSS_DB = os.environ.get(
-    "VERIDIAN_DIRECTIVE_SUPERBOSS_DB", "/opt/veridian/ai-os/memory/superboss-register.sqlite")
+SCRIPTS = "/opt/veridian/scripts"
+SUPERBOSS_REGISTER = os.path.join(SCRIPTS, "superboss-register.py")
+# Real, canonical DB-path resolution -- same lazy-import-cached convention
+# reconcile_stale_running_workers.py and worker-exit-status-bridge.py already
+# use, so every real path decision (and this DB's real existence/size/
+# SQLite-header/umr_tasks-table verification) goes through the one real
+# canonical chokepoint instead of being opened unchecked here. The
+# pre-existing VERIDIAN_DIRECTIVE_SUPERBOSS_DB testability seam (real fix,
+# UMR-20260806-090229-f2a7) is preserved by feeding it through as
+# resolve_superboss_db_path()'s own default_path testability seam (see that
+# function's own docstring) -- SUPERBOSS_REGISTER_DB, if set, still takes
+# priority per that function's real documented order.
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_directive_engine", SUPERBOSS_REGISTER)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path(
+        default_path=os.environ.get(
+            "VERIDIAN_DIRECTIVE_SUPERBOSS_DB",
+            "/opt/veridian/ai-os/memory/superboss-register.sqlite"))
+
+
 GOVERNOR = os.environ.get("VERIDIAN_DIRECTIVE_GOVERNOR_SCRIPT", "/opt/veridian/scripts/resource_governor.py")
 TASK_GATEWAY = os.environ.get("VERIDIAN_DIRECTIVE_TASK_GATEWAY_SCRIPT", "/opt/veridian/scripts/task-gateway.py")
 DIRECTIVE_FILE = os.environ.get("VERIDIAN_DIRECTIVE_FILE", "/opt/veridian/ai-os/DIRECTIVE.yaml")
@@ -78,7 +110,7 @@ def load_directive():
 
 
 def umr_status_for_identity(task_identity):
-    conn = sqlite3.connect(SUPERBOSS_DB)
+    conn = sqlite3.connect(_resolve_db_path())
     cur = conn.cursor()
     cur.execute(
         "SELECT status, umr_id FROM umr_tasks WHERE task_identity = ? "
@@ -188,7 +220,7 @@ def find_in_flight_duplicate(task_identity):
     if not target:
         return None, None
     try:
-        conn = sqlite3.connect(SUPERBOSS_DB)
+        conn = sqlite3.connect(_resolve_db_path())
         cur = conn.cursor()
         cur.execute(
             "SELECT task_identity, status FROM umr_tasks WHERE status IN (?,?,?) "

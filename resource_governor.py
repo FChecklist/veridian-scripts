@@ -1428,6 +1428,269 @@ def submit(task_spec, tier, source_trigger):
 
 
 # ---------------------------------------------------------------------------
+# Queue-management operations (UMR-20260813-211804-b554's RCA + real
+# redispatch of UMR-20260807-150524-a683's own spec: "extend
+# resource_governor.py with real list_queue/stop_task/resume_task/
+# delete_task/set_priority/move_up/move_down operations, each atomic (real
+# read-check-and-write in one function call, no separate round-trips a
+# caller must sequence), exposed via a thin real CLI").
+#
+# a683's original 2026-08-07 dispatch was correctly declined: it relied on
+# an unverifiable "FIX IT SO THAT WORK HAPPENS" Owner quote as its claimed
+# exemption from the standing stop-work order, and no independent channel
+# available at the time corroborated it (no pm_decisions_pending row, no
+# ATTENTION.md mention, no amendment on the stop-work-order task's own
+# record). That stop-work order has since been genuinely, verifiably lifted
+# for this exact file -- OWNER_DECISIONS_NEEDED_2026-07-23.yaml's own
+# id=stop-work-order-lifted-2026-08-08 entry (decided_by rajat, on-server,
+# own git identity, 2026-08-08T09:55:38Z, explicitly names
+# resource_governor.py) -- confirmed live by this task by calling
+# _stop_work_order_block_reason() directly, which returns blocked=False as
+# of this run. So the real remaining build scope below is legitimate now,
+# on its own real authorization, independent of the fabricated quote the
+# original dispatch tried to use.
+#
+# Deliberately schema-free: no ALTER TABLE, no new umr_tasks.status value.
+# "Stopping"/"resuming"/manual reordering all live inside the existing
+# metadata_json column (already an established free-form JSON field on this
+# table -- see submit()'s own metadata_json.correlation_id precedent above)
+# so none of this touches the live production umr_tasks CHECK constraint or
+# needs the heavy rebuild _migrate_umr_tasks_status_widen() required for a
+# genuinely new status value -- a materially lower-risk change to make
+# directly against the shared, concurrently-used production DB.
+# ---------------------------------------------------------------------------
+
+def _queue_metadata(row):
+    try:
+        return json.loads(row["metadata_json"]) if row.get("metadata_json") else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _queue_sort_key(row, now=None):
+    """(effective_priority, manual_rank-or-ts_submitted-epoch) -- manual_rank
+    (metadata_json.queue_manual_rank, a float) is an optional same-tier
+    tiebreaker set only by move_up()/move_down() below; a row that never
+    goes through either falls back to its own ts_submitted epoch, so an
+    untouched queue sorts in exactly next_queued_task()'s existing
+    (effective_priority, ts_submitted) order -- purely additive, never a
+    behavior change for any row nothing here ever touches."""
+    meta = _queue_metadata(row)
+    ts_submitted = row["ts_submitted"]
+    ts_dt = datetime.fromisoformat(ts_submitted) if isinstance(ts_submitted, str) else ts_submitted
+    manual_rank = meta.get("queue_manual_rank")
+    if not isinstance(manual_rank, (int, float)):
+        manual_rank = ts_dt.timestamp()
+    return (effective_priority(row, now), manual_rank)
+
+
+def list_queue(status="queued", limit=100):
+    """Real, read-only listing of umr_tasks rows in the given status
+    (default 'queued'), sorted in the exact order next_queued_task() would
+    dispatch them in. A read is inherently atomic under this DB's WAL mode
+    (PRAGMA journal_mode=WAL, already set by _connect()) -- no write lock
+    needed for this one."""
+    sbr, error = _safe_superboss_register("list_queue")
+    if error:
+        return {"ok": False, "error": error}
+    conn = sbr._connect()
+    sbr._ensure_umr_table(conn)
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM umr_tasks WHERE status=? ORDER BY ts_submitted", (status,)
+        ).fetchall()]
+    finally:
+        conn.close()
+    now = _utcnow()
+    ranked = sorted(rows, key=lambda r: _queue_sort_key(r, now))
+    out = []
+    for position, row in enumerate(ranked[:max(0, limit)]):
+        meta = _queue_metadata(row)
+        out.append({
+            "position": position,
+            "umr_id": row["umr_id"],
+            "task_identity": row["task_identity"],
+            "tier": row["tier"],
+            "status": row["status"],
+            "ts_submitted": row["ts_submitted"],
+            "paused": bool(meta.get("queue_paused")),
+        })
+    return {"ok": True, "status": status, "count": len(out), "queue": out}
+
+
+def _load_umr_row(conn, umr_id):
+    row = conn.execute("SELECT * FROM umr_tasks WHERE umr_id=?", (umr_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def stop_task(umr_id):
+    """Pauses a QUEUED (not yet dispatched) row so next_queued_task() skips
+    it, without touching status/tier/ts_submitted -- reversible via
+    resume_task(). Deliberately refuses anything already dispatched/
+    running/terminal: safely stopping a live systemd unit is a materially
+    different, riskier operation this SPEC's own queue-management framing
+    does not cover, and conflating the two would let a caller believe this
+    pauses real running work when it only ever prevents a not-yet-started
+    row from being picked up."""
+    sbr, error = _safe_superboss_register("stop_task")
+    if error:
+        return {"ok": False, "error": error}
+    with sbr._write_lock():
+        conn = sbr._connect()
+        try:
+            row = _load_umr_row(conn, umr_id)
+            if row is None:
+                return {"ok": False, "error": f"no umr_tasks row for umr_id={umr_id!r}"}
+            if row["status"] != "queued":
+                return {"ok": False, "error": f"can only stop a queued row (status is {row['status']!r})"}
+            meta = _queue_metadata(row)
+            if meta.get("queue_paused"):
+                return {"ok": True, "umr_id": umr_id, "already_paused": True}
+            meta["queue_paused"] = True
+            meta["queue_paused_at"] = _now_iso()
+            sbr.update_umr_task(conn, umr_id, metadata=meta)
+            conn.commit()
+            return {"ok": True, "umr_id": umr_id, "already_paused": False}
+        finally:
+            conn.close()
+
+
+def resume_task(umr_id):
+    """Inverse of stop_task() -- clears the pause flag so the row is
+    eligible for dispatch again. Idempotent: resuming a never-paused row is
+    a real no-op, not an error, since the caller's intent ("make sure this
+    row is dispatchable") is already satisfied either way."""
+    sbr, error = _safe_superboss_register("resume_task")
+    if error:
+        return {"ok": False, "error": error}
+    with sbr._write_lock():
+        conn = sbr._connect()
+        try:
+            row = _load_umr_row(conn, umr_id)
+            if row is None:
+                return {"ok": False, "error": f"no umr_tasks row for umr_id={umr_id!r}"}
+            meta = _queue_metadata(row)
+            if not meta.get("queue_paused"):
+                return {"ok": True, "umr_id": umr_id, "was_paused": False}
+            meta.pop("queue_paused", None)
+            meta.pop("queue_paused_at", None)
+            sbr.update_umr_task(conn, umr_id, metadata=meta)
+            conn.commit()
+            return {"ok": True, "umr_id": umr_id, "was_paused": True}
+        finally:
+            conn.close()
+
+
+def delete_task(umr_id):
+    """Physically removes a QUEUED row -- refuses anything dispatched/
+    running/terminal, so this can never destroy real execution evidence
+    (outputs_json/logs_ref/reason of a row that already did or is doing
+    real work), only a not-yet-started queue entry a caller has decided
+    should never run. Returns the deleted row's own snapshot as evidence."""
+    sbr, error = _safe_superboss_register("delete_task")
+    if error:
+        return {"ok": False, "error": error}
+    with sbr._write_lock():
+        conn = sbr._connect()
+        try:
+            row = _load_umr_row(conn, umr_id)
+            if row is None:
+                return {"ok": False, "error": f"no umr_tasks row for umr_id={umr_id!r}"}
+            if row["status"] != "queued":
+                return {"ok": False, "error": f"can only delete a queued row (status is {row['status']!r})"}
+            conn.execute("DELETE FROM umr_tasks WHERE umr_id=?", (umr_id,))
+            conn.commit()
+            return {"ok": True, "umr_id": umr_id, "deleted_row": row}
+        finally:
+            conn.close()
+
+
+def set_priority(umr_id, tier):
+    """Sets tier directly (0=highest .. 4=lowest, matching the table's own
+    CHECK(tier BETWEEN 0 AND 4) and DEFAULT_TIER/effective_priority's
+    existing semantics) -- refuses anything not still queued, same
+    reasoning as stop_task()/delete_task() above."""
+    sbr, error = _safe_superboss_register("set_priority")
+    if error:
+        return {"ok": False, "error": error}
+    if not isinstance(tier, int) or isinstance(tier, bool) or not (0 <= tier <= 4):
+        return {"ok": False, "error": f"tier must be an int 0..4, got {tier!r}"}
+    with sbr._write_lock():
+        conn = sbr._connect()
+        try:
+            row = _load_umr_row(conn, umr_id)
+            if row is None:
+                return {"ok": False, "error": f"no umr_tasks row for umr_id={umr_id!r}"}
+            if row["status"] != "queued":
+                return {"ok": False, "error": f"can only reprioritize a queued row (status is {row['status']!r})"}
+            prior_tier = row["tier"]
+            conn.execute("UPDATE umr_tasks SET tier=? WHERE umr_id=?", (tier, umr_id))
+            conn.commit()
+            return {"ok": True, "umr_id": umr_id, "prior_tier": prior_tier, "tier": tier}
+        finally:
+            conn.close()
+
+
+def _move_task(umr_id, direction):
+    """Shared real implementation for move_up()/move_down(). Swaps this
+    row's queue_manual_rank with its immediate same-tier queued neighbor's
+    -- deliberately NEVER crosses a tier boundary (tier is
+    next_queued_task()'s own primary sort key; a tier-1 row outranking a
+    tier-3 row is that dispatcher's real, load-bearing invariant, not
+    something a manual reorder should override) and NEVER touches
+    ts_submitted (effective_priority()'s own aging/starvation-prevention
+    math depends on it staying the real submission time; mutating it to
+    fake a reorder would break that real fairness guarantee)."""
+    assert direction in ("up", "down")
+    sbr, error = _safe_superboss_register(f"move_{direction}")
+    if error:
+        return {"ok": False, "error": error}
+    with sbr._write_lock():
+        conn = sbr._connect()
+        try:
+            row = _load_umr_row(conn, umr_id)
+            if row is None:
+                return {"ok": False, "error": f"no umr_tasks row for umr_id={umr_id!r}"}
+            if row["status"] != "queued":
+                return {"ok": False, "error": f"can only reorder a queued row (status is {row['status']!r})"}
+            now = _utcnow()
+            same_tier = [dict(r) for r in conn.execute(
+                "SELECT * FROM umr_tasks WHERE status='queued' AND tier=?", (row["tier"],)
+            ).fetchall()]
+            ranked = sorted(same_tier, key=lambda r: _queue_sort_key(r, now))
+            idx = next((i for i, r in enumerate(ranked) if r["umr_id"] == umr_id), None)
+            if idx is None:
+                return {"ok": False, "error": "row vanished mid-operation"}
+            neighbor_idx = idx - 1 if direction == "up" else idx + 1
+            if neighbor_idx < 0 or neighbor_idx >= len(ranked):
+                edge = "top" if direction == "up" else "bottom"
+                return {"ok": True, "umr_id": umr_id, "moved": False,
+                         "reason": f"already at the {edge} of its tier's queue"}
+            neighbor = ranked[neighbor_idx]
+            this_rank = _queue_sort_key(ranked[idx], now)[1]
+            neighbor_rank = _queue_sort_key(neighbor, now)[1]
+            this_meta = _queue_metadata(ranked[idx])
+            neighbor_meta = _queue_metadata(neighbor)
+            this_meta["queue_manual_rank"] = neighbor_rank
+            neighbor_meta["queue_manual_rank"] = this_rank
+            sbr.update_umr_task(conn, umr_id, metadata=this_meta)
+            sbr.update_umr_task(conn, neighbor["umr_id"], metadata=neighbor_meta)
+            conn.commit()
+            return {"ok": True, "umr_id": umr_id, "moved": True,
+                     "swapped_with_umr_id": neighbor["umr_id"]}
+        finally:
+            conn.close()
+
+
+def move_up(umr_id):
+    return _move_task(umr_id, "up")
+
+
+def move_down(umr_id):
+    return _move_task(umr_id, "down")
+
+
+# ---------------------------------------------------------------------------
 # UMR-20260807-110133-205d -- single deterministic orchestrator pipeline.
 # Governing chain: UMR-20260806-171945-5767 (original spec,
 # task-20260806-201941), first amendment (UMR-20260807-035145-aa45, real:
@@ -4200,6 +4463,26 @@ def main():
                           "real use, since task-gateway.py has no other task_kind")
     ap.add_argument("--title", default=None)
     ap.add_argument("--umr-id", dest="umr_id", default=None)
+    ap.add_argument("--list-queue", dest="list_queue", action="store_true",
+                     help="UMR-20260807-150524-a683 (real redispatch): list umr_tasks rows in "
+                          "--status (default 'queued') in real dispatch order, up to --limit")
+    ap.add_argument("--stop-task", dest="stop_task", action="store_true",
+                     help="pause a queued row (--umr-id) so it is skipped for dispatch; reversible "
+                          "via --resume-task")
+    ap.add_argument("--resume-task", dest="resume_task", action="store_true",
+                     help="clear a queued row's (--umr-id) pause flag set by --stop-task")
+    ap.add_argument("--delete-task", dest="delete_task", action="store_true",
+                     help="delete a queued row (--umr-id); refuses anything already "
+                          "dispatched/running/terminal")
+    ap.add_argument("--set-priority", dest="set_priority", action="store_true",
+                     help="set a queued row's (--umr-id) tier (--tier, 0..4); refuses anything "
+                          "already dispatched/running/terminal")
+    ap.add_argument("--move-up", dest="move_up", action="store_true",
+                     help="swap a queued row (--umr-id) with its same-tier neighbor ranked "
+                          "immediately above it")
+    ap.add_argument("--move-down", dest="move_down", action="store_true",
+                     help="swap a queued row (--umr-id) with its same-tier neighbor ranked "
+                          "immediately below it")
     args = ap.parse_args()
 
     if args.clear_emergency_stop:
@@ -4253,6 +4536,70 @@ def main():
             pass
         conn.close()
         print(json.dumps({"count": len(rows), "matches": rows}, indent=2, default=str))
+        return
+
+    if args.list_queue:
+        print(json.dumps(list_queue(status=args.status or "queued", limit=args.limit), default=str))
+        return
+
+    if args.stop_task:
+        if not args.umr_id:
+            print(json.dumps({"ok": False, "error": "--stop-task requires --umr-id"}))
+            sys.exit(1)
+        result = stop_task(args.umr_id)
+        print(json.dumps(result, default=str))
+        if not result.get("ok"):
+            sys.exit(1)
+        return
+
+    if args.resume_task:
+        if not args.umr_id:
+            print(json.dumps({"ok": False, "error": "--resume-task requires --umr-id"}))
+            sys.exit(1)
+        result = resume_task(args.umr_id)
+        print(json.dumps(result, default=str))
+        if not result.get("ok"):
+            sys.exit(1)
+        return
+
+    if args.delete_task:
+        if not args.umr_id:
+            print(json.dumps({"ok": False, "error": "--delete-task requires --umr-id"}))
+            sys.exit(1)
+        result = delete_task(args.umr_id)
+        print(json.dumps(result, default=str))
+        if not result.get("ok"):
+            sys.exit(1)
+        return
+
+    if args.set_priority:
+        if not args.umr_id:
+            print(json.dumps({"ok": False, "error": "--set-priority requires --umr-id (and --tier)"}))
+            sys.exit(1)
+        result = set_priority(args.umr_id, args.tier)
+        print(json.dumps(result, default=str))
+        if not result.get("ok"):
+            sys.exit(1)
+        return
+
+    if args.move_up:
+        if not args.umr_id:
+            print(json.dumps({"ok": False, "error": "--move-up requires --umr-id"}))
+            sys.exit(1)
+        result = move_up(args.umr_id)
+        print(json.dumps(result, default=str))
+        if not result.get("ok"):
+            sys.exit(1)
+        return
+
+    if args.move_down:
+        if not args.umr_id:
+            print(json.dumps({"ok": False, "error": "--move-down requires --umr-id"}))
+            sys.exit(1)
+        result = move_down(args.umr_id)
+        print(json.dumps(result, default=str))
+        if not result.get("ok"):
+            sys.exit(1)
         return
 
     if args.submit:

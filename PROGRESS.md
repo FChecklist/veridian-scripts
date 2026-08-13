@@ -82,6 +82,10 @@ $ python3 -m pytest tests/ --collect-only -q
 628 tests collected in 1.00s   # zero collection errors from the new/changed files
 ```
 
+- [x] Opened **PR #329** (https://github.com/FChecklist/veridian-scripts/pull/329)
+      against `FChecklist/veridian-scripts` base `main`, 5 files changed.
+- [x] Called `agent_work_briefing.py record-completion --umr-id
+      UMR-20260813-215742-db64` with a real summary of the work above.
+
 ## Remaining
-- [ ] None for this UMR's own scope. `agent_work_briefing.py record-completion` to be
-      called after this PR is opened.
+- [ ] None for this UMR's own scope.

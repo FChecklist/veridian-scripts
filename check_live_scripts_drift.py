@@ -47,6 +47,19 @@ def check_drift(live_dir=DEFAULT_LIVE_DIR):
         result["error"] = "git rev-parse HEAD / origin/main failed"
         return result, 2
 
+    # 2026-08-13 (task-20260813-103224): real incident this caught live --
+    # this checkout can be on a non-main branch (e.g. a worker task checked
+    # out its own PR branch directly here). sync-repos.sh's `git pull
+    # --ff-only` only fast-forwards the CURRENT branch's own upstream in
+    # that case, silently never touching origin/main -- surface the real
+    # branch name so that failure mode is never silently invisible here too.
+    branch = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=live_dir)
+    result["current_branch"] = branch.stdout.strip() if branch.returncode == 0 else None
+    if result["current_branch"] and result["current_branch"] != "main":
+        result["on_main_branch"] = False
+    else:
+        result["on_main_branch"] = True
+
     live_head = head.stdout.strip()
     origin_head = origin_main.stdout.strip()
     result["live_head"] = live_head

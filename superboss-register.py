@@ -6143,12 +6143,23 @@ def _umr_row_to_dict(row):
     return d
 
 
-def query_umr_tasks(conn, limit=20, status=None, tier=None, task_identity=None, query_text=None):
-    """Real search over umr_tasks -- exact task_identity match first, then
-    FTS5 over task_identity/source_trigger/logs_ref for a free-text
-    --search, else a plain filtered listing (newest first). Same two-stage
-    resolution shape lookup_entity()/lookup_capability() already use."""
-    if task_identity:
+def query_umr_tasks(conn, limit=20, status=None, tier=None, task_identity=None, query_text=None, umr_id=None):
+    """Real search over umr_tasks -- exact umr_id match first (umr_id is the
+    real PRIMARY KEY, so this can only ever return the one row it names or
+    nothing -- real fix, UMR-20260813-042207: --query-umr --umr-id X
+    previously fell all the way through to the plain-listing `else` branch
+    below because umr_id was parsed by the CLI but never threaded into this
+    function's call, silently ignoring X and returning the newest row
+    instead, regardless of X), then exact task_identity match, then FTS5
+    over task_identity/source_trigger/logs_ref for a free-text --search,
+    else a plain filtered listing (newest first). Same two-stage resolution
+    shape lookup_entity()/lookup_capability() already use."""
+    if umr_id:
+        rows = conn.execute(
+            "SELECT * FROM umr_tasks WHERE umr_id=? LIMIT ?",
+            (umr_id, limit),
+        ).fetchall()
+    elif task_identity:
         rows = conn.execute(
             "SELECT * FROM umr_tasks WHERE task_identity=? ORDER BY ts_submitted DESC LIMIT ?",
             (task_identity, limit),
@@ -6178,9 +6189,9 @@ def query_umr_tasks(conn, limit=20, status=None, tier=None, task_identity=None, 
         ).fetchall()
 
     matches = [_umr_row_to_dict(r) for r in rows]
-    if status and (task_identity or query_text):
+    if status and (umr_id or task_identity or query_text):
         matches = [m for m in matches if m["status"] == status]
-    if tier is not None and (task_identity or query_text):
+    if tier is not None and (umr_id or task_identity or query_text):
         matches = [m for m in matches if m["tier"] == tier]
     return matches
 

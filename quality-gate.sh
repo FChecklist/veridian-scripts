@@ -151,7 +151,20 @@ DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@
 DEFAULT_BRANCH="${DEFAULT_BRANCH:-master}"
 CHANGED_FILES=$(git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" 2>/dev/null || true)
 DOCS_ONLY=0
-if [ -n "$CHANGED_FILES" ] && ! echo "$CHANGED_FILES" | grep -qE '\.(ts|tsx|js|jsx|mjs|cjs|vue|svelte|css|scss|less|py|go|rs|java|rb|php|sql|sh|json)$'; then
+# AUDIT:FAIL on this PR's own first head (b315ae9) caught a real
+# detection-precision bug here: the extension list omitted .txt/.toml/
+# .yml/.yaml and any extensionless-but-code-relevant filename, so a diff
+# touching ONLY requirements.txt or pyproject.toml (one of the most common
+# changes that legitimately needs the python lint/test gate), a CI/lint
+# config (.github/workflows/ci.yml, .eslintrc.yml), or a bare Dockerfile was
+# wrongly classified DOCS_ONLY=1 and gates got skipped -- exactly the "let a
+# real defect reach pending_review unchecked" failure mode this block's own
+# comment above says must never happen. Second grep below matches those
+# common extensionless build/CI filenames by name (optionally with a
+# `.suffix`, e.g. Dockerfile.prod) since they carry no file extension at all.
+if [ -n "$CHANGED_FILES" ] \
+   && ! echo "$CHANGED_FILES" | grep -qE '\.(ts|tsx|js|jsx|mjs|cjs|vue|svelte|css|scss|less|py|go|rs|java|rb|php|sql|sh|json|yml|yaml|txt|toml)$' \
+   && ! echo "$CHANGED_FILES" | grep -qE '(^|/)(Dockerfile|Makefile|Jenkinsfile|Procfile)([.][A-Za-z0-9_.-]+)?$'; then
   DOCS_ONLY=1
 fi
 

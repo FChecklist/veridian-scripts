@@ -116,7 +116,58 @@ PYEOF
   rm -f "$logfile" "${logfile}.tail"
 }
 
-if [ -f package.json ]; then
+# Root-caused 2026-08-13 (task-20260813-143152, against 3 blocked RCA-for-
+# killed-task documentation tasks -- task-20260813-104656/-105054/-105503,
+# all RCA'ing an already-SIGKILLed task and landing a PROGRESS.md/RCA.md-only
+# diff): gate detection above is purely repo-type-based (package.json
+# present -> run node lint/build/test), never diff-content-based, so a
+# doc-only change in this Next.js monorepo still pays the full `next build`
+# -- which the BUILD_LOCK_* comments above already document as routinely
+# taking 900s+ and timing out under host contention. That timeout then feeds
+# worker-entrypoint.sh's auto-fix-then-blocked pipeline a "fix the build"
+# instruction for a change that touched zero build-relevant files -- nothing
+# for the AI to fix, and credit-accountant.py correctly refused the spend
+# every time (confirmed live in all 3 tasks' worker.log), leaving them
+# permanently status=blocked instead of ever reaching pending_review.
+#
+# Considered gating this on the task's own title/type label (e.g. a
+# `rca--umr-*-killed` pattern) instead. Rejected: a title is caller-supplied
+# free text, not verified content -- trusting it to bypass real gates is
+# exactly the kind of unverified-claim shortcut this fix must not introduce,
+# and it would only cover this one task-naming convention, not every other
+# genuinely docs-only change (e.g. a plain README fix) that hits the same
+# bug. Gating on the actual diff is general, verifiable from the commits
+# themselves, and does not trust anything the task claims about itself.
+#
+# DOCS_ONLY is deliberately conservative: any changed path with a
+# code-relevant extension (including bare .json, since that also matches
+# package.json/tsconfig.json/lockfile-adjacent config) keeps the full gate
+# suite running. A false negative here (running gates on a genuinely
+# doc-only diff) just costs the same wasted build time this fix targets; a
+# false positive (skipping gates on a diff that touched real code) would
+# let a real defect reach pending_review unchecked, which is the one
+# failure mode this must never risk.
+DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-master}"
+CHANGED_FILES=$(git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" 2>/dev/null || true)
+DOCS_ONLY=0
+if [ -n "$CHANGED_FILES" ] && ! echo "$CHANGED_FILES" | grep -qE '\.(ts|tsx|js|jsx|mjs|cjs|vue|svelte|css|scss|less|py|go|rs|java|rb|php|sql|sh|json)$'; then
+  DOCS_ONLY=1
+fi
+
+if [ "$DOCS_ONLY" -eq 1 ]; then
+  echo "[quality-gate.sh] diff vs origin/${DEFAULT_BRANCH} touches no code-relevant files (only: $(echo "$CHANGED_FILES" | tr '\n' ' ')) -- skipping node/python lint/build/test gates as not applicable to this change, same 'gracefully skip gates that don't apply' posture this script already uses for a repo with no package.json at all"
+  NAME=docs_only_skip RESULTS_FILE="$RESULTS_FILE" python3 <<'PYEOF'
+import json, os
+results_file = os.environ["RESULTS_FILE"]
+with open(results_file) as f:
+    r = json.load(f)
+r["docs_only_skip"] = {"ran": False, "passed": True, "exit_code": 0,
+                        "output_tail": "diff vs default branch touched no code-relevant files -- lint/build/test gates skipped as not applicable"}
+with open(results_file, "w") as f:
+    json.dump(r, f)
+PYEOF
+elif [ -f package.json ]; then
   # Root-caused 2026-07-26 (task-20260726-180000 RCA against
   # task-20260726-171957's watchdog "periodic checkpoint" stall signature):
   # journalctl showed the worker unit "killed by the OOM killer" mid `next
@@ -302,13 +353,60 @@ PYEOF
       elif [ "$BUILD_LOCK_RC" -eq 1 ]; then
         cp "$RESULTS_FILE" "$RESUME_MARKER"
         UNIT_NAME="veridian-worker@${TASK_ID}.service"
-        if python3 /opt/veridian/scripts/superboss-register.py requeue-build-lock-contended \
-            --task-identity "$TASK_ID" --unit-name "$UNIT_NAME"; then
+        REQUEUE_OUT=$(python3 /opt/veridian/scripts/superboss-register.py requeue-build-lock-contended \
+            --task-identity "$TASK_ID" --unit-name "$UNIT_NAME" 2>&1)
+        REQUEUE_RC=$?
+        if [ "$REQUEUE_RC" -eq 0 ]; then
           echo "[quality-gate.sh] build lock contended after ${BUILD_LOCK_SHORT_WAIT_SECONDS}s wait -- task requeued (reason=build_lock_contended), exiting cleanly so this systemd slot frees up for a different task"
           rm -f "$RESULTS_FILE"
           exit "$BUILD_LOCK_CONTENDED_EXIT_CODE"
+        elif echo "$REQUEUE_OUT" | grep -q "no active (queued/dispatched/running) umr_tasks row found"; then
+          # Root-caused 2026-08-13 (task-20260813-132414, against 3 RCA-for-
+          # killed-task resumption tasks -- task-20260813-104656,-105054,
+          # -105503 -- all blocked the same way): these tasks were created
+          # directly (a task.yaml + systemd unit) and never went through
+          # resource_governor.submit()'s umr_tasks INSERT, confirmed LIVE via
+          # the superboss_gateway /read endpoint returning zero rows for
+          # their task_identity. requeue-build-lock-contended's own
+          # find_active_umr_by_identity() check (see its docstring) correctly
+          # refuses to requeue a row that does not exist -- that refusal is
+          # not a bug. The bug was here: this branch treated ANY requeue
+          # failure as unusual/unexpected and recorded a FAKE "build" gate
+          # failure for it, which fed the auto-fix-then-blocked pipeline a
+          # nonexistent code defect to "fix" (correctly refused downstream by
+          # credit-accountant.py, but the task stayed wrongly blocked).
+          # There is nothing wrong with this task's code; it simply has no
+          # umr_tasks row to hand the slot back to, so instead of requeuing,
+          # wait out the lock right here (same fixed long-wait shape as the
+          # loss_count>=4 starvation guard above) -- a real wait for a real
+          # lock, not a fabricated result. Any OTHER requeue failure (DB
+          # unreachable, gateway down, etc.) still falls through to the
+          # original fake-gate-failure path below, preserving that
+          # defense-in-depth visibility for genuinely unexpected errors.
+          echo "[quality-gate.sh] build lock contended, but this task has no active umr_tasks row to requeue (not dispatched via resource_governor.submit()) -- waiting up to ${BUILD_LOCK_LONG_WAIT_SECONDS}s in-process for the lock instead of faking a gate failure"
+          rm -f "$RESUME_MARKER"
+          exec 9>"$BUILD_LOCK_FILE"
+          if flock -w "$BUILD_LOCK_LONG_WAIT_SECONDS" 9; then
+            run_gate build "$PKG_MGR run build"
+            flock -u 9
+            exec 9>&-
+          else
+            exec 9>&-
+            OVERALL=1
+            NAME=build CODE=1 RESULTS_FILE="$RESULTS_FILE" python3 <<'PYEOF'
+import json, os
+name = os.environ["NAME"]
+results_file = os.environ["RESULTS_FILE"]
+with open(results_file) as f:
+    r = json.load(f)
+r[name] = {"ran": False, "passed": False, "exit_code": 1,
+           "output_tail": "build lock not acquired even after an untracked-task long wait -- real capacity failure, not a code defect"}
+with open(results_file, "w") as f:
+    json.dump(r, f)
+PYEOF
+          fi
         else
-          echo "[quality-gate.sh] build lock contended but the requeue CLI call itself failed -- NOT silently dropping this: falling through to a normal gate failure instead"
+          echo "[quality-gate.sh] build lock contended but the requeue CLI call itself failed unexpectedly -- NOT silently dropping this: falling through to a normal gate failure instead ($REQUEUE_OUT)"
           rm -f "$RESUME_MARKER"
           OVERALL=1
           NAME=build CODE=1 RESULTS_FILE="$RESULTS_FILE" python3 <<'PYEOF'

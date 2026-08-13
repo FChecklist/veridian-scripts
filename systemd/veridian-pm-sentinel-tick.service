@@ -1,0 +1,31 @@
+# =============================================================================
+# Unit #20 in the veridian-cron-* closed set (see ~/.config/systemd/user/
+# README.md "STANDING RULE -- this is a CLOSED SET" and its own "Unit #20
+# ... explicit Owner-authorized exception" precedent for
+# veridian-cron-prune-memory-backups, the same real pattern this unit
+# follows). Explicit Owner authorization for THIS new cadence/purpose is
+# task-20260813-084351-build-native-server-side-pm-sentinel--sy itself
+# (addendum to P1 UMR-20260806-171945-5767) -- its own SPEC directly asks for
+# "a new systemd --user timer ... firing hourly", the same real Owner
+# decision the STANDING RULE requires before adding a genuinely new
+# cadence/purpose. Checked against the STANDING RULE first: this purpose
+# (server-native hourly PM oversight of tracked UMR chains, independent of
+# the Owner's laptop app staying open) does not genuinely fit any of the 19
+# existing units -- the nearest analog, veridian-cron-dispatch-tick, drives
+# the real mechanical dispatch queue itself, an unrelated concern from PM
+# oversight of already-dispatched work.
+#
+# Modeled exactly on veridian-cron-dispatch-tick.service's real pattern: same
+# shared EMERGENCY_STOP ConditionPathExists gate, same run-logged.sh wrapper,
+# same oneshot Type. pm-sentinel-tick.sh itself never bypasses
+# resource_governor.py's own tier/concurrency-cap/stop-work-order gate --
+# every real dispatch it makes goes through the existing
+# dispatch-owner-task.sh --no-relay front door, which submits through that
+# same real gate.
+# =============================================================================
+[Unit]
+Description=VERIDIAN PM sentinel tick: server-native hourly PM oversight of tracked UMR chains (addendum to P1 UMR-20260806-171945-5767) -- RCA/audit/merge/fix-cited dispatch via the real dispatch-owner-task.sh front door, capped at 5 new dispatches/tick
+ConditionPathExists=!/opt/veridian/ai-os/locks/resource-governor-EMERGENCY_STOP
+[Service]
+Type=oneshot
+... more files changed

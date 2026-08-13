@@ -65,6 +65,9 @@ established false-premise pattern for these dispatches) before writing code:
       `detect_duplicate_documents_by_hash()` direct in-process call) is
       unaffected -- that function's signature/behavior is unchanged
 
+- [x] Committed, pushed branch, opened PR #330:
+      https://github.com/FChecklist/veridian-scripts/pull/330
+- [x] Recorded completion via agent_work_briefing.py
+
 ## Remaining
-- [ ] Commit + push branch, open PR against veridian-scripts
-- [ ] Record completion via agent_work_briefing.py
+- (none -- awaiting real human PR review/merge, out of scope for this task)

@@ -2515,7 +2515,34 @@ def scan_stuck_tasks(now=None):
     """timeout -> SIGTERM -> SIGTERM_TO_SIGKILL_GRACE_SECONDS -> SIGKILL,
     using each unit's real ActiveEnterTimestamp to measure elapsed time.
     Returns the list of actions actually taken this call (empty if nothing
-    was stuck)."""
+    was stuck).
+
+    Real fix (RCA, UMR-20260813-101757-f13c, live-reproduced incident,
+    UMR-20260808-150937-43d0): scoped to task_kind='veridian_task_create'
+    only. This whole SIGTERM/SIGKILL protocol assumes "running" means "an
+    ephemeral task unit that is expected to exit on its own within
+    STUCK_TASK_TIMEOUT_SECONDS of ITS OWN start" -- true for
+    veridian-worker@<task_id>.service units (Type=oneshot-ish, one task,
+    then exit), false for task_kind='systemctl_action' rows, whose
+    unit_name is often a persistent, always-on singleton daemon
+    (Restart=always/on-failure, WantedBy=default.target -- e.g.
+    veridian-superboss-gateway.service, veridian-glm-proxy.service,
+    veridian-governor-tick.service) that is SUPPOSED to keep running
+    forever. _perform_spawn() marks a systemctl_action row status="running"
+    the instant `systemctl start` returns 0 -- including when the unit was
+    ALREADY active, in which case _unit_active_enter_timestamp() reports
+    the timestamp of whenever it first started, which can trivially be
+    older than STUCK_TASK_TIMEOUT_SECONDS. That made this scan wrongly
+    conclude the row was "stuck" on its very next tick and SIGTERM/SIGKILL
+    (and, at line ~2565 below, disable) the real, healthy, always-on
+    gateway daemon -- confirmed live: UMR-20260808-150937-43d0 (a
+    registration-only "start veridian-superboss-gateway.service" row) was
+    SIGTERM'd 31s after dispatch and SIGKILL'd+disabled 60s after that, and
+    the real unit was still disabled/inactive 5 days later when this RCA
+    ran. systemctl_action rows have no "must exit" contract to police --
+    _perform_spawn() already resolves their real outcome synchronously
+    (status="running"/"failed" from the `systemctl start` returncode
+    itself) -- so they must never enter this ephemeral-task reaper at all."""
     now = now or _utcnow()
     # Real fix (independent review round 2, PR #20): see
     # _safe_superboss_register()'s own docstring. A broken/unavailable
@@ -2533,7 +2560,8 @@ def scan_stuck_tasks(now=None):
     actions = []
 
     running = conn.execute(
-        "SELECT * FROM umr_tasks WHERE status='running' AND unit_name IS NOT NULL"
+        "SELECT * FROM umr_tasks WHERE status='running' AND unit_name IS NOT NULL "
+        "AND task_kind='veridian_task_create'"
     ).fetchall()
     for row in running:
         row = dict(row)

@@ -719,6 +719,84 @@ class PmSentinelTickRunningRowOrderIndependentParseTest(unittest.TestCase):
         self.assertEqual(len(new_rows), 1, msg=rows)
 
 
+class PmSentinelTickImpossibleActiveStateGuardTest(unittest.TestCase):
+    """Real regression test for ACTION 2 of the UMR-20260813-145511-5aca /
+    UMR-20260813-170956-5385 / UMR-20260813-183133 (third redispatch) fix:
+    the name-keyed parse alone is not enough defense-in-depth -- if
+    systemd's own output shape ever changes again (missing key line,
+    truncated field, a future systemctl behavior change) a *silent*
+    re-transposition would be exactly as invisible as the original bug.
+    Feeds a real fake systemctl that returns the impossible fingerprint
+    ActiveState=success (a real Result value, never a real ActiveState
+    value) and proves the tick refuses to act on it: no MISMATCH, no RCA
+    dispatch, a loud logged rejection, and a real non-zero tick exit
+    (TICK_FAILURES), rather than either silently doing nothing or firing a
+    false RCA off untrustworthy data."""
+
+    def setUp(self):
+        self.UMR_IMPOSSIBLE = f"UMR-TESTFIX-20260101-000000-{uuid.uuid4().hex[:8]}"
+        self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_impossible_test_")
+
+        self.copy_path = _seeded_copy(self.tmpdir, [
+            (self.UMR_IMPOSSIBLE, "test-seed-impossible-activestate", "running", ""),
+        ])
+        conn = sqlite3.connect(self.copy_path)
+        conn.execute("UPDATE umr_tasks SET unit_name = 'impossible.service' WHERE umr_id = ?",
+                     (self.UMR_IMPOSSIBLE,))
+        conn.commit()
+        conn.close()
+
+        bindir = _fake_systemctl_journalctl_bin(self.tmpdir, {
+            # The real live-reproduced impossible fingerprint: ActiveState
+            # can never legitimately be "success" (that is a Result value).
+            "impossible.service": "ActiveState=success\nResult=active",
+        })
+
+        self.state_file = os.path.join(self.tmpdir, "pm-sentinel-inflight.json")
+        self.report_file = os.path.join(self.tmpdir, "pm-sentinel-tick-report.jsonl")
+        self.metrics_file = os.path.join(self.tmpdir, "pm-sentinel-tick.prom")
+        self.env = dict(os.environ)
+        self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
+        self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
+        self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
+        self.env["PM_SENTINEL_REPORT_FILE"] = self.report_file
+        self.env["PM_SENTINEL_METRICS_FILE"] = self.metrics_file
+        self.env["DISPATCH_OWNER_TASK_SH"] = REAL_DISPATCH_OWNER_TASK_SH
+        self.env["VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS"] = ""
+        self.env["DISPATCH_TMUX_SESSION"] = "pm-sentinel-test-throwaway-session"
+        self.env["PATH"] = bindir + os.pathsep + self.env.get("PATH", "")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run_tick(self):
+        return subprocess.run(
+            [SENTINEL_SH], cwd=HERE, env=self.env,
+            capture_output=True, text=True, timeout=90,
+        )
+
+    def test_impossible_active_state_is_rejected_not_acted_on(self):
+        result = self._run_tick()
+
+        # Never treated as a MISMATCH/RCA candidate off untrustworthy data.
+        self.assertNotIn(f"MISMATCH: {self.UMR_IMPOSSIBLE}", result.stdout)
+        self.assertNotIn(f"DISPATCHING for rca:{self.UMR_IMPOSSIBLE}", result.stdout)
+
+        # Loud, real rejection is logged (not a silent skip).
+        self.assertIn("IMPOSSIBLE VALUE", result.stdout)
+        self.assertIn(self.UMR_IMPOSSIBLE, result.stdout)
+        self.assertIn("ActiveState=success", result.stdout)
+
+        # No new row was dispatched for this UMR.
+        rows = _umr_tasks_rows(self.copy_path)
+        new_rows = [r for r in rows if r["umr_id"] != self.UMR_IMPOSSIBLE]
+        self.assertEqual(len(new_rows), 0, msg=rows)
+
+        # The tick still fails loudly overall (real non-zero exit) instead
+        # of silently swallowing an untrustworthy parse.
+        self.assertNotEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+
+
 class PmSentinelTickDuplicateContentRefusalDoesNotFailTickTest(unittest.TestCase):
     """Real regression test for UMR-20260813-145511-5aca / redispatch
     UMR-20260813-170956-5385's second real defect:

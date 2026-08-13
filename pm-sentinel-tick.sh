@@ -792,6 +792,28 @@ while IFS=$'\t' read -r umr_id unit; do
   UNIT_STATE="$(systemctl --user show "$unit" -p ActiveState -p Result 2>/dev/null)"
   ACTIVE_STATE="$(printf '%s\n' "$UNIT_STATE" | sed -n 's/^ActiveState=//p')"
   RESULT_STATE="$(printf '%s\n' "$UNIT_STATE" | sed -n 's/^Result=//p')"
+  # Real guard (ACTION 2, UMR-20260813-145511-5aca / UMR-20260813-170956-5385
+  # / UMR-20260813-183133 third redispatch): the name-keyed parse above
+  # already fixes the transposition itself, but defense-in-depth still
+  # matters here -- if systemd's own output format ever changes shape again
+  # (a missing key line, a truncated field, a future systemctl behavior
+  # change) a *silent* re-transposition is exactly how this bug class was
+  # invisible for as long as it was: ActiveState=success is not a value
+  # ActiveState can ever legitimately hold (systemd's real ActiveState enum
+  # is active/reloading/inactive/failed/activating/deactivating/
+  # maintenance -- "success" only ever appears in Result). Reject that
+  # impossible value outright rather than act on it: fail loudly (real
+  # TICK_FAILURES increment, real non-zero tick exit) and skip this row
+  # entirely for this tick instead of feeding a still-possibly-transposed
+  # value into the MISMATCH check below and risking another false RCA.
+  case "$ACTIVE_STATE" in
+    ""|active|reloading|inactive|failed|activating|deactivating|maintenance) ;;
+    *)
+      echo "  IMPOSSIBLE VALUE: $umr_id unit $unit real systemctl show returned ActiveState=$ACTIVE_STATE (Result=$RESULT_STATE) -- \"$ACTIVE_STATE\" is not a real systemd ActiveState value (it looks like a Result value), so this parse is not trustworthy. Refusing to act on it -- NOT dispatching an RCA off unverified data. This is a real tick failure needing investigation, not a unit-dead finding."
+      TICK_FAILURES=$((TICK_FAILURES + 1))
+      continue
+      ;;
+  esac
   if [ "$ACTIVE_STATE" != "active" ] && [ -n "$ACTIVE_STATE" ]; then
     echo "  MISMATCH: $umr_id status=running but unit $unit ActiveState=$ACTIVE_STATE Result=$RESULT_STATE -- real exit-write-back-bug candidate"
     JOURNAL_EXCERPT="$(journalctl --user -u "$unit" -n 5 --no-pager --output=cat 2>/dev/null | tr '\n' ' ' | head -c 500)"

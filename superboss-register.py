@@ -3213,7 +3213,45 @@ def _ensure_umr_table(conn):
             "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_umr_tasks_status_ts'"
         ).fetchone() is not None
         if {"last_heartbeat", "tenant_id", "utm_source", "external_agent_eligible",
-                "ts_relay_attempted"} <= cols and status_migrated and index_migrated:
+                "ts_relay_attempted"} <= cols and status_migrated:
+            # AUDIT:FAIL 2026-08-13T16:50Z (PR #308, head 34bb70b6) real
+            # regression, independently reproduced and fixed here: the naive
+            # version of this gate fell all the way through to the "slow
+            # path" below whenever index_migrated was False, even though
+            # every other real migration already ran. That slow path opens
+            # with `CREATE TABLE IF NOT EXISTS umr_tasks (...)` -- a provable
+            # silent no-op against a table that already exists under any
+            # schema, partial or full -- immediately followed by
+            # unconditional `CREATE INDEX ... ON umr_tasks(tier)` /
+            # `...(task_identity)` etc., which assume the FULL base schema
+            # (tier, ts_submitted, ...) is already present. That assumption
+            # only holds for a genuine, from-day-one production umr_tasks
+            # table; it does not hold in general for anything that merely
+            # satisfies THIS gate (the 5 ALTER-added columns + widened status
+            # CHECK say nothing about the original base columns). Reproduced
+            # directly against tests/../test_full_server_file_registration.py
+            # ::_bootstrap_and_point_env_at_tmp_db's minimal stub table (has
+            # the 5 gate columns + widened status, deliberately omits tier
+            # and ts_submitted) -- pre-fix: `sqlite3.OperationalError: no
+            # such column: tier` inside init_db(); post-fix (below): the stub
+            # keeps hitting this fast-path return exactly as it did before
+            # this PR, index or no index.
+            #
+            # Real fix: never fall through to that full slow path just to
+            # backfill one additive index. Add ONLY the missing index,
+            # directly, the same idempotent/additive shape every other
+            # _migrate_umr_* function already uses -- and only attempt it
+            # when the column the index is actually built on (ts_submitted)
+            # is present, so this can never crash a table (real or test
+            # stub) that predates even the base schema. Every real
+            # production umr_tasks table has had ts_submitted since its
+            # original CREATE TABLE, so this still delivers the PR's real
+            # goal (auto-backfilling idx_umr_tasks_status_ts onto every
+            # already-migrated live DB on first connect) for every DB that
+            # actually matters; it just no longer crashes ones that don't
+            # look like a real production table.
+            if not index_migrated and "ts_submitted" in cols:
+                _migrate_umr_tasks_status_ts_index(conn)
             return
     status_sql = ",".join("'" + s + "'" for s in UMR_STATUSES)
     conn.execute(f"""CREATE TABLE IF NOT EXISTS umr_tasks (

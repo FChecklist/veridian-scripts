@@ -116,7 +116,76 @@ PYEOF
   rm -f "$logfile" "${logfile}.tail"
 }
 
-if [ -f package.json ]; then
+# Root-caused 2026-08-13 (task-20260813-143152, against 3 blocked RCA-for-
+# killed-task documentation tasks -- task-20260813-104656/-105054/-105503,
+# all RCA'ing an already-SIGKILLed task and landing a PROGRESS.md/RCA.md-only
+# diff): gate detection above is purely repo-type-based (package.json
+# present -> run node lint/build/test), never diff-content-based, so a
+# doc-only change in this Next.js monorepo still pays the full `next build`
+# -- which the BUILD_LOCK_* comments above already document as routinely
+# taking 900s+ and timing out under host contention. That timeout then feeds
+# worker-entrypoint.sh's auto-fix-then-blocked pipeline a "fix the build"
+# instruction for a change that touched zero build-relevant files -- nothing
+# for the AI to fix, and credit-accountant.py correctly refused the spend
+# every time (confirmed live in all 3 tasks' worker.log), leaving them
+# permanently status=blocked instead of ever reaching pending_review.
+#
+# Considered gating this on the task's own title/type label (e.g. a
+# `rca--umr-*-killed` pattern) instead. Rejected: a title is caller-supplied
+# free text, not verified content -- trusting it to bypass real gates is
+# exactly the kind of unverified-claim shortcut this fix must not introduce,
+# and it would only cover this one task-naming convention, not every other
+# genuinely docs-only change (e.g. a plain README fix) that hits the same
+# bug. Gating on the actual diff is general, verifiable from the commits
+# themselves, and does not trust anything the task claims about itself.
+#
+# DOCS_ONLY is deliberately conservative: it must fail CLOSED (gates run) on
+# anything it doesn't explicitly recognize as docs-only, never fail open
+# (gates skipped) on anything it doesn't explicitly recognize as
+# code-relevant. A false negative here (running gates on a genuinely
+# doc-only diff) just costs the same wasted build time this fix targets; a
+# false positive (skipping gates on a diff that touched real code) would
+# let a real defect reach pending_review unchecked, which is the one
+# failure mode this must never risk.
+DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-master}"
+CHANGED_FILES=$(git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" 2>/dev/null || true)
+DOCS_ONLY=0
+# AUDIT:FAIL on this PR's own first head (b315ae9) caught a real
+# detection-precision bug: the original check was a code-relevant-extension
+# BLOCKLIST (\.(ts|js|py|...)$ etc.), so anything not on that list -- .txt,
+# .toml, .yml/.yaml, or any extensionless build filename at first, then a
+# fresh audit on the very next head (a63def8e) proved setup.cfg, tox.ini,
+# pytest.ini, yarn.lock, Cargo.lock, poetry.lock STILL slipped through --
+# was wrongly classified DOCS_ONLY=1 and gates got skipped. A blocklist can
+# only ever cover extensions someone remembered to add; it can never close
+# against an extension nobody has thought of yet. Inverted here to a small,
+# closed docs-only ALLOWLIST instead: prose (*.md, *.rst), anything under a
+# docs/ directory, LICENSE (with or without a suffix/extension), and common
+# image formats. Anything that does NOT match this allowlist -- including
+# every case above, plus any future unrecognized extension or extensionless
+# filename -- now fails closed to code-relevant (gates run), the one
+# direction this check is allowed to get wrong.
+DOCS_ONLY_EXT_PATTERN='\.(md|rst|png|jpe?g|gif|svg|ico|webp|bmp|tiff?|avif)$'
+DOCS_ONLY_NAME_PATTERN='(^|/)(docs/.*|LICENSE([.][A-Za-z0-9]+)?)$'
+if [ -n "$CHANGED_FILES" ] \
+   && ! echo "$CHANGED_FILES" | grep -qvE "${DOCS_ONLY_EXT_PATTERN}|${DOCS_ONLY_NAME_PATTERN}"; then
+  DOCS_ONLY=1
+fi
+
+if [ "$DOCS_ONLY" -eq 1 ]; then
+  echo "[quality-gate.sh] diff vs origin/${DEFAULT_BRANCH} touches no code-relevant files (only: $(echo "$CHANGED_FILES" | tr '\n' ' ')) -- skipping node/python lint/build/test gates as not applicable to this change, same 'gracefully skip gates that don't apply' posture this script already uses for a repo with no package.json at all"
+  NAME=docs_only_skip RESULTS_FILE="$RESULTS_FILE" python3 <<'PYEOF'
+import json, os
+results_file = os.environ["RESULTS_FILE"]
+with open(results_file) as f:
+    r = json.load(f)
+r["docs_only_skip"] = {"ran": False, "passed": True, "exit_code": 0,
+                        "output_tail": "diff vs default branch touched no code-relevant files -- lint/build/test gates skipped as not applicable"}
+with open(results_file, "w") as f:
+    json.dump(r, f)
+PYEOF
+elif [ -f package.json ]; then
   # Root-caused 2026-07-26 (task-20260726-180000 RCA against
   # task-20260726-171957's watchdog "periodic checkpoint" stall signature):
   # journalctl showed the worker unit "killed by the OOM killer" mid `next

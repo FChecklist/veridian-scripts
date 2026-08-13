@@ -302,13 +302,60 @@ PYEOF
       elif [ "$BUILD_LOCK_RC" -eq 1 ]; then
         cp "$RESULTS_FILE" "$RESUME_MARKER"
         UNIT_NAME="veridian-worker@${TASK_ID}.service"
-        if python3 /opt/veridian/scripts/superboss-register.py requeue-build-lock-contended \
-            --task-identity "$TASK_ID" --unit-name "$UNIT_NAME"; then
+        REQUEUE_OUT=$(python3 /opt/veridian/scripts/superboss-register.py requeue-build-lock-contended \
+            --task-identity "$TASK_ID" --unit-name "$UNIT_NAME" 2>&1)
+        REQUEUE_RC=$?
+        if [ "$REQUEUE_RC" -eq 0 ]; then
           echo "[quality-gate.sh] build lock contended after ${BUILD_LOCK_SHORT_WAIT_SECONDS}s wait -- task requeued (reason=build_lock_contended), exiting cleanly so this systemd slot frees up for a different task"
           rm -f "$RESULTS_FILE"
           exit "$BUILD_LOCK_CONTENDED_EXIT_CODE"
+        elif echo "$REQUEUE_OUT" | grep -q "no active (queued/dispatched/running) umr_tasks row found"; then
+          # Root-caused 2026-08-13 (task-20260813-132414, against 3 RCA-for-
+          # killed-task resumption tasks -- task-20260813-104656,-105054,
+          # -105503 -- all blocked the same way): these tasks were created
+          # directly (a task.yaml + systemd unit) and never went through
+          # resource_governor.submit()'s umr_tasks INSERT, confirmed LIVE via
+          # the superboss_gateway /read endpoint returning zero rows for
+          # their task_identity. requeue-build-lock-contended's own
+          # find_active_umr_by_identity() check (see its docstring) correctly
+          # refuses to requeue a row that does not exist -- that refusal is
+          # not a bug. The bug was here: this branch treated ANY requeue
+          # failure as unusual/unexpected and recorded a FAKE "build" gate
+          # failure for it, which fed the auto-fix-then-blocked pipeline a
+          # nonexistent code defect to "fix" (correctly refused downstream by
+          # credit-accountant.py, but the task stayed wrongly blocked).
+          # There is nothing wrong with this task's code; it simply has no
+          # umr_tasks row to hand the slot back to, so instead of requeuing,
+          # wait out the lock right here (same fixed long-wait shape as the
+          # loss_count>=4 starvation guard above) -- a real wait for a real
+          # lock, not a fabricated result. Any OTHER requeue failure (DB
+          # unreachable, gateway down, etc.) still falls through to the
+          # original fake-gate-failure path below, preserving that
+          # defense-in-depth visibility for genuinely unexpected errors.
+          echo "[quality-gate.sh] build lock contended, but this task has no active umr_tasks row to requeue (not dispatched via resource_governor.submit()) -- waiting up to ${BUILD_LOCK_LONG_WAIT_SECONDS}s in-process for the lock instead of faking a gate failure"
+          rm -f "$RESUME_MARKER"
+          exec 9>"$BUILD_LOCK_FILE"
+          if flock -w "$BUILD_LOCK_LONG_WAIT_SECONDS" 9; then
+            run_gate build "$PKG_MGR run build"
+            flock -u 9
+            exec 9>&-
+          else
+            exec 9>&-
+            OVERALL=1
+            NAME=build CODE=1 RESULTS_FILE="$RESULTS_FILE" python3 <<'PYEOF'
+import json, os
+name = os.environ["NAME"]
+results_file = os.environ["RESULTS_FILE"]
+with open(results_file) as f:
+    r = json.load(f)
+r[name] = {"ran": False, "passed": False, "exit_code": 1,
+           "output_tail": "build lock not acquired even after an untracked-task long wait -- real capacity failure, not a code defect"}
+with open(results_file, "w") as f:
+    json.dump(r, f)
+PYEOF
+          fi
         else
-          echo "[quality-gate.sh] build lock contended but the requeue CLI call itself failed -- NOT silently dropping this: falling through to a normal gate failure instead"
+          echo "[quality-gate.sh] build lock contended but the requeue CLI call itself failed unexpectedly -- NOT silently dropping this: falling through to a normal gate failure instead ($REQUEUE_OUT)"
           rm -f "$RESUME_MARKER"
           OVERALL=1
           NAME=build CODE=1 RESULTS_FILE="$RESULTS_FILE" python3 <<'PYEOF'

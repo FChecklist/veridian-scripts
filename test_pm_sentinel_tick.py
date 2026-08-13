@@ -184,6 +184,13 @@ class PmSentinelTickKilledRowTest(unittest.TestCase):
         self.report_file = os.path.join(self.tmpdir, "pm-sentinel-tick-report.jsonl")
         self.metrics_file = os.path.join(self.tmpdir, "pm-sentinel-tick.prom")
         self.env = dict(os.environ)
+        # Check 0 (UMR-20260813-195852-aa85 addendum): point the live
+        # deploy-drift self-check at this test's own real, non-git tmpdir so
+        # it fails closed (git fetch fails -> DRIFT CHECK UNAVAILABLE, not a
+        # finding) and never perturbs this test's own dispatch-count /
+        # FINDINGS_LOGGED assertions -- Check 0's own real behavior is
+        # covered by its own dedicated test classes below.
+        self.env["PM_SENTINEL_LIVE_SCRIPTS_DIR"] = self.tmpdir
         self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
         self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
         self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
@@ -277,6 +284,13 @@ class PmSentinelTickFinancialEscalationTest(unittest.TestCase):
 
         self.state_file = os.path.join(self.tmpdir, "pm-sentinel-inflight.json")
         self.env = dict(os.environ)
+        # Check 0 (UMR-20260813-195852-aa85 addendum): point the live
+        # deploy-drift self-check at this test's own real, non-git tmpdir so
+        # it fails closed (git fetch fails -> DRIFT CHECK UNAVAILABLE, not a
+        # finding) and never perturbs this test's own dispatch-count /
+        # FINDINGS_LOGGED assertions -- Check 0's own real behavior is
+        # covered by its own dedicated test classes below.
+        self.env["PM_SENTINEL_LIVE_SCRIPTS_DIR"] = self.tmpdir
         self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
         self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
         self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
@@ -345,6 +359,13 @@ class PmSentinelTickDispatchFailurePropagatesTest(unittest.TestCase):
 
         self.state_file = os.path.join(self.tmpdir, "pm-sentinel-inflight.json")
         self.env = dict(os.environ)
+        # Check 0 (UMR-20260813-195852-aa85 addendum): point the live
+        # deploy-drift self-check at this test's own real, non-git tmpdir so
+        # it fails closed (git fetch fails -> DRIFT CHECK UNAVAILABLE, not a
+        # finding) and never perturbs this test's own dispatch-count /
+        # FINDINGS_LOGGED assertions -- Check 0's own real behavior is
+        # covered by its own dedicated test classes below.
+        self.env["PM_SENTINEL_LIVE_SCRIPTS_DIR"] = self.tmpdir
         self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
         self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
         self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
@@ -435,6 +456,13 @@ class PmSentinelTickQueryOncePerTickTest(unittest.TestCase):
 
         self.state_file = os.path.join(self.tmpdir, "pm-sentinel-inflight.json")
         self.env = dict(os.environ)
+        # Check 0 (UMR-20260813-195852-aa85 addendum): point the live
+        # deploy-drift self-check at this test's own real, non-git tmpdir so
+        # it fails closed (git fetch fails -> DRIFT CHECK UNAVAILABLE, not a
+        # finding) and never perturbs this test's own dispatch-count /
+        # FINDINGS_LOGGED assertions -- Check 0's own real behavior is
+        # covered by its own dedicated test classes below.
+        self.env["PM_SENTINEL_LIVE_SCRIPTS_DIR"] = self.tmpdir
         self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
         self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
         self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
@@ -527,6 +555,13 @@ class PmSentinelTickDecideAndFixTest(unittest.TestCase):
         self.report_file = os.path.join(self.tmpdir, "pm-sentinel-tick-report.jsonl")
         self.metrics_file = os.path.join(self.tmpdir, "pm-sentinel-tick.prom")
         self.env = dict(os.environ)
+        # Check 0 (UMR-20260813-195852-aa85 addendum): point the live
+        # deploy-drift self-check at this test's own real, non-git tmpdir so
+        # it fails closed (git fetch fails -> DRIFT CHECK UNAVAILABLE, not a
+        # finding) and never perturbs this test's own dispatch-count /
+        # FINDINGS_LOGGED assertions -- Check 0's own real behavior is
+        # covered by its own dedicated test classes below.
+        self.env["PM_SENTINEL_LIVE_SCRIPTS_DIR"] = self.tmpdir
         self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
         self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
         self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
@@ -669,6 +704,13 @@ class PmSentinelTickRunningRowOrderIndependentParseTest(unittest.TestCase):
         self.report_file = os.path.join(self.tmpdir, "pm-sentinel-tick-report.jsonl")
         self.metrics_file = os.path.join(self.tmpdir, "pm-sentinel-tick.prom")
         self.env = dict(os.environ)
+        # Check 0 (UMR-20260813-195852-aa85 addendum): point the live
+        # deploy-drift self-check at this test's own real, non-git tmpdir so
+        # it fails closed (git fetch fails -> DRIFT CHECK UNAVAILABLE, not a
+        # finding) and never perturbs this test's own dispatch-count /
+        # FINDINGS_LOGGED assertions -- Check 0's own real behavior is
+        # covered by its own dedicated test classes below.
+        self.env["PM_SENTINEL_LIVE_SCRIPTS_DIR"] = self.tmpdir
         self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
         self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
         self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
@@ -756,6 +798,13 @@ class PmSentinelTickImpossibleActiveStateGuardTest(unittest.TestCase):
         self.report_file = os.path.join(self.tmpdir, "pm-sentinel-tick-report.jsonl")
         self.metrics_file = os.path.join(self.tmpdir, "pm-sentinel-tick.prom")
         self.env = dict(os.environ)
+        # Check 0 (UMR-20260813-195852-aa85 addendum): point the live
+        # deploy-drift self-check at this test's own real, non-git tmpdir so
+        # it fails closed (git fetch fails -> DRIFT CHECK UNAVAILABLE, not a
+        # finding) and never perturbs this test's own dispatch-count /
+        # FINDINGS_LOGGED assertions -- Check 0's own real behavior is
+        # covered by its own dedicated test classes below.
+        self.env["PM_SENTINEL_LIVE_SCRIPTS_DIR"] = self.tmpdir
         self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
         self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
         self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
@@ -838,6 +887,13 @@ class PmSentinelTickDuplicateContentRefusalDoesNotFailTickTest(unittest.TestCase
         self.state_file = os.path.join(self.tmpdir, "pm-sentinel-inflight.json")
         self.metrics_file = os.path.join(self.tmpdir, "pm-sentinel-tick.prom")
         self.env = dict(os.environ)
+        # Check 0 (UMR-20260813-195852-aa85 addendum): point the live
+        # deploy-drift self-check at this test's own real, non-git tmpdir so
+        # it fails closed (git fetch fails -> DRIFT CHECK UNAVAILABLE, not a
+        # finding) and never perturbs this test's own dispatch-count /
+        # FINDINGS_LOGGED assertions -- Check 0's own real behavior is
+        # covered by its own dedicated test classes below.
+        self.env["PM_SENTINEL_LIVE_SCRIPTS_DIR"] = self.tmpdir
         self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
         self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
         self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
@@ -871,6 +927,203 @@ class PmSentinelTickDuplicateContentRefusalDoesNotFailTickTest(unittest.TestCase
         with open(self.state_file) as f:
             state = json.load(f)
         self.assertNotIn(f"rca:{self.TEST_UMR_ID}", state)
+
+
+def _git(args, cwd, check=True):
+    return subprocess.run(["git"] + args, cwd=cwd, check=check,
+                           capture_output=True, text=True)
+
+
+def _local_drift_fixture(tmpdir, extra_origin_commit):
+    """Real, fully local git fixture -- a real bare 'origin' repo plus a real
+    clone of it ('live') -- proving Check 0's own real
+    `check_live_scripts_drift.py --live-dir <live>` call against a genuine
+    real `git fetch`/`rev-parse`/`diff`, with NO GitHub, no network, and no
+    dependency on this box's own real veridian-scripts checkout's real
+    current drift state (which is exactly the live, changing condition Check
+    0 exists to detect, so it cannot double as a deterministic test fixture).
+
+    When `extra_origin_commit` is True, a second real commit is pushed to
+    origin AFTER `live` was cloned -- `live`'s real HEAD is now genuinely
+    behind real origin/main, the real drift condition. When False, `live`'s
+    real HEAD stays exactly equal to real origin/main -- the real in-sync
+    condition."""
+    origin_dir = os.path.join(tmpdir, "origin.git")
+    _git(["init", "--quiet", "--bare", "-b", "main", origin_dir], cwd=tmpdir)
+
+    seed_dir = os.path.join(tmpdir, "seed")
+    _git(["init", "--quiet", "-b", "main", seed_dir], cwd=tmpdir)
+    _git(["config", "user.email", "test@pm-sentinel-tick-test.invalid"], cwd=seed_dir)
+    _git(["config", "user.name", "pm-sentinel-tick test"], cwd=seed_dir)
+    with open(os.path.join(seed_dir, "pm-sentinel-tick.sh"), "w") as f:
+        f.write("#!/usr/bin/env bash\necho v1\n")
+    _git(["add", "."], cwd=seed_dir)
+    _git(["commit", "--quiet", "-m", "seed"], cwd=seed_dir)
+    _git(["remote", "add", "origin", origin_dir], cwd=seed_dir)
+    _git(["push", "--quiet", "origin", "main"], cwd=seed_dir)
+
+    live_dir = os.path.join(tmpdir, "live")
+    _git(["clone", "--quiet", origin_dir, live_dir], cwd=tmpdir)
+
+    if extra_origin_commit:
+        with open(os.path.join(seed_dir, "pm-sentinel-tick.sh"), "w") as f:
+            f.write("#!/usr/bin/env bash\necho v2 -- real fix landed upstream\n")
+        _git(["commit", "--quiet", "-am", "real fix landed on origin/main"], cwd=seed_dir)
+        _git(["push", "--quiet", "origin", "main"], cwd=seed_dir)
+
+    return live_dir
+
+
+def _fake_dispatch_owner_task_recording(tmpdir, call_log_path):
+    """A real, throwaway dispatch-owner-task.sh stand-in: records its real
+    argv (one line per call) to call_log_path and returns a real, successful,
+    fake umr_id -- proves Check 0 actually calls the one real dispatch
+    gateway with a real title/prompt, without making any real GitHub/gh
+    network call (unlike the other real-dispatch test classes above, which
+    deliberately exercise the real dispatch-owner-task.sh end to end; Check
+    0's own regression coverage only needs to prove Check 0 ITSELF detects
+    drift and reaches the gateway, which the QueryOnce/DecideAndFix test
+    classes above already prove end-to-end for every other check)."""
+    fake = os.path.join(tmpdir, "fake-dispatch-owner-task-drift.sh")
+    with open(fake, "w") as f:
+        f.write(
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' \"$*\" >> \"$DISPATCH_CALL_LOG\"\n"
+            "echo \"DISPATCHED (fake, no real network) umr_id=UMR-FAKE-20260101-000000-$RANDOM$RANDOM\"\n"
+            "exit 0\n"
+        )
+    os.chmod(fake, os.stat(fake).st_mode | stat.S_IEXEC)
+    return fake
+
+
+class PmSentinelTickLiveDeployDriftFoundTest(unittest.TestCase):
+    """Real test for Check 0 (2026-08-13 addendum, UMR-20260813-195852-aa85):
+    when this script's own real live checkout ($PM_SENTINEL_LIVE_SCRIPTS_DIR)
+    is genuinely behind real origin/main (a real local git fixture, see
+    _local_drift_fixture), Check 0 must detect it via the real, already-built
+    check_live_scripts_drift.py and dispatch a real fix through the same
+    single gateway -- the real, concrete gap this closes: a real fix (e.g.
+    PR #299's Check 2b parse fix) can be merged to origin/main while
+    production keeps running an older, buggy, unfixed copy forever, with
+    nothing noticing."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_drift_found_test_")
+        # Empty umr_tasks (no seeded rows) -- isolates this test to Check 0
+        # only; Checks 1/2a/2b/3 all no-op on a real empty table.
+        self.copy_path = _seeded_copy(self.tmpdir, [])
+        self.live_dir = _local_drift_fixture(self.tmpdir, extra_origin_commit=True)
+
+        self.call_log = os.path.join(self.tmpdir, "dispatch-calls.log")
+        open(self.call_log, "w").close()
+        self.fake_dispatch = _fake_dispatch_owner_task_recording(self.tmpdir, self.call_log)
+
+        self.state_file = os.path.join(self.tmpdir, "pm-sentinel-inflight.json")
+        self.report_file = os.path.join(self.tmpdir, "report.jsonl")
+        self.metrics_file = os.path.join(self.tmpdir, "metrics.prom")
+        self.env = dict(os.environ)
+        self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
+        self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
+        self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
+        self.env["PM_SENTINEL_REPORT_FILE"] = self.report_file
+        self.env["PM_SENTINEL_METRICS_FILE"] = self.metrics_file
+        self.env["PM_SENTINEL_LIVE_SCRIPTS_DIR"] = self.live_dir
+        self.env["CHECK_LIVE_SCRIPTS_DRIFT_PY"] = os.path.join(HERE, "check_live_scripts_drift.py")
+        self.env["DISPATCH_OWNER_TASK_SH"] = self.fake_dispatch
+        self.env["DISPATCH_CALL_LOG"] = self.call_log
+        self.env["VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS"] = ""
+        self.env["DISPATCH_TMUX_SESSION"] = "pm-sentinel-test-throwaway-session"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run_tick(self):
+        return subprocess.run(
+            [SENTINEL_SH], cwd=HERE, env=self.env,
+            capture_output=True, text=True, timeout=90,
+        )
+
+    def test_real_drift_dispatches_real_reconcile_fix(self):
+        result = self._run_tick()
+
+        self.assertIn("DRIFT FOUND", result.stdout, msg=result.stdout + result.stderr)
+        self.assertIn(f"DISPATCHING for deploy_drift:{self.live_dir}", result.stdout)
+        self.assertIn("Reconcile live deploy drift", result.stdout)
+
+        with open(self.call_log) as f:
+            calls = f.read()
+        self.assertIn("Reconcile live deploy drift", calls)
+        self.assertIn("veridian-scripts", calls)
+
+        with open(self.report_file) as f:
+            report_rows = [json.loads(line) for line in f if line.strip()]
+        drift_rows = [r for r in report_rows if r["gap_type"] == "live_deploy_drift"]
+        self.assertEqual(len(drift_rows), 1, msg=report_rows)
+        self.assertTrue(drift_rows[0]["FOUND"])
+
+        with open(self.metrics_file) as f:
+            metrics_txt = f.read()
+        self.assertIn("pm_sentinel_tick_findings_logged 1", metrics_txt)
+        self.assertIn("pm_sentinel_tick_findings_actioned 1", metrics_txt)
+
+
+class PmSentinelTickLiveDeployDriftInSyncTest(unittest.TestCase):
+    """Real control case for Check 0: when the live checkout's real HEAD
+    genuinely equals real origin/main, Check 0 must NOT report a finding or
+    dispatch anything -- proves the drift check doesn't false-positive on a
+    genuinely healthy, in-sync deployment."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_drift_insync_test_")
+        self.copy_path = _seeded_copy(self.tmpdir, [])
+        self.live_dir = _local_drift_fixture(self.tmpdir, extra_origin_commit=False)
+
+        self.state_file = os.path.join(self.tmpdir, "pm-sentinel-inflight.json")
+        self.report_file = os.path.join(self.tmpdir, "report.jsonl")
+        self.metrics_file = os.path.join(self.tmpdir, "metrics.prom")
+        self.env = dict(os.environ)
+        self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
+        self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
+        self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
+        self.env["PM_SENTINEL_REPORT_FILE"] = self.report_file
+        self.env["PM_SENTINEL_METRICS_FILE"] = self.metrics_file
+        self.env["PM_SENTINEL_LIVE_SCRIPTS_DIR"] = self.live_dir
+        self.env["CHECK_LIVE_SCRIPTS_DRIFT_PY"] = os.path.join(HERE, "check_live_scripts_drift.py")
+        # Real dispatch-owner-task.sh is fine here -- it must never actually
+        # be invoked for a genuine in-sync live checkout with no other
+        # seeded rows, so pointing it at the real one (never exercised) is a
+        # stronger proof than a fake that could silently mask a real call.
+        self.env["DISPATCH_OWNER_TASK_SH"] = REAL_DISPATCH_OWNER_TASK_SH
+        self.env["VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS"] = ""
+        self.env["DISPATCH_TMUX_SESSION"] = "pm-sentinel-test-throwaway-session"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run_tick(self):
+        return subprocess.run(
+            [SENTINEL_SH], cwd=HERE, env=self.env,
+            capture_output=True, text=True, timeout=90,
+        )
+
+    def test_in_sync_live_checkout_is_not_a_finding(self):
+        result = self._run_tick()
+
+        self.assertIn("in sync:", result.stdout, msg=result.stdout + result.stderr)
+        self.assertNotIn("DRIFT FOUND", result.stdout)
+        self.assertNotIn("DISPATCHING for deploy_drift:", result.stdout)
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+
+        # emit_report_row() only ever appends -- a real tick with zero real
+        # findings never creates REPORT_FILE at all (no seeded umr_tasks
+        # rows here, and a genuinely in-sync live checkout is not one
+        # either), so an absent file is itself real, positive proof no
+        # finding was emitted.
+        if os.path.exists(self.report_file):
+            with open(self.report_file) as f:
+                report_rows = [json.loads(line) for line in f if line.strip()]
+            drift_rows = [r for r in report_rows if r["gap_type"] == "live_deploy_drift"]
+            self.assertEqual(len(drift_rows), 0, msg=report_rows)
 
 
 if __name__ == "__main__":

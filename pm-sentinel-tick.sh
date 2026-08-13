@@ -51,7 +51,15 @@
 # earlier-and-cheaper check ahead of it.
 #
 # What one tick does (same 3 checks the laptop-side hourly PM sentinel does,
-# plus 326b's blocked-row check and dynamic addenda-chain discovery):
+# plus 326b's blocked-row check, dynamic addenda-chain discovery, and Check 0
+# below):
+#   0. Live deploy drift self-check (2026-08-13 addendum, UMR-20260813-
+#      195852-aa85) -- is this script's OWN real running checkout the same
+#      commit as origin/main? Real finding: it was not (stuck on a stale,
+#      dirty, off-main commit) despite real fixes (e.g. PR #299's Check 2b
+#      systemctl-show parse fix, see Check 0's own header comment below for
+#      full detail) already being merged -- the confirmed root cause of a
+#      recurring false-RCA cascade on this chain. See Check 0 below.
 #   1. Tracked-chain status: python3 "$SUPERBOSS_REGISTER_PY"
 #      show-owner-priority-state gives the real, live set of governing UMR
 #      chains still active/pending; each chain's governing UMR is re-queried
@@ -261,6 +269,11 @@ STATE_FILE="${PM_SENTINEL_STATE_FILE:-/opt/veridian/ai-os/logs/pm-sentinel-infli
 NOTIFY_OWNER_SCRIPT="${PM_SENTINEL_NOTIFY_OWNER_SCRIPT:-notify-owner.py}"
 REPORT_FILE="${PM_SENTINEL_REPORT_FILE:-/opt/veridian/ai-os/logs/pm-sentinel-tick-report.jsonl}"
 METRICS_FILE="${PM_SENTINEL_METRICS_FILE:-/opt/veridian/ai-os/logs/pm-sentinel-tick.prom}"
+# Check 0 (2026-08-13 addendum, UMR-20260813-195852-aa85 -- see Check 0's own
+# header comment below): the real live git checkout this script itself is
+# actually running from. Defaults to SCRIPT_DIR (this script's own real
+# on-disk location), overridable for tests.
+LIVE_SCRIPTS_DIR="${PM_SENTINEL_LIVE_SCRIPTS_DIR:-$SCRIPT_DIR}"
 DISPATCH_COUNT=0
 TICK_FAILURES=0
 # QUERY-ONCE-PER-TICK + DECIDE-AND-FIX (UMR-20260813-105106-e9a7 addendum to
@@ -327,6 +340,22 @@ elif [ -f "/opt/veridian/scripts/superboss-register.py" ]; then
   SUPERBOSS_REGISTER_PY="/opt/veridian/scripts/superboss-register.py"
 else
   SUPERBOSS_REGISTER_PY="$SCRIPT_DIR/superboss-register.py"
+fi
+
+# Check 0 real testability seam (2026-08-13 addendum, UMR-20260813-195852-aa85):
+# same env-override -> co-located -> canonical-live-path resolution as every
+# other real tool above -- check_live_scripts_drift.py already exists (built
+# by task-20260813-103224-close-the-merged-to-live-deployment-gap,
+# UMR-20260813-101142-5d24) and answers exactly the question Check 0 needs
+# ("is the live checkout's HEAD the same commit as origin/main, with real
+# evidence"), so this reuses it directly rather than reimplementing the same
+# git-fetch-and-compare logic here.
+if [ -n "${CHECK_LIVE_SCRIPTS_DRIFT_PY:-}" ]; then
+  :
+elif [ -f "/opt/veridian/scripts/check_live_scripts_drift.py" ]; then
+  CHECK_LIVE_SCRIPTS_DRIFT_PY="/opt/veridian/scripts/check_live_scripts_drift.py"
+else
+  CHECK_LIVE_SCRIPTS_DRIFT_PY="$SCRIPT_DIR/check_live_scripts_drift.py"
 fi
 
 # Real, deliberately narrow keyword test backing is_financial_decision()
@@ -649,6 +678,69 @@ dispatch_gap() {
     return 1
   fi
 }
+
+# ---------------------------------------------------------------------------
+# Check 0 (2026-08-13 addendum, UMR-20260813-195852-aa85): live deploy drift
+# self-check -- is THIS SCRIPT'S OWN real running checkout ($LIVE_SCRIPTS_DIR)
+# actually the same commit as origin/main?
+#
+# Real root cause this closes: this exact positional-`systemctl show`-parse
+# bug (Check 2b, ActiveState/Result read by output line position instead of
+# by key -- the fingerprint being an impossible "ActiveState=success" pairing,
+# since "success" is only ever a real Result/SubState value) was ALREADY
+# FIXED and merged to origin/main via PR #299 (commit ae48cf0, 2026-08-13
+# 18:49 UTC) -- verified live this same tick: `git cat-file -p
+# origin/main:pm-sentinel-tick.sh` shows the real, current, key-based parse
+# (`sed -n 's/^ActiveState=//p'` / `sed -n 's/^Result=//p'`, plus an
+# impossible-value guard), not the old `--value` + `sed -n '1p'`/`'2p'`
+# positional read. Despite that, the box's real live checkout at
+# /opt/veridian/scripts (the actual systemd --user unit target, the one
+# every RCA in this chain has been inspecting) was found THIS SAME TICK still
+# sitting on stale commit ff328e7 (`git rev-parse HEAD` there), NOT on main,
+# WITH real uncommitted local edits on top -- so the real fix has been
+# sitting merged and tested in git this whole time while production kept
+# running the old buggy positional parse, generating the exact false
+# "status=running but unit dead" RCA cascade this UMR chain (UMR-20260806-
+# 171945-5767 -> ... -> UMR-20260813-092654-326b) has repeatedly had to
+# re-diagnose. `sync-repos.sh`'s own fast-forward-only pull already correctly
+# refuses to silently overwrite a dirty/non-main checkout (by design -- see
+# its own comments), but nothing was watching for that refusal and escalating
+# it as a real, actionable gap -- this script ran every hour regardless,
+# oblivious to running a stale, already-fixed-elsewhere copy of itself. Check
+# 0 closes that: reuses the real, already-built check_live_scripts_drift.py
+# (never reimplemented here) to answer the question with real evidence, and
+# -- per DECIDE-AND-FIX -- dispatches a real fix through the same single
+# gateway the instant drift is found, instead of only ever logging it.
+# ---------------------------------------------------------------------------
+echo "--- Check 0: live deploy drift self-check ($LIVE_SCRIPTS_DIR vs origin/main) ---"
+DRIFT_JSON="$(python3 "$CHECK_LIVE_SCRIPTS_DRIFT_PY" --live-dir "$LIVE_SCRIPTS_DIR" 2>/dev/null)"
+DRIFT_RC=$?
+if [ "$DRIFT_RC" -eq 2 ] || [ -z "$DRIFT_JSON" ]; then
+  echo "  DRIFT CHECK UNAVAILABLE (check_live_scripts_drift.py exit $DRIFT_RC, could not determine real state -- e.g. fetch/network failure) -- fails closed: NOT treated as a drift finding this tick (a tooling failure alone is not itself evidence of drift), but also not silently OK -- see its own real stderr/output above if this persists."
+else
+  IN_SYNC="$(printf '%s' "$DRIFT_JSON" | py_field "d.get('in_sync', False)")"
+  if [ "$IN_SYNC" = "True" ]; then
+    LIVE_HEAD="$(printf '%s' "$DRIFT_JSON" | py_field "d.get('live_head','')")"
+    echo "  in sync: $LIVE_SCRIPTS_DIR HEAD matches origin/main (head=$LIVE_HEAD)"
+  else
+    LIVE_HEAD="$(printf '%s' "$DRIFT_JSON" | py_field "d.get('live_head','')")"
+    ORIGIN_HEAD="$(printf '%s' "$DRIFT_JSON" | py_field "d.get('origin_main_head','')")"
+    CUR_BRANCH="$(printf '%s' "$DRIFT_JSON" | py_field "d.get('current_branch','')")"
+    ON_MAIN="$(printf '%s' "$DRIFT_JSON" | py_field "d.get('on_main_branch', True)")"
+    CHANGED_COUNT="$(printf '%s' "$DRIFT_JSON" | py_field "len(d.get('changed_files') or [])")"
+    CHANGED_LIST="$(printf '%s' "$DRIFT_JSON" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(', '.join(c.get('path','') for c in (d.get('changed_files') or [])[:20]))
+" 2>/dev/null)"
+    echo "  DRIFT FOUND: $LIVE_SCRIPTS_DIR is real, live, NOT in sync with origin/main -- branch=$CUR_BRANCH (on_main=$ON_MAIN) head=$LIVE_HEAD vs origin/main=$ORIGIN_HEAD, $CHANGED_COUNT real tracked file(s) differ: $CHANGED_LIST"
+    TARGET_KEY="deploy_drift:${LIVE_SCRIPTS_DIR}"
+    PROMPT="GOVERNING CHAIN: this task's own dispatching UMR (PM-sentinel tick), Check 0 (UMR-20260813-195852-aa85 addendum). REAL GAP FOUND: the real live checkout at ${LIVE_SCRIPTS_DIR} (this script's own actual running location) is NOT in sync with origin/main, verified live this tick via check_live_scripts_drift.py --live-dir ${LIVE_SCRIPTS_DIR} -- branch=${CUR_BRANCH} (on_main_branch=${ON_MAIN}) real HEAD=${LIVE_HEAD} vs real origin/main=${ORIGIN_HEAD}, ${CHANGED_COUNT} real tracked file(s) differ: ${CHANGED_LIST}. This is a confirmed root cause of prior false RCAs on this chain: real fixes merged to origin/main (e.g. PR #299's key-based systemctl-show parse fix) never reach production while this drift persists. Read the row's full real check_live_scripts_drift.py --live-dir ${LIVE_SCRIPTS_DIR} output yourself first (do not trust this summary alone), determine why the live checkout is stuck off-main / dirty (sync-repos.sh deliberately refuses to force-overwrite a dirty or non-main checkout -- see its own comments), and either safely reconcile it onto origin/main (real evidence: whose real uncommitted changes are present, whether they are stale/abandoned or genuinely in-flight work needing a real commit+push first) or record a real, honest terminal outcome via superboss-register.py mark-umr-terminal citing real evidence. Do not fabricate completion, and do not destroy another real in-flight agent's uncommitted work without first confirming it is genuinely abandoned."
+    record_finding
+    dispatch_gap "$TARGET_KEY" "Reconcile live deploy drift: ${LIVE_SCRIPTS_DIR} vs origin/main" "$PROMPT" 1 "veridian-scripts"
+    emit_report_row "live-checkout:${LIVE_SCRIPTS_DIR}" "live_deploy_drift" false false false false
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # Check 1: tracked-chain status (per governing UMR of each active/pending

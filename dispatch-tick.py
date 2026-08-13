@@ -1309,6 +1309,52 @@ def _load_reconcile_stale_running_workers():
     return mod
 
 
+# ---------------------------------------------------------------------------
+# owner_dispatch_gateway status reconciliation (UMR-20260813-103211, addendum
+# to UMR-20260813-065157-ba95: "close the success half of the umr_tasks
+# write-back gap" landed real, tested, audited code in status-remediation-
+# tick.py's own run_owner_dispatch_reconciliation() -- but status-remediation-
+# tick.py has no live caller of its own: its unit
+# (veridian-cron-status-remediation-tick.timer) is disabled per the Owner's
+# real 2026-08-07 standing order (INS-20260807-042700-a247, "only the project
+# manager work timer and the real execution mechanism may keep running until
+# the current priority chain finishes, all others hard stopped") which
+# explicitly named veridian-cron-dispatch-tick.timer -- THIS unit -- as one of
+# the exactly 2 that must stay enabled/active. Re-enabling status-remediation-
+# tick's own timer would directly contradict that live directive, so per the
+# ~/.config/systemd/user/README.md STANDING RULE ("a periodic need whose
+# cadence/purpose fits an existing unit goes in as a new step inside that
+# unit/script, not a 20th unit") this wires the SAME already-audited call into
+# dispatch-tick.py instead -- reusing status-remediation-tick.py's own
+# run_owner_dispatch_reconciliation() function in-process (lazy importlib
+# load, same pattern _load_reconcile_owner_dispatch_status() inside that file
+# already uses one level down) rather than re-implementing or duplicating its
+# logic. dispatch-tick.py runs every ~10 minutes (OnCalendar=*-*-*
+# *:2/10:00), the same cadence status-remediation-tick.py itself ran on
+# before its timer was disabled, so no scheduling behavior is invented here,
+# only the caller changes.
+#
+# Unlike this script's other dispatch actions (which are inherently "real,
+# no extra flag" -- dispatch-tick.py has no --apply/--dry-run switch of its
+# own), this calls run_owner_dispatch_reconciliation(apply_=True) directly:
+# the STALE_LABEL_TERMINAL bucket it applies is the same narrow, deterministic,
+# already-hardened-against-a-real-AUDIT:FAIL (PR #147) mechanical bucket
+# status-remediation-tick.py's own docstring describes -- MERGED PR ->
+# completed, CLOSED PR -> failed, no PR ever opened -> killed -- never the
+# NEEDS_AI_JUDGMENT bucket, which this call (like every other caller of
+# run_owner_dispatch_reconciliation()) never touches.
+def _load_status_remediation_tick():
+    """Lazy, in-process import of status-remediation-tick.py -- same
+    importlib pattern this codebase already uses for hyphenated-filename
+    modules (see status-remediation-tick.py's own _load_generate_wiring_registry()
+    and _load_reconcile_owner_dispatch_status())."""
+    spec = importlib.util.spec_from_file_location(
+        "status_remediation_tick", os.path.join(SCRIPTS, "status-remediation-tick.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def run_stale_running_workers_reconciliation():
     """UMR-20260813-090037-9a34 (residue of PR #249's own real AUDIT:FAIL
     finding "(c) reconcile_stale_running_workers.py ... is a ONE-SHOT and is
@@ -1346,6 +1392,15 @@ def run_stale_running_workers_reconciliation():
         return {"ok": True, "examined": report["examined"], "counts": report["counts"]}
     except Exception as e:
         print(f"WARNING: stale-running-worker reconciliation failed (non-fatal): {e}", file=sys.stderr)
+        return {"ok": False, "error": str(e)}
+
+
+def owner_dispatch_reconciliation_tick():
+    try:
+        srt = _load_status_remediation_tick()
+        return srt.run_owner_dispatch_reconciliation(apply_=True)
+    except Exception as e:
+        print(f"WARNING: owner_dispatch_gateway status reconciliation failed (non-fatal): {e}", file=sys.stderr)
         return {"ok": False, "error": str(e)}
 
 
@@ -1387,6 +1442,11 @@ def main():
 
     stale_running_result = run_stale_running_workers_reconciliation()
 
+    owner_dispatch_reconciliation = owner_dispatch_reconciliation_tick()
+    if owner_dispatch_reconciliation.get("ok") and owner_dispatch_reconciliation.get("corrected_umr_ids"):
+        print(f"OWNER_DISPATCH_GATEWAY RECONCILED ({len(owner_dispatch_reconciliation['corrected_umr_ids'])}): "
+              f"{owner_dispatch_reconciliation['corrected_umr_ids']}")
+
     dispatched_this_tick = (
         len(sweep_result.get("started", []))
         + len(resume_result.get("resumed", []))
@@ -1403,6 +1463,8 @@ def main():
             "stuck_tasks_found": len(stuck_tasks),
             "pm_triage_invoked": pm_triage_result["invoked"],
             "stale_running_workers_reconciliation": stale_running_result,
+            "owner_dispatch_reconciliation_ok": owner_dispatch_reconciliation.get("ok"),
+            "owner_dispatch_reconciliation_corrected": owner_dispatch_reconciliation.get("corrected_umr_ids", []),
         },
     )
 
@@ -1414,6 +1476,7 @@ def main():
         "stuck_tasks_heartbeat": heartbeat,
         "pm_triage": pm_triage_result,
         "stale_running_workers_reconciliation": stale_running_result,
+        "owner_dispatch_reconciliation": owner_dispatch_reconciliation,
     }, indent=2, default=str))
 
 

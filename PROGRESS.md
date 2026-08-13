@@ -1,40 +1,70 @@
-# PROGRESS -- task-20260808-215140-umr171945-0003-0005-0007-audit-probe
+# PROGRESS -- task-20260813-171208-fix-pm-sentinel-tick-sh-positional-activ
 
 ## SPEC
-"run a pruned scoped code search for a regex pattern, grep -lE style"
+REDISPATCH of UMR-20260813-145511-5aca (governing this redispatch:
+UMR-20260813-170956-5385): fix pm-sentinel-tick.sh's positional
+ActiveState/Result parse (Check 2b, ~line 755) and its non-zero-exit-on-
+cap-reached-adjacent defect; coordinate with open PR #299
+(FChecklist/veridian-scripts).
 
 ## Completed
-- [x] Checked the deterministic briefing's cited "2 existing scripts" before reusing/building anything:
-      `single_deterministic_orchestrator_pipeline` (resource_governor.py run_tick 12-step
-      dispatch pipeline) and `zero_gap_zero_duplication_wiring_audit`
-      (wiring_registry_zero_gap_audit.py, a DB integrity audit). Read both capability
-      records in full: **neither implements a pruned, scoped, `grep -lE`-style code
-      search.** The briefing's capability-registry citation for this SPEC does not match
-      what those two scripts actually do -- consistent with the known
-      task-dispatch false-premise pattern (briefing claims that don't match live state).
-- [x] Checked the wiring_registry hit (`dispatch_event-owner-task-20260808-215120-1705975`)
-      via `wiring_query.py --entity-id`: it is only this task's own dispatch-event record
-      (created when the resource governor dispatched this task), not a prior
-      implementation of this capability. No relevant prior art there.
-- [x] Found the capability that actually matches the SPEC verbatim: `find_code.sh`
-      (registered capability `pruned_code_search`, UMR-20260806-100604-4591), already
-      present both in this workspace and deployed live at
-      `/opt/veridian/scripts/find_code.sh` (byte-identical, `diff -q` confirms). It takes
-      an extended-regex `pattern` and optional `scope_dir`, real `find -prune`s
-      node_modules/.git/.venv/__pycache__/dist/build plus the known huge scratch
-      subtrees (`ai-os/tasks/*/workspace`, `workspace/claude-cli-work`,
-      `workspace/main-e2e-check`), then runs `grep -IlE` -- exactly "pruned scoped code
-      search for a regex pattern, grep -lE style".
-- [x] Verified it live rather than trusting the capability record's claims on faith:
-  - match case: `./find_code.sh 'pruned_code_search' .` -> 4 files listed, exit 0
-  - no-match case: `./find_code.sh 'ZZZ_NO_SUCH_PATTERN_EVER_XYZ123' .` -> exit 1
-  - invalid-regex case: `./find_code.sh '[' .` -> clean usage error to stderr, exit 2
-  - All three match the script's documented exit-code contract.
+- [x] Re-verified all evidence independently before acting (per the
+      redispatch note and the known task-dispatch false-premise pattern):
+  - Confirmed `/opt/veridian/repos/veridian-scripts` exists on disk (the
+    prior redispatch's own claimed repair), so `veridian-task.py create`
+    can actually clone from it.
+  - Confirmed PR #299 (FChecklist/veridian-scripts, head 5e3eeeb at start)
+    is OPEN/MERGEABLE/CLEAN and really contains the exact buggy pattern at
+    `pm-sentinel-tick.sh:755-757`
+    (`systemctl --user show ... --value` + `sed -n 1p`/`sed -n 2p`
+    positional read).
+  - Confirmed the live-deployed `/opt/veridian/scripts/pm-sentinel-tick.sh`
+    has the byte-identical bug at the same lines, and that
+    `veridian-pm-sentinel-tick.service` is really in `Active: failed
+    (Result: exit-code)` (last run exited 1).
+  - Confirmed via the real cron tick log
+    (`/opt/veridian/ai-os/logs/pm-sentinel-tick-cron.log`) that the swap
+    really happens live: rows read `ActiveState=success Result=active` /
+    `ActiveState=success Result=inactive`, both semantically impossible
+    unless the two fields were swapped by output position.
+  - Re-checked the three false-positive UMR rows named in the original
+    evidence (UMR-20260813-141620-94c7, UMR-20260813-141628-e66b,
+    UMR-20260813-141633-f0fc) via `resource_governor.py --query-umr`: all
+    three are already `status=completed`, each closed by real,
+    independently-dispatched RCA work (not by this task) with an honest,
+    evidence-cited terminal reason. No action needed or taken on these
+    three; did not touch the killed-path rows
+    UMR-20260813-141610-273a / UMR-20260813-141605-0ece, per instruction.
+- [x] Fixed `pm-sentinel-tick.sh` Check 2b's ActiveState/Result parse to be
+      order-independent: dropped `--value`, extract each field by its own
+      `Key=` prefix via `sed`, same single `systemctl` call preserved
+      (query-once-per-tick optimization intact).
+- [x] Root-caused and fixed the real non-zero-exit defect: `dispatch_gap()`
+      was counting dispatch-owner-task.sh's own content-duplicate refusal
+      (an identical prompt already logged within its real 6h window) as a
+      genuine `TICK_FAILURES` failure. Now recognized and skipped quietly
+      (return 0, not counted), while every other real dispatch failure
+      still counts and still propagates non-zero (AUDIT-REJECT FIX #2
+      preserved, its existing regression test untouched and still passes).
+- [x] Added two real regression tests to `test_pm_sentinel_tick.py`:
+      `PmSentinelTickRunningRowOrderIndependentParseTest` (feeds both the
+      documented and swapped systemctl property order via a real PATH-shim
+      fake `systemctl`, asserts an active unit is never classified dead,
+      and that a genuinely dead unit is still correctly flagged) and
+      `PmSentinelTickDuplicateContentRefusalDoesNotFailTickTest` (asserts a
+      tick that only hits a duplicate-content refusal still exits 0).
+- [x] Ran the full real test suite as real subprocesses against an isolated
+      sqlite3 copy of the live DB: **8 passed in 311.47s, exit 0**
+      (`python3 -m pytest test_pm_sentinel_tick.py -v`) -- 6 pre-existing
+      tests unchanged/still passing + 2 new.
+- [x] Landed the fix by pushing directly onto PR #299's own branch
+      (`worker/task-20260813-123933-add-query-once-decide-and-fix`) as a
+      clean fast-forward commit (5e3eeeb -> 32b4276), per SPEC point 4 --
+      no competing PR opened. Verified live afterward: PR #299's
+      `headRefOid` is now `32b4276...`.
 
 ## Remaining
-- [ ] None. The SPEC's requested capability already exists, is deployed, and is
-      verified working correctly. No new code was written -- rebuilding it would have
-      been the exact class of duplicate-implementation this UMR-lineage's own tooling
-      (`find_code.sh`'s header, `pruned_code_search` capability record) exists to
-      prevent. If a *specific* pattern/scope is later provided, run:
-      `/opt/veridian/scripts/find_code.sh '<pattern>' [scope_dir]` directly.
+- [ ] None outstanding on this task's own scope. PR #299 (now carrying this
+      fix) is still open and unmerged -- merging it is outside this task's
+      authority per the governing UMR chain's own review process, not a
+      gap left by this task.

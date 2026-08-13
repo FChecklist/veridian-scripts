@@ -65,6 +65,8 @@
       since it is outside this task's governing chain.
 - [x] `agent_work_briefing.py record-completion` called for
       UMR-20260813-201823-4bcc.
+- [x] Committed and opened PR #324 (FChecklist/veridian-scripts,
+      branch worker/task-20260813-201836-rca--umr-20260807-151622-15cd-killed).
 
 ## Remaining
 - [ ] None for this UMR's own scope. Open platform backlog (not this task's

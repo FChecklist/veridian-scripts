@@ -205,6 +205,38 @@ def test_apply_correction_writes_only_via_update_umr_task(monkeypatch):
     print("PASS: test_apply_correction_writes_only_via_update_umr_task")
 
 
+def test_apply_correction_sets_ts_completed_and_reason(monkeypatch):
+    """Regression test for UMR-20260813-065157-ba95 ("close the success half
+    of the umr_tasks write-back gap"): live-confirmed, apply_correction()
+    used to call update_umr_task() with only status=.../metadata=..., never
+    ts_completed or reason -- since update_umr_task() only ever writes the
+    columns it's explicitly given, every row this script ever corrected
+    (including real status='completed' rows backed by a real MERGED PR) kept
+    ts_completed=NULL and reason='queued' forever. Both must now be set,
+    reason must be the real evidence string (never a placeholder), and
+    ts_completed must be a real, parseable UTC isoformat timestamp."""
+    mod = _load_module()
+    calls = []
+
+    def fake_update(conn, umr_id, **fields):
+        calls.append((umr_id, fields))
+
+    monkeypatch.setattr(mod._sbr, "update_umr_task", fake_update)
+    ev = {
+        "umr_id": "UMR-x", "new_status": "completed", "db_status": "running",
+        "pr_number": 129, "reason": "real systemd state 'inactive', real PR #129 state=MERGED",
+    }
+    mod.apply_correction(_FakeConnReadOnlySelect(None), ev, dry_run=False)
+    assert len(calls) == 1
+    fields = calls[0][1]
+    assert fields["reason"] == ev["reason"], "reason must be the real evidence string, not a placeholder"
+    assert fields.get("ts_completed"), "ts_completed must be set for a terminal write"
+    # Real, parseable UTC isoformat -- never a guess/placeholder string.
+    parsed = datetime.fromisoformat(fields["ts_completed"])
+    assert parsed.tzinfo is not None
+    print("PASS: test_apply_correction_sets_ts_completed_and_reason")
+
+
 def test_apply_correction_preserves_prior_metadata(monkeypatch):
     """Regression test for the real data-loss bug caught by the real
     AUDIT:FAIL on this script's own PR #147: update_umr_task()'s own

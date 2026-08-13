@@ -79,6 +79,19 @@ Mechanical actions are gated behind --apply (default off = dry-run: prints what
 WOULD run, calls nothing real). The proposed cron entry passes --apply (see this
 task's PR body). Judgment-path drafting never touches an external system (only
 writes a local file) so it always runs for real, --apply or not.
+
+--- addendum, UMR-20260813-065157-ba95 (close the success half of the
+umr_tasks write-back gap, addendum to UMR-20260806-171945-5767) ---
+
+Every real tick now also calls run_owner_dispatch_reconciliation() (below),
+which wires in-process to the already-existing, already-tested, already-
+audited (PR #147) reconcile_owner_dispatch_status.py -- previously a real
+mechanical fixer that existed on disk with zero periodic caller
+(wiring_registry recorded cron_scheduled=false for it). Same --apply gate
+this script's own remediation already uses. See that function's own
+docstring for the full real-evidence basis and why this is deliberately a
+separate mechanism from, and never a loosening of, worker-exit-status-
+bridge.py's own intentionally-conservative restriction.
 """
 import argparse
 import datetime
@@ -129,6 +142,85 @@ def refresh_wiring_registry():
         return {"ok": True, "entity_count": summary.get("entity_count")}
     except Exception as e:
         print(f"WARNING: wiring_registry refresh failed (non-fatal): {e}", file=sys.stderr)
+        return {"ok": False, "error": str(e)}
+
+
+def _load_reconcile_owner_dispatch_status():
+    """Lazy, in-process import of reconcile_owner_dispatch_status.py -- same
+    importlib pattern _load_generate_wiring_registry() above already uses,
+    reused here for the same reason: this tick calls the real, already-
+    existing reconciler in-process instead of adding a new standalone cron
+    entry (the ~/.config/systemd/user/README.md STANDING RULE: a periodic
+    need whose cadence/purpose fits an existing unit goes in as a new step
+    inside that unit/script, not a 20th unit)."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location(
+        "reconcile_owner_dispatch_status", os.path.join(script_dir, "reconcile_owner_dispatch_status.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def run_owner_dispatch_reconciliation(apply_):
+    """UMR-20260813-065157-ba95 ("close the success half of the umr_tasks
+    write-back gap", addendum to UMR-20260806-171945-5767): real, ongoing
+    wiring for reconcile_owner_dispatch_status.py -- previously a real,
+    tested, already-audited (PR #147) mechanical reconciler that existed on
+    disk but was NEVER invoked by anything periodic (its own wiring_registry
+    row records cron_scheduled=false), so `status='running'` rows whose real
+    systemd unit had already exited (success OR failure) sat stuck forever
+    until someone remembered to run it by hand. Six real, live-verified
+    stuck rows on this exact box at the time this was written; two of them
+    (UMR-20260813-042145-7cc0, UMR-20260813-050029-ecba) were genuine
+    successes -- real MERGED PRs -- silently still reporting 'running'.
+
+    Deliberately does NOT touch worker-exit-status-bridge.py or loosen its
+    own, separate, intentional restriction (that hook never writes
+    status=completed from an ExecStopPost exit-code signal alone -- see its
+    own module docstring). This is a genuinely different, already-audited
+    evidence basis: a real `gh pr list`/`gh pr view` MERGED verdict matched
+    by branch name against this row's own task.yaml, cross-checked against
+    real `systemctl --user is-active` state -- never an exit code, never AI
+    narration. Every row with a real OPEN PR is deliberately left at
+    NEEDS_AI_JUDGMENT and never auto-terminalized (see classify_row()'s own
+    docstring) -- this call only ever applies the STALE_LABEL_TERMINAL
+    bucket's mechanical corrections (MERGED PR -> completed, CLOSED PR ->
+    failed, no PR ever opened -> killed), same as a manual `--apply` run.
+
+    Wired in-process (not a subprocess call) for the same reason
+    refresh_wiring_registry() above is in-process: one fewer subprocess
+    spawn per 10-minute tick, and a real Python exception here is caught
+    and reported the same fail-open way, never load-bearing for the rest of
+    this tick's own scan/remediate work. Every real DB write this reaches
+    still goes through reconcile_owner_dispatch_status.py's own
+    apply_correction() -> update_umr_task() path, completely unchanged by
+    being called from here instead of that script's own __main__."""
+    try:
+        mod = _load_reconcile_owner_dispatch_status()
+        conn = mod._sbr._connect()
+        try:
+            now = mod.datetime.now(mod.timezone.utc)
+            pr_cache = {}
+            rows = mod.load_rows(conn)
+            results = [mod.classify_row(r, now, pr_cache) for r in rows]
+            corrected = [r for r in results if r["bucket"] == "STALE_LABEL_TERMINAL"]
+            if apply_ and corrected:
+                with mod._sbr._write_lock():
+                    for ev in corrected:
+                        mod.apply_correction(conn, ev, dry_run=False)
+                    conn.commit()
+        finally:
+            conn.close()
+        counts = {}
+        for r in results:
+            counts[r["bucket"]] = counts.get(r["bucket"], 0) + 1
+        return {
+            "ok": True, "apply_mode": apply_, "examined": len(results), "counts": counts,
+            "corrected_umr_ids": [r["umr_id"] for r in corrected] if apply_ else [],
+            "would_correct_umr_ids": [r["umr_id"] for r in corrected] if not apply_ else [],
+        }
+    except Exception as e:
+        print(f"WARNING: owner_dispatch_gateway status reconciliation failed (non-fatal): {e}", file=sys.stderr)
         return {"ok": False, "error": str(e)}
 
 
@@ -836,6 +928,12 @@ def main():
 
     wiring_refresh = refresh_wiring_registry()
 
+    # UMR-20260813-065157-ba95 (close the success half of the umr_tasks
+    # write-back gap): same --apply gate this whole script already uses for
+    # its own mechanical fixes above -- a dry-run tick still classifies and
+    # reports real would-correct counts, only a real --apply tick writes.
+    owner_dispatch_reconciliation = run_owner_dispatch_reconciliation(args.apply)
+
     dispatch_core.record_tick(
         "status-remediation-tick", status="ok", dispatched_this_tick=0,
         extra={
@@ -843,6 +941,7 @@ def main():
             "drafted_pending_review_count": len(drafted_pending),
             "scan_errors": len(errors),
             "wiring_registry_refresh": wiring_refresh,
+            "owner_dispatch_reconciliation": owner_dispatch_reconciliation,
         },
     )
 
@@ -858,6 +957,7 @@ def main():
         "auto_dispatched_count": len(auto_dispatched),
         "drafted_pending_review_count": len(drafted_pending),
         "wiring_registry_refresh": wiring_refresh,
+        "owner_dispatch_reconciliation": owner_dispatch_reconciliation,
     }
     print(json.dumps(summary, indent=2))
     return 0

@@ -615,6 +615,23 @@ dispatch_gap() {
   rc=$?
   echo "$out" | sed 's/^/    /'
   if [ "$rc" -ne 0 ]; then
+    # Real fix (UMR-20260813-145511-5aca / UMR-20260813-170956-5385, second
+    # real defect): dispatch-owner-task.sh's own content-duplicate guard
+    # (superboss-register.py check-content-duplicate, 6h window) refuses a
+    # byte-identical prompt already logged -- live-reproduced on
+    # veridian-pm-sentinel-tick.service's own most recent failed runs. This
+    # is an expected, already-accounted-for condition (the same finding was
+    # already logged, just not by this tick), not a genuine dispatch
+    # failure -- treat it like CAP REACHED/is_in_flight above: skip quietly,
+    # let a later tick reconsider once the window rolls, and do NOT fail the
+    # whole tick over it. A tick that hits only this (or CAP REACHED) must
+    # still exit 0; every OTHER real dispatch-owner-task.sh failure still
+    # counts and still propagates non-zero (AUDIT-REJECT FIX #2, preserved
+    # below).
+    if printf '%s' "$out" | grep -q "REFUSED: an identical instruction was already logged"; then
+      echo "  SKIPPED $target_key: duplicate content already logged within dispatch-owner-task.sh's own 6h window -- not a tick failure (will be reconsidered next tick)"
+      return 0
+    fi
     echo "  DISPATCH FAILED for $target_key (dispatch-owner-task.sh exit $rc) -- see output above, no state recorded"
     # AUDIT-REJECT FIX #2: propagate real failure, do not swallow it.
     TICK_FAILURES=$((TICK_FAILURES + 1))
@@ -750,11 +767,31 @@ while IFS=$'\t' read -r umr_id unit; do
     continue
   fi
   # QUERY-ONCE-PER-TICK: one real systemctl call for BOTH ActiveState and
-  # Result (was two identical-unit calls, one per field) -- newline-joined
-  # output in the same order as the -p flags.
-  UNIT_STATE="$(systemctl --user show "$unit" -p ActiveState -p Result --value 2>/dev/null)"
-  ACTIVE_STATE="$(printf '%s\n' "$UNIT_STATE" | sed -n '1p')"
-  RESULT_STATE="$(printf '%s\n' "$UNIT_STATE" | sed -n '2p')"
+  # Result (was two identical-unit calls, one per field).
+  #
+  # Real fix (UMR-20260813-145511-5aca / UMR-20260813-170956-5385): this
+  # used to run with --value and assume systemd would always emit
+  # ActiveState before Result (positionally reading line 1 = ActiveState,
+  # line 2 = Result via `sed -n 1p`/`sed -n 2p`) -- nothing in systemctl's
+  # own contract guarantees `show -p X -p Y --value` preserves the -p flag
+  # order in its output. Live-reproduced proof this really happens: real
+  # tick log rows read "ActiveState=success Result=active" and
+  # "ActiveState=success Result=inactive" -- ActiveState can never
+  # legitimately be "success" (that's a Result value) and Result can never
+  # legitimately be "active"/"inactive" (those are ActiveState values), so
+  # those were really Result and ActiveState swapped by position. Because
+  # the guard below is `[ "$ACTIVE_STATE" != active ]`, a swapped read of a
+  # genuinely successful/active unit's real "ActiveState=active
+  # Result=success" landed as ACTIVE_STATE=success -- read as "not active"
+  # -- turning a live, healthy unit into a false MISMATCH/RCA dispatch.
+  #
+  # Fixed to be order-independent: drop --value (each line now comes back
+  # as `Key=Value`, not bare) and extract each field by its own key, never
+  # by output position. Same single systemctl call, same query-once
+  # optimization -- only the parse changed.
+  UNIT_STATE="$(systemctl --user show "$unit" -p ActiveState -p Result 2>/dev/null)"
+  ACTIVE_STATE="$(printf '%s\n' "$UNIT_STATE" | sed -n 's/^ActiveState=//p')"
+  RESULT_STATE="$(printf '%s\n' "$UNIT_STATE" | sed -n 's/^Result=//p')"
   if [ "$ACTIVE_STATE" != "active" ] && [ -n "$ACTIVE_STATE" ]; then
     echo "  MISMATCH: $umr_id status=running but unit $unit ActiveState=$ACTIVE_STATE Result=$RESULT_STATE -- real exit-write-back-bug candidate"
     JOURNAL_EXCERPT="$(journalctl --user -u "$unit" -n 5 --no-pager --output=cat 2>/dev/null | tr '\n' ' ' | head -c 500)"

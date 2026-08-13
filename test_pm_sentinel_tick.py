@@ -583,5 +583,217 @@ class PmSentinelTickDecideAndFixTest(unittest.TestCase):
         self.assertIn(self.UMR_B, reported_ids)
 
 
+def _fake_systemctl_journalctl_bin(tmpdir, unit_states):
+    """A real, throwaway `bin/` dir prepended to PATH containing fake
+    `systemctl` and `journalctl` executables -- proves Check 2b's own parse
+    of `systemctl --user show <unit> -p ActiveState -p Result` is genuinely
+    order-independent, which nothing about the real systemd IPC contract
+    guarantees (there is no live, deterministic way to force the real
+    systemd user manager to emit properties in a specific order on demand,
+    so this is the real, honest way to test both orderings).
+
+    `unit_states` maps a fake `*.service` unit name to the exact multi-line
+    `Key=Value` text that unit's fake `systemctl --user show -p ActiveState
+    -p Result` call should return -- callers control the real line order
+    directly to cover both the documented order and the swapped order.
+    """
+    bindir = os.path.join(tmpdir, "bin")
+    os.makedirs(bindir, exist_ok=True)
+
+    systemctl = os.path.join(bindir, "systemctl")
+    with open(systemctl, "w") as f:
+        f.write("#!/usr/bin/env bash\n")
+        f.write("unit=\"\"\n")
+        f.write('for a in "$@"; do case "$a" in *.service) unit="$a" ;; esac; done\n')
+        f.write("case \"$unit\" in\n")
+        for unit, text in unit_states.items():
+            escaped = text.replace("'", "'\\''")
+            f.write(f"  {unit}) printf '%s\\n' '{escaped}' ;;\n")
+        f.write("  *) exit 1 ;;\n")
+        f.write("esac\n")
+    os.chmod(systemctl, os.stat(systemctl).st_mode | stat.S_IEXEC)
+
+    journalctl = os.path.join(bindir, "journalctl")
+    with open(journalctl, "w") as f:
+        f.write("#!/usr/bin/env bash\necho 'fake journal excerpt for test'\n")
+    os.chmod(journalctl, os.stat(journalctl).st_mode | stat.S_IEXEC)
+
+    return bindir
+
+
+class PmSentinelTickRunningRowOrderIndependentParseTest(unittest.TestCase):
+    """Real regression test for UMR-20260813-145511-5aca / redispatch
+    UMR-20260813-170956-5385: Check 2b's real live systemctl output parse
+    used to assume `systemctl --user show <unit> -p ActiveState -p Result
+    --value` always emits ActiveState before Result -- nothing in
+    systemd's own contract guarantees that. Feeds BOTH a documented-order
+    and a swapped-order real `Key=Value` payload for a genuinely ACTIVE
+    unit and asserts neither is ever classified dead (false MISMATCH), and
+    that a genuinely dead unit is still correctly flagged regardless of
+    which order its properties come back in."""
+
+    def setUp(self):
+        self.UMR_NORMAL_ACTIVE = f"UMR-TESTFIX-20260101-000000-{uuid.uuid4().hex[:8]}"
+        self.UMR_SWAPPED_ACTIVE = f"UMR-TESTFIX-20260101-000000-{uuid.uuid4().hex[:8]}"
+        self.UMR_SWAPPED_DEAD = f"UMR-TESTFIX-20260101-000000-{uuid.uuid4().hex[:8]}"
+        self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_orderparse_test_")
+
+        self.copy_path = _seeded_copy(self.tmpdir, [
+            (self.UMR_NORMAL_ACTIVE, "test-seed-orderparse-normal-active", "running", ""),
+            (self.UMR_SWAPPED_ACTIVE, "test-seed-orderparse-swapped-active", "running", ""),
+            (self.UMR_SWAPPED_DEAD, "test-seed-orderparse-swapped-dead", "running", ""),
+        ])
+        conn = sqlite3.connect(self.copy_path)
+        conn.execute("UPDATE umr_tasks SET unit_name = 'normal-active.service' WHERE umr_id = ?",
+                     (self.UMR_NORMAL_ACTIVE,))
+        conn.execute("UPDATE umr_tasks SET unit_name = 'swapped-active.service' WHERE umr_id = ?",
+                     (self.UMR_SWAPPED_ACTIVE,))
+        conn.execute("UPDATE umr_tasks SET unit_name = 'swapped-dead.service' WHERE umr_id = ?",
+                     (self.UMR_SWAPPED_DEAD,))
+        conn.commit()
+        conn.close()
+
+        bindir = _fake_systemctl_journalctl_bin(self.tmpdir, {
+            # Documented -p flag order, genuinely active: must never MISMATCH.
+            "normal-active.service": "ActiveState=active\nResult=success",
+            # SWAPPED order, genuinely active (the real live-reproduced bug
+            # case): must never MISMATCH either -- this is the real
+            # regression case for the false RCA dispatches.
+            "swapped-active.service": "Result=success\nActiveState=active",
+            # SWAPPED order, genuinely dead: must still MISMATCH -- proves
+            # the fix did not also break real detection.
+            "swapped-dead.service": "Result=success\nActiveState=inactive",
+        })
+
+        self.state_file = os.path.join(self.tmpdir, "pm-sentinel-inflight.json")
+        self.report_file = os.path.join(self.tmpdir, "pm-sentinel-tick-report.jsonl")
+        self.metrics_file = os.path.join(self.tmpdir, "pm-sentinel-tick.prom")
+        self.env = dict(os.environ)
+        self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
+        self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
+        self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
+        self.env["PM_SENTINEL_REPORT_FILE"] = self.report_file
+        self.env["PM_SENTINEL_METRICS_FILE"] = self.metrics_file
+        self.env["DISPATCH_OWNER_TASK_SH"] = REAL_DISPATCH_OWNER_TASK_SH
+        self.env["VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS"] = ""
+        self.env["DISPATCH_TMUX_SESSION"] = "pm-sentinel-test-throwaway-session"
+        # Real fake systemctl/journalctl ahead of the real ones on PATH --
+        # every OTHER real call this tick makes (resource_governor.py,
+        # superboss-register.py, dispatch-owner-task.sh, git, gh, python3)
+        # is unaffected, none of those are named systemctl/journalctl.
+        self.env["PATH"] = bindir + os.pathsep + self.env.get("PATH", "")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run_tick(self):
+        return subprocess.run(
+            [SENTINEL_SH], cwd=HERE, env=self.env,
+            capture_output=True, text=True, timeout=90,
+        )
+
+    def test_active_unit_never_classified_dead_regardless_of_property_order(self):
+        result = self._run_tick()
+
+        # Neither genuinely-active unit (documented order or swapped order)
+        # is ever reported as a MISMATCH -- the real false-positive this bug
+        # caused live.
+        self.assertNotIn(f"MISMATCH: {self.UMR_NORMAL_ACTIVE}", result.stdout)
+        self.assertNotIn(f"MISMATCH: {self.UMR_SWAPPED_ACTIVE}", result.stdout)
+        self.assertNotIn(f"DISPATCHING for rca:{self.UMR_NORMAL_ACTIVE}", result.stdout)
+        self.assertNotIn(f"DISPATCHING for rca:{self.UMR_SWAPPED_ACTIVE}", result.stdout)
+
+        # The genuinely dead unit (also swapped order) is still correctly
+        # flagged and RCA'd -- the fix did not also break real detection.
+        self.assertIn(
+            f"MISMATCH: {self.UMR_SWAPPED_DEAD} status=running but unit "
+            "swapped-dead.service ActiveState=inactive Result=success",
+            result.stdout,
+        )
+        self.assertIn(f"DISPATCHING for rca:{self.UMR_SWAPPED_DEAD}", result.stdout)
+
+        # Only the genuinely-dead row produced a new dispatched task.
+        rows = _umr_tasks_rows(self.copy_path)
+        seed_ids = {self.UMR_NORMAL_ACTIVE, self.UMR_SWAPPED_ACTIVE, self.UMR_SWAPPED_DEAD}
+        new_rows = [r for r in rows if r["umr_id"] not in seed_ids]
+        self.assertEqual(len(new_rows), 1, msg=rows)
+
+
+class PmSentinelTickDuplicateContentRefusalDoesNotFailTickTest(unittest.TestCase):
+    """Real regression test for UMR-20260813-145511-5aca / redispatch
+    UMR-20260813-170956-5385's second real defect:
+    veridian-pm-sentinel-tick.service really exited 1 on its two most
+    recent live runs. Live root cause traced to dispatch_gap() counting
+    dispatch-owner-task.sh's own content-duplicate refusal (an identical
+    prompt already logged within its real 6h window -- an expected,
+    already-accounted-for condition, not a genuine dispatch failure) as a
+    TICK_FAILURES failure like any other. Proves a tick that hits ONLY that
+    condition still exits 0, while a genuinely different real
+    dispatch-owner-task.sh failure (AUDIT-REJECT FIX #2) still propagates
+    non-zero -- see PmSentinelTickDispatchFailurePropagatesTest above,
+    intentionally left unchanged."""
+
+    def setUp(self):
+        self.TEST_UMR_ID = f"UMR-TESTFIX-20260101-000000-{uuid.uuid4().hex[:8]}"
+        self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_duprefusal_test_")
+        self.copy_path = _seeded_copy(self.tmpdir, [
+            (self.TEST_UMR_ID, "test-seed-duprefusal-task-0001", "killed",
+             "test-seeded: duplicate-content-refusal-does-not-fail-tick regression case"),
+        ])
+        # A real, throwaway stand-in dispatch-owner-task.sh that always
+        # refuses exactly the way the real one does on a genuine content
+        # duplicate (same stdout shape, same exit 1) -- proves this exact
+        # refusal text is what the fix keys off, without depending on a
+        # real prior instruction actually being logged within 6h.
+        self.fake_dispatch = os.path.join(self.tmpdir, "fake-dispatch-owner-task.sh")
+        with open(self.fake_dispatch, "w") as f:
+            f.write(
+                "#!/usr/bin/env bash\n"
+                "echo '{\"content_duplicate_found\": true, \"duplicate_instruction_id\": \"INS-test-0001\"}'\n"
+                "echo \"REFUSED: an identical instruction was already logged within the last 6 hours "
+                "(see duplicate_instruction_id above). Re-run with a genuinely different prompt if this "
+                "repeat is intentional.\" >&2\n"
+                "exit 1\n"
+            )
+        os.chmod(self.fake_dispatch, os.stat(self.fake_dispatch).st_mode | stat.S_IEXEC)
+
+        self.state_file = os.path.join(self.tmpdir, "pm-sentinel-inflight.json")
+        self.metrics_file = os.path.join(self.tmpdir, "pm-sentinel-tick.prom")
+        self.env = dict(os.environ)
+        self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
+        self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
+        self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
+        self.env["PM_SENTINEL_REPORT_FILE"] = os.path.join(self.tmpdir, "report.jsonl")
+        self.env["PM_SENTINEL_METRICS_FILE"] = self.metrics_file
+        self.env["DISPATCH_OWNER_TASK_SH"] = self.fake_dispatch
+        self.env["VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS"] = ""
+        self.env["DISPATCH_TMUX_SESSION"] = "pm-sentinel-test-throwaway-session"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run_tick(self):
+        return subprocess.run(
+            [SENTINEL_SH], cwd=HERE, env=self.env,
+            capture_output=True, text=True, timeout=90,
+        )
+
+    def test_duplicate_content_refusal_alone_exits_zero(self):
+        result = self._run_tick()
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+        self.assertIn(f"SKIPPED rca:{self.TEST_UMR_ID}: duplicate content already logged", result.stdout)
+        self.assertNotIn("DISPATCH FAILED for rca:", result.stdout)
+
+        with open(self.metrics_file) as f:
+            metrics_txt = f.read()
+        self.assertIn("pm_sentinel_tick_failure_count 0", metrics_txt)
+
+        # Not recorded in-flight (no real dispatched UMR exists for it) --
+        # a later tick, after the real 6h window rolls, gets to reconsider.
+        with open(self.state_file) as f:
+            state = json.load(f)
+        self.assertNotIn(f"rca:{self.TEST_UMR_ID}", state)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1253,13 +1253,24 @@ def cmd_check_content_duplicate(args):
 # filter, newest first -- the exact shape this incident's own fix
 # requirement specifies), and for every row still queued/running within the
 # last `window_hours` (default 4h), extracts the same class of "target
-# identifier" (PR number+repo, exact file path, or exact script name) from
-# ITS OWN real prompt/title text and checks for an exact intersection with
-# the target identifiers of the dispatch about to happen. No UMR-chain
-# matching involved -- this is deliberately orthogonal to that (and to
-# check_content_duplicate()'s exact-hash match, and to --search's fuzzy
-# FTS5 match): three independent, complementary dedup layers, not one
-# widened to try to cover all three cases.
+# identifier" (UMR id, PR number+repo, exact file path, or exact script
+# name) from ITS OWN real prompt/title text and checks for an exact
+# intersection with the target identifiers of the dispatch about to happen.
+# This is deliberately orthogonal to check_content_duplicate()'s exact-hash
+# match and to --search's fuzzy FTS5 match: three independent, complementary
+# dedup layers, not one widened to try to cover all three cases.
+#
+# UMR-20260813-220216-2e2b real addendum: the UMR-id extraction above was
+# added after this dedup layer itself missed two more real duplicate-spend
+# incidents on 2026-08-13 that named their target purely by UMR id (an
+# RCA "for" a UMR, not a PR/file/script) -- see extract_target_identifiers()'s
+# own docstring for the concrete evidence. This is still target-identifier
+# matching, not governing-chain matching: a UMR id only counts as a target
+# identifier when it is what the dispatch is ABOUT (e.g. "RCA: UMR-X
+# killed"), which is exactly what a plain substring match against title+
+# prompt text captures -- it says nothing about, and is not confused by, an
+# unrelated "addendum to UMR-Y" governing-chain citation elsewhere in the
+# same text meaning something different.
 # ---------------------------------------------------------------------------
 
 _TARGET_ID_PR_EXPLICIT_REPO_RE = re.compile(r'\b([A-Za-z0-9_.-]+)#(\d+)\b')
@@ -1267,23 +1278,44 @@ _TARGET_ID_PR_BARE_RE = re.compile(r'\bPR\s*#\s*(\d+)\b', re.IGNORECASE)
 _TARGET_ID_FILE_PATH_RE = re.compile(
     r'\b[A-Za-z0-9_][\w./-]*/[\w.-]+\.(?:py|sh|md|yaml|yml|json|ts|tsx|js|jsx|txt|sql|cfg|ini|toml)\b')
 _TARGET_ID_SCRIPT_NAME_RE = re.compile(r'(?<![\w/.-])([A-Za-z0-9_-]+\.(?:py|sh))\b')
+# Reuse the same canonical UMR-id pattern _extract_umr_ids() (OCID canonical
+# resolution, above) already matches PR bodies against -- one real regex for
+# "what does a UMR id look like", not two independently-drifting ones.
 
 
 def extract_target_identifiers(text, default_repo=None):
     """Real, deterministic (regex, no fuzziness) extraction of "target
-    identifiers" from free text -- PR number+repo, exact file paths, and
-    exact script names -- see the module comment above this function for
-    why this exists (the exact recent-incident dedup gap --search /
-    check_content_duplicate() both missed). Returns a sorted list of
-    normalized identifier strings, e.g. ["pr:claude-control#131",
-    "path:scripts/resource_governor.py"]. Deliberately conservative: a bare
-    "PR #131" with no repo anywhere (neither an explicit "<repo>#131" in
-    the text nor a `default_repo` passed in) is skipped rather than
-    guessed at -- a repo-less PR number is not a real target identifier on
-    its own, and the caller always has (and must pass) its own real target
-    repo."""
+    identifiers" from free text -- UMR ids, PR number+repo, exact file
+    paths, and exact script names -- see the module comment above this
+    function for why this exists (the exact recent-incident dedup gap
+    --search / check_content_duplicate() both missed). Returns a sorted
+    list of normalized identifier strings, e.g. ["pr:claude-control#131",
+    "path:scripts/resource_governor.py", "umr:UMR-20260807-151622-15cd"].
+    Deliberately conservative: a bare "PR #131" with no repo anywhere
+    (neither an explicit "<repo>#131" in the text nor a `default_repo`
+    passed in) is skipped rather than guessed at -- a repo-less PR number
+    is not a real target identifier on its own, and the caller always has
+    (and must pass) its own real target repo.
+
+    UMR-20260813-220216-2e2b real fix: the original version of this
+    function only extracted PR numbers, file paths, and script names --
+    it never recognized a UMR id itself as a target identifier. That gap
+    is exactly what let two real duplicate-spend incidents slip past this
+    same dedup layer on 2026-08-13: UMR-20260807-151622-15cd got a
+    "RCA: UMR-20260807-151622-15cd killed" dispatch TWICE (UMR-...-4bcc at
+    20:18, UMR-...-7615 at 21:17, worded differently enough that
+    check_content_duplicate()'s exact-hash match also missed it), and
+    UMR-20260813-195852-aa85 got an RCA dispatched (UMR-...-b0cc) for a
+    target whose real fix had already merged as PR #323. Both incidents'
+    dispatch text names the target purely by UMR id, with no PR number, no
+    file path -- extract_target_identifiers() returned an empty set for
+    them and find_target_identifier_duplicate() never even got a chance to
+    compare. Extracting `umr:<id>` here closes that."""
     ids = set()
     text = text or ""
+
+    for m in _UMR_ID_RE.finditer(text):
+        ids.add(f"umr:{m.group(0)}")
 
     for m in _TARGET_ID_PR_EXPLICIT_REPO_RE.finditer(text):
         repo, num = m.group(1).lower(), m.group(2)

@@ -10,9 +10,19 @@ the exact PR text returned nothing (FTS5 is fuzzy and missed an exact recent
 duplicate), so both duplicate pairs ran concurrently against the same PR
 branches.
 
+UMR-20260813-220216-2e2b real addendum: extract_target_identifiers() had no
+UMR-id pattern at all, which is exactly what let two more real
+duplicate-spend incidents slip past this same dedup layer on 2026-08-13 --
+"RCA: UMR-20260807-151622-15cd killed" dispatched twice an hour apart
+(UMR-...-4bcc, UMR-...-7615), and an RCA dispatched for
+UMR-20260813-195852-aa85 (UMR-...-b0cc) after its real fix had already
+merged as veridian-scripts#323. Both name their target purely by UMR id, no
+PR/file/script involved. See the real-incident fixtures below (verbatim
+title/prompt text from superboss-register.sqlite's umr_tasks rows).
+
 Covers:
   1. extract_target_identifiers()/find_target_identifier_duplicate() as pure
-     functions -- PR number+repo, exact file path, exact script name.
+     functions -- UMR id, PR number+repo, exact file path, exact script name.
   2. superboss-register.py's check-target-identifier-duplicate CLI, against a
      real, isolated, temp-file SQLite DB seeded with the real schema.
   3. dispatch-owner-task.sh end-to-end, real code path, real subprocess: the
@@ -21,6 +31,10 @@ Covers:
      existing check-content-duplicate (byte-identical hash) or --search
      (fuzzy FTS5) mechanisms alone -- this is the real proof the new,
      deterministic layer is what closes the gap.
+  4. Real-incident regression fixtures for the two live UMR-id-only
+     duplicates above (the 15cd duplicate-RCA pair, and the aa85
+     RCA-against-an-already-merged-fix), plus a genuinely-new-target
+     negative control.
 """
 import importlib.util
 import json
@@ -117,6 +131,21 @@ def test_extract_target_identifiers_file_path_and_script_name():
     assert "script:pm-sentinel-tick.sh" in ids
 
 
+def test_extract_target_identifiers_umr_id():
+    """UMR-20260813-220216-2e2b real fix: a dispatch that names its target
+    purely by UMR id (e.g. "RCA: UMR-X killed") must yield a target
+    identifier -- the original version of this function had no UMR-id
+    pattern at all, which is exactly what let the two real duplicate-spend
+    incidents below (15cd, aa85) slip past this dedup layer."""
+    sbr = _load_sbr()
+    ids = sbr.extract_target_identifiers(
+        "RCA: UMR-20260807-151622-15cd killed -- read the real reason first")
+    assert ids == ["umr:UMR-20260807-151622-15cd"]
+    # No default_repo needed -- unlike a bare PR number, a UMR id is globally
+    # unambiguous on its own.
+    assert sbr.extract_target_identifiers("no umr id in this text") == []
+
+
 def test_find_target_identifier_duplicate_pure_function(scratch_db):
     sbr = _seed_full_schema(scratch_db)
     _insert_row(scratch_db, "UMR-TEST-10c3-a248", status="running",
@@ -183,6 +212,162 @@ def test_check_target_identifier_duplicate_cli(scratch_db):
     ], scratch_db)
     assert out_clean.returncode == 0, out_clean.stderr
     assert json.loads(out_clean.stdout)["target_identifier_duplicate_found"] is False
+
+
+# --- real-incident fixtures (UMR-20260813-220216-2e2b) --------------------
+#
+# Real title/prompt text pulled verbatim from superboss-register.sqlite's
+# umr_tasks rows for the two live duplicate-spend incidents that motivated
+# adding UMR-id extraction (see extract_target_identifiers()'s own
+# docstring). Both real duplicate dispatches actually happened -- these
+# fixtures reproduce the exact pre-dispatch decision point (the earlier row
+# still non-terminal) so the check can be proven to now refuse the second
+# one.
+
+REAL_15CD_FIRST_TITLE = "RCA: UMR-20260807-151622-15cd killed"
+REAL_15CD_FIRST_PROMPT = (
+    "GOVERNING CHAIN: this task's own dispatching UMR (PM-sentinel tick). "
+    "REAL GAP FOUND: resource_governor.py --query-umr --umr-id "
+    "UMR-20260807-151622-15cd shows status=killed, real recorded reason: "
+    "\"queued\" (unit_name=veridian-worker@task-20260807-152601-stop-work-"
+    "order--batch-3--land-batch-2-s.service). This needs a real RCA: read "
+    "the row's full real outputs_json/reason (query resource_governor.py "
+    "--query-umr --umr-id UMR-20260807-151622-15cd yourself first, do not "
+    "trust this summary alone), determine the real root cause, and either "
+    "fix + redispatch the real remaining scope, or record a real, honest "
+    "terminal outcome via superboss-register.py mark-umr-terminal citing "
+    "real evidence. Do not fabricate completion."
+)
+# Real second dispatch, UMR-20260813-211758-7615, ~59 minutes later -- same
+# target, deliberately different wording (a different "real recorded
+# reason" quoted) so a byte-identical content hash can never catch it.
+REAL_15CD_SECOND_TITLE = "RCA: UMR-20260807-151622-15cd killed"
+REAL_15CD_SECOND_PROMPT = (
+    "GOVERNING CHAIN: this task's own dispatching UMR (PM-sentinel tick). "
+    "REAL GAP FOUND: resource_governor.py --query-umr --umr-id "
+    "UMR-20260807-151622-15cd shows status=killed, real recorded reason: "
+    "\"real systemd state 'inactive', no PR was ever opened, real task.yaml "
+    "status='blocked' -- no live process and no real deliverable; "
+    "mechanically correctable to killed (orphaned dispatch, never produced "
+    "a real artifact).\" (unit_name=veridian-worker@task-20260807-152601-"
+    "stop-work-order--batch-3--land-batch-2-s.service). This needs a real "
+    "RCA: read the row's full real outputs_json/reason (query "
+    "resource_governor.py --query-umr --umr-id UMR-20260807-151622-15cd "
+    "yourself first, do not trust this summary alone), determine the real "
+    "root cause, and either fix + redispatch the real remaining scope, or "
+    "record a real, honest terminal outcome via superboss-register.py "
+    "mark-umr-terminal citing real evidence. Do not fabricate completion."
+)
+
+# Real UMR-20260813-205141-b6fa: dispatched to Tier-1-audit-then-merge the
+# real fix for aa85 (PR #323). Still non-terminal is exactly the state it
+# was actually in when the real duplicate below fired.
+REAL_AA85_MERGE_TASK_TITLE = (
+    "Tier-1 independent audit then merge veridian-scripts PR 323 at head "
+    "84ca4b43 - real code, MERGEABLE CLEAN, zero audit comments"
+)
+REAL_AA85_MERGE_TASK_PROMPT = (
+    "GOVERNING CHAIN: PM-desktop-sentinel tick 2026-08-13T20:44Z. Source "
+    "UMR: UMR-20260813-195852-aa85 (status killed, but returncode=0 and it "
+    "DID produce real work - PR 323 exists with real code, a false-kill "
+    "matching the known supervisor self-block pattern). PR 323 in "
+    "FChecklist/veridian-scripts, title fix(pm-sentinel-tick): Check 0, "
+    "live deploy drift self-check."
+)
+# Real UMR-20260813-211747-b0cc: an RCA dispatched for aa85 even though
+# aa85's real fix had already merged as PR #323 (i.e. the row above already
+# covers this exact target).
+REAL_AA85_RCA_TITLE = "RCA: UMR-20260813-195852-aa85 killed"
+REAL_AA85_RCA_PROMPT = (
+    "GOVERNING CHAIN: this task's own dispatching UMR (PM-sentinel tick). "
+    "REAL GAP FOUND: resource_governor.py --query-umr --umr-id "
+    "UMR-20260813-195852-aa85 shows status=killed, real recorded reason: "
+    "\"real systemd state 'inactive', no PR was ever opened, real "
+    "task.yaml status='pending_review' -- no live process and no real "
+    "deliverable; mechanically correctable to killed (orphaned dispatch, "
+    "never produced a real artifact).\" (unit_name=veridian-worker@task-"
+    "20260813-195921-real-pm-sentinel-tick-sh-key-based-syste.service). "
+    "This needs a real RCA: read the row's full real outputs_json/reason "
+    "first, determine the real root cause, and either fix + redispatch the "
+    "real remaining scope, or record a real, honest terminal outcome via "
+    "superboss-register.py mark-umr-terminal citing real evidence."
+)
+
+
+def test_real_incident_duplicate_15cd_rca_blocked(scratch_db):
+    """Real incident: "RCA: UMR-20260807-151622-15cd killed" was dispatched
+    TWICE, an hour apart (UMR-20260813-201823-4bcc, then
+    UMR-20260813-211758-7615), each spawning a full paid AI session and a
+    no-op branch. First, prove the existing exact-hash content-duplicate
+    check would NOT have caught it (the "real recorded reason" quoted
+    differs between the two, so the normalized text hashes differ) --
+    then prove the new UMR-id-aware target-identifier check does."""
+    sbr = _seed_full_schema(scratch_db)
+    assert (sbr._content_hash_for_text(REAL_15CD_FIRST_PROMPT)
+            != sbr._content_hash_for_text(REAL_15CD_SECOND_PROMPT))
+
+    _insert_row(scratch_db, "UMR-20260813-201823-4bcc", status="running",
+                title=REAL_15CD_FIRST_TITLE, prompt=REAL_15CD_FIRST_PROMPT,
+                repo="veridian-scripts", hours_ago=59 / 60)
+
+    conn = sqlite3.connect(scratch_db)
+    conn.row_factory = sqlite3.Row
+    sbr._ensure_umr_table(conn)
+    dup = sbr.find_target_identifier_duplicate(
+        conn, REAL_15CD_SECOND_TITLE, REAL_15CD_SECOND_PROMPT,
+        repo="veridian-scripts", window_hours=4, limit=30,
+    )
+    conn.close()
+    assert dup is not None
+    assert dup["umr_id"] == "UMR-20260813-201823-4bcc"
+
+
+def test_real_incident_aa85_rca_against_already_merged_fix_blocked(scratch_db):
+    """Real incident: an RCA was dispatched for UMR-20260813-195852-aa85
+    (UMR-20260813-211747-b0cc) even though aa85's real fix had already
+    merged as veridian-scripts#323 -- a still-non-terminal Tier-1-audit-and-
+    merge row for that exact same UMR id (UMR-20260813-205141-b6fa) already
+    covered it. The RCA never needed to happen."""
+    sbr = _seed_full_schema(scratch_db)
+    _insert_row(scratch_db, "UMR-20260813-205141-b6fa", status="running",
+                title=REAL_AA85_MERGE_TASK_TITLE, prompt=REAL_AA85_MERGE_TASK_PROMPT,
+                repo="claude-control", hours_ago=26 / 60)
+
+    conn = sqlite3.connect(scratch_db)
+    conn.row_factory = sqlite3.Row
+    sbr._ensure_umr_table(conn)
+    dup = sbr.find_target_identifier_duplicate(
+        conn, REAL_AA85_RCA_TITLE, REAL_AA85_RCA_PROMPT,
+        repo="claude-control", window_hours=4, limit=30,
+    )
+    conn.close()
+    assert dup is not None
+    assert dup["umr_id"] == "UMR-20260813-205141-b6fa"
+
+
+def test_real_incident_genuinely_new_target_not_blocked(scratch_db):
+    """Negative control: neither real fixture row above shares a target
+    identifier with a genuinely new, unrelated UMR -- a real new target must
+    still pass."""
+    sbr = _seed_full_schema(scratch_db)
+    _insert_row(scratch_db, "UMR-20260813-201823-4bcc", status="running",
+                title=REAL_15CD_FIRST_TITLE, prompt=REAL_15CD_FIRST_PROMPT,
+                repo="veridian-scripts", hours_ago=0.5)
+    _insert_row(scratch_db, "UMR-20260813-205141-b6fa", status="running",
+                title=REAL_AA85_MERGE_TASK_TITLE, prompt=REAL_AA85_MERGE_TASK_PROMPT,
+                repo="claude-control", hours_ago=0.5)
+
+    conn = sqlite3.connect(scratch_db)
+    conn.row_factory = sqlite3.Row
+    sbr._ensure_umr_table(conn)
+    dup = sbr.find_target_identifier_duplicate(
+        conn, "RCA: UMR-20260813-220512-9f01 killed",
+        "GOVERNING CHAIN: unrelated real gap, a genuinely new target that "
+        "has never been dispatched before.",
+        repo="claude-control", window_hours=4, limit=30,
+    )
+    conn.close()
+    assert dup is None
 
 
 # --- dispatch-owner-task.sh end-to-end, real code path, real incident ----

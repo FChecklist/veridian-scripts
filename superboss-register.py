@@ -3799,7 +3799,13 @@ DEFAULT_OCID_RESOLVER_REPOS = ("compliance-tracker", "veridian-scripts", "projex
 
 DEFAULT_OCID_RESOLVER_REPO_LOCAL_PATHS = {
     "compliance-tracker": "/opt/veridian/repos/compliance-tracker",
-    "veridian-scripts": "/opt/veridian/repos/veridian-scripts",
+    # 2026-08-13 (task-20260813-103224, UMR-20260813-101142-5d24): points at
+    # the real live checkout, not /opt/veridian/repos/veridian-scripts --
+    # that second checkout is orphaned (nothing has pulled it since
+    # 2026-08-06, confirmed 200 commits behind origin/main). /opt/veridian/scripts
+    # IS a real veridian-scripts checkout, kept current every 2h by
+    # sync-repos.sh's direct `git pull --ff-only`.
+    "veridian-scripts": "/opt/veridian/scripts",
     "projexa": "/opt/veridian/repos/projexa",
 }
 
@@ -8733,7 +8739,22 @@ def _umr_genuinely_completed(conn, umr_id, repos_root="/opt/veridian/repos"):
     file_path = outputs.get("file_path")
     commit_sha = outputs.get("commit_sha")
     repo = outputs.get("repo")
-    repo_root = os.path.join(repos_root, repo) if repo else None
+    if repo == "veridian-scripts":
+        # 2026-08-13 (task-20260813-103224, UMR-20260813-101142-5d24):
+        # veridian-scripts is special-cased to the real live checkout
+        # (/opt/veridian/scripts, kept current every 2h by sync-repos.sh's
+        # direct `git pull --ff-only`) rather than the generic
+        # repos_root-join, which would resolve to
+        # /opt/veridian/repos/veridian-scripts -- an orphaned second
+        # checkout, 200 commits behind as of this fix, nothing has pulled it
+        # since 2026-08-06. Not a prior correctness bug (both
+        # _umr_terminal_commit_exists / _is_umr_terminal_commit_ancestor_of_main
+        # do a real `git fetch origin` before checking, in either checkout),
+        # but pointing this at the real live tree is the honest, current
+        # answer to "what does this repo mean on this box" going forward.
+        repo_root = "/opt/veridian/scripts"
+    else:
+        repo_root = os.path.join(repos_root, repo) if repo else None
     allowed, refusal_reason = validate_umr_terminal_completion_evidence(
         status="completed", file_path=file_path, commit_sha=commit_sha, repo_root=repo_root,
     )

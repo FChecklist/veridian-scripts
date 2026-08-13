@@ -32,8 +32,24 @@ cd /opt/veridian/scripts
 if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "SKIPPED: uncommitted local changes present"
 else
+  # 2026-08-13 (task-20260813-103224, UMR-20260813-101142-5d24): report
+  # precisely which live files a real pull changed -- "OK: <sha>" alone told
+  # you HEAD moved but never what actually landed on disk, which is exactly
+  # the fact a PM tier needs to certify INTEGRATED as real, not assumed.
+  PRE_SHA="$(git rev-parse HEAD)"
   git fetch --quiet origin
-  git pull --ff-only --quiet && echo "OK: $(git rev-parse --short HEAD)" || echo "FAILED (non-fast-forward or network issue)"
+  if git pull --ff-only --quiet; then
+    POST_SHA="$(git rev-parse HEAD)"
+    echo "OK: $POST_SHA"
+    if [ "$PRE_SHA" != "$POST_SHA" ]; then
+      echo "CHANGED FILES ($PRE_SHA..$POST_SHA):"
+      git diff --name-status "$PRE_SHA" "$POST_SHA"
+    else
+      echo "CHANGED FILES: none (already up to date)"
+    fi
+  else
+    echo "FAILED (non-fast-forward or network issue)"
+  fi
 fi
 
 # 2026-08-02 (PM decision UMR-20260802-083104-5987, MASTER_INDEX.yaml

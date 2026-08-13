@@ -150,3 +150,70 @@ fix in this PR.
       separately per superboss_gateway's own capability record scope_note)
       -- the live recurrence noted above is a real, current instance of
       that exact backlog item.
+
+## Addendum: AUDIT:FAIL remediation (UMR-20260813-225704-6195, 2026-08-13)
+Real posted AUDIT:FAIL on this PR (comment id 5283739805, 2026-08-13T16:50Z,
+head 34bb70b61ac7456a20845d50df623ce02c87b628). Full finding list from that
+comment:
+1. CLI resource guard (`install_cli_resource_guard()`) verified sound by
+   the auditor -- no action needed, no fabrication found.
+2. Composite index + light-column-select + `MAX_UMR_QUERY_LIMIT` clamp
+   mechanism verified sound by the auditor -- no action needed.
+3. **Real regression** (the only actionable finding): `_ensure_umr_table()`'s
+   new `index_migrated` fast-path-gate condition causes any pre-existing
+   `umr_tasks` table that satisfies the OLD gate but lacks the new index to
+   fall through to the destructive slow path, which assumes
+   `CREATE TABLE IF NOT EXISTS` fully creates the schema on an
+   already-existing table (it's a no-op) and then unconditionally runs
+   `CREATE INDEX ... ON umr_tasks(tier)`, crashing with
+   `sqlite3.OperationalError: no such column: tier` against any table that
+   predates the base schema. Independently reproduced by the auditor via
+   `test_full_server_file_registration.py` (19/19 broken: 2 failed, 17
+   errors at the audited head).
+
+### Completed (this addendum)
+- [x] Read the full posted AUDIT:FAIL comment via
+      `gh api repos/FChecklist/veridian-scripts/issues/308/comments` and
+      enumerated all 3 findings above (2 sound, 1 real regression).
+- [x] Fixed finding 3 with a real code change in `superboss-register.py`'s
+      `_ensure_umr_table()`: when the legacy gate is satisfied but the new
+      index is missing, add ONLY that index directly (idempotent/additive,
+      same shape as every other `_migrate_umr_*` function), guarded on
+      `ts_submitted` actually existing on the table -- never fall through
+      to the full slow path. Every real production `umr_tasks` table has
+      had `ts_submitted` since its original `CREATE TABLE`, so this still
+      backfills the index onto every real already-migrated live DB; it
+      just no longer crashes tables that don't look like a real production
+      table (e.g. the test stub).
+- [x] Verified the exact regression the auditor found is gone:
+      `VERIDIAN_SCRIPTS_DIR=<fresh clone> python3 -m pytest
+      test_full_server_file_registration.py -q` -> **19 passed** (real
+      exit code 0; was 2 failed/17 errors at the audited head).
+- [x] Added `tests/test_query_umr_limit_clamp_and_ensure_table_regression.py`
+      with 2 real tests, both run and passing (real exit code 0):
+      - `test_ensure_umr_table_legacy_gate_without_new_index_does_not_crash`:
+        direct regression test for the exact crash above, against the same
+        minimal legacy-shaped stub schema.
+      - `test_query_umr_tasks_limit_is_hard_clamped_regardless_of_caller_limit`:
+        seeds `MAX_UMR_QUERY_LIMIT + 5` real rows and proves the returned
+        row count is clamped to exactly `MAX_UMR_QUERY_LIMIT`, both at the
+        `query_umr_tasks()` function level and through the real
+        `resource_governor.py --query-umr --limit 999999` CLI subprocess.
+- [x] Ran the full existing suite (`VERIDIAN_SCRIPTS_DIR=<fresh clone>
+      python3 -m pytest -q`) against the patched code: **1170 passed, 14
+      failed, 0 errors** (real exit code from pytest recorded; command
+      output captured). The 17 errors + the `test_full_server_file_registration.py`
+      failures the auditor found are gone. Remaining 14 failures are
+      environmental/pre-existing (systemd-timer-outside-real-login-session,
+      live `deploy-live-scripts.sh` absence in a clean clone, real-time
+      `running_worker_count`/swap-state-dependent capacity checks) -- same
+      class the auditor's own run already attributed to environment, not
+      this diff; not silently asserted away, see the full pytest log
+      captured during this task for the exact failing test names.
+- [x] Pushed the fix commit (`75c12f2`) to
+      `worker/task-20260813-145820-guard-register-cli-invocations--one-quer`.
+- [ ] Merge/rebase `origin/main` into this branch to clear
+      `mergeable=CONFLICTING`/`mergeStateStatus=DIRTY`.
+- [ ] Post a fresh AUDIT comment naming the new head SHA.
+- [ ] Merge the PR once re-audit is PASS and `gh pr view` reports
+      `MERGEABLE`/`CLEAN`.

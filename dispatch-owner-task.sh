@@ -7,8 +7,8 @@
 # the live interactive tmux session in the SAME call -- there is no separate
 # "raw tmux send-keys" step left to accidentally use instead of this script.
 # Every call either returns a real umr_id (and relays it), or refuses with a
-# clear reason (duplicate content, or resource_governor.py rejection) -- it
-# never silently does nothing.
+# clear reason (duplicate content, duplicate target identifier, or
+# resource_governor.py rejection) -- it never silently does nothing.
 #
 # Usage: dispatch-owner-task.sh "<short title>" "<full prompt text>" [tier] [medium] [repo] [--no-relay]
 #   tier       - resource_governor.py tier, 0 (highest) .. 4 (lowest); default 2
@@ -118,6 +118,35 @@ DUP_FOUND=$(echo "$DUP_JSON" | python3 -c "import json,sys; print(json.load(sys.
 if [ "$DUP_FOUND" = "True" ]; then
   echo "$DUP_JSON"
   echo "REFUSED: an identical instruction was already logged within the last 6 hours (see duplicate_instruction_id above). Re-run with a genuinely different prompt if this repeat is intentional." >&2
+  exit 1
+fi
+
+# 1b. Addendum to UMR-20260813-102459-10c3 (itself addendum to
+#     UMR-20260813-084321-2962 / P1 UMR-20260806-171945-5767): a real,
+#     deterministic (regex, not fuzzy, not hash-exact) check that a
+#     queued/running umr_tasks row from the last 4h does not already
+#     target the exact same PR number+repo, file path, or script name as
+#     THIS dispatch -- checked separately from step 1 above because two
+#     dispatches phrased differently about the same real target (the check
+#     above only catches byte-identical normalized text) sail straight
+#     past it. Real incident this fixes (2026-08-13): the Desktop sentinel
+#     dispatched UMR-...-a248 (PR #131) and UMR-...-1489 (PR #135), then
+#     the Desktop session independently dispatched UMR-...-bd10 (same
+#     PR #131) and UMR-...-9a69 (same PR #135) minutes later --
+#     resource_governor.py --search on the exact PR text returned nothing
+#     (FTS5 MATCH is fuzzy token-overlap ranking, not an exact-substring
+#     guarantee) -- so both duplicate pairs ran concurrently against the
+#     same PR branches. See superboss-register.py's
+#     find_target_identifier_duplicate()/extract_target_identifiers() for
+#     the real check itself (pulls --query-umr-equivalent query_umr_tasks
+#     with limit=30, NO status filter, newest first -- never --search
+#     alone).
+TIDUP_JSON=$(python3 superboss-register.py check-target-identifier-duplicate \
+  --title "$TITLE" --prompt "$PROMPT" --repo "$REPO" --window-hours 4 --limit 30)
+TIDUP_FOUND=$(echo "$TIDUP_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['target_identifier_duplicate_found'])")
+if [ "$TIDUP_FOUND" = "True" ]; then
+  echo "$TIDUP_JSON"
+  echo "REFUSED: a queued/running dispatch within the last 4h already targets the exact same PR/file/script (see duplicate_umr_id above). Re-run once that target is no longer live if this is genuinely new work." >&2
   exit 1
 fi
 

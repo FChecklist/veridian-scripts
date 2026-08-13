@@ -1956,6 +1956,20 @@ def _referenced_pr_number(text):
     return m.group(1) if m else None
 
 
+# UMR-20260813-172606-101a: real, deterministic phrasing this repo's own
+# disclosure-PR convention actually uses to state "this cites another PR's
+# number but is NOT duplicating its work" (see find_pr_for_task_identity()'s
+# Stage 6, and claude-control#142's real title: "...(already covered by PR
+# 141, not re-implemented)"). A title matching this is excluded from Stage
+# 6's duplicate-PR match -- it is evidence of non-duplication, not evidence
+# of it.
+_DISCLOSURE_CITATION_RE = re.compile(
+    r"\balready\s+covered\b|\bnot\s+re-?implemented\b|\bnot\s+a\s+duplicate\b|"
+    r"\bnot\s+duplicat(?:ed|ing)\b|\bsuperseded\s+by\b|\bsupersedes\b",
+    re.IGNORECASE,
+)
+
+
 def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None, title=None):
     """Stage 4 (2026-07-29) duplicate-PR guard -- real, exact --head branch
     match against GitHub, ported from owner_backlog_orchestrator.py's
@@ -2083,6 +2097,28 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
     # PR #64/#65/#66 evidence this closes -- a task_identity-fragmented
     # duplicate (different task_identity string, same real PR referenced in
     # the title) that no branch-name-based check above can ever catch.
+    #
+    # UMR-20260813-172606-101a real fix: Stage 6's own docstring assumption
+    # ("unrelated PRs essentially never reference the exact same 'PR #NNN'
+    # substring by coincidence") is false for a DISCLOSURE citation -- a PR
+    # whose title explicitly states it is NOT duplicating the referenced
+    # PR's work, only citing it as already-covering evidence. Real incident:
+    # UMR-20260813-145418-3f98, title "Merge audit-passed PR 141
+    # (server-native PM integration)" (pr_num='141'), was wrongly rejected
+    # as a duplicate of claude-control#142, whose own title is "docs: real
+    # dedup finding for UMR-20260813-092654-326b (already covered by PR 141,
+    # not re-implemented)" -- #142 is real, unrelated work (a docs-only PR
+    # about a different UMR/objective) that happens to cite "PR 141" only to
+    # disclose it is deliberately NOT re-implementing it. The match key
+    # itself (the literal target PR number extracted by
+    # _referenced_pr_number()) was already correct; the gap is that a title
+    # merely CITING that number is treated identically to a title that is
+    # ITSELF new/duplicate work targeting it. _DISCLOSURE_CITATION_RE above
+    # recognizes the real, deterministic phrasing this class of disclosure
+    # PR actually uses (this repo's own convention, see #142's title/body)
+    # and excludes those titles from counting as a duplicate -- the #64/#65/
+    # #66 shape this stage was built for used no such disclosure language,
+    # so that real incident is still caught unchanged.
     pr_num = _referenced_pr_number(title)
     if pr_num:
         for repo in repos:
@@ -2106,8 +2142,12 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
             except (json.JSONDecodeError, ValueError):
                 prs = []
             for pr in prs:
-                if _referenced_pr_number(pr.get("title") or "") == pr_num:
-                    return pr["number"], repo
+                candidate_title = pr.get("title") or ""
+                if _referenced_pr_number(candidate_title) != pr_num:
+                    continue
+                if _DISCLOSURE_CITATION_RE.search(candidate_title):
+                    continue  # real citation-not-duplicate disclosure -- not a match
+                return pr["number"], repo
     return None, None
 
 

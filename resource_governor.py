@@ -246,6 +246,20 @@ def _run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
 
 
+# Real fix (UMR-20260813-165729, addendum to P1 UMR-20260806-171945-5767):
+# _perform_spawn()'s veridian_task_create branch used to persist only
+# r.stderr[:500] into outputs_json. Real, live-reproduced root cause: the
+# child (veridian-task.py cmd_create) writes its own real error text via
+# plain `print(...)` -- STDOUT, not stderr -- before every one of its
+# `sys.exit(1)` calls (e.g. "ERROR: repo not found at ..."), so a real,
+# diagnosable failure reason existed on disk the whole time, on the one
+# stream this code never looked at. Persisting a bounded tail of BOTH
+# streams (never unbounded -- these rows are already read back whole into
+# umr_tasks.outputs_json) closes that gap for every future failure, not
+# just this one specific cause.
+_SPAWN_OUTPUT_TAIL_CHARS = 4000
+
+
 def _utcnow():
     return datetime.now(timezone.utc)
 
@@ -1850,8 +1864,9 @@ def _perform_spawn(row):
         inputs = row.get("inputs_json")
         inputs = json.loads(inputs) if isinstance(inputs, str) else (inputs or {})
         if not isinstance(inputs, dict):
+            reason = f"malformed inputs: expected object, got {type(inputs).__name__}"
             return {"status": "failed", "unit_name": row.get("unit_name"),
-                    "outputs": {"error": f"malformed inputs: expected object, got {type(inputs).__name__}"}}
+                    "outputs": {"error": reason}, "reason": reason}
 
         if task_kind == "systemctl_action":
             unit = row["unit_name"]
@@ -1864,12 +1879,21 @@ def _perform_spawn(row):
             else:
                 r = _run(["systemctl", "--user", "start", unit])
             status = "running" if r.returncode == 0 else "failed"
-            return {"status": status, "unit_name": unit, "outputs": {"returncode": r.returncode, "stderr": r.stderr[:500]}}
+            stdout_tail = (r.stdout or "")[-_SPAWN_OUTPUT_TAIL_CHARS:]
+            stderr_tail = (r.stderr or "")[-_SPAWN_OUTPUT_TAIL_CHARS:]
+            reason = None
+            if status == "failed":
+                cause = stderr_tail.strip() or stdout_tail.strip() or "no output on either stream"
+                reason = f"systemctl {action} {unit} exited {r.returncode}: {cause[:500]}"
+            return {"status": status, "unit_name": unit,
+                    "outputs": {"returncode": r.returncode, "stdout": stdout_tail, "stderr": stderr_tail},
+                    "reason": reason}
 
         if task_kind == "veridian_task_create":
             if "title" not in inputs or "prompt" not in inputs:
+                reason = "veridian_task_create requires inputs.title and inputs.prompt"
                 return {"status": "failed", "unit_name": row.get("unit_name"),
-                        "outputs": {"error": "veridian_task_create requires inputs.title and inputs.prompt"}}
+                        "outputs": {"error": reason}, "reason": reason}
             cmd = ["python3", os.path.join(SCRIPTS, "veridian-task.py"), "create",
                    "--title", inputs["title"], "--repo", inputs.get("repo", "claude-control"),
                    "--prompt", inputs["prompt"]]
@@ -1880,13 +1904,29 @@ def _perform_spawn(row):
             if unit_name:
                 _run(["systemctl", "--user", "start", unit_name])
             status = "running" if new_task_id else "failed"
+            # Bounded tails of BOTH real streams -- see _SPAWN_OUTPUT_TAIL_CHARS's
+            # module-level comment for why stdout must be captured here too,
+            # not just stderr: veridian-task.py's own real error text (e.g.
+            # "ERROR: repo not found at ...") is written via print(), which
+            # goes to stdout.
+            stdout_tail = (r.stdout or "")[-_SPAWN_OUTPUT_TAIL_CHARS:]
+            stderr_tail = (r.stderr or "")[-_SPAWN_OUTPUT_TAIL_CHARS:]
+            reason = None
+            if status == "failed":
+                cause = stderr_tail.strip() or stdout_tail.strip() or "no output on either stream"
+                reason = f"veridian-task.py create exited {r.returncode} with no CREATED: line -- {cause[:500]}"
             return {"status": status, "unit_name": unit_name,
-                    "outputs": {"new_task_id": new_task_id, "returncode": r.returncode, "stderr": r.stderr[:500]}}
+                    "outputs": {"new_task_id": new_task_id, "returncode": r.returncode,
+                                "stdout": stdout_tail, "stderr": stderr_tail},
+                    "reason": reason}
 
-        return {"status": "failed", "unit_name": row.get("unit_name"), "outputs": {"error": f"unknown task_kind {task_kind!r}"}}
-    except Exception as e:
+        reason = f"unknown task_kind {task_kind!r}"
         return {"status": "failed", "unit_name": row.get("unit_name"),
-                "outputs": {"error": f"_perform_spawn crashed: {type(e).__name__}: {e}"}}
+                "outputs": {"error": reason}, "reason": reason}
+    except Exception as e:
+        reason = f"_perform_spawn crashed: {type(e).__name__}: {e}"
+        return {"status": "failed", "unit_name": row.get("unit_name"),
+                "outputs": {"error": reason}, "reason": reason}
 
 
 def _recorded_new_task_ids_for_identity(task_identity, exclude_umr_id=None, limit=2):
@@ -2310,7 +2350,8 @@ def classify_dispatch_outcome(dispatch_result):
         # real outputs.error/outputs.stderr -- never an empty/silent failure
         # (see its own docstring's "no exception ever escapes" contract).
         outputs = spawn_result.get("outputs") or {}
-        root_cause = outputs.get("error") or outputs.get("stderr") or "unknown spawn failure (no error detail captured)"
+        root_cause = (spawn_result.get("reason") or outputs.get("error") or outputs.get("stderr")
+                      or outputs.get("stdout") or "unknown spawn failure (no error detail captured)")
         return {
             "outcome": "failed",
             "error_id": f"DISPATCH-FAILED-{umr_id}" if umr_id else "DISPATCH-FAILED-UNKNOWN-UMR",
@@ -2675,14 +2716,28 @@ def _dispatch_one_inner(dry_run=False, now=None):
                      "detail": reason, "reuse_verdict": verdict_result, "metrics": metrics}
 
         result = _perform_spawn(row)
+        # Real fix (UMR-20260813-165729, addendum to P1 UMR-20260806-171945-5767):
+        # this call used to always pass reason=None into both update_umr_task()
+        # and the output contract, so a row's reason column was left at its
+        # submit-time value ("queued") FOREVER, even once the row reached a
+        # real terminal status="failed" -- update_umr_task() only touches
+        # columns actually passed as kwargs, so reason=None here was itself
+        # the bug, not a no-op. _perform_spawn() now always returns a real
+        # "reason" string alongside a failed/rejected status (None for
+        # "running", which is not terminal and correctly left untouched).
+        spawn_reason = result.get("reason")
+        update_kwargs = {}
+        if result["status"] != "running":
+            update_kwargs["reason"] = spawn_reason or f"veridian_task_create dispatch resolved to status={result['status']!r} with no captured reason"
         with sbr._write_lock():
             sbr.update_umr_task(
                 conn, row["umr_id"], status=result["status"],
                 unit_name=result.get("unit_name") or row["unit_name"],
                 ts_dispatched=_now_iso(),
                 outputs=_orchestrator_output_contract(
-                    sbr, row["umr_id"], result["status"], None, result.get("outputs", {})),
+                    sbr, row["umr_id"], result["status"], update_kwargs.get("reason"), result.get("outputs", {})),
                 metric_snapshot=metrics,
+                **update_kwargs,
             )
             conn.commit()
         if result["status"] == "running":

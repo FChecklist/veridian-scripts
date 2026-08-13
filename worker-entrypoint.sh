@@ -172,7 +172,24 @@ trap 'kill $CHECKPOINT_PID 2>/dev/null' EXIT
 
 cd "$WORKSPACE"
 
-PROGRESS_INSTRUCTION="PROTOCOL: maintain PROGRESS.md (## Completed / ## Remaining, markdown checkboxes), update after each step. commit+push after each meaningful unit, not only at the end. on a 2nd consecutive failure of the identical approach: STOP, do not attempt a 3rd time -- this is enforced by a circuit breaker on the next invocation regardless, so stopping yourself first saves a wasted restart."
+# 2026-08-13 (UMR-20260813-195922-f548, real defect confirmed live against
+# FChecklist/veridian-scripts PRs #315/#317/#321): every worker used to
+# "maintain PROGRESS.md" -- ONE shared file, same path on every branch. Two
+# compounding failures resulted: (a) a worker could satisfy this literal
+# instruction by only ever editing PROGRESS.md, so 3 separate "fixes" for
+# real dispatch defects shipped as prose with the named source file
+# untouched, and got recorded as real completed work; (b) every long-lived
+# branch that touched PROGRESS.md conflicted with every OTHER branch that
+# also touched it, regardless of whether their real code overlapped at all
+# -- 17 of 25 parseable open/DIRTY PRs on veridian-scripts were
+# PROGRESS.md-only diffs stuck CONFLICTING for exactly this reason. Fix:
+# each task now owns a PER-TASK progress file (progress/<task_id>.md) -- a
+# new path per branch, so two branches never touch the same line and never
+# conflict on merge. A rolled-up view (if wanted) is generated
+# deterministically from every progress/*.md file by
+# progress_completion_gate.py's own `rollup` subcommand, never hand-edited.
+PROGRESS_FILE="progress/${TASK_ID}.md"
+PROGRESS_INSTRUCTION="PROTOCOL: maintain $PROGRESS_FILE (## Completed / ## Remaining, markdown checkboxes), update after each step. This is YOUR OWN per-task file, not a shared PROGRESS.md -- do not edit any other task's progress/*.md, and do not recreate a shared PROGRESS.md. commit+push after each meaningful unit, not only at the end. COMPLETION GATE: if your task's objective names a specific source file or script, that file MUST be present in your real committed diff -- a diff containing only progress/doc artifacts for a code-named objective will be rejected as a real failure (not marked complete), see progress_completion_gate.py check-completion. on a 2nd consecutive failure of the identical approach: STOP, do not attempt a 3rd time -- this is enforced by a circuit breaker on the next invocation regardless, so stopping yourself first saves a wasted restart."
 
 # --- Deterministic pre-work briefing (2026-08-06, direct correction/extension
 # to UMR-20260806-121332-6ba4, see scripts/agent_work_briefing.py) --------
@@ -243,7 +260,7 @@ fi
 if [ "$IS_RESUME" -eq 1 ]; then
   RESUME_CONTEXT=$(python3 /opt/veridian/scripts/veridian-task.py resume-context "$TASK_ID")
   PROMPT="RESUME task=$TASK_ID invocation=$NEW_COUNT/$MAX_LIFETIME_INVOCATIONS
-DO_NOT restart from scratch. run: git status && git log --oneline -10 && read PROGRESS.md.
+DO_NOT restart from scratch. run: git status && git log --oneline -10 && read $PROGRESS_FILE (your own per-task progress file, not a shared PROGRESS.md).
 LAST_CHECKPOINT:
 $RESUME_CONTEXT
 SPEC: full task spec is prompt.txt in cwd (provided once already, not restated here -- read it only if you need it).
@@ -589,6 +606,31 @@ if git -C "$WORKSPACE" diff --quiet && git -C "$WORKSPACE" diff --cached --quiet
   echo "clean working tree but $AHEAD_COUNT commit(s) ahead of $DEFAULT_BRANCH (worker self-committed) -- routing through quality gates + pending_review instead of a direct completed shortcut" >> "$TASK_DIR/worker.log"
 fi
 # --- NOOP-COMPLETION-BLOCK-END ---
+
+# --- COMPLETION-GATE-BLOCK-START (2026-08-13, UMR-20260813-195922-f548) ---
+# Real gate, not a prompt instruction: if this task's own prompt.txt names a
+# specific source/script file as its objective, that file must be present
+# in the REAL diff (committed + staged + unstaged, vs the merge-base with
+# origin/$DEFAULT_BRANCH) before this is allowed anywhere near
+# pending_review/completed. This is what actually closes the PROGRESS.md-only-
+# fix hole the PROGRESS_INSTRUCTION rewrite above only discourages by
+# convention -- a worker could still ignore the instruction, so the diff
+# itself is checked here, mechanically, every single run. A rejection here
+# is a REAL, terminal failure (status=blocked with the explicit reason),
+# never silently downgraded to success. See progress_completion_gate.py and
+# tests/test_progress_completion_gate.py.
+GATE_CHECK_OUT=$(python3 /opt/veridian/scripts/progress_completion_gate.py check-completion \
+  --task-dir "$TASK_DIR" --workspace "$WORKSPACE" --default-branch "$DEFAULT_BRANCH" 2>>"$TASK_DIR/worker.log")
+GATE_CHECK_RC=$?
+if [ "$GATE_CHECK_RC" -ne 0 ]; then
+  python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status blocked --note "COMPLETION GATE REJECTED: $GATE_CHECK_OUT -- real failure, not success; a human must either supply the named file's real change or correct the task's stated objective"
+  git -C "$WORKSPACE" add -A
+  git -C "$WORKSPACE" commit -m "Worker $TASK_ID: automated checkpoint commit (completion gate rejected: objective named a code file the diff never touches)" >> "$TASK_DIR/worker.log" 2>&1 || true
+  git -C "$WORKSPACE" push -u origin "$BRANCH" >> "$TASK_DIR/worker.log" 2>&1 || true
+  systemctl --user disable "veridian-worker@${TASK_ID}.service" >> "$TASK_DIR/worker.log" 2>&1 || true
+  exit 0
+fi
+# --- COMPLETION-GATE-BLOCK-END ---
 
 # Quality gates: up to 2 auto-fix attempts (same conversation via --continue)
 # before giving up and marking blocked for human review.

@@ -102,12 +102,27 @@ REPO_LOCAL_PATHS = {
     "veridian-scripts": "/opt/veridian/repos/veridian-scripts",
     "projexa": "/opt/veridian/repos/projexa",
     "veridian-ai-os": "/opt/veridian/repos/veridian-ai-os",
+    # UMR-20260813-115911-df5c root cause (task-20260813-140326): this repo's
+    # own governance/meta tasks (task.yaml `repo: claude-control`) had no
+    # entry here, so _real_branch_tip_sha()/_first_recent_commit_sha() could
+    # never resolve a repo_root for them and _completion_candidates() always
+    # returned empty -- every claude-control-repo row with a real, pushed,
+    # even already-reviewed branch fell all the way through to "genuinely
+    # ambiguous -- real re-queue" (see decide_and_apply's final branch below),
+    # forcing a brand-new duplicate dispatch instead of ever reaching a real
+    # terminal status. Confirmed live: UMR-20260813-115911-df5c's own worker
+    # units (task-20260813-132414 -> -135613 -> -140326) looped exactly this
+    # way. Same real local checkout superboss-register.py's
+    # DEFAULT_OCID_RESOLVER_REPO_LOCAL_PATHS now also carries (kept in sync
+    # deliberately, per this file's own header note that these two dicts are
+    # a real, separate, parallel convention, not auto-synced).
+    "claude-control": "/opt/veridian/repos/claude-control",
 }
 # mark-umr-terminal's own --repo argparse choices (superboss-register.py's p_markterm) --
 # a real task.yaml repo outside this set is still handled correctly (--repo-root always
 # overrides the path lookup); --repo's value in that case is just a cosmetic placeholder
 # for the outputs_json.repo metadata field mark-umr-terminal itself records.
-MARK_TERMINAL_REPO_CHOICES = ("compliance-tracker", "veridian-scripts", "projexa")
+MARK_TERMINAL_REPO_CHOICES = ("compliance-tracker", "veridian-scripts", "projexa", "claude-control")
 
 # Same real vocabulary worker-exit-status-bridge.py and resource_governor.py's own
 # _forward_progress_decision() already treat as "a genuinely self-reported negative,
@@ -397,6 +412,38 @@ def decide_and_apply(row, execute):
     last_status = checkpoints[-1]["status"] if checkpoints else task.get("status")
     branch, repo = task.get("branch"), task.get("repo")
     entry["task_yaml_status"], entry["branch"], entry["repo"] = last_status, branch, repo
+
+    # Real race window, root-caused live against UMR-20260813-115911-df5c
+    # (task-20260813-140326, itself a wasted duplicate dispatch this exact
+    # check would have prevented): worker-entrypoint.sh's own normal SUCCESS
+    # path (see its NOOP-COMPLETION-BLOCK / quality-gate sections) disables
+    # veridian-worker@<task_id>.service and starts
+    # veridian-supervisor@<task_id>.service the moment a task reaches
+    # pending_review -- ActiveState=inactive on the WORKER unit is the
+    # expected, correct outcome of a legitimate handoff here, not evidence of
+    # a crash. Confirmed live: task-20260813-135613's worker unit went
+    # inactive at status=pending_review while its supervisor unit was still
+    # reviewing PR #147; this sweep ran in that exact window, found no repo
+    # mapping for `claude-control` (separately fixed above) and therefore no
+    # completion candidate, and requeued a task whose real review was
+    # seconds away from writing its own real terminal-ish checkpoint
+    # (status=blocked, real rejection) -- producing task-20260813-140326, a
+    # genuinely redundant re-dispatch of already-in-flight work. Skipping
+    # here (not_settled, same shape as the ActiveState check above) when the
+    # supervisor unit is still live/transitional closes that window without
+    # weakening real crash detection: once the supervisor unit itself
+    # actually goes inactive, a future sweep tick re-evaluates this row
+    # exactly as before.
+    if last_status == "pending_review":
+        task_id = os.path.basename(task_dir)
+        supervisor_unit = f"veridian-supervisor@{task_id}.service"
+        supervisor_state = _unit_active_state(supervisor_unit)
+        if supervisor_state not in ("inactive", "failed", "unknown"):
+            entry["decision"] = "skipped_not_settled"
+            entry["detail"] = (f"task.yaml status=pending_review and supervisor unit "
+                                f"{supervisor_unit} ActiveState={supervisor_state!r} -- real review "
+                                f"still in flight, not touched")
+            return entry
 
     repo_root = REPO_LOCAL_PATHS.get(repo)
     candidates = _completion_candidates(task, repo, branch, repo_root)

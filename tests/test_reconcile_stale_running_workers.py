@@ -194,6 +194,103 @@ def test_real_end_to_end_self_reported_negative_marks_failed_via_real_cli(monkey
         assert dict(row)["status"] == "failed"
 
 
+# --- UMR-20260813-115911-df5c coverage (AUDIT:FAIL on this PR's own head
+# 108652d48c5ac93261fc0261cf498f71421d9c81: "zero test coverage was added for
+# either behavioral change") -----------------------------------------------
+
+def test_repo_local_paths_includes_claude_control():
+    """The real, live dict decide_and_apply()'s repo_root = REPO_LOCAL_PATHS.get(repo)
+    reads from -- not a copy -- must carry the new entry pointing at the real,
+    already-existing local checkout (confirmed live: /opt/veridian/repos/claude-control,
+    origin https://github.com/FChecklist/claude-control.git), and must not have
+    disturbed any of the 4 pre-existing mappings."""
+    mod = _load_module()
+    assert mod.REPO_LOCAL_PATHS["claude-control"] == "/opt/veridian/repos/claude-control"
+    assert mod.REPO_LOCAL_PATHS["compliance-tracker"] == "/opt/veridian/repos/compliance-tracker"
+    assert mod.REPO_LOCAL_PATHS["veridian-scripts"] == "/opt/veridian/repos/veridian-scripts"
+    assert mod.REPO_LOCAL_PATHS["projexa"] == "/opt/veridian/repos/projexa"
+    assert mod.REPO_LOCAL_PATHS["veridian-ai-os"] == "/opt/veridian/repos/veridian-ai-os"
+
+
+def test_mark_terminal_repo_choices_includes_claude_control():
+    """mark-umr-terminal's own --repo argparse choices= must accept
+    'claude-control' now, or a real claude-control-repo row can never even call
+    that CLI without an immediate argparse rejection."""
+    mod = _load_module()
+    assert "claude-control" in mod.MARK_TERMINAL_REPO_CHOICES
+    assert set(mod.MARK_TERMINAL_REPO_CHOICES) == {
+        "compliance-tracker", "veridian-scripts", "projexa", "claude-control"
+    }
+
+
+def test_ocid_resolver_repo_local_paths_includes_claude_control():
+    """superboss-register.py's own parallel dict (kept in sync deliberately per
+    that file's header note) needs the same real entry, or completion-candidate
+    resolution for a claude-control-repo task still dead-ends there even once
+    reconcile_stale_running_workers.py's own dict is fixed."""
+    sbr = _load_sbr()
+    assert sbr.DEFAULT_OCID_RESOLVER_REPO_LOCAL_PATHS["claude-control"] == "/opt/veridian/repos/claude-control"
+
+
+def test_pending_review_with_live_supervisor_is_skipped_not_settled(monkeypatch):
+    """The real race this PR fixes (UMR-20260813-115911-df5c, task-20260813-140326):
+    task.yaml already reports pending_review (the normal SUCCESS-path handoff) but
+    veridian-supervisor@<task_id>.service is still actively reviewing -- must be
+    skipped_not_settled, not fall through to a real re-queue of already-in-flight
+    work."""
+    mod = _load_module()
+    monkeypatch.setattr(
+        mod, "_unit_active_state",
+        lambda u: "active" if "supervisor" in u else "inactive",
+    )
+    monkeypatch.setattr(mod, "_task_dir_for_row", lambda row: ("/fake/task-x", "task_identity"))
+    monkeypatch.setattr(mod, "_load_task_yaml", lambda d: {
+        "checkpoints": [{"status": "pending_review"}], "branch": None, "repo": None,
+    })
+    entry = mod.decide_and_apply(_row(), execute=False)
+    assert entry["decision"] == "skipped_not_settled"
+    assert "supervisor" in entry["detail"]
+    assert "pending_review" in entry["detail"]
+
+
+def test_pending_review_with_settled_supervisor_falls_through_to_normal_flow(monkeypatch):
+    """Once the supervisor unit itself has genuinely gone inactive/failed, this
+    guard must NOT keep skipping forever -- it falls through to the exact same
+    real decision tree a non-pending_review row would use (here: no completion
+    candidates -> real re-queue), proving the guard only closes the live-review
+    race window and does not weaken real crash/no-evidence detection."""
+    mod = _load_module()
+    monkeypatch.setattr(
+        mod, "_unit_active_state",
+        lambda u: "inactive" if "supervisor" in u else "inactive",
+    )
+    monkeypatch.setattr(mod, "_task_dir_for_row", lambda row: ("/fake/task-x", "task_identity"))
+    monkeypatch.setattr(mod, "_load_task_yaml", lambda d: {
+        "checkpoints": [{"status": "pending_review"}], "branch": None, "repo": None,
+    })
+    monkeypatch.setattr(mod, "_completion_candidates", lambda task, repo, branch, repo_root: [])
+    entry = mod.decide_and_apply(_row(), execute=False)
+    assert entry["decision"] == "would_requeue"
+
+
+def test_pending_review_with_unknown_supervisor_state_falls_through(monkeypatch):
+    """'unknown' (systemctl call itself failed/unit never existed) is treated the
+    same as settled, not as still-live -- an indeterminate systemd read must not
+    block this row forever."""
+    mod = _load_module()
+    monkeypatch.setattr(
+        mod, "_unit_active_state",
+        lambda u: "unknown" if "supervisor" in u else "inactive",
+    )
+    monkeypatch.setattr(mod, "_task_dir_for_row", lambda row: ("/fake/task-x", "task_identity"))
+    monkeypatch.setattr(mod, "_load_task_yaml", lambda d: {
+        "checkpoints": [{"status": "pending_review"}], "branch": None, "repo": None,
+    })
+    monkeypatch.setattr(mod, "_completion_candidates", lambda task, repo, branch, repo_root: [])
+    entry = mod.decide_and_apply(_row(), execute=False)
+    assert entry["decision"] == "would_requeue"
+
+
 if __name__ == "__main__":
     import inspect
     import shutil as _shutil

@@ -1,40 +1,58 @@
-# PROGRESS -- task-20260808-215140-umr171945-0003-0005-0007-audit-probe
-
-## SPEC
-"run a pruned scoped code search for a regex pattern, grep -lE style"
+# PROGRESS -- task-20260813-211814-rca--umr-20260807-151622-15cd-killed
 
 ## Completed
-- [x] Checked the deterministic briefing's cited "2 existing scripts" before reusing/building anything:
-      `single_deterministic_orchestrator_pipeline` (resource_governor.py run_tick 12-step
-      dispatch pipeline) and `zero_gap_zero_duplication_wiring_audit`
-      (wiring_registry_zero_gap_audit.py, a DB integrity audit). Read both capability
-      records in full: **neither implements a pruned, scoped, `grep -lE`-style code
-      search.** The briefing's capability-registry citation for this SPEC does not match
-      what those two scripts actually do -- consistent with the known
-      task-dispatch false-premise pattern (briefing claims that don't match live state).
-- [x] Checked the wiring_registry hit (`dispatch_event-owner-task-20260808-215120-1705975`)
-      via `wiring_query.py --entity-id`: it is only this task's own dispatch-event record
-      (created when the resource governor dispatched this task), not a prior
-      implementation of this capability. No relevant prior art there.
-- [x] Found the capability that actually matches the SPEC verbatim: `find_code.sh`
-      (registered capability `pruned_code_search`, UMR-20260806-100604-4591), already
-      present both in this workspace and deployed live at
-      `/opt/veridian/scripts/find_code.sh` (byte-identical, `diff -q` confirms). It takes
-      an extended-regex `pattern` and optional `scope_dir`, real `find -prune`s
-      node_modules/.git/.venv/__pycache__/dist/build plus the known huge scratch
-      subtrees (`ai-os/tasks/*/workspace`, `workspace/claude-cli-work`,
-      `workspace/main-e2e-check`), then runs `grep -IlE` -- exactly "pruned scoped code
-      search for a regex pattern, grep -lE style".
-- [x] Verified it live rather than trusting the capability record's claims on faith:
-  - match case: `./find_code.sh 'pruned_code_search' .` -> 4 files listed, exit 0
-  - no-match case: `./find_code.sh 'ZZZ_NO_SUCH_PATTERN_EVER_XYZ123' .` -> exit 1
-  - invalid-regex case: `./find_code.sh '[' .` -> clean usage error to stderr, exit 2
-  - All three match the script's documented exit-code contract.
+- [x] Queried `resource_governor.py --query-umr --umr-id UMR-20260807-151622-15cd`
+      directly (did not trust the SPEC's summary alone). Live row:
+      `status=killed`, `reason="real systemd state 'inactive', no PR was
+      ever opened, real task.yaml status='blocked' -- no live process and
+      no real deliverable; mechanically correctable to killed (orphaned
+      dispatch, never produced a real artifact)."`, `ts_completed=2026-08-13T20:26:27Z`.
+- [x] **Found this is a duplicate dispatch of already-completed work.**
+      `ai-os/tasks/task-20260813-201836-rca--umr-20260807-151622-15cd-killed`
+      (created ~52 min before this task) already did this exact RCA to
+      completion:
+      - Root-caused the kill: worker did real work (14 batch-2 pytest
+        files, commit 6cbd222) but its local branch `rescue/batch-2-land-tests`
+        was never pushed to origin; `gh pr create` failed, the task sat
+        `status=blocked` for ~6 days until its systemd unit went inactive.
+      - Confirmed no real work was lost: Part A (rescue batch-2's 14
+        stranded tests) was independently redone and merged as **PR #271**
+        ("14/14 real tests passing, 60/158 -> 76/160", merged
+        2026-08-07T16:39:50Z -- independently re-verified via `gh pr view 271`
+        in this task, not just cited).
+      - Confirmed Part B (next 15 untested scripts) was never attempted by
+        any task and remains real, open backlog -- but it is distinct,
+        freshly-dispatchable work, not scope blocked behind this UMR's kill
+        (the dead local branch's unpushed commit is unreachable and the
+        worktree has been pruned; nothing to resume).
+      - Fixed the row itself by re-running the now-corrected
+        `reconcile_owner_dispatch_status.py --umr-id UMR-20260807-151622-15cd
+        --apply`, writing the real `reason`/`ts_completed` shown above via
+        `update_umr_task()`.
+      - Committed, opened **PR #324**, which I independently verified via
+        `gh pr view 324` is `MERGED` (mergedAt 2026-08-13T20:31:02Z), not
+        just claimed in a task.yaml.
+- [x] Re-verified nothing changed in the ~50 min between PR #324 merging
+      and this task starting: `gh pr list` shows no PR touching batch-3 /
+      `PLATFORM_COMPLETION_CHECKLIST.json` / this UMR since #324;
+      `PLATFORM_COMPLETION_CHECKLIST.json` is still unchanged
+      (`git_head=de2df88`, `tested=76/160`, file mtime 2026-08-08, matching
+      what task-201836 already reported) -- Part B is still open backlog,
+      still out of this UMR's scope, still nobody else's in-flight work.
+- [x] Conclusion: no fix or redispatch needed under this UMR. The real gap
+      was already closed honestly, with real evidence, by a prior task.
+      Redoing the RCA or re-calling `mark-umr-terminal` on
+      UMR-20260807-151622-15cd would be redundant (the row is already
+      correctly terminal) and risks clobbering a good record for no reason.
+      Not fabricating any new completion here.
+- [x] `agent_work_briefing.py record-completion` called for this task's
+      own UMR (UMR-20260813-211758-7615), citing this finding.
 
 ## Remaining
-- [ ] None. The SPEC's requested capability already exists, is deployed, and is
-      verified working correctly. No new code was written -- rebuilding it would have
-      been the exact class of duplicate-implementation this UMR-lineage's own tooling
-      (`find_code.sh`'s header, `pruned_code_search` capability record) exists to
-      prevent. If a *specific* pattern/scope is later provided, run:
-      `/opt/veridian/scripts/find_code.sh '<pattern>' [scope_dir]` directly.
+- [ ] None for this UMR's own scope.
+- [ ] Open platform backlog (not this task's scope, tracked here for
+      visibility only): Part B of the original batch-3 SPEC -- write real
+      pytest coverage for the next 15 alphabetical `complete_and_tested:
+      false` scripts in `PLATFORM_COMPLETION_CHECKLIST.json` (84 of 160
+      still untested) -- is real, still-open, freely dispatchable work with
+      no blocker, distinct from this killed UMR.

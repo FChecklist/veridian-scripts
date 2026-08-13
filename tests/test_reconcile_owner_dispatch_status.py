@@ -146,6 +146,58 @@ def test_active_unit_no_pr_stale_checkpoint_needs_judgment(monkeypatch):
     print("PASS: test_active_unit_no_pr_stale_checkpoint_needs_judgment")
 
 
+def test_pending_review_with_active_supervisor_needs_judgment(monkeypatch):
+    """Regression test for the real false-terminal bug live-confirmed on
+    UMR-20260813-170956-5385: a task whose worker unit has already gone
+    inactive because it legitimately reached task.yaml status='pending_review'
+    (the expected worker->supervisor handoff, not a crash) and whose real PR
+    hasn't been opened YET (the supervisor is still reviewing) must NOT be
+    auto-corrected to 'killed' just because no PR match exists yet. Mirrors
+    reconcile_stale_running_workers.py's own STEP 3 pending_review guard,
+    which this script previously duplicated the problem space of without
+    reusing the safeguard."""
+    mod = _load_module()
+    monkeypatch.setattr(mod, "_task_dir_from_unit", lambda u: "task-x")
+    monkeypatch.setattr(mod, "_read_task_yaml", lambda t: {
+        "status": "pending_review", "repo": "veridian-scripts", "branch": "b1",
+        "last_checkpoint_at": "2026-08-05T00:10:00+00:00",
+    })
+
+    def fake_active(unit_name):
+        if unit_name.startswith("veridian-supervisor@"):
+            return "active"
+        return "inactive"
+
+    monkeypatch.setattr(mod, "_systemd_is_active", fake_active)
+    monkeypatch.setattr(mod, "_fetch_prs", lambda repo, cache: [])
+
+    ev = mod.classify_row(_row(), datetime.now(timezone.utc), {})
+    assert ev["bucket"] == "NEEDS_AI_JUDGMENT", ev
+    assert "new_status" not in ev
+    assert ev["supervisor_unit"] == "veridian-supervisor@task-x.service"
+    assert ev["supervisor_is_active"] == "active"
+    print("PASS: test_pending_review_with_active_supervisor_needs_judgment")
+
+
+def test_pending_review_with_settled_supervisor_still_falls_through(monkeypatch):
+    """Same pending_review row, but the supervisor unit has ALSO already
+    settled (inactive/failed) -- the real review genuinely finished with no
+    PR ever produced, so the normal mechanical rules must still apply (not
+    an infinite NEEDS_AI_JUDGMENT hold)."""
+    mod = _load_module()
+    monkeypatch.setattr(mod, "_task_dir_from_unit", lambda u: "task-x")
+    monkeypatch.setattr(mod, "_read_task_yaml", lambda t: {
+        "status": "pending_review", "repo": None, "branch": None,
+        "last_checkpoint_at": "2026-08-05T00:10:00+00:00",
+    })
+    monkeypatch.setattr(mod, "_systemd_is_active", lambda u: "inactive")
+
+    ev = mod.classify_row(_row(), datetime.now(timezone.utc), {})
+    assert ev["bucket"] == "STALE_LABEL_TERMINAL", ev
+    assert ev["new_status"] == "killed"
+    print("PASS: test_pending_review_with_settled_supervisor_still_falls_through")
+
+
 def test_unresolvable_unit_name_needs_judgment(monkeypatch):
     mod = _load_module()
     monkeypatch.setattr(mod, "_task_dir_from_unit", lambda u: None)

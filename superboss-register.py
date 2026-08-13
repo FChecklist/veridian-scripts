@@ -3899,22 +3899,46 @@ def _is_umr_terminal_commit_ancestor_of_main(repo_root, sha, _runner=None):
     codebase already trusts that a commit is genuinely on main (never a PR's
     mergedAt field alone, and never gh's --json state field alone: a PR can
     be merged into a non-main base, or a base later force-reset). Fetches
-    origin/main and the target sha fresh (best-effort -- a fetch failure
-    still lets the subsequent merge-base call fail honestly rather than
-    trusting a stale local ref) before the real check. Fails closed: any
-    subprocess/timeout error is treated as 'not confirmed an ancestor', never
-    as 'assume merged' -- this is the one check status=completed's real
-    artifact requirement is not allowed to get wrong in the optimistic
-    direction."""
+    the real default branch and the target sha fresh (best-effort -- a
+    fetch failure still lets the subsequent merge-base call fail honestly
+    rather than trusting a stale local ref) before the real check. Fails
+    closed: any subprocess/timeout error is treated as 'not confirmed an
+    ancestor', never as 'assume merged' -- this is the one check
+    status=completed's real artifact requirement is not allowed to get
+    wrong in the optimistic direction.
+
+    UMR-20260813-141633-f0fc real fix: this used to hardcode
+    'origin/main', but not every repo this gate runs against actually uses
+    'main' as its default branch -- claude-control's real default branch is
+    'master' (confirmed live: `git remote show origin` HEAD branch, and
+    independently via `git merge-base --is-ancestor` against
+    `origin/master`). That meant every genuinely-merged claude-control
+    commit failed this check and got silently downgraded to
+    completed_unmerged (or refused outright for --status completed) even
+    though it was truly merged -- live-confirmed against
+    UMR-20260813-141633-f0fc/commit d9f0c7c (real PR #167, merged, state
+    MERGED, and a real ancestor of origin/master) which
+    reconcile_stale_running_workers.py had recorded as completed_unmerged
+    for exactly this reason. Now resolves the real default branch per repo
+    (`git symbolic-ref refs/remotes/origin/HEAD`, same real signal
+    _git_default_branch() below already uses for worktree/PR creation),
+    falling back to 'main' only if that lookup itself fails."""
     runner = _runner or _default_ocid_resolver_runner
     if not sha or not repo_root or not os.path.isdir(repo_root):
         return False
+    default_branch = "main"
     try:
-        runner(["git", "fetch", "origin", "main"], cwd=repo_root)
+        head_ref = runner(["git", "symbolic-ref", "refs/remotes/origin/HEAD"], cwd=repo_root)
+        if head_ref.returncode == 0 and head_ref.stdout.strip():
+            default_branch = head_ref.stdout.strip().rsplit("/", 1)[-1]
     except Exception:
         pass
     try:
-        result = runner(["git", "merge-base", "--is-ancestor", sha, "origin/main"], cwd=repo_root)
+        runner(["git", "fetch", "origin", default_branch], cwd=repo_root)
+    except Exception:
+        pass
+    try:
+        result = runner(["git", "merge-base", "--is-ancestor", sha, f"origin/{default_branch}"], cwd=repo_root)
         return result.returncode == 0
     except Exception:
         return False

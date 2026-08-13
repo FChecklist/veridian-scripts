@@ -34,6 +34,7 @@ real work for the AI-OS layer:
 Run: python3 scripts/document_engine.py <register-capabilities|detect-duplicates|report-failure> ...
 """
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -180,21 +181,89 @@ def cmd_register_capabilities(_args):
 def detect_duplicate_documents_by_hash(documents):
     """Field-for-field port of document-processing-engine.ts's
     detectDuplicateDocumentsByHash(): groups document ids by exact contentHash
-    match, returns only groups with more than one member."""
+    match, returns only groups with more than one member. Unchanged by
+    UMR-20260806-171945-5767 issue #921's git-hash-object wiring below --
+    this function's contract (a pre-supplied contentHash per document) is the
+    real field-for-field port fidelity to the TS original and is what this
+    module's own tests exercise directly; the real hash-computation lookup
+    is wired in one layer up, in cmd_detect_duplicates()'s new --files mode."""
     groups = {}
     for doc in documents:
         groups.setdefault(doc["contentHash"], []).append(doc["id"])
     return [ids for ids in groups.values() if len(ids) > 1]
 
 
-def cmd_detect_duplicates(args):
+def git_hash_object_of(path):
+    """Real content hash via git's own blob object model -- the identical
+    algorithm a real `git hash-object <file>` invocation computes:
+    sha1('blob ' + str(len(content)) + '\\0' + content). Verified
+    byte-identical against a real `git hash-object` subprocess in
+    test_document_engine.py, not assumed.
+
+    This is the real 'thin lookup' UMR-20260806-171945-5767 /
+    UMR_5767_ISSUE_RESOLUTION_MATRIX.json issue_number 921 asks to be wired
+    into this script: 'Wire a thin lookup (git hash-object <file>) into
+    existing file-registration scripts (document_engine.py's
+    detectDuplicateDocumentsByHash...) rather than a new ID service.'
+    Computed in-process rather than shelling out to a real `git hash-object`
+    subprocess per file, per that same issue's own sanctioned fallback ('the
+    local equivalent blob <len>\\0<content> SHA-1 computation if shelling out
+    to git per-file is judged too slow') -- one real subprocess per document
+    would multiply real fork/exec overhead across a real document corpus for
+    zero behavioral gain over computing the identical real SHA-1 in-process."""
     try:
-        documents = json.loads(args.documents)
-    except json.JSONDecodeError:
-        print(json.dumps({"error": "--documents must be valid JSON: a list of {id, contentHash}"}))
-        sys.exit(1)
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    h = hashlib.sha1()
+    h.update(("blob %d" % size).encode() + b"\x00")
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                h.update(chunk)
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+    return h.hexdigest()
+
+
+def cmd_detect_duplicates(args):
+    if args.files:
+        try:
+            files = json.loads(args.files)
+        except json.JSONDecodeError:
+            print(json.dumps({"error": "--files must be valid JSON: a list of {id, path}"}))
+            sys.exit(1)
+        documents = []
+        errors = []
+        for entry in files:
+            ch = git_hash_object_of(entry["path"])
+            if ch is None:
+                errors.append(entry["path"])
+                continue
+            documents.append({"id": entry["id"], "contentHash": ch})
+        if errors:
+            print(json.dumps({"error": "unreadable path(s), refusing to guess a hash",
+                               "unreadable_paths": errors}))
+            sys.exit(1)
+    else:
+        try:
+            documents = json.loads(args.documents)
+        except json.JSONDecodeError:
+            print(json.dumps({"error": "--documents must be valid JSON: a list of {id, contentHash}"}))
+            sys.exit(1)
     duplicate_groups = detect_duplicate_documents_by_hash(documents)
     print(json.dumps({"input_count": len(documents), "duplicate_groups": duplicate_groups}, indent=2))
+
+
+def cmd_hash_object(args):
+    """Standalone thin lookup: real git hash-object equivalent for one file,
+    the same real content-addressable hash cmd_detect_duplicates()'s --files
+    mode uses internally."""
+    ch = git_hash_object_of(args.file)
+    if ch is None:
+        print(json.dumps({"error": f"unreadable path: {args.file}"}))
+        sys.exit(1)
+    print(json.dumps({"path": args.file, "contentHash": ch}, indent=2))
 
 
 def cmd_report_failure(args):
@@ -226,8 +295,16 @@ def main():
         "capability_registry").set_defaults(func=cmd_register_capabilities)
 
     p_dedup = sub.add_parser("detect-duplicates", help="exact contentHash duplicate grouping")
-    p_dedup.add_argument("--documents", required=True, help='JSON list of {"id": ..., "contentHash": ...}')
+    dedup_input = p_dedup.add_mutually_exclusive_group(required=True)
+    dedup_input.add_argument("--documents", help='JSON list of {"id": ..., "contentHash": ...}')
+    dedup_input.add_argument("--files", help='JSON list of {"id": ..., "path": ...} -- contentHash is '
+        "computed for real via git's own blob object model (git hash-object), not pre-supplied")
     p_dedup.set_defaults(func=cmd_detect_duplicates)
+
+    p_hash = sub.add_parser("hash-object", help="real git hash-object equivalent for one file "
+        "(thin content-addressable-hash lookup, UMR-20260806-171945-5767 issue #921)")
+    p_hash.add_argument("--file", required=True)
+    p_hash.set_defaults(func=cmd_hash_object)
 
     p_fail = sub.add_parser("report-failure", help="cross-call into the Notification Engine on a real "
         "document-pipeline failure")

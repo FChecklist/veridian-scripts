@@ -308,6 +308,53 @@ def test_cli_refuses_completed_for_real_unmerged_commit_against_real_git_repo(sc
     assert _row(scratch_db, umr_id2)["status"] == "completed"
 
 
+def test_cli_accepts_completed_for_real_merged_commit_on_non_main_default_branch(scratch_db, tmp_path):
+    """UMR-20260813-141633-f0fc regression test: real end-to-end proof that
+    a genuinely-merged commit is accepted for --status completed even when
+    the repo's real default branch is NOT literally named 'main' (e.g.
+    claude-control's real default branch is 'master'). Before the fix,
+    _is_umr_terminal_commit_ancestor_of_main hardcoded 'origin/main', so
+    this exact scenario always fell through to the 'not (yet) an ancestor'
+    branch and refused status=completed for a commit that was truly merged
+    -- live-confirmed against claude-control commit d9f0c7c / PR #167."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(a, cwd=repo, check=True, capture_output=True, text=True)
+    run("git", "init", "-q", "-b", "master")
+    run("git", "config", "user.email", "test@example.com")
+    run("git", "config", "user.name", "Test")
+    (repo / "README.md").write_text("real\n")
+    run("git", "add", "README.md")
+    run("git", "commit", "-q", "-m", "initial")
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(repo), str(origin)], check=True, capture_output=True, text=True)
+    run("git", "remote", "add", "origin", str(origin))
+    run("git", "fetch", "-q", "origin")
+    # Real signal _is_umr_terminal_commit_ancestor_of_main now reads to
+    # resolve the real default branch, same as a real GitHub clone would set.
+    subprocess.run(["git", "-C", str(origin), "symbolic-ref", "HEAD", "refs/heads/master"],
+                    check=True, capture_output=True, text=True)
+    run("git", "remote", "set-head", "origin", "master")
+
+    run("git", "checkout", "-q", "-b", "feature")
+    (repo / "feature.py").write_text("# real merged work\n")
+    run("git", "add", "feature.py")
+    run("git", "commit", "-q", "-m", "real work, later merged")
+    feature_sha = run("git", "rev-parse", "HEAD").stdout.strip()
+    run("git", "checkout", "-q", "master")
+    run("git", "merge", "-q", "--no-ff", "feature")
+    subprocess.run(["git", "-C", str(origin), "fetch", str(repo), "master:master"],
+                    check=True, capture_output=True, text=True)
+
+    umr_id = "UMR-TEST-f0fc-non-main-default-branch-merged"
+    _insert_queued_row(scratch_db, umr_id)
+    merged = _run_sbr(["mark-umr-terminal", "--umr-id", umr_id, "--status", "completed",
+                        "--commit-sha", feature_sha, "--repo-root", str(repo),
+                        "--reason", "real work, really merged on a non-main default branch"], scratch_db)
+    assert merged.returncode == 0, merged.stderr
+    assert _row(scratch_db, umr_id)["status"] == "completed"
+
+
 def test_cli_rejects_invalid_status_choice_still(scratch_db):
     """Pre-existing behavior (argparse choices) must still hold -- this fix
     only widens the choice set to add completed_unmerged, never removes the

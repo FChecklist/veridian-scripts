@@ -89,7 +89,9 @@ fabricate completion.
       + tests in this task's own workspace/branch instead, which is what
       this PROGRESS.md and the eventual PR actually carry.
 
+- [x] Pushed and opened PR: https://github.com/FChecklist/veridian-scripts/pull/319
+
 ## Remaining
-- [ ] None outstanding on this task's own scope. Merging this branch is
-      the only remaining step (standard supervisor review process, outside
+- [ ] None outstanding on this task's own scope. Merging PR #319 is the
+      only remaining step (standard supervisor review process, outside
       this task's own authority to self-merge without that gate).

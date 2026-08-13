@@ -36,6 +36,23 @@ else
   # precisely which live files a real pull changed -- "OK: <sha>" alone told
   # you HEAD moved but never what actually landed on disk, which is exactly
   # the fact a PM tier needs to certify INTEGRATED as real, not assumed.
+  #
+  # Real incident this also closes: this checkout was found (2026-08-13,
+  # same task) sitting on an open, unmerged PR's worker branch (PR #292,
+  # a DIFFERENT task) instead of main -- `git pull --ff-only` only
+  # fast-forwards the CURRENT branch against ITS OWN upstream, so it kept
+  # silently reporting "OK: <sha>" every cycle while never once pulling
+  # main, and production ran unreviewed/unmerged code for real real-world
+  # time. Loudly flag this instead of silently no-op'ing: this does NOT
+  # auto-checkout main itself (a checkout/branch switch on this box has
+  # previously overwritten live files still in use by a running systemd
+  # unit -- see check_live_scripts_drift.py's own docstring / this task's
+  # PROGRESS.md -- that decision needs a real human/Owner call, not a
+  # silent auto-switch here), it only makes the drift impossible to miss.
+  CUR_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+  if [ "$CUR_BRANCH" != "main" ]; then
+    echo "WARNING: live checkout is on branch '$CUR_BRANCH', NOT main -- this pull only fast-forwards that branch's own upstream, it does NOT pull origin/main. Run check_live_scripts_drift.py for the real divergence. NOT auto-switching (known hazard: branch switches here have previously overwritten live files a running systemd unit depends on)."
+  fi
   PRE_SHA="$(git rev-parse HEAD)"
   git fetch --quiet origin
   if git pull --ff-only --quiet; then

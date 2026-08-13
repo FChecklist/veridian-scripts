@@ -1,0 +1,19 @@
+# NOT YET AUTHORIZED / NOT YET INSTALLED as a version-controlled reference
+# copy convention would normally require -- see veridian-pm-sentinel-
+# tick.service in this same directory for why this pair is the real
+# Owner-authorized exception (task-20260813-084351-build-native-server-side-
+# pm-sentinel--sy, addendum to P1 UMR-20260806-171945-5767) rather than a
+# default/automatic new-unit addition. Hourly cadence per that task's own
+# SPEC, minute 15 (jittered) so it does not cluster with dispatch-tick's
+# */10 minute-2 schedule or pm-report-tick's */10 minute-6 schedule.
+[Unit]
+Description=Run veridian-pm-sentinel-tick hourly (jittered -- see the paired .service for the real Owner-authorization disclosure)
+
+[Timer]
+OnCalendar=*-*-* *:15:00
+RandomizedDelaySec=180
+AccuracySec=1s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -3970,6 +3970,24 @@ DEFAULT_OCID_RESOLVER_REPO_LOCAL_PATHS = {
     # sync-repos.sh's direct `git pull --ff-only`.
     "veridian-scripts": "/opt/veridian/scripts",
     "projexa": "/opt/veridian/repos/projexa",
+    # UMR-20260813-115911-df5c (real root cause behind this same UMR's own
+    # repeated redispatch loop, task-20260813-140326): governance/meta-repo
+    # tasks (task.yaml `repo: claude-control`, e.g. every RCA/routing-fix task
+    # dispatched against this repo itself) had NO entry here, so
+    # mark-umr-terminal's own --repo argparse `choices=list(...)` rejected
+    # "claude-control" outright and reconcile_stale_running_workers.py's own
+    # parallel REPO_LOCAL_PATHS dict (see that file) could never resolve a
+    # local checkout for `git ls-remote`/commit-ancestor verification. Real,
+    # live effect confirmed: UMR-20260813-115911-df5c's own worker units kept
+    # going inactive at pending_review/blocked with zero real completion
+    # candidate ever resolvable, so STEP 3's sweep fell through to "genuinely
+    # ambiguous -- real re-queue" every single time, forcing a brand-new
+    # duplicate dispatch (task-20260813-132414 -> -135613 -> -140326) of
+    # already-completed work instead of ever reaching a terminal status.
+    # /opt/veridian/repos/claude-control is the real, already-existing local
+    # checkout (origin https://github.com/FChecklist/claude-control.git,
+    # confirmed live) -- just never wired into this dict.
+    "claude-control": "/opt/veridian/repos/claude-control",
 }
 
 

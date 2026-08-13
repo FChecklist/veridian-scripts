@@ -288,6 +288,143 @@ def test_dispatch_one_end_to_end_dirty_open_pr_is_not_rejected_by_this_guard():
         mock_spawn.assert_called_once()
 
 
+# ---------------------------------------------------------------------------
+# 3. UMR-20260813-165620-aac7 (addendum to P1 UMR-20260806-171945-5767):
+#    repo-qualified target-PR resolution. Real incident this backstops: the
+#    old code resolved a BARE "PR NNN" title reference by scanning
+#    GH_PR_CHECK_REPOS in a fixed, arbitrary order and blocking on the FIRST
+#    repo where that bare number resolved to MERGED/CLOSED -- even though
+#    PR numbers are per-repo. 3 real confirmed rows (UMR-20260813-135121-9da6
+#    / -135059-3b92 / -135034-fef1) named veridian-scripts PR #297/#300/#301
+#    (each real, MERGEABLE+CLEAN, zero posted audit verdict) and were wrongly
+#    rejected because the same bare number resolved first against an
+#    unrelated, month-old, already-MERGED compliance-tracker PR.
+# ---------------------------------------------------------------------------
+
+def test_bare_pr_number_no_repo_no_hint_fails_open_without_any_gh_call():
+    """The core of the real fix: a bare 'PR NNN' title with NO repo
+    anywhere in it and NO usable hint_repo must fail open WITHOUT even
+    attempting a scan -- never guess a repo by trying GH_PR_CHECK_REPOS in
+    arbitrary order (the exact mechanism that caused the real #297/#300/#301
+    collisions)."""
+    rg = _load_rg("rg_targetpr_qualify_1", {"VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR})
+    with mock.patch.object(rg, "_run") as mock_run:
+        blocked, evidence = rg.target_pr_already_resolved(
+            "Bare PR 297 needs a second look, no repo named anywhere")
+    assert blocked is False
+    assert evidence is None
+    mock_run.assert_not_called()
+
+
+def test_bare_pr_number_with_hint_repo_checks_only_the_hinted_repo_not_a_collision():
+    """Real regression shape for the #297 collision: a bare 'PR 297' with
+    hint_repo='veridian-scripts' must resolve ONLY against veridian-scripts
+    (OPEN, correctly not blocked) and must NEVER even look at
+    compliance-tracker, where an unrelated PR #297 is MERGED."""
+    rg = _load_rg("rg_targetpr_qualify_2", {"VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR})
+
+    def fake_run(cmd, **kwargs):
+        assert "compliance-tracker" not in " ".join(cmd), cmd
+        assert "FChecklist/veridian-scripts" in cmd
+        return _FakeCompletedProcess(0, json.dumps(
+            {"number": 297, "state": "OPEN", "mergedAt": None, "closedAt": None,
+             "url": "https://github.com/FChecklist/veridian-scripts/pull/297"}))
+
+    with mock.patch.object(rg, "_run", side_effect=fake_run) as mock_run:
+        blocked, evidence = rg.target_pr_already_resolved(
+            "Bare PR 297 needs a second look, no repo named anywhere",
+            hint_repo="veridian-scripts")
+    assert blocked is False
+    assert evidence is None
+    mock_run.assert_called_once()
+
+
+def test_repo_qualified_hash_form_merged_blocks_ignoring_collision():
+    """'veridian-scripts#297' is a repo-qualified reference and must resolve
+    ONLY against veridian-scripts and block on its real MERGED state --
+    regardless of what an unrelated compliance-tracker#297 resolves to, and
+    even with no hint_repo at all."""
+    rg = _load_rg("rg_targetpr_qualify_3", {"VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR})
+    fake_pr = {"number": 297, "state": "MERGED",
+               "mergedAt": "2026-07-13T21:05:24Z", "closedAt": None,
+               "url": "https://github.com/FChecklist/veridian-scripts/pull/297"}
+
+    def fake_run(cmd, **kwargs):
+        assert "FChecklist/veridian-scripts" in cmd
+        return _FakeCompletedProcess(0, json.dumps(fake_pr))
+
+    with mock.patch.object(rg, "_run", side_effect=fake_run) as mock_run:
+        blocked, evidence = rg.target_pr_already_resolved(
+            "Fix real dedup bug tracked at veridian-scripts#297")
+    assert blocked is True
+    assert evidence["repo"] == "veridian-scripts"
+    assert evidence["number"] == 297
+    mock_run.assert_called_once()
+
+
+def test_repo_qualified_title_convention_merged_blocks_overriding_wrong_hint_repo():
+    """Real UMR-20260813-135121-9da6 shape verbatim: the real dispatch-title
+    convention 'audit of <repo> PR NNN ...' is a repo-qualified reference
+    and must be preferred over a WRONG hint_repo (here 'claude-control', the
+    real dispatch/runner repo the row's own inputs.repo carried in the
+    actual incident -- NOT the repo the target PR lives in)."""
+    rg = _load_rg("rg_targetpr_qualify_4", {"VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR})
+    fake_pr = {"number": 297, "state": "MERGED",
+               "mergedAt": "2026-07-13T21:05:24Z", "closedAt": None,
+               "url": "https://github.com/FChecklist/veridian-scripts/pull/297"}
+
+    def fake_run(cmd, **kwargs):
+        assert "FChecklist/veridian-scripts" in cmd
+        assert "FChecklist/claude-control" not in cmd
+        return _FakeCompletedProcess(0, json.dumps(fake_pr))
+
+    with mock.patch.object(rg, "_run", side_effect=fake_run) as mock_run:
+        blocked, evidence = rg.target_pr_already_resolved(
+            "Real Tier-1 independent audit of veridian-scripts PR 297 "
+            "(deterministic target-identifier dedup) at head c3ee2b2d",
+            hint_repo="claude-control")
+    assert blocked is True
+    assert evidence["repo"] == "veridian-scripts"
+    assert evidence["number"] == 297
+    mock_run.assert_called_once()
+
+
+def test_word_before_pr_that_is_not_a_known_repo_is_not_treated_as_repo_qualified():
+    """Regression guard for the real UMR-20260813-111352-6973 title shape
+    ('...audit-approved PR 136') that this function's own docstring already
+    documents: the word immediately before 'PR' is NOT a repo name, so it
+    must fall through to the bare-PR-number + hint_repo path, not be
+    misparsed as a repo-qualified reference naming a nonexistent
+    'audit-approved' repo."""
+    rg = _load_rg("rg_targetpr_qualify_5", {"VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR})
+    fake_pr = {"number": 136, "state": "OPEN", "mergedAt": None, "closedAt": None,
+               "url": "https://github.com/FChecklist/claude-control/pull/136"}
+
+    def fake_run(cmd, **kwargs):
+        assert "FChecklist/claude-control" in cmd
+        assert "audit-approved" not in " ".join(cmd)
+        return _FakeCompletedProcess(0, json.dumps(fake_pr))
+
+    with mock.patch.object(rg, "_run", side_effect=fake_run):
+        blocked, evidence = rg.target_pr_already_resolved(
+            "Execute the real merge for audit-approved PR 136", hint_repo="claude-control")
+    assert blocked is False
+    assert evidence is None
+
+
+def test_default_gh_pr_check_repos_includes_veridian_scripts_and_claude_control():
+    """UMR-20260813-165620-aac7 item (b): the live default (no env override)
+    must include veridian-scripts and claude-control -- the two repos where
+    essentially all real infrastructure work lands -- alongside the
+    pre-existing compliance-tracker and projexa."""
+    os.environ.pop("VERIDIAN_GOVERNOR_GH_PR_CHECK_REPOS", None)
+    rg = _load_rg("rg_targetpr_qualify_6", {"VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR})
+    assert "veridian-scripts" in rg.GH_PR_CHECK_REPOS, rg.GH_PR_CHECK_REPOS
+    assert "claude-control" in rg.GH_PR_CHECK_REPOS, rg.GH_PR_CHECK_REPOS
+    assert "compliance-tracker" in rg.GH_PR_CHECK_REPOS, rg.GH_PR_CHECK_REPOS
+    assert "projexa" in rg.GH_PR_CHECK_REPOS, rg.GH_PR_CHECK_REPOS
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

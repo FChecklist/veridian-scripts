@@ -376,12 +376,31 @@ def apply_correction(conn, evidence, dry_run):
     same codebase's own established read-existing/merge/write-back
     convention (superboss-register.py's annotate_knowledge(): 'Appends a
     dated correction note ... without touching' other fields) -- every
-    real pre-existing key survives untouched."""
+    real pre-existing key survives untouched.
+
+    UMR-20260813-065157-ba95 ("close the success half of the umr_tasks
+    write-back gap"): this correction now also passes ts_completed and a
+    real, evidence-carrying `reason` string to update_umr_task() -- both
+    were previously silently omitted here, so a row this function corrected
+    to status='completed' (or failed/killed) kept ts_completed=NULL and
+    reason='queued' forever (update_umr_task() only ever writes the columns
+    explicitly passed to it -- see its own docstring). Live-confirmed: every
+    one of this script's real prior corrections on this box has exactly
+    that shape. Both values are derived from the SAME evidence dict already
+    computed by classify_row() and already stored under
+    metadata['reconcile_owner_dispatch_status']['evidence'] -- no new guess,
+    no second evidence source, just also writing it to the two flat columns
+    every other real terminal-status writer in this codebase already
+    populates (reconcile_stale_heartbeats()/backfill_null_heartbeats() in
+    resource_governor.py both set reason; every mark-umr-terminal path sets
+    ts_completed)."""
     umr_id = evidence["umr_id"]
     new_status = evidence["new_status"]
 
     if dry_run:
         return
+
+    now = datetime.now(timezone.utc)
 
     existing_row = conn.execute(
         "SELECT metadata_json FROM umr_tasks WHERE umr_id=?", (umr_id,)
@@ -399,11 +418,15 @@ def apply_correction(conn, evidence, dry_run):
     merged_metadata = dict(existing_metadata)
     merged_metadata["reconcile_owner_dispatch_status"] = {
         "reconciled_by": "reconcile_owner_dispatch_status.py",
-        "reconciled_at": datetime.now(timezone.utc).isoformat(),
+        "reconciled_at": now.isoformat(),
         "prior_db_status": evidence["db_status"],
         "evidence": evidence,
     }
-    _sbr.update_umr_task(conn, umr_id, status=new_status, metadata=merged_metadata)
+    _sbr.update_umr_task(
+        conn, umr_id, status=new_status, ts_completed=now.isoformat(),
+        reason=evidence.get("reason") or f"reconcile_owner_dispatch_status.py: corrected to {new_status!r}",
+        metadata=merged_metadata,
+    )
 
 
 def main():

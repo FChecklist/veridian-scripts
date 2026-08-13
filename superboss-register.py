@@ -1232,6 +1232,169 @@ def cmd_check_content_duplicate(args):
     }))
 
 
+# ---------------------------------------------------------------------------
+# Deterministic target-identifier dedup (addendum to UMR-20260813-102459-10c3,
+# itself addendum to UMR-20260813-084321-2962 / P1 UMR-20260806-171945-5767).
+# Real incident this fixes (2026-08-13): the Desktop sentinel dispatched
+# UMR-...-a248 (targeting PR #131) and UMR-...-1489 (targeting PR #135), then
+# the Desktop session independently dispatched UMR-...-bd10 (same PR #131)
+# and UMR-...-9a69 (same PR #135) minutes later -- resource_governor.py
+# --search on the exact PR text returned nothing (FTS5 MATCH is fuzzy
+# token-overlap ranking, not an exact-substring guarantee, and missed an
+# exact recent duplicate whose wording differed from the first dispatch), so
+# both duplicate pairs ran concurrently against the same PR branches,
+# wasting real tokens and risking a git collision. check_content_duplicate()
+# above only catches BYTE-IDENTICAL (normalized) prompt text -- two
+# dispatches phrased differently about the same real target sail straight
+# past it too.
+#
+# The fix: a real, deterministic (not fuzzy, not hash-exact) check. Pulls
+# the most recent umr_tasks rows via query_umr_tasks(limit=30, no status
+# filter, newest first -- the exact shape this incident's own fix
+# requirement specifies), and for every row still queued/running within the
+# last `window_hours` (default 4h), extracts the same class of "target
+# identifier" (UMR id, PR number+repo, exact file path, or exact script
+# name) from ITS OWN real prompt/title text and checks for an exact
+# intersection with the target identifiers of the dispatch about to happen.
+# This is deliberately orthogonal to check_content_duplicate()'s exact-hash
+# match and to --search's fuzzy FTS5 match: three independent, complementary
+# dedup layers, not one widened to try to cover all three cases.
+#
+# UMR-20260813-220216-2e2b real addendum: the UMR-id extraction above was
+# added after this dedup layer itself missed two more real duplicate-spend
+# incidents on 2026-08-13 that named their target purely by UMR id (an
+# RCA "for" a UMR, not a PR/file/script) -- see extract_target_identifiers()'s
+# own docstring for the concrete evidence. This is still target-identifier
+# matching, not governing-chain matching: a UMR id only counts as a target
+# identifier when it is what the dispatch is ABOUT (e.g. "RCA: UMR-X
+# killed"), which is exactly what a plain substring match against title+
+# prompt text captures -- it says nothing about, and is not confused by, an
+# unrelated "addendum to UMR-Y" governing-chain citation elsewhere in the
+# same text meaning something different.
+# ---------------------------------------------------------------------------
+
+_TARGET_ID_PR_EXPLICIT_REPO_RE = re.compile(r'\b([A-Za-z0-9_.-]+)#(\d+)\b')
+_TARGET_ID_PR_BARE_RE = re.compile(r'\bPR\s*#\s*(\d+)\b', re.IGNORECASE)
+_TARGET_ID_FILE_PATH_RE = re.compile(
+    r'\b[A-Za-z0-9_][\w./-]*/[\w.-]+\.(?:py|sh|md|yaml|yml|json|ts|tsx|js|jsx|txt|sql|cfg|ini|toml)\b')
+_TARGET_ID_SCRIPT_NAME_RE = re.compile(r'(?<![\w/.-])([A-Za-z0-9_-]+\.(?:py|sh))\b')
+# Reuse the same canonical UMR-id pattern _extract_umr_ids() (OCID canonical
+# resolution, above) already matches PR bodies against -- one real regex for
+# "what does a UMR id look like", not two independently-drifting ones.
+
+
+def extract_target_identifiers(text, default_repo=None):
+    """Real, deterministic (regex, no fuzziness) extraction of "target
+    identifiers" from free text -- UMR ids, PR number+repo, exact file
+    paths, and exact script names -- see the module comment above this
+    function for why this exists (the exact recent-incident dedup gap
+    --search / check_content_duplicate() both missed). Returns a sorted
+    list of normalized identifier strings, e.g. ["pr:claude-control#131",
+    "path:scripts/resource_governor.py", "umr:UMR-20260807-151622-15cd"].
+    Deliberately conservative: a bare "PR #131" with no repo anywhere
+    (neither an explicit "<repo>#131" in the text nor a `default_repo`
+    passed in) is skipped rather than guessed at -- a repo-less PR number
+    is not a real target identifier on its own, and the caller always has
+    (and must pass) its own real target repo.
+
+    UMR-20260813-220216-2e2b real fix: the original version of this
+    function only extracted PR numbers, file paths, and script names --
+    it never recognized a UMR id itself as a target identifier. That gap
+    is exactly what let two real duplicate-spend incidents slip past this
+    same dedup layer on 2026-08-13: UMR-20260807-151622-15cd got a
+    "RCA: UMR-20260807-151622-15cd killed" dispatch TWICE (UMR-...-4bcc at
+    20:18, UMR-...-7615 at 21:17, worded differently enough that
+    check_content_duplicate()'s exact-hash match also missed it), and
+    UMR-20260813-195852-aa85 got an RCA dispatched (UMR-...-b0cc) for a
+    target whose real fix had already merged as PR #323. Both incidents'
+    dispatch text names the target purely by UMR id, with no PR number, no
+    file path -- extract_target_identifiers() returned an empty set for
+    them and find_target_identifier_duplicate() never even got a chance to
+    compare. Extracting `umr:<id>` here closes that."""
+    ids = set()
+    text = text or ""
+
+    for m in _UMR_ID_RE.finditer(text):
+        ids.add(f"umr:{m.group(0)}")
+
+    for m in _TARGET_ID_PR_EXPLICIT_REPO_RE.finditer(text):
+        repo, num = m.group(1).lower(), m.group(2)
+        ids.add(f"pr:{repo}#{num}")
+
+    if default_repo:
+        for m in _TARGET_ID_PR_BARE_RE.finditer(text):
+            ids.add(f"pr:{default_repo.lower()}#{m.group(1)}")
+
+    for m in _TARGET_ID_FILE_PATH_RE.finditer(text):
+        ids.add(f"path:{m.group(0)}")
+
+    for m in _TARGET_ID_SCRIPT_NAME_RE.finditer(text):
+        ids.add(f"script:{m.group(1)}")
+
+    return sorted(ids)
+
+
+def find_target_identifier_duplicate(conn, title, prompt, repo=None, window_hours=4, limit=30):
+    """The real check itself: pulls query_umr_tasks(conn, limit=limit) --
+    deliberately no status filter, newest-first, exactly the shape this
+    incident's own fix requirement specifies (never --search alone) --
+    and returns the first row (dict) within `window_hours` whose own real
+    prompt/title (from inputs_json) shares an exact target identifier with
+    (title, prompt), and whose status is still 'queued' or 'running' (a row
+    that already finished/failed/was rejected is not a live duplicate to
+    skip against). Returns None if there is no real match."""
+    my_ids = set(extract_target_identifiers(f"{title or ''} {prompt or ''}", default_repo=repo))
+    if not my_ids:
+        return None
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+    rows = query_umr_tasks(conn, limit=limit)
+    for row in rows:
+        if row.get("status") not in ("queued", "running"):
+            continue
+        ts_submitted = row.get("ts_submitted")
+        if not ts_submitted:
+            continue
+        if isinstance(ts_submitted, str):
+            try:
+                ts_submitted = datetime.fromisoformat(ts_submitted)
+            except ValueError:
+                continue
+        if ts_submitted.tzinfo is None:
+            ts_submitted = ts_submitted.replace(tzinfo=timezone.utc)
+        if ts_submitted < cutoff:
+            continue
+
+        inputs = row.get("inputs_json") or {}
+        if isinstance(inputs, str):
+            try:
+                inputs = json.loads(inputs)
+            except (TypeError, ValueError):
+                inputs = {}
+        row_repo = inputs.get("repo") or repo
+        row_text = f"{inputs.get('title', '')} {inputs.get('prompt', '')}"
+        row_ids = set(extract_target_identifiers(row_text, default_repo=row_repo))
+        if my_ids & row_ids:
+            return row
+
+    return None
+
+
+def cmd_check_target_identifier_duplicate(args):
+    conn = _connect()
+    _ensure_umr_table(conn)
+    row = find_target_identifier_duplicate(
+        conn, args.title, args.prompt, repo=args.repo,
+        window_hours=args.window_hours, limit=args.limit,
+    )
+    conn.close()
+    print(json.dumps({
+        "target_identifier_duplicate_found": row is not None,
+        "duplicate_umr_id": row["umr_id"] if row else None,
+        "duplicate_status": row["status"] if row else None,
+    }))
+
+
 def log_instruction(args):
     init_db_silent()
     conn = _connect()
@@ -9157,6 +9320,23 @@ if __name__ == "__main__":
     p_cdup.add_argument("--text", required=True)
     p_cdup.add_argument("--window-hours", dest="window_hours", type=float, default=24)
 
+    p_tidup = sub.add_parser(
+        "check-target-identifier-duplicate",
+        help="Addendum to UMR-20260813-102459-10c3: deterministic (not fuzzy, not "
+             "hash-exact) dedup -- does a queued/running umr_tasks row from the last "
+             "--window-hours already target the exact same PR number+repo, file path, "
+             "or script name as (--title, --prompt)? Real fix for the incident where "
+             "--search (FTS5, fuzzy) missed an exact recent duplicate whose wording "
+             "differed from the first dispatch.")
+    p_tidup.add_argument("--title", required=True)
+    p_tidup.add_argument("--prompt", required=True)
+    p_tidup.add_argument("--repo", default=None,
+                          help="target repo, used both to scope a bare 'PR #N' mention "
+                               "in --title/--prompt and as the fallback repo for rows "
+                               "whose own inputs_json has none")
+    p_tidup.add_argument("--window-hours", dest="window_hours", type=float, default=4)
+    p_tidup.add_argument("--limit", type=int, default=30)
+
     p_exec = sub.add_parser("log-execution")
     p_exec.add_argument("--phase", required=True, choices=["PRE", "POST"])
     p_exec.add_argument("--work-item-id", dest="work_item_id", default=None)
@@ -9610,6 +9790,8 @@ if __name__ == "__main__":
         check_duplicate(args)
     elif args.cmd == "check-content-duplicate":
         cmd_check_content_duplicate(args)
+    elif args.cmd == "check-target-identifier-duplicate":
+        cmd_check_target_identifier_duplicate(args)
     elif args.cmd == "log-execution":
         with _write_lock():
             log_execution(args)

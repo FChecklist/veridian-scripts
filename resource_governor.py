@@ -136,9 +136,26 @@ METRIC_NAMES = ("cpu", "ram", "disk_io", "network")
 # submission while the FIRST is still active (queued/dispatched/running); it
 # cannot see a prior run that already finished and already has a PR.
 GH_ORG = os.environ.get("VERIDIAN_GH_ORG", "FChecklist")
+# UMR-20260813-165620-aac7 (addendum to P1 UMR-20260806-171945-5767,
+# targeting the dispatch-time target-PR re-check introduced under
+# UMR-20260813-135626): the live default here used to be ONLY
+# "compliance-tracker,projexa" -- veridian-scripts and claude-control, the
+# two repos where essentially all real infrastructure work actually lands,
+# were absent. Combined with target_pr_already_resolved()'s old
+# arbitrary-repo-order bare-PR-number scan, this caused 3+ real confirmed
+# Tier-1 audit dispatches targeting veridian-scripts PRs (#297/#300/#301,
+# all MERGEABLE+CLEAN+zero-audit) to be wrongly rejected on a same-number
+# collision against an unrelated, month-old compliance-tracker PR that
+# happened to resolve first. See target_pr_already_resolved()'s own
+# docstring for the real fix (repo-qualified resolution, no more
+# arbitrary-order scanning for bare "PR NNN" references) -- this default
+# fix is the second, independent half of closing that same real gap: even
+# with a correct resolver, a repo missing from this list can never be
+# checked at all. Env-var override preserved for tests/future repos.
 GH_PR_CHECK_REPOS = tuple(
-    r.strip() for r in os.environ.get("VERIDIAN_GOVERNOR_GH_PR_CHECK_REPOS",
-                                       "compliance-tracker,projexa").split(",") if r.strip()
+    r.strip() for r in os.environ.get(
+        "VERIDIAN_GOVERNOR_GH_PR_CHECK_REPOS",
+        "compliance-tracker,projexa,veridian-scripts,claude-control").split(",") if r.strip()
 )
 GH_PR_CHECK_TIMEOUT_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_GH_PR_CHECK_TIMEOUT_S", "8"))
 
@@ -1753,6 +1770,65 @@ def _referenced_pr_number(text):
     return m.group(1) if m else None
 
 
+def _repo_qualified_pr_ref(text, known_repos=None):
+    """UMR-20260813-165620-aac7 (addendum to P1 UMR-20260806-171945-5767,
+    targeting target_pr_already_resolved()'s dispatch-time re-check): extract
+    a REPO-QUALIFIED PR reference from `text` -- i.e. one that names both a
+    repo and a PR number, so the caller never has to guess which repo to
+    check. Three real, deterministic forms are matched, most-specific first:
+
+      1. A full GitHub PR URL: '.../github.com/OWNER/REPO/pull/NNN'. OWNER
+         is unambiguous by construction, so this always matches.
+      2. 'owner/repo#NNN' (e.g. 'FChecklist/veridian-scripts#297'). Also
+         unambiguous -- has an explicit owner segment.
+      3. 'repo#NNN' (e.g. 'veridian-scripts#297') or the real dispatch-title
+         convention this UMR's own governing SPEC evidence rows actually use,
+         '<repo> PR #NNN' / '<repo> PR NNN' (e.g. 'audit of veridian-scripts
+         PR 297 ...' -- see UMR-20260813-135121-9da6/-135059-3b92/-135034-fef1,
+         the 3 real rows wrongly rejected by the old arbitrary-repo-order
+         scan). Both of these bare, no-owner forms are ONLY trusted when the
+         captured name matches a repo from `known_repos` (default
+         GH_PR_CHECK_REPOS) -- never an arbitrary preceding word. This is
+         load-bearing: target_pr_already_resolved()'s own docstring records a
+         real title, '...audit-approved PR 136' (UMR-20260813-111352-6973),
+         where the word immediately before 'PR' is NOT a repo name at all; a
+         naive "word before PR" match would misparse that title and treat
+         'audit-approved' as a repo, exactly the class of guess this
+         function exists to refuse to make.
+
+    Returns (repo, pr_number) -- both strings -- or (None, None) if no
+    repo-qualified reference is present. A bare 'PR NNN' with no repo
+    anywhere in `text` deliberately returns (None, None) here; callers fall
+    back to _referenced_pr_number() + a real, single hint_repo (never a
+    scan) for that case. Never raises, same fail-open-shape convention as
+    _referenced_pr_number()."""
+    if not text:
+        return None, None
+    repos = known_repos if known_repos is not None else GH_PR_CHECK_REPOS
+
+    m = re.search(r"github\.com/[\w.-]+/([\w.-]+)/pull/(\d+)", text, re.IGNORECASE)
+    if m:
+        return m.group(1), m.group(2)
+
+    m = re.search(r"\b[\w.-]+/([\w.-]+)#(\d+)\b", text)
+    if m:
+        return m.group(1), m.group(2)
+
+    if not repos:
+        return None, None
+    repo_alt = "|".join(re.escape(r) for r in repos)
+
+    m = re.search(r"\b(" + repo_alt + r")#(\d+)\b", text, re.IGNORECASE)
+    if not m:
+        m = re.search(r"\b(" + repo_alt + r")\s+PR\s*#?\s*(\d+)\b", text, re.IGNORECASE)
+    if m:
+        matched = m.group(1)
+        canonical = next((r for r in repos if r.lower() == matched.lower()), matched)
+        return canonical, m.group(2)
+
+    return None, None
+
+
 def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None, title=None):
     """Stage 4 (2026-07-29) duplicate-PR guard -- real, exact --head branch
     match against GitHub, ported from owner_backlog_orchestrator.py's
@@ -1948,19 +2024,57 @@ def target_pr_already_resolved(title, hint_repo=None):
     self-reject) is deliberately NOT blocked here: only a real, confirmed
     MERGED or CLOSED state means the queue-time premise itself is dead.
 
+    UMR-20260813-165620-aac7 (addendum to P1 UMR-20260806-171945-5767) real
+    fix: this used to resolve a BARE "PR NNN" title reference by scanning
+    ALL of GH_PR_CHECK_REPOS in a fixed, arbitrary order and blocking on the
+    FIRST repo where that bare number happened to resolve to MERGED/CLOSED
+    -- even though PR numbers are per-repo and the OPEN branch two
+    paragraphs above already explicitly acknowledges that same fact ("the
+    search stops here rather than risking a same-number collision in a
+    different repo"). Live evidence this actually caused, all confirmed via
+    --query-umr the same day: 3 real Tier-1 audit dispatches naming
+    veridian-scripts PR #297/#300/#301 (each real, MERGEABLE+CLEAN, zero
+    posted audit verdict) were wrongly rejected because the SAME bare
+    number resolved first against an unrelated, month-old, already-MERGED
+    compliance-tracker PR -- compliance-tracker's low PR numbers are almost
+    always occupied (200 open PRs at the time), so this collision was
+    effectively guaranteed for any veridian-scripts audit dispatch, and
+    with nothing ever auditable nothing could ever merge.
+
+    Real fix, two-tiered:
+      1. Prefer a REPO-QUALIFIED reference (_repo_qualified_pr_ref() --
+         'veridian-scripts#297', 'FChecklist/veridian-scripts#297', a full
+         github.com PR URL, or the real dispatch-title convention '<repo>
+         PR #NNN' the 3 evidence rows above actually use) and resolve
+         against THAT repo ONLY -- never any other, regardless of
+         hint_repo.
+      2. Otherwise fall back to a bare _referenced_pr_number() match, but
+         ONLY resolve it against hint_repo (a single, real, caller-supplied
+         repo -- never a scan). If hint_repo is also absent/unusable, fail
+         OPEN immediately (no gh call at all) rather than guess a repo by
+         scanning GH_PR_CHECK_REPOS in arbitrary order -- the exact
+         guessing this real incident closes.
+
     Returns (blocked: bool, evidence: dict|None). evidence, when blocked,
     always carries repo/number/state/url plus mergedAt (MERGED) or
     closedAt (CLOSED) -- real, structured evidence for the row's own
     outputs_json/reason, never bare prose."""
-    pr_num = _referenced_pr_number(title)
-    if not pr_num:
-        return False, None
-    if hint_repo and hint_repo in GH_PR_CHECK_REPOS:
-        repos = [hint_repo] + [r for r in GH_PR_CHECK_REPOS if r != hint_repo]
-    elif hint_repo:
-        repos = [hint_repo] + list(GH_PR_CHECK_REPOS)
+    qualified_repo, qualified_pr_num = _repo_qualified_pr_ref(title)
+    if qualified_pr_num:
+        pr_num = qualified_pr_num
+        repos = [qualified_repo]
     else:
-        repos = list(GH_PR_CHECK_REPOS)
+        pr_num = _referenced_pr_number(title)
+        if not pr_num:
+            return False, None
+        if not hint_repo:
+            # Bare "PR NNN" with no repo anywhere in the title and no
+            # usable hint_repo -- do NOT guess by scanning GH_PR_CHECK_REPOS
+            # in arbitrary order (see docstring above for the real
+            # #297/#300/#301 collisions that caused). Fail open: no gh
+            # call, dispatch proceeds as if this guard did not run.
+            return False, None
+        repos = [hint_repo]
     for repo in repos:
         try:
             r = _run(

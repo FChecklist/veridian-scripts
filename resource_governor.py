@@ -26,8 +26,10 @@ import fcntl
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import threading
 import time
 import yaml
 from datetime import datetime, timedelta, timezone
@@ -76,6 +78,34 @@ MAX_TASK_IDENTITY_LEN = 500
 # Anti-starvation aging (design doc "Dynamic realignment"): a queued item's
 # effective priority is max(0, tier - age_seconds // this interval).
 AGING_PROMOTION_INTERVAL_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_AGING_INTERVAL_S", str(15 * 60)))
+
+# UMR-20260813-125756-9221 (addendum to Priority-1 UMR-20260806-171945-5767):
+# real hard guard at this CLI's own entry point. Real incident this closes,
+# measured by the PM desktop sentinel 2026-08-13 12:52-12:56 UTC: a single
+# `--query-umr --status killed --limit 200` invocation (PID 1685324) sat in
+# state D (wchan=mem_cgroup_handle_over_high) for 51-55+ minutes, RSS
+# ~2.04-2.09GB, while the box's swap was fully exhausted (free -g: swap
+# free=0/3) and /proc/pressure/memory sat at ~30-39% full-stall for the
+# whole window -- a steady state, not a spike. earlyoom (active the whole
+# time) never reaped it: see install_cli_resource_guard()'s own docstring
+# and PROGRESS.md/RCA for why. No Python-level guard, and no external
+# daemon, can un-wedge a process already stuck in D state (SIGKILL itself
+# cannot preempt TASK_UNINTERRUPTIBLE) -- the real fix is closing off the
+# ability to balloon to a multi-GB working set in the first place (the
+# SELECT-column and index fixes elsewhere in this task) PLUS this guard,
+# which catches every OTHER real way a future invocation could still run
+# long/heavy (a bad --search pattern, a future code path that regresses the
+# LIMIT pushdown, etc.) before it ever reaches that unrecoverable state.
+# Both values are generous relative to a healthy --query-umr (real,
+# post-fix measurement: sub-second, tens of MB) or a normal --tick pass
+# (this module's own docs: expected to complete well inside the 30s
+# dispatch-loop interval), but decisively below the 51-minute/2GB incident,
+# and overridable per-invocation for real, deliberately-long operations
+# (e.g. a large --reconcile-stale --execute sweep) without weakening the
+# default for every other caller.
+CLI_GUARD_WALL_CLOCK_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_CLI_WALL_CLOCK_S", "180"))
+CLI_GUARD_RSS_CEILING_MB = int(os.environ.get("VERIDIAN_GOVERNOR_CLI_RSS_CEILING_MB", "1024"))
+CLI_GUARD_POLL_INTERVAL_SECONDS = 0.1
 
 # Stuck-task protocol: timeout -> SIGTERM -> grace period -> SIGKILL.
 STUCK_TASK_TIMEOUT_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_STUCK_TIMEOUT_S", str(60 * 60)))
@@ -3812,8 +3842,138 @@ def clear_emergency_stop():
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# CLI resource guard (UMR-20260813-125756-9221)
 # ---------------------------------------------------------------------------
+
+class CliGuardTimeout(Exception):
+    """Raised in the main thread by _cli_guard_alarm_handler() when this CLI
+    invocation's own wall-clock ceiling (CLI_GUARD_WALL_CLOCK_SECONDS) is
+    exceeded. Caught only at the top level (main()'s own caller, below) so
+    every command gets the same real, loud failure -- never a silent hang."""
+
+
+def _cli_guard_alarm_handler(signum, frame):
+    raise CliGuardTimeout(
+        f"resource_governor.py CLI invocation exceeded its {CLI_GUARD_WALL_CLOCK_SECONDS}s "
+        "wall-clock ceiling (VERIDIAN_GOVERNOR_CLI_WALL_CLOCK_S) -- aborted rather than left "
+        "to hang. See PROGRESS.md / RCA for the 2026-08-13 PID 1685324 incident this guard "
+        "closes."
+    )
+
+
+def _read_self_rss_mb():
+    """Real resident set size of THIS process, in MB, read straight from
+    /proc/self/status VmRSS -- the same real metric (RSS, not VSZ) the PM
+    desktop sentinel's ps -o rss measurement used to characterize the
+    original incident, so the guard's ceiling is directly comparable to that
+    real evidence. Returns None if /proc/self/status is unreadable (e.g. a
+    non-Linux dev box) -- the RSS half of the guard degrades to a no-op in
+    that case, but the wall-clock half (signal.alarm) still applies."""
+    try:
+        with open("/proc/self/status", "r") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    kb = int(line.split()[1])
+                    return kb / 1024.0
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _cli_guard_rss_watchdog(stop_event, ceiling_mb):
+    """Background daemon thread: polls this process's own real RSS and, on
+    breach, fails loudly and HARD (os._exit, not sys.exit/an exception) --
+    deliberate, not an oversight. A Python exception raised from a
+    background thread does not propagate into the main thread; the only
+    reliable way for a watchdog thread to stop a main thread that is
+    ballooning memory (e.g. deep inside a C-level sqlite3 fetch) is to kill
+    the whole process itself. This mirrors the real, measured mechanism of
+    the incident this closes: sqlite3's C extension releases the GIL around
+    its own blocking C calls (sqlite3_step et al), which is exactly why this
+    thread can still run and observe real RSS growth while the main thread
+    is deep inside a large query -- confirmed against CPython's own
+    Modules/_sqlite/cursor.c (Py_BEGIN_ALLOW_THREADS around sqlite3_step()).
+    os._exit() (not sys.exit()) is deliberate too: it skips Python's normal
+    interpreter teardown/atexit machinery, which itself could allocate and
+    make a bad memory situation worse.
+
+    Real bug found and fixed while building this task's own before/after
+    benchmark harness: `while not stop_event.wait(interval): check()` waits
+    out the FULL interval before its very first check, so a fast, healthy
+    invocation that finishes inside one poll interval never gets checked at
+    all (confirmed: a deliberately absurd 1MB test ceiling did not fire
+    against a real, ~28MB, ~0.25s --query-umr run because the process had
+    already exited and set stop_event before the first wait() returned).
+    Checking once immediately, THEN entering the wait loop, closes that
+    race -- every real invocation, however short, gets at least one real
+    RSS sample."""
+    first = True
+    while first or not stop_event.wait(CLI_GUARD_POLL_INTERVAL_SECONDS):
+        first = False
+        rss_mb = _read_self_rss_mb()
+        if rss_mb is not None and rss_mb > ceiling_mb:
+            sys.stderr.write(json.dumps({
+                "error": (
+                    f"resource_governor.py CLI invocation exceeded its {ceiling_mb}MB resident "
+                    "memory ceiling (VERIDIAN_GOVERNOR_CLI_RSS_CEILING_MB) -- killed rather than "
+                    "left to balloon further. See PROGRESS.md / RCA for the 2026-08-13 PID "
+                    "1685324 incident this guard closes."
+                ),
+                "measured_rss_mb": round(rss_mb, 1),
+                "ceiling_mb": ceiling_mb,
+            }) + "\n")
+            sys.stderr.flush()
+            os._exit(137)  # 128 + SIGKILL(9), same convention as a real OOM kill exit code
+
+
+@contextlib.contextmanager
+def install_cli_resource_guard(wall_clock_seconds=None, rss_ceiling_mb=None):
+    """Real hard guard at the CLI entry point (main(), below), covering
+    EVERY resource_governor.py invocation, not only --query-umr -- the
+    incident class (a single CLI invocation ballooning memory and wedging
+    the box) is not specific to one flag, even though --query-umr is the
+    one real, measured instance found this run. Two independent real
+    mechanisms, because they catch different failure shapes:
+
+    1. Wall-clock (signal.alarm/SIGALRM, main-thread only): catches a
+       command that is simply taking too long, whether or not it is also
+       consuming excess memory (e.g. blocked on a lock, a slow disk).
+    2. Resident-memory ceiling (background thread polling real
+       /proc/self/status VmRSS): catches unbounded memory growth even
+       within the wall-clock budget -- see _cli_guard_rss_watchdog()'s own
+       docstring for why this can observe growth in the main thread and why
+       it hard-exits rather than raising.
+
+    Neither mechanism can un-wedge a process ALREADY stuck in kernel-side
+    memcg reclaim (D state) -- nothing at the Python level can (see this
+    guard's own module-level comment above CLI_GUARD_WALL_CLOCK_SECONDS).
+    Both are real, tested prevention: they fire well before RSS/wall-clock
+    reach that unrecoverable regime, using ceilings far above real healthy
+    usage but decisively below the incident's measured ~2GB/51+ minutes."""
+    wall_clock_seconds = CLI_GUARD_WALL_CLOCK_SECONDS if wall_clock_seconds is None else wall_clock_seconds
+    rss_ceiling_mb = CLI_GUARD_RSS_CEILING_MB if rss_ceiling_mb is None else rss_ceiling_mb
+
+    old_handler = None
+    stop_event = threading.Event()
+    watchdog = None
+    if wall_clock_seconds and hasattr(signal, "SIGALRM"):
+        old_handler = signal.signal(signal.SIGALRM, _cli_guard_alarm_handler)
+        signal.alarm(wall_clock_seconds)
+    if rss_ceiling_mb:
+        watchdog = threading.Thread(
+            target=_cli_guard_rss_watchdog, args=(stop_event, rss_ceiling_mb), daemon=True,
+            name="cli-resource-guard-rss-watchdog",
+        )
+        watchdog.start()
+    try:
+        yield
+    finally:
+        if wall_clock_seconds and hasattr(signal, "SIGALRM"):
+            signal.alarm(0)
+            if old_handler is not None:
+                signal.signal(signal.SIGALRM, old_handler)
+        stop_event.set()
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
@@ -3857,6 +4017,11 @@ def main():
     ap.add_argument("--status", default=None)
     ap.add_argument("--search", default=None, help="free-text FTS5 query over task_identity/source_trigger/logs_ref")
     ap.add_argument("--task-identity", dest="task_identity", default=None)
+    ap.add_argument("--full", action="store_true",
+                     help="UMR-20260813-125756-9221: include the large inputs_json/outputs_json/"
+                          "metadata_json/metric_snapshot_json blob columns in --query-umr's output "
+                          "(default: excluded -- see query_umr_tasks()'s own docstring in "
+                          "superboss-register.py for the real measured row sizes this default avoids)")
     ap.add_argument("--clear-emergency-stop", action="store_true")
     ap.add_argument("--check-task-start-gate", action="store_true",
                      help="UMR-20260808-121334-e122 (Option B): real, shared stop-work-order + "
@@ -3909,7 +4074,7 @@ def main():
         sbr._ensure_umr_table(conn)
         rows = sbr.query_umr_tasks(conn, limit=args.limit, status=args.status,
                                     task_identity=args.task_identity, query_text=args.search,
-                                    umr_id=args.umr_id)
+                                    umr_id=args.umr_id, full=args.full)
         # Point 2 (task-gateway.py audit-24-points, UMR-20260808-145030-f3d1):
         # this IS the other canonical query path (alongside task-gateway.py
         # status) -- log it. Best-effort: a broken log write must never break
@@ -3990,4 +4155,17 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # UMR-20260813-125756-9221: real hard guard wraps EVERY CLI invocation
+    # of this module -- see install_cli_resource_guard()'s own docstring for
+    # why (wall-clock + RSS ceiling, two independent real mechanisms) and
+    # the module-level comment above CLI_GUARD_WALL_CLOCK_SECONDS for the
+    # real incident evidence this closes. CliGuardTimeout is the one real
+    # exception type this guard can raise into the main thread (the RSS
+    # watchdog's own breach path hard-exits itself, see
+    # _cli_guard_rss_watchdog()'s own docstring, so it never reaches here).
+    try:
+        with install_cli_resource_guard():
+            main()
+    except CliGuardTimeout as exc:
+        print(json.dumps({"error": str(exc)}))
+        sys.exit(124)  # matches the real `timeout(1)` convention for "killed for timing out"

@@ -857,29 +857,59 @@ def build_browser_components(reg, engine_inventory, engine_ids_by_no):
     return count
 
 
+def _merge_census_entries(master_index_doc):
+    """Merges every registries[] entry whose id starts with
+    'vercel_github_state_census_' (UMR-20260806-140841-46d1, real gh-repo-list-vs-wiring_registry
+    drift found: the original 2026_07_26 entry undercounted real GitHub repos 7-vs-15 and had
+    drifted open_pr_count values). Entries are applied in id-sort order (2026_07_26 base, then
+    dated refresh entries like 2026_08_06_refresh layered on top), field-by-field per repo/project
+    key so a refresh entry only needs to carry the fields that actually changed -- it does not have
+    to repeat a whole repo's required_status_checks_contexts/active_workflows just to update its
+    open_pr_count. New repo/project keys a refresh entry introduces are added as-is. Returns None if
+    no census entry exists at all (never invents one)."""
+    entries = sorted(
+        (r for r in master_index_doc.get("registries", []) if r.get("id", "").startswith("vercel_github_state_census_")),
+        key=lambda r: r["id"],
+    )
+    if not entries:
+        return None
+    merged_repos, merged_projects, source_ids = {}, {}, []
+    for e in entries:
+        source_ids.append(e["id"])
+        for name, row in (e.get("github", {}).get("repos", {}) or {}).items():
+            merged_repos.setdefault(name, {}).update(row)
+        for name, row in (e.get("vercel", {}).get("projects", {}) or {}).items():
+            merged_projects.setdefault(name, {}).update(row)
+    merged = dict(entries[0])
+    merged["github"] = dict(merged.get("github", {}))
+    merged["github"]["repos"] = merged_repos
+    merged["vercel"] = dict(merged.get("vercel", {}))
+    merged["vercel"]["projects"] = merged_projects
+    merged["_source_census_ids"] = source_ids
+    return merged
+
+
 def build_vercel_and_github(reg, master_index_doc):
     """entity_type=vercel_project, entity_type=github_repo -- full-system extension
     (task-20260726-162252-extend-wiring-engine-to-full-system--ser). Sourced from the
     real, fresh vercel/gh CLI census already committed at
-    ai-os/MASTER_INDEX.yaml registries[id=vercel_github_state_census_2026_07_26] --
-    never a separate hand-typed catalog. Also emits the real `contains` relationship
+    ai-os/MASTER_INDEX.yaml registries[id=vercel_github_state_census_2026_07_26], merged
+    with any later dated refresh entries via _merge_census_entries() (UMR-20260806-140841-46d1)
+    -- never a separate hand-typed catalog. Also emits the real `contains` relationship
     from each github_repo to any file/engine/gateway entity this run already
     collected whose own path is a real prefix match under that repo's local mirror
     directory (repos/<repo>/...) -- run LAST in main() so path_to_id is maximally
     populated first."""
-    entry = None
-    for r in master_index_doc.get("registries", []):
-        if r.get("id") == "vercel_github_state_census_2026_07_26":
-            entry = r
-            break
+    entry = _merge_census_entries(master_index_doc)
     if not entry:
-        print("  ! vercel_github_state_census_2026_07_26 not found in MASTER_INDEX.yaml, "
+        print("  ! no vercel_github_state_census_* entry found in MASTER_INDEX.yaml, "
               "skipping vercel_project/github_repo entities", file=sys.stderr)
         return 0, 0
 
     master_index_rel = "ai-os/MASTER_INDEX.yaml"
     master_index_file_id = reg.get_or_create_file(master_index_rel, "vercel_github_state_census")
     master_index_exists = path_exists(master_index_rel)
+    census_ids_note = "+".join(entry.get("_source_census_ids", ["vercel_github_state_census_2026_07_26"]))
 
     github_repos = entry.get("github", {}).get("repos", {}) or {}
     vercel_projects = entry.get("vercel", {}).get("projects", {}) or {}
@@ -899,7 +929,7 @@ def build_vercel_and_github(reg, master_index_doc):
             "path": mirror_rel_path if mirror_exists else None,
             "relationships": [{
                 "target_entity_id": master_index_file_id, "relationship_type": "defined_in",
-                "evidence": f"{master_index_rel} registries[id=vercel_github_state_census_2026_07_26].github.repos.{repo_name}",
+                "evidence": f"{master_index_rel} registries[id in ({census_ids_note})].github.repos.{repo_name}",
             }],
             "last_verified_ts": now_iso(),
             "verification_status": "VERIFIED_MATCH" if mirror_exists else "PATH_MISSING",
@@ -920,7 +950,7 @@ def build_vercel_and_github(reg, master_index_doc):
         target_repo_id = github_ids_by_repo_name.get(repo_name) if repo_name else None
         rels = [{
             "target_entity_id": master_index_file_id, "relationship_type": "defined_in",
-            "evidence": f"{master_index_rel} registries[id=vercel_github_state_census_2026_07_26].vercel.projects.{project_key}",
+            "evidence": f"{master_index_rel} registries[id in ({census_ids_note})].vercel.projects.{project_key}",
         }]
         if target_repo_id:
             rels.append({"target_entity_id": target_repo_id, "relationship_type": "deployed_from",

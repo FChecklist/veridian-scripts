@@ -42,13 +42,32 @@ identical for both, since supervisor-entrypoint.sh's own vocabulary
 (`completed`/`blocked`) is already a strict subset of SELF_REPORTED_NEGATIVE_STATUSES
 below.
 
+UMR-20260813-215742-db64 addendum (real fix for the supervisor's own hard-fail-every-
+no-op-branch defect, task-20260813-215756): supervisor-entrypoint.sh's real NO-OP-BRANCH-
+GUARD-BLOCK now writes task.yaml checkpoint status='completed_no_change' -- never
+'completed' -- for the one, narrow, real case a worker/supervisor branch has ZERO commits
+ahead of its own base branch (`git rev-list --count base..branch` == 0): the real
+deliverable was already merged by a prior task, this is a genuine, evidenced completion,
+not a plumbing failure, and must not fall through to the failed/killed path a supervisor
+hard-fail (exit 1) would otherwise reach. That checkpoint is always paired with a real,
+structured `no_op.json` marker (base_sha/branch_sha/base_branch/branch/reason) written to
+the SAME task dir, in the SAME commit of work, by the SAME script, immediately before
+exit 0 -- so, unlike point 1 below, this hook trusts that marker's branch_sha as a real
+completion candidate and bridges it to umr_tasks.status='completed' via the exact same
+`mark-umr-terminal --status completed --commit-sha <branch_sha>` real-evidence gate
+(validate_umr_terminal_completion_evidence) every other real 'completed' writer already
+goes through -- it is independently, live re-verified there (a real `git merge-base
+--is-ancestor` check against the real local repo checkout), never blindly trusted from
+the marker file alone. See `_bridge_no_op_completion()` below.
+
 Deliberately conservative in both directions:
-  1. NEVER writes status=completed/completed_unmerged from here. This hook only ever has
-     a process exit code to go on, and this task's own SPEC is explicit: a clean exit
-     code is NOT evidence of substantive completion. Only
-     reconcile_stale_running_workers.py's own real-artifact check (a real commit,
-     verified server-side by validate_umr_terminal_completion_evidence -- real git
-     ancestry / real file existence, never our own guess) is allowed to write those two
+  1. NEVER writes status=completed/completed_unmerged from a bare exit code alone. This
+     hook only ever has a process exit code to go on for every OTHER status, and this
+     task's own SPEC is explicit: a clean exit code is NOT evidence of substantive
+     completion. Only reconcile_stale_running_workers.py's own real-artifact check (a
+     real commit, verified server-side by validate_umr_terminal_completion_evidence --
+     real git ancestry / real file existence, never our own guess) -- or the real,
+     structured no_op.json marker described above -- is allowed to write those two
      statuses.
   2. Only writes umr_tasks.status=failed for a DEFINITIVE, already-self-reported negative
      outcome: task.yaml's own last checkpoint status is one of
@@ -80,6 +99,7 @@ Deliberately conservative in both directions:
      signal this whole fix depends on. Any exception here is caught, logged to the
      task's own worker.log, and swallowed.
 """
+import json
 import os
 import subprocess
 import sys
@@ -124,6 +144,15 @@ SELF_REPORTED_NEGATIVE_STATUSES = (
     "failed", "blocked", "cancelled", "rejected_duplicate", "superseded", "not_needed",
 )
 
+# UMR-20260813-215742-db64: the one real self-reported POSITIVE-but-distinct status this
+# hook recognizes -- see the module docstring's own addendum section above for the full
+# real chain (supervisor-entrypoint.sh's NO-OP-BRANCH-GUARD-BLOCK writes this, paired with
+# a real no_op.json evidence marker, only when a branch genuinely has zero commits ahead
+# of its base). Kept as its own named constant (not folded into
+# SELF_REPORTED_NEGATIVE_STATUSES, which it structurally is not) so the two vocabularies
+# can never silently drift into meaning the same thing.
+SELF_REPORTED_NO_OP_STATUS = "completed_no_change"
+
 
 def _load_task_yaml(task_id):
     path = f"{AI_OS}/tasks/{task_id}/task.yaml"
@@ -131,6 +160,23 @@ def _load_task_yaml(task_id):
         with open(path) as f:
             return yaml.safe_load(f) or {}
     except (OSError, yaml.YAMLError):
+        return None
+
+
+def _load_no_op_marker(task_id):
+    """UMR-20260813-215742-db64: real, structured hand-off written by
+    supervisor-entrypoint.sh's own NO-OP-BRANCH-GUARD-BLOCK immediately before it
+    checkpoints task.yaml status='completed_no_change' and exits 0. Read here, not
+    re-derived -- same 'trust the caller's own already-computed real evidence, which the
+    real mark-umr-terminal gate independently re-verifies rather than blindly accepts'
+    posture the --evidence-json/--handoff-envelope flags elsewhere in this codebase
+    already established. Missing/unparseable is a real, safe fail-open (leaves the row at
+    'running' for a human or the STEP 3 reconciler), never a guess."""
+    path = f"{AI_OS}/tasks/{task_id}/no_op.json"
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
         return None
 
 
@@ -204,6 +250,10 @@ def run(task_id, unit_kind="worker"):
     checkpoints = task.get("checkpoints") or []
     last_status = checkpoints[-1]["status"] if checkpoints else task.get("status")
 
+    if last_status == SELF_REPORTED_NO_OP_STATUS:
+        _bridge_no_op_completion(task_id, unit_kind, unit_name, row, task)
+        return
+
     if last_status not in SELF_REPORTED_NEGATIVE_STATUSES:
         # pending_review (supervisor handoff) / completed (already gated elsewhere) /
         # in_progress / pending (ambiguous mid-work stop, maybe a systemd restart is
@@ -228,6 +278,54 @@ def run(task_id, unit_kind="worker"):
             capture_output=True, text=True, timeout=35,
         )
         _log(task_id, unit_kind, f"mark-umr-terminal umr={row['umr_id']} status=failed rc={result.returncode} "
+                                  f"stdout={result.stdout.strip()[:300]} stderr={result.stderr.strip()[:300]}")
+    except Exception as e:
+        _log(task_id, unit_kind, f"mark-umr-terminal call raised (non-fatal): {e}")
+
+
+def _bridge_no_op_completion(task_id, unit_kind, unit_name, row, task):
+    """UMR-20260813-215742-db64: real, distinct handling for
+    status='completed_no_change' -- see the module docstring's own addendum for the full
+    real chain this closes (previously: an unrecognized checkpoint status fell through to
+    the generic 'leave at running' branch, which pm-sentinel-tick.sh's own status='running'
+    + dead-unit cross-check (Check 2b) would then independently catch and dispatch a fresh,
+    unnecessary RCA for -- the exact unbounded paid-AI re-dispatch loop this UMR exists to
+    close).
+
+    Requires a real no_op.json marker with a real branch_sha -- written by
+    supervisor-entrypoint.sh's own NO-OP-BRANCH-GUARD-BLOCK in the same run that wrote this
+    checkpoint status, never guessed here. That branch_sha is exactly the real evidence
+    validate_umr_terminal_completion_evidence() already requires for status='completed' (a
+    real commit that IS an ancestor of the base branch -- which is structurally guaranteed
+    true here: supervisor-entrypoint.sh only ever writes 'completed_no_change' when `git
+    rev-list --count base..branch` was genuinely 0) -- reusing the existing 'completed'
+    status rather than widening the umr_tasks CHECK-constraint enum for a case that is,
+    evidentially, already exactly that. --repo is threaded from this task's own real
+    task.yaml repo field so the real ancestor check runs against the real local checkout
+    this branch actually lives in, not a hardcoded default."""
+    no_op = _load_no_op_marker(task_id)
+    if not no_op or not no_op.get("branch_sha"):
+        _log(task_id, unit_kind, f"last task.yaml status='{SELF_REPORTED_NO_OP_STATUS}' for umr {row['umr_id']} "
+                                  f"but no real no_op.json marker (with a real branch_sha) was found -- leaving "
+                                  f"at running rather than guessing")
+        return
+
+    reason = (
+        f"worker-exit-status-bridge (ExecStopPost, UMR-20260813-215742-db64 no-op-branch "
+        f"completion guard): unit {unit_name} stopped with task.yaml's own last checkpoint "
+        f"status='{SELF_REPORTED_NO_OP_STATUS}' -- real no_op.json evidence: {no_op.get('reason', '')}"
+    )
+    cmd = [
+        "python3", SUPERBOSS_REGISTER, "mark-umr-terminal",
+        "--umr-id", row["umr_id"], "--status", "completed",
+        "--commit-sha", no_op["branch_sha"], "--reason", reason,
+    ]
+    repo = task.get("repo")
+    if repo:
+        cmd += ["--repo", repo]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
+        _log(task_id, unit_kind, f"mark-umr-terminal umr={row['umr_id']} status=completed(no-op) rc={result.returncode} "
                                   f"stdout={result.stdout.strip()[:300]} stderr={result.stderr.strip()[:300]}")
     except Exception as e:
         _log(task_id, unit_kind, f"mark-umr-terminal call raised (non-fatal): {e}")

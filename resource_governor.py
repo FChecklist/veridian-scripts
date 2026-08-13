@@ -51,6 +51,37 @@ PROC_STAT_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_STAT", "/proc/stat")
 PROC_MEMINFO_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_MEMINFO", "/proc/meminfo")
 PROC_DISKSTATS_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_DISKSTATS", "/proc/diskstats")
 PROC_NETDEV_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_NETDEV", "/proc/net/dev")
+PROC_VMSTAT_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_VMSTAT", "/proc/vmstat")
+
+# Real, additive stale-swap-ratchet override (UMR-20260813-155201-da76,
+# addendum to P1 UMR-20260806-171945-5767 / UMR-20260813-163237 spec "unwedge
+# dispatch -- stale swap ratchet blocked"). Real evidence this closes, live
+# 2026-08-13: dispatch_core.py's swap_backoff gate is a STATIC occupancy
+# ratio (1 - SwapFree/SwapTotal from /proc/meminfo) -- Linux never
+# proactively reclaims swap pages once written, so a single past spike (this
+# box's own known ~2GB-per-register-CLI-call working set) can leave that
+# ratio permanently >= BACKOFF_UTILIZATION_PCT (0.80) even with abundant real
+# MemAvailable and ZERO ongoing swap I/O. 5 real /proc/meminfo samples over
+# 15s that tick showed SwapFree byte-frozen at exactly 775980 kB every
+# sample (swap_used_pct=0.8149) while MemAvailable held ~11.3GB of 15.6GB
+# genuinely free, and real `vmstat 2 5` showed so=1079,0,0,0,0 / si tapering
+# to near-zero -- no steady-state swap activity, i.e. the gate was blocking
+# on a stale ratchet, not real pressure. See
+# swap_activity_quiet_detail()/_override_stale_swap_backoff() below for the
+# real mechanism -- this stays in resource_governor.py (exempt from the
+# narrow 2026-08-08 stop-work order) and wraps dispatch_core.py's own
+# has_free_slot_detail() result; dispatch_core.py itself is left unmodified.
+SWAP_ACTIVITY_STATE_PATH = os.environ.get(
+    "VERIDIAN_GOVERNOR_SWAP_ACTIVITY_STATE", f"{LOCKS_DIR}/resource-governor-swap-activity-state.json")
+# A real elapsed window is required before a "quiet" verdict can be trusted
+# -- two samples taken within the same fraction of a second would look
+# "quiet" from pure sampling luck, not because swap I/O is actually idle.
+SWAP_ACTIVITY_MIN_INTERVAL_SECONDS = float(
+    os.environ.get("VERIDIAN_GOVERNOR_SWAP_ACTIVITY_MIN_INTERVAL_S", "5"))
+# Small, real allowance for isolated single-page noise (e.g. one cold page
+# swapped in by an unrelated process) -- NOT a real sustained swap-out.
+# Default 0: only a byte-for-byte-zero pswpin/pswpout delta counts as quiet.
+SWAP_ACTIVITY_NOISE_PAGES = int(os.environ.get("VERIDIAN_GOVERNOR_SWAP_ACTIVITY_NOISE_PAGES", "0"))
 
 # The one hard cap this whole module exists to enforce, independently per
 # metric -- any ONE of the four hitting this freezes the queue (SCOPE
@@ -166,9 +197,26 @@ METRIC_NAMES = ("cpu", "ram", "disk_io", "network")
 # submission while the FIRST is still active (queued/dispatched/running); it
 # cannot see a prior run that already finished and already has a PR.
 GH_ORG = os.environ.get("VERIDIAN_GH_ORG", "FChecklist")
+# UMR-20260813-165620-aac7 (addendum to P1 UMR-20260806-171945-5767,
+# targeting the dispatch-time target-PR re-check introduced under
+# UMR-20260813-135626): the live default here used to be ONLY
+# "compliance-tracker,projexa" -- veridian-scripts and claude-control, the
+# two repos where essentially all real infrastructure work actually lands,
+# were absent. Combined with target_pr_already_resolved()'s old
+# arbitrary-repo-order bare-PR-number scan, this caused 3+ real confirmed
+# Tier-1 audit dispatches targeting veridian-scripts PRs (#297/#300/#301,
+# all MERGEABLE+CLEAN+zero-audit) to be wrongly rejected on a same-number
+# collision against an unrelated, month-old compliance-tracker PR that
+# happened to resolve first. See target_pr_already_resolved()'s own
+# docstring for the real fix (repo-qualified resolution, no more
+# arbitrary-order scanning for bare "PR NNN" references) -- this default
+# fix is the second, independent half of closing that same real gap: even
+# with a correct resolver, a repo missing from this list can never be
+# checked at all. Env-var override preserved for tests/future repos.
 GH_PR_CHECK_REPOS = tuple(
-    r.strip() for r in os.environ.get("VERIDIAN_GOVERNOR_GH_PR_CHECK_REPOS",
-                                       "compliance-tracker,projexa").split(",") if r.strip()
+    r.strip() for r in os.environ.get(
+        "VERIDIAN_GOVERNOR_GH_PR_CHECK_REPOS",
+        "compliance-tracker,projexa,veridian-scripts,claude-control").split(",") if r.strip()
 )
 GH_PR_CHECK_TIMEOUT_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_GH_PR_CHECK_TIMEOUT_S", "8"))
 
@@ -243,6 +291,20 @@ STOP_WORK_ORDER_GIT_FETCH_RETRY_DELAY_SECONDS = float(
 
 def _run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+# Real fix (UMR-20260813-165729, addendum to P1 UMR-20260806-171945-5767):
+# _perform_spawn()'s veridian_task_create branch used to persist only
+# r.stderr[:500] into outputs_json. Real, live-reproduced root cause: the
+# child (veridian-task.py cmd_create) writes its own real error text via
+# plain `print(...)` -- STDOUT, not stderr -- before every one of its
+# `sys.exit(1)` calls (e.g. "ERROR: repo not found at ..."), so a real,
+# diagnosable failure reason existed on disk the whole time, on the one
+# stream this code never looked at. Persisting a bounded tail of BOTH
+# streams (never unbounded -- these rows are already read back whole into
+# umr_tasks.outputs_json) closes that gap for every future failure, not
+# just this one specific cause.
+_SPAWN_OUTPUT_TAIL_CHARS = 4000
 
 
 def _utcnow():
@@ -587,6 +649,178 @@ def sample_metrics(now=None):
 def over_threshold_metrics(metrics, threshold=None):
     threshold = METRIC_THRESHOLD_PERCENT if threshold is None else threshold
     return [name for name in METRIC_NAMES if metrics.get(name, 0.0) >= threshold]
+
+
+# ---------------------------------------------------------------------------
+# Stale-swap-ratchet override (UMR-20260813-155201-da76) -- see the
+# SWAP_ACTIVITY_* constants' own comment above for the full real incident.
+# Two real, independent pieces: (1) read real MemAvailable headroom directly
+# (this module's own PROC_MEMINFO_PATH, same convention as read_mem_percent()
+# above -- never dispatch_core.py's private helper, so this stays fully
+# testable via the existing env-override convention), and (2) a real,
+# delta-based swap-activity check against /proc/vmstat's cumulative
+# pswpin/pswpout counters, persisted across calls the same way
+# sample_metrics() above persists cpu/disk/net state -- never a blocking
+# `vmstat N M` subprocess call inside this 30s-cadence dispatch hot path.
+# ---------------------------------------------------------------------------
+
+def read_swap_page_counters(path=None):
+    """Real, cumulative since-boot pswpin/pswpout page counts from
+    /proc/vmstat -- the same real kernel counters `vmstat`'s own si/so
+    columns are derived from (vmstat itself just reports the per-interval
+    DELTA of these two counters). Reading the raw cumulative values lets a
+    delta be taken between two real, timestamped governor samples instead
+    of shelling out to `vmstat N M`, which blocks for N*M wall-clock
+    seconds -- unacceptable inside dispatch_one()'s real per-tick path."""
+    path = path or PROC_VMSTAT_PATH
+    pswpin = pswpout = 0
+    with open(path) as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) != 2:
+                continue
+            if parts[0] == "pswpin":
+                pswpin = int(parts[1])
+            elif parts[0] == "pswpout":
+                pswpout = int(parts[1])
+    return pswpin, pswpout
+
+
+def swap_activity_quiet_detail(now=None):
+    """(quiet, detail): real, delta-based check of whether swap is ACTIVELY
+    being written/read right now, independent of the static SwapFree/
+    SwapTotal occupancy ratio dispatch_core.py's swap_backoff check uses.
+    Same persisted-state-file delta pattern sample_metrics() above already
+    uses for cpu/disk/net (a separate state file -- SWAP_ACTIVITY_STATE_PATH
+    -- so this never contends with or corrupts that one).
+
+    quiet is True only when ALL of the following real conditions hold:
+      - a PRIOR sample exists (not this process's first-ever call/cold
+        start against SWAP_ACTIVITY_STATE_PATH),
+      - at least SWAP_ACTIVITY_MIN_INTERVAL_SECONDS of real wall-clock time
+        has elapsed since it (guards against a too-close-together pair of
+        calls looking "quiet" purely from too short a window to measure
+        across), and
+      - both the real pswpin and pswpout deltas over that window are at/
+        under SWAP_ACTIVITY_NOISE_PAGES.
+    Every other case (cold start, too-short interval, or a real nonzero-
+    beyond-noise delta) returns quiet=False -- fails open to the ORIGINAL
+    swap_backoff block; this function only ever narrows when dispatch backs
+    off, it never widens uncertainty into an override."""
+    now = now or _utcnow()
+    curr_in, curr_out = read_swap_page_counters()
+    curr_ts = now.timestamp()
+
+    with _state_file_lock(SWAP_ACTIVITY_STATE_PATH):
+        prev = _load_json(SWAP_ACTIVITY_STATE_PATH)
+        _save_json(SWAP_ACTIVITY_STATE_PATH, {"ts": curr_ts, "pswpin": curr_in, "pswpout": curr_out})
+
+    if prev is None:
+        return False, {"check": "swap_activity_cold_start"}
+
+    dt = curr_ts - prev.get("ts", curr_ts)
+    if dt < SWAP_ACTIVITY_MIN_INTERVAL_SECONDS:
+        return False, {"check": "swap_activity_interval_too_short", "dt_seconds": dt,
+                        "min_interval_seconds": SWAP_ACTIVITY_MIN_INTERVAL_SECONDS}
+
+    in_delta = max(0, curr_in - prev.get("pswpin", curr_in))
+    out_delta = max(0, curr_out - prev.get("pswpout", curr_out))
+    quiet = in_delta <= SWAP_ACTIVITY_NOISE_PAGES and out_delta <= SWAP_ACTIVITY_NOISE_PAGES
+    return quiet, {
+        "check": "swap_activity_quiet" if quiet else "swap_activity_sustained",
+        "pswpin_delta": in_delta, "pswpout_delta": out_delta, "dt_seconds": dt,
+        "noise_allowance_pages": SWAP_ACTIVITY_NOISE_PAGES,
+    }
+
+
+def _real_mem_headroom_bytes(path=None):
+    """Real MemAvailable headroom (bytes) below dispatch_core.py's own
+    BACKOFF_UTILIZATION_PCT ceiling on memory -- the identical math
+    dispatch_core.has_resource_headroom_detail()'s mem_headroom_budget check
+    already does, independently re-derived here from this module's own
+    PROC_MEMINFO_PATH (never dispatch_core.py's private helper) so this stays
+    testable via the existing env-override convention. Returns None if
+    MemTotal is unreadable/zero -- callers must treat that as "cannot
+    confirm headroom", never as "abundant"."""
+    path = path or PROC_MEMINFO_PATH
+    vals = {}
+    with open(path) as f:
+        for line in f:
+            key, _, rest = line.partition(":")
+            if key in ("MemTotal", "MemAvailable"):
+                parts = rest.strip().split()
+                if parts:
+                    vals[key] = int(parts[0]) * 1024
+    mem_total = vals.get("MemTotal", 0)
+    if not mem_total:
+        return None
+    mem_available = vals.get("MemAvailable", mem_total)
+    mem_used_bytes = mem_total - mem_available
+    dc = _dispatch_core()
+    return (mem_total * dc.BACKOFF_UTILIZATION_PCT) - mem_used_bytes
+
+
+def _override_stale_swap_backoff(slot_ok, slot_detail, now=None):
+    """Real, narrow override of dispatch_core.has_free_slot_detail()'s
+    "swap_backoff" veto specifically -- see the SWAP_ACTIVITY_* constants'
+    own comment above for the real evidence this closes.
+
+    Deliberately narrow: only ever overrides slot_detail["check"] ==
+    "swap_backoff" (the SOFT 0.80 BACKOFF_UTILIZATION_PCT threshold
+    dispatch_core.py's own module comment documents as "meaningfully below
+    the hard ceiling... a build/compile spike... still has real room before
+    0.99"). NEVER overrides "swap_hard_ceiling" (the Owner's own 0.99
+    number, "never cross" per that same module comment), "mem_backoff",
+    "mem_hard_ceiling", "mem_headroom_budget", "load1_backoff",
+    "load1_unreadable", or "cap_exhausted" -- none of those are the stale
+    ratchet this UMR's real evidence found; overriding any of them would be
+    exactly the kind of invented exemption this task's own spec forbids.
+    Passing through slot_ok/slot_detail completely unchanged (including
+    slot_ok=True, i.e. no block to override) is the correct behavior for
+    every one of those other cases.
+
+    Both of the following real, freshly-live-read conditions must hold, or
+    the original (slot_ok, slot_detail) is returned unchanged:
+      1. _real_mem_headroom_bytes() confirms at least one more worker's own
+         PER_WORKER_MEMORY_BUDGET_BYTES of real headroom below the backoff
+         ceiling -- memory itself must be genuinely abundant, not just
+         "not yet over its own threshold".
+      2. swap_activity_quiet_detail() confirms zero-or-noise real
+         pswpin/pswpout activity over a real, trustworthy elapsed window.
+
+    Returns (ok, detail) in the exact same shape dispatch_core.py's own
+    has_free_slot_detail() uses. When it overrides, detail carries
+    check="swap_backoff_override_stale_ratchet" plus every real number both
+    conditions were computed from, so this is fully diagnosable from the
+    tick log / veridian-dispatch-decision journal alone, same as every
+    other real check in this module."""
+    if slot_ok or not slot_detail or slot_detail.get("check") != "swap_backoff":
+        return slot_ok, slot_detail
+
+    dc = _dispatch_core()
+    try:
+        mem_headroom_bytes = _real_mem_headroom_bytes()
+    except (OSError, ValueError):
+        return slot_ok, slot_detail  # real /proc/meminfo unreadable -- fail open to the original block
+    if mem_headroom_bytes is None or mem_headroom_bytes < dc.PER_WORKER_MEMORY_BUDGET_BYTES:
+        return slot_ok, slot_detail  # real memory headroom is NOT independently confirmed abundant
+
+    try:
+        quiet, activity_detail = swap_activity_quiet_detail(now=now)
+    except (OSError, ValueError):
+        return slot_ok, slot_detail  # real /proc/vmstat unreadable -- fail open to the original block
+    if not quiet:
+        return slot_ok, slot_detail  # real swap I/O is active, or not yet confirmed quiet
+
+    return True, {
+        "check": "swap_backoff_override_stale_ratchet",
+        "original_check": "swap_backoff",
+        "swap_used_pct": slot_detail.get("swap_used_pct"),
+        "threshold_pct": slot_detail.get("threshold_pct"),
+        "mem_headroom_bytes": mem_headroom_bytes,
+        "required_bytes": dc.PER_WORKER_MEMORY_BUDGET_BYTES,
+        "swap_activity": activity_detail,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1241,6 +1475,269 @@ def submit(task_spec, tier, source_trigger):
 
 
 # ---------------------------------------------------------------------------
+# Queue-management operations (UMR-20260813-211804-b554's RCA + real
+# redispatch of UMR-20260807-150524-a683's own spec: "extend
+# resource_governor.py with real list_queue/stop_task/resume_task/
+# delete_task/set_priority/move_up/move_down operations, each atomic (real
+# read-check-and-write in one function call, no separate round-trips a
+# caller must sequence), exposed via a thin real CLI").
+#
+# a683's original 2026-08-07 dispatch was correctly declined: it relied on
+# an unverifiable "FIX IT SO THAT WORK HAPPENS" Owner quote as its claimed
+# exemption from the standing stop-work order, and no independent channel
+# available at the time corroborated it (no pm_decisions_pending row, no
+# ATTENTION.md mention, no amendment on the stop-work-order task's own
+# record). That stop-work order has since been genuinely, verifiably lifted
+# for this exact file -- OWNER_DECISIONS_NEEDED_2026-07-23.yaml's own
+# id=stop-work-order-lifted-2026-08-08 entry (decided_by rajat, on-server,
+# own git identity, 2026-08-08T09:55:38Z, explicitly names
+# resource_governor.py) -- confirmed live by this task by calling
+# _stop_work_order_block_reason() directly, which returns blocked=False as
+# of this run. So the real remaining build scope below is legitimate now,
+# on its own real authorization, independent of the fabricated quote the
+# original dispatch tried to use.
+#
+# Deliberately schema-free: no ALTER TABLE, no new umr_tasks.status value.
+# "Stopping"/"resuming"/manual reordering all live inside the existing
+# metadata_json column (already an established free-form JSON field on this
+# table -- see submit()'s own metadata_json.correlation_id precedent above)
+# so none of this touches the live production umr_tasks CHECK constraint or
+# needs the heavy rebuild _migrate_umr_tasks_status_widen() required for a
+# genuinely new status value -- a materially lower-risk change to make
+# directly against the shared, concurrently-used production DB.
+# ---------------------------------------------------------------------------
+
+def _queue_metadata(row):
+    try:
+        return json.loads(row["metadata_json"]) if row.get("metadata_json") else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _queue_sort_key(row, now=None):
+    """(effective_priority, manual_rank-or-ts_submitted-epoch) -- manual_rank
+    (metadata_json.queue_manual_rank, a float) is an optional same-tier
+    tiebreaker set only by move_up()/move_down() below; a row that never
+    goes through either falls back to its own ts_submitted epoch, so an
+    untouched queue sorts in exactly next_queued_task()'s existing
+    (effective_priority, ts_submitted) order -- purely additive, never a
+    behavior change for any row nothing here ever touches."""
+    meta = _queue_metadata(row)
+    ts_submitted = row["ts_submitted"]
+    ts_dt = datetime.fromisoformat(ts_submitted) if isinstance(ts_submitted, str) else ts_submitted
+    manual_rank = meta.get("queue_manual_rank")
+    if not isinstance(manual_rank, (int, float)):
+        manual_rank = ts_dt.timestamp()
+    return (effective_priority(row, now), manual_rank)
+
+
+def list_queue(status="queued", limit=100):
+    """Real, read-only listing of umr_tasks rows in the given status
+    (default 'queued'), sorted in the exact order next_queued_task() would
+    dispatch them in. A read is inherently atomic under this DB's WAL mode
+    (PRAGMA journal_mode=WAL, already set by _connect()) -- no write lock
+    needed for this one."""
+    sbr, error = _safe_superboss_register("list_queue")
+    if error:
+        return {"ok": False, "error": error}
+    conn = sbr._connect()
+    sbr._ensure_umr_table(conn)
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM umr_tasks WHERE status=? ORDER BY ts_submitted", (status,)
+        ).fetchall()]
+    finally:
+        conn.close()
+    now = _utcnow()
+    ranked = sorted(rows, key=lambda r: _queue_sort_key(r, now))
+    out = []
+    for position, row in enumerate(ranked[:max(0, limit)]):
+        meta = _queue_metadata(row)
+        out.append({
+            "position": position,
+            "umr_id": row["umr_id"],
+            "task_identity": row["task_identity"],
+            "tier": row["tier"],
+            "status": row["status"],
+            "ts_submitted": row["ts_submitted"],
+            "paused": bool(meta.get("queue_paused")),
+        })
+    return {"ok": True, "status": status, "count": len(out), "queue": out}
+
+
+def _load_umr_row(conn, umr_id):
+    row = conn.execute("SELECT * FROM umr_tasks WHERE umr_id=?", (umr_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def stop_task(umr_id):
+    """Pauses a QUEUED (not yet dispatched) row so next_queued_task() skips
+    it, without touching status/tier/ts_submitted -- reversible via
+    resume_task(). Deliberately refuses anything already dispatched/
+    running/terminal: safely stopping a live systemd unit is a materially
+    different, riskier operation this SPEC's own queue-management framing
+    does not cover, and conflating the two would let a caller believe this
+    pauses real running work when it only ever prevents a not-yet-started
+    row from being picked up."""
+    sbr, error = _safe_superboss_register("stop_task")
+    if error:
+        return {"ok": False, "error": error}
+    with sbr._write_lock():
+        conn = sbr._connect()
+        try:
+            row = _load_umr_row(conn, umr_id)
+            if row is None:
+                return {"ok": False, "error": f"no umr_tasks row for umr_id={umr_id!r}"}
+            if row["status"] != "queued":
+                return {"ok": False, "error": f"can only stop a queued row (status is {row['status']!r})"}
+            meta = _queue_metadata(row)
+            if meta.get("queue_paused"):
+                return {"ok": True, "umr_id": umr_id, "already_paused": True}
+            meta["queue_paused"] = True
+            meta["queue_paused_at"] = _now_iso()
+            sbr.update_umr_task(conn, umr_id, metadata=meta)
+            conn.commit()
+            return {"ok": True, "umr_id": umr_id, "already_paused": False}
+        finally:
+            conn.close()
+
+
+def resume_task(umr_id):
+    """Inverse of stop_task() -- clears the pause flag so the row is
+    eligible for dispatch again. Idempotent: resuming a never-paused row is
+    a real no-op, not an error, since the caller's intent ("make sure this
+    row is dispatchable") is already satisfied either way."""
+    sbr, error = _safe_superboss_register("resume_task")
+    if error:
+        return {"ok": False, "error": error}
+    with sbr._write_lock():
+        conn = sbr._connect()
+        try:
+            row = _load_umr_row(conn, umr_id)
+            if row is None:
+                return {"ok": False, "error": f"no umr_tasks row for umr_id={umr_id!r}"}
+            meta = _queue_metadata(row)
+            if not meta.get("queue_paused"):
+                return {"ok": True, "umr_id": umr_id, "was_paused": False}
+            meta.pop("queue_paused", None)
+            meta.pop("queue_paused_at", None)
+            sbr.update_umr_task(conn, umr_id, metadata=meta)
+            conn.commit()
+            return {"ok": True, "umr_id": umr_id, "was_paused": True}
+        finally:
+            conn.close()
+
+
+def delete_task(umr_id):
+    """Physically removes a QUEUED row -- refuses anything dispatched/
+    running/terminal, so this can never destroy real execution evidence
+    (outputs_json/logs_ref/reason of a row that already did or is doing
+    real work), only a not-yet-started queue entry a caller has decided
+    should never run. Returns the deleted row's own snapshot as evidence."""
+    sbr, error = _safe_superboss_register("delete_task")
+    if error:
+        return {"ok": False, "error": error}
+    with sbr._write_lock():
+        conn = sbr._connect()
+        try:
+            row = _load_umr_row(conn, umr_id)
+            if row is None:
+                return {"ok": False, "error": f"no umr_tasks row for umr_id={umr_id!r}"}
+            if row["status"] != "queued":
+                return {"ok": False, "error": f"can only delete a queued row (status is {row['status']!r})"}
+            conn.execute("DELETE FROM umr_tasks WHERE umr_id=?", (umr_id,))
+            conn.commit()
+            return {"ok": True, "umr_id": umr_id, "deleted_row": row}
+        finally:
+            conn.close()
+
+
+def set_priority(umr_id, tier):
+    """Sets tier directly (0=highest .. 4=lowest, matching the table's own
+    CHECK(tier BETWEEN 0 AND 4) and DEFAULT_TIER/effective_priority's
+    existing semantics) -- refuses anything not still queued, same
+    reasoning as stop_task()/delete_task() above."""
+    sbr, error = _safe_superboss_register("set_priority")
+    if error:
+        return {"ok": False, "error": error}
+    if not isinstance(tier, int) or isinstance(tier, bool) or not (0 <= tier <= 4):
+        return {"ok": False, "error": f"tier must be an int 0..4, got {tier!r}"}
+    with sbr._write_lock():
+        conn = sbr._connect()
+        try:
+            row = _load_umr_row(conn, umr_id)
+            if row is None:
+                return {"ok": False, "error": f"no umr_tasks row for umr_id={umr_id!r}"}
+            if row["status"] != "queued":
+                return {"ok": False, "error": f"can only reprioritize a queued row (status is {row['status']!r})"}
+            prior_tier = row["tier"]
+            conn.execute("UPDATE umr_tasks SET tier=? WHERE umr_id=?", (tier, umr_id))
+            conn.commit()
+            return {"ok": True, "umr_id": umr_id, "prior_tier": prior_tier, "tier": tier}
+        finally:
+            conn.close()
+
+
+def _move_task(umr_id, direction):
+    """Shared real implementation for move_up()/move_down(). Swaps this
+    row's queue_manual_rank with its immediate same-tier queued neighbor's
+    -- deliberately NEVER crosses a tier boundary (tier is
+    next_queued_task()'s own primary sort key; a tier-1 row outranking a
+    tier-3 row is that dispatcher's real, load-bearing invariant, not
+    something a manual reorder should override) and NEVER touches
+    ts_submitted (effective_priority()'s own aging/starvation-prevention
+    math depends on it staying the real submission time; mutating it to
+    fake a reorder would break that real fairness guarantee)."""
+    assert direction in ("up", "down")
+    sbr, error = _safe_superboss_register(f"move_{direction}")
+    if error:
+        return {"ok": False, "error": error}
+    with sbr._write_lock():
+        conn = sbr._connect()
+        try:
+            row = _load_umr_row(conn, umr_id)
+            if row is None:
+                return {"ok": False, "error": f"no umr_tasks row for umr_id={umr_id!r}"}
+            if row["status"] != "queued":
+                return {"ok": False, "error": f"can only reorder a queued row (status is {row['status']!r})"}
+            now = _utcnow()
+            same_tier = [dict(r) for r in conn.execute(
+                "SELECT * FROM umr_tasks WHERE status='queued' AND tier=?", (row["tier"],)
+            ).fetchall()]
+            ranked = sorted(same_tier, key=lambda r: _queue_sort_key(r, now))
+            idx = next((i for i, r in enumerate(ranked) if r["umr_id"] == umr_id), None)
+            if idx is None:
+                return {"ok": False, "error": "row vanished mid-operation"}
+            neighbor_idx = idx - 1 if direction == "up" else idx + 1
+            if neighbor_idx < 0 or neighbor_idx >= len(ranked):
+                edge = "top" if direction == "up" else "bottom"
+                return {"ok": True, "umr_id": umr_id, "moved": False,
+                         "reason": f"already at the {edge} of its tier's queue"}
+            neighbor = ranked[neighbor_idx]
+            this_rank = _queue_sort_key(ranked[idx], now)[1]
+            neighbor_rank = _queue_sort_key(neighbor, now)[1]
+            this_meta = _queue_metadata(ranked[idx])
+            neighbor_meta = _queue_metadata(neighbor)
+            this_meta["queue_manual_rank"] = neighbor_rank
+            neighbor_meta["queue_manual_rank"] = this_rank
+            sbr.update_umr_task(conn, umr_id, metadata=this_meta)
+            sbr.update_umr_task(conn, neighbor["umr_id"], metadata=neighbor_meta)
+            conn.commit()
+            return {"ok": True, "umr_id": umr_id, "moved": True,
+                     "swapped_with_umr_id": neighbor["umr_id"]}
+        finally:
+            conn.close()
+
+
+def move_up(umr_id):
+    return _move_task(umr_id, "up")
+
+
+def move_down(umr_id):
+    return _move_task(umr_id, "down")
+
+
+# ---------------------------------------------------------------------------
 # UMR-20260807-110133-205d -- single deterministic orchestrator pipeline.
 # Governing chain: UMR-20260806-171945-5767 (original spec,
 # task-20260806-201941), first amendment (UMR-20260807-035145-aa45, real:
@@ -1677,8 +2174,9 @@ def _perform_spawn(row):
         inputs = row.get("inputs_json")
         inputs = json.loads(inputs) if isinstance(inputs, str) else (inputs or {})
         if not isinstance(inputs, dict):
+            reason = f"malformed inputs: expected object, got {type(inputs).__name__}"
             return {"status": "failed", "unit_name": row.get("unit_name"),
-                    "outputs": {"error": f"malformed inputs: expected object, got {type(inputs).__name__}"}}
+                    "outputs": {"error": reason}, "reason": reason}
 
         if task_kind == "systemctl_action":
             unit = row["unit_name"]
@@ -1691,12 +2189,21 @@ def _perform_spawn(row):
             else:
                 r = _run(["systemctl", "--user", "start", unit])
             status = "running" if r.returncode == 0 else "failed"
-            return {"status": status, "unit_name": unit, "outputs": {"returncode": r.returncode, "stderr": r.stderr[:500]}}
+            stdout_tail = (r.stdout or "")[-_SPAWN_OUTPUT_TAIL_CHARS:]
+            stderr_tail = (r.stderr or "")[-_SPAWN_OUTPUT_TAIL_CHARS:]
+            reason = None
+            if status == "failed":
+                cause = stderr_tail.strip() or stdout_tail.strip() or "no output on either stream"
+                reason = f"systemctl {action} {unit} exited {r.returncode}: {cause[:500]}"
+            return {"status": status, "unit_name": unit,
+                    "outputs": {"returncode": r.returncode, "stdout": stdout_tail, "stderr": stderr_tail},
+                    "reason": reason}
 
         if task_kind == "veridian_task_create":
             if "title" not in inputs or "prompt" not in inputs:
+                reason = "veridian_task_create requires inputs.title and inputs.prompt"
                 return {"status": "failed", "unit_name": row.get("unit_name"),
-                        "outputs": {"error": "veridian_task_create requires inputs.title and inputs.prompt"}}
+                        "outputs": {"error": reason}, "reason": reason}
             cmd = ["python3", os.path.join(SCRIPTS, "veridian-task.py"), "create",
                    "--title", inputs["title"], "--repo", inputs.get("repo", "claude-control"),
                    "--prompt", inputs["prompt"]]
@@ -1707,13 +2214,29 @@ def _perform_spawn(row):
             if unit_name:
                 _run(["systemctl", "--user", "start", unit_name])
             status = "running" if new_task_id else "failed"
+            # Bounded tails of BOTH real streams -- see _SPAWN_OUTPUT_TAIL_CHARS's
+            # module-level comment for why stdout must be captured here too,
+            # not just stderr: veridian-task.py's own real error text (e.g.
+            # "ERROR: repo not found at ...") is written via print(), which
+            # goes to stdout.
+            stdout_tail = (r.stdout or "")[-_SPAWN_OUTPUT_TAIL_CHARS:]
+            stderr_tail = (r.stderr or "")[-_SPAWN_OUTPUT_TAIL_CHARS:]
+            reason = None
+            if status == "failed":
+                cause = stderr_tail.strip() or stdout_tail.strip() or "no output on either stream"
+                reason = f"veridian-task.py create exited {r.returncode} with no CREATED: line -- {cause[:500]}"
             return {"status": status, "unit_name": unit_name,
-                    "outputs": {"new_task_id": new_task_id, "returncode": r.returncode, "stderr": r.stderr[:500]}}
+                    "outputs": {"new_task_id": new_task_id, "returncode": r.returncode,
+                                "stdout": stdout_tail, "stderr": stderr_tail},
+                    "reason": reason}
 
-        return {"status": "failed", "unit_name": row.get("unit_name"), "outputs": {"error": f"unknown task_kind {task_kind!r}"}}
-    except Exception as e:
+        reason = f"unknown task_kind {task_kind!r}"
         return {"status": "failed", "unit_name": row.get("unit_name"),
-                "outputs": {"error": f"_perform_spawn crashed: {type(e).__name__}: {e}"}}
+                "outputs": {"error": reason}, "reason": reason}
+    except Exception as e:
+        reason = f"_perform_spawn crashed: {type(e).__name__}: {e}"
+        return {"status": "failed", "unit_name": row.get("unit_name"),
+                "outputs": {"error": reason}, "reason": reason}
 
 
 def _recorded_new_task_ids_for_identity(task_identity, exclude_umr_id=None, limit=2):
@@ -1781,6 +2304,79 @@ def _referenced_pr_number(text):
         return None
     m = re.search(r"\bPR\s*#?\s*(\d+)\b", text, re.IGNORECASE)
     return m.group(1) if m else None
+
+
+def _repo_qualified_pr_ref(text, known_repos=None):
+    """UMR-20260813-165620-aac7 (addendum to P1 UMR-20260806-171945-5767,
+    targeting target_pr_already_resolved()'s dispatch-time re-check): extract
+    a REPO-QUALIFIED PR reference from `text` -- i.e. one that names both a
+    repo and a PR number, so the caller never has to guess which repo to
+    check. Three real, deterministic forms are matched, most-specific first:
+
+      1. A full GitHub PR URL: '.../github.com/OWNER/REPO/pull/NNN'. OWNER
+         is unambiguous by construction, so this always matches.
+      2. 'owner/repo#NNN' (e.g. 'FChecklist/veridian-scripts#297'). Also
+         unambiguous -- has an explicit owner segment.
+      3. 'repo#NNN' (e.g. 'veridian-scripts#297') or the real dispatch-title
+         convention this UMR's own governing SPEC evidence rows actually use,
+         '<repo> PR #NNN' / '<repo> PR NNN' (e.g. 'audit of veridian-scripts
+         PR 297 ...' -- see UMR-20260813-135121-9da6/-135059-3b92/-135034-fef1,
+         the 3 real rows wrongly rejected by the old arbitrary-repo-order
+         scan). Both of these bare, no-owner forms are ONLY trusted when the
+         captured name matches a repo from `known_repos` (default
+         GH_PR_CHECK_REPOS) -- never an arbitrary preceding word. This is
+         load-bearing: target_pr_already_resolved()'s own docstring records a
+         real title, '...audit-approved PR 136' (UMR-20260813-111352-6973),
+         where the word immediately before 'PR' is NOT a repo name at all; a
+         naive "word before PR" match would misparse that title and treat
+         'audit-approved' as a repo, exactly the class of guess this
+         function exists to refuse to make.
+
+    Returns (repo, pr_number) -- both strings -- or (None, None) if no
+    repo-qualified reference is present. A bare 'PR NNN' with no repo
+    anywhere in `text` deliberately returns (None, None) here; callers fall
+    back to _referenced_pr_number() + a real, single hint_repo (never a
+    scan) for that case. Never raises, same fail-open-shape convention as
+    _referenced_pr_number()."""
+    if not text:
+        return None, None
+    repos = known_repos if known_repos is not None else GH_PR_CHECK_REPOS
+
+    m = re.search(r"github\.com/[\w.-]+/([\w.-]+)/pull/(\d+)", text, re.IGNORECASE)
+    if m:
+        return m.group(1), m.group(2)
+
+    m = re.search(r"\b[\w.-]+/([\w.-]+)#(\d+)\b", text)
+    if m:
+        return m.group(1), m.group(2)
+
+    if not repos:
+        return None, None
+    repo_alt = "|".join(re.escape(r) for r in repos)
+
+    m = re.search(r"\b(" + repo_alt + r")#(\d+)\b", text, re.IGNORECASE)
+    if not m:
+        m = re.search(r"\b(" + repo_alt + r")\s+PR\s*#?\s*(\d+)\b", text, re.IGNORECASE)
+    if m:
+        matched = m.group(1)
+        canonical = next((r for r in repos if r.lower() == matched.lower()), matched)
+        return canonical, m.group(2)
+
+    return None, None
+
+
+# UMR-20260813-172606-101a: real, deterministic phrasing this repo's own
+# disclosure-PR convention actually uses to state "this cites another PR's
+# number but is NOT duplicating its work" (see find_pr_for_task_identity()'s
+# Stage 6, and claude-control#142's real title: "...(already covered by PR
+# 141, not re-implemented)"). A title matching this is excluded from Stage
+# 6's duplicate-PR match -- it is evidence of non-duplication, not evidence
+# of it.
+_DISCLOSURE_CITATION_RE = re.compile(
+    r"\balready\s+covered\b|\bnot\s+re-?implemented\b|\bnot\s+a\s+duplicate\b|"
+    r"\bnot\s+duplicat(?:ed|ing)\b|\bsuperseded\s+by\b|\bsupersedes\b",
+    re.IGNORECASE,
+)
 
 
 def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None, title=None):
@@ -1910,6 +2506,28 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
     # PR #64/#65/#66 evidence this closes -- a task_identity-fragmented
     # duplicate (different task_identity string, same real PR referenced in
     # the title) that no branch-name-based check above can ever catch.
+    #
+    # UMR-20260813-172606-101a real fix: Stage 6's own docstring assumption
+    # ("unrelated PRs essentially never reference the exact same 'PR #NNN'
+    # substring by coincidence") is false for a DISCLOSURE citation -- a PR
+    # whose title explicitly states it is NOT duplicating the referenced
+    # PR's work, only citing it as already-covering evidence. Real incident:
+    # UMR-20260813-145418-3f98, title "Merge audit-passed PR 141
+    # (server-native PM integration)" (pr_num='141'), was wrongly rejected
+    # as a duplicate of claude-control#142, whose own title is "docs: real
+    # dedup finding for UMR-20260813-092654-326b (already covered by PR 141,
+    # not re-implemented)" -- #142 is real, unrelated work (a docs-only PR
+    # about a different UMR/objective) that happens to cite "PR 141" only to
+    # disclose it is deliberately NOT re-implementing it. The match key
+    # itself (the literal target PR number extracted by
+    # _referenced_pr_number()) was already correct; the gap is that a title
+    # merely CITING that number is treated identically to a title that is
+    # ITSELF new/duplicate work targeting it. _DISCLOSURE_CITATION_RE above
+    # recognizes the real, deterministic phrasing this class of disclosure
+    # PR actually uses (this repo's own convention, see #142's title/body)
+    # and excludes those titles from counting as a duplicate -- the #64/#65/
+    # #66 shape this stage was built for used no such disclosure language,
+    # so that real incident is still caught unchanged.
     pr_num = _referenced_pr_number(title)
     if pr_num:
         for repo in repos:
@@ -1933,8 +2551,12 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
             except (json.JSONDecodeError, ValueError):
                 prs = []
             for pr in prs:
-                if _referenced_pr_number(pr.get("title") or "") == pr_num:
-                    return pr["number"], repo
+                candidate_title = pr.get("title") or ""
+                if _referenced_pr_number(candidate_title) != pr_num:
+                    continue
+                if _DISCLOSURE_CITATION_RE.search(candidate_title):
+                    continue  # real citation-not-duplicate disclosure -- not a match
+                return pr["number"], repo
     return None, None
 
 
@@ -1978,19 +2600,57 @@ def target_pr_already_resolved(title, hint_repo=None):
     self-reject) is deliberately NOT blocked here: only a real, confirmed
     MERGED or CLOSED state means the queue-time premise itself is dead.
 
+    UMR-20260813-165620-aac7 (addendum to P1 UMR-20260806-171945-5767) real
+    fix: this used to resolve a BARE "PR NNN" title reference by scanning
+    ALL of GH_PR_CHECK_REPOS in a fixed, arbitrary order and blocking on the
+    FIRST repo where that bare number happened to resolve to MERGED/CLOSED
+    -- even though PR numbers are per-repo and the OPEN branch two
+    paragraphs above already explicitly acknowledges that same fact ("the
+    search stops here rather than risking a same-number collision in a
+    different repo"). Live evidence this actually caused, all confirmed via
+    --query-umr the same day: 3 real Tier-1 audit dispatches naming
+    veridian-scripts PR #297/#300/#301 (each real, MERGEABLE+CLEAN, zero
+    posted audit verdict) were wrongly rejected because the SAME bare
+    number resolved first against an unrelated, month-old, already-MERGED
+    compliance-tracker PR -- compliance-tracker's low PR numbers are almost
+    always occupied (200 open PRs at the time), so this collision was
+    effectively guaranteed for any veridian-scripts audit dispatch, and
+    with nothing ever auditable nothing could ever merge.
+
+    Real fix, two-tiered:
+      1. Prefer a REPO-QUALIFIED reference (_repo_qualified_pr_ref() --
+         'veridian-scripts#297', 'FChecklist/veridian-scripts#297', a full
+         github.com PR URL, or the real dispatch-title convention '<repo>
+         PR #NNN' the 3 evidence rows above actually use) and resolve
+         against THAT repo ONLY -- never any other, regardless of
+         hint_repo.
+      2. Otherwise fall back to a bare _referenced_pr_number() match, but
+         ONLY resolve it against hint_repo (a single, real, caller-supplied
+         repo -- never a scan). If hint_repo is also absent/unusable, fail
+         OPEN immediately (no gh call at all) rather than guess a repo by
+         scanning GH_PR_CHECK_REPOS in arbitrary order -- the exact
+         guessing this real incident closes.
+
     Returns (blocked: bool, evidence: dict|None). evidence, when blocked,
     always carries repo/number/state/url plus mergedAt (MERGED) or
     closedAt (CLOSED) -- real, structured evidence for the row's own
     outputs_json/reason, never bare prose."""
-    pr_num = _referenced_pr_number(title)
-    if not pr_num:
-        return False, None
-    if hint_repo and hint_repo in GH_PR_CHECK_REPOS:
-        repos = [hint_repo] + [r for r in GH_PR_CHECK_REPOS if r != hint_repo]
-    elif hint_repo:
-        repos = [hint_repo] + list(GH_PR_CHECK_REPOS)
+    qualified_repo, qualified_pr_num = _repo_qualified_pr_ref(title)
+    if qualified_pr_num:
+        pr_num = qualified_pr_num
+        repos = [qualified_repo]
     else:
-        repos = list(GH_PR_CHECK_REPOS)
+        pr_num = _referenced_pr_number(title)
+        if not pr_num:
+            return False, None
+        if not hint_repo:
+            # Bare "PR NNN" with no repo anywhere in the title and no
+            # usable hint_repo -- do NOT guess by scanning GH_PR_CHECK_REPOS
+            # in arbitrary order (see docstring above for the real
+            # #297/#300/#301 collisions that caused). Fail open: no gh
+            # call, dispatch proceeds as if this guard did not run.
+            return False, None
+        repos = [hint_repo]
     for repo in repos:
         try:
             r = _run(
@@ -2097,7 +2757,8 @@ def classify_dispatch_outcome(dispatch_result):
         # real outputs.error/outputs.stderr -- never an empty/silent failure
         # (see its own docstring's "no exception ever escapes" contract).
         outputs = spawn_result.get("outputs") or {}
-        root_cause = outputs.get("error") or outputs.get("stderr") or "unknown spawn failure (no error detail captured)"
+        root_cause = (spawn_result.get("reason") or outputs.get("error") or outputs.get("stderr")
+                      or outputs.get("stdout") or "unknown spawn failure (no error detail captured)")
         return {
             "outcome": "failed",
             "error_id": f"DISPATCH-FAILED-{umr_id}" if umr_id else "DISPATCH-FAILED-UNKNOWN-UMR",
@@ -2199,6 +2860,27 @@ def _dispatch_one_inner(dry_run=False, now=None):
             return {"action": "idle", "detail": "queue empty", "metrics": metrics}
 
         slot_ok, slot_detail = dc.has_free_slot_detail()
+
+        # UMR-20260813-155201-da76 (unwedge dispatch -- stale swap ratchet
+        # blocked dispatch, addendum to P1 UMR-20260806-171945-5767): a
+        # "swap_backoff" slot_detail specifically can be a STALE ratchet
+        # (static SwapFree/SwapTotal occupancy that Linux never proactively
+        # reclaims) rather than real, current pressure -- see
+        # _override_stale_swap_backoff()'s own docstring for the real,
+        # narrow conditions (abundant real MemAvailable headroom AND
+        # confirmed-quiet real swap I/O) required before this can ever
+        # override, and for why every other real gate (including the 0.99
+        # swap_hard_ceiling) is left completely untouched. Passes through
+        # unchanged in every other case.
+        slot_overridden = slot_ok is False and (slot_detail or {}).get("check") == "swap_backoff"
+        slot_ok, slot_detail = _override_stale_swap_backoff(slot_ok, slot_detail, now=now)
+        if slot_overridden and slot_ok:
+            _append_attention(
+                f"INFO: dispatch_one() overrode a stale swap_backoff ratchet for "
+                f"umr_id={row['umr_id']!r} -- real MemAvailable headroom confirmed abundant and "
+                f"real swap I/O confirmed quiet, see slot_detail: {slot_detail}"
+            )
+
         if not slot_ok:
             conn.close()
             # Real fix (UMR-20260806-101839-688e): the old fixed detail
@@ -2441,14 +3123,28 @@ def _dispatch_one_inner(dry_run=False, now=None):
                      "detail": reason, "reuse_verdict": verdict_result, "metrics": metrics}
 
         result = _perform_spawn(row)
+        # Real fix (UMR-20260813-165729, addendum to P1 UMR-20260806-171945-5767):
+        # this call used to always pass reason=None into both update_umr_task()
+        # and the output contract, so a row's reason column was left at its
+        # submit-time value ("queued") FOREVER, even once the row reached a
+        # real terminal status="failed" -- update_umr_task() only touches
+        # columns actually passed as kwargs, so reason=None here was itself
+        # the bug, not a no-op. _perform_spawn() now always returns a real
+        # "reason" string alongside a failed/rejected status (None for
+        # "running", which is not terminal and correctly left untouched).
+        spawn_reason = result.get("reason")
+        update_kwargs = {}
+        if result["status"] != "running":
+            update_kwargs["reason"] = spawn_reason or f"veridian_task_create dispatch resolved to status={result['status']!r} with no captured reason"
         with sbr._write_lock():
             sbr.update_umr_task(
                 conn, row["umr_id"], status=result["status"],
                 unit_name=result.get("unit_name") or row["unit_name"],
                 ts_dispatched=_now_iso(),
                 outputs=_orchestrator_output_contract(
-                    sbr, row["umr_id"], result["status"], None, result.get("outputs", {})),
+                    sbr, row["umr_id"], result["status"], update_kwargs.get("reason"), result.get("outputs", {})),
                 metric_snapshot=metrics,
+                **update_kwargs,
             )
             conn.commit()
         if result["status"] == "running":
@@ -2654,6 +3350,13 @@ def run_tick(max_dispatches=None, now=None):
     while max_dispatches is None or len(results["dispatches"]) < max_dispatches:
         r = dispatch_one(now=now)
         results["dispatches"].append(r)
+        # UMR-20260813-120054-4e66: real, per-tick journal instrumentation --
+        # see dispatch_core.log_dispatch_decision()'s own docstring for the
+        # full real gap this closes (journalctl showed nothing useful about
+        # WHY a tick dispatched nothing, even on the real unit that owns
+        # this real dispatch loop). Best-effort/fail-open inside that
+        # function itself -- never allowed to break a real tick.
+        _dispatch_core().log_dispatch_decision(r)
         if r["action"] not in ROW_RESOLVED_NON_DISPATCH_ACTIONS:
             break
     return results
@@ -4039,6 +4742,26 @@ def main():
                           "real use, since task-gateway.py has no other task_kind")
     ap.add_argument("--title", default=None)
     ap.add_argument("--umr-id", dest="umr_id", default=None)
+    ap.add_argument("--list-queue", dest="list_queue", action="store_true",
+                     help="UMR-20260807-150524-a683 (real redispatch): list umr_tasks rows in "
+                          "--status (default 'queued') in real dispatch order, up to --limit")
+    ap.add_argument("--stop-task", dest="stop_task", action="store_true",
+                     help="pause a queued row (--umr-id) so it is skipped for dispatch; reversible "
+                          "via --resume-task")
+    ap.add_argument("--resume-task", dest="resume_task", action="store_true",
+                     help="clear a queued row's (--umr-id) pause flag set by --stop-task")
+    ap.add_argument("--delete-task", dest="delete_task", action="store_true",
+                     help="delete a queued row (--umr-id); refuses anything already "
+                          "dispatched/running/terminal")
+    ap.add_argument("--set-priority", dest="set_priority", action="store_true",
+                     help="set a queued row's (--umr-id) tier (--tier, 0..4); refuses anything "
+                          "already dispatched/running/terminal")
+    ap.add_argument("--move-up", dest="move_up", action="store_true",
+                     help="swap a queued row (--umr-id) with its same-tier neighbor ranked "
+                          "immediately above it")
+    ap.add_argument("--move-down", dest="move_down", action="store_true",
+                     help="swap a queued row (--umr-id) with its same-tier neighbor ranked "
+                          "immediately below it")
     args = ap.parse_args()
 
     if args.clear_emergency_stop:
@@ -4092,6 +4815,70 @@ def main():
             pass
         conn.close()
         print(json.dumps({"count": len(rows), "matches": rows}, indent=2, default=str))
+        return
+
+    if args.list_queue:
+        print(json.dumps(list_queue(status=args.status or "queued", limit=args.limit), default=str))
+        return
+
+    if args.stop_task:
+        if not args.umr_id:
+            print(json.dumps({"ok": False, "error": "--stop-task requires --umr-id"}))
+            sys.exit(1)
+        result = stop_task(args.umr_id)
+        print(json.dumps(result, default=str))
+        if not result.get("ok"):
+            sys.exit(1)
+        return
+
+    if args.resume_task:
+        if not args.umr_id:
+            print(json.dumps({"ok": False, "error": "--resume-task requires --umr-id"}))
+            sys.exit(1)
+        result = resume_task(args.umr_id)
+        print(json.dumps(result, default=str))
+        if not result.get("ok"):
+            sys.exit(1)
+        return
+
+    if args.delete_task:
+        if not args.umr_id:
+            print(json.dumps({"ok": False, "error": "--delete-task requires --umr-id"}))
+            sys.exit(1)
+        result = delete_task(args.umr_id)
+        print(json.dumps(result, default=str))
+        if not result.get("ok"):
+            sys.exit(1)
+        return
+
+    if args.set_priority:
+        if not args.umr_id:
+            print(json.dumps({"ok": False, "error": "--set-priority requires --umr-id (and --tier)"}))
+            sys.exit(1)
+        result = set_priority(args.umr_id, args.tier)
+        print(json.dumps(result, default=str))
+        if not result.get("ok"):
+            sys.exit(1)
+        return
+
+    if args.move_up:
+        if not args.umr_id:
+            print(json.dumps({"ok": False, "error": "--move-up requires --umr-id"}))
+            sys.exit(1)
+        result = move_up(args.umr_id)
+        print(json.dumps(result, default=str))
+        if not result.get("ok"):
+            sys.exit(1)
+        return
+
+    if args.move_down:
+        if not args.umr_id:
+            print(json.dumps({"ok": False, "error": "--move-down requires --umr-id"}))
+            sys.exit(1)
+        result = move_down(args.umr_id)
+        print(json.dumps(result, default=str))
+        if not result.get("ok"):
+            sys.exit(1)
         return
 
     if args.submit:

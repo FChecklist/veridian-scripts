@@ -80,6 +80,76 @@ echo "Workspace resync (branch=$BRANCH): $RESYNC_BEFORE_SHA -> $RESYNC_AFTER_SHA
 
 DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@')
 
+# --- NO-OP-BRANCH-GUARD-BLOCK-START (UMR-20260813-215742-db64, see
+# tests/test_supervisor_no_op_branch_guard.py) ---
+# Real incident: a worker branch can legitimately have ZERO commits ahead of
+# the base branch -- e.g. its real deliverable was already merged by a prior
+# task (real example: PR #323 already landed the fix a later task's own
+# branch had nothing left to add). That is a real, evidenced SUCCESS with no
+# new deliverable, never a plumbing failure -- but before this fix, nothing
+# here distinguished it: execution fell through unconditionally to `gh pr
+# create` further down, which always fails a 0-commit branch with GraphQL
+# "No commits between $DEFAULT_BRANCH and $BRANCH", `gh pr list --head` then
+# finds nothing either (no PR was ever open), PR_URL stayed empty, and the
+# PR-URL-RESOLUTION-GUARD-BLOCK below correctly refused to continue but for
+# the WRONG reason -- it cannot tell this apart from a real gh/plumbing
+# break, so it always hard-failed (exit 1). That false failure reaches
+# umr_tasks via worker-exit-status-bridge.py's ExecStopPost hook (any
+# checkpoint status it does not specifically recognize as this real no-op
+# case is treated as a self-reported-negative outcome and bridged to
+# status=failed), which pm-sentinel-tick.sh's own checks then escalate to
+# status=killed and dispatch a fresh RCA for -- itself another task whose own
+# branch also legitimately has zero commits ahead once the RCA concludes
+# there is nothing left to fix: an unbounded paid-AI re-dispatch loop.
+# Real, directly observed evidence (2026-08-13): 44 of 147 task dirs today
+# died at exactly this path (30% of all runs); RCA for
+# UMR-20260807-151622-15cd was dispatched twice; RCA for
+# UMR-20260813-195852-aa85 was dispatched even though its real fix had
+# already merged as PR #323.
+#
+# Real fix: deterministically distinguish the two cases with a real `git
+# rev-list --count` BEFORE ever attempting `gh pr create` -- never infer it
+# from gh's own failure text after the fact. This also means a genuine no-op
+# never pays for the AI review call below at all (real cost saved on a path
+# that was hitting 30% of all runs). Base is fetched fresh right here (never
+# assumed to be origin/main) and resolved from the SAME refs/remotes/
+# origin/HEAD symbolic ref DEFAULT_BRANCH above already used, so this can
+# never drift from what the rest of this script already treats as the real
+# base branch -- for veridian-scripts that real default branch is master.
+git fetch origin "$DEFAULT_BRANCH" >> "$TASK_DIR/supervisor.log" 2>&1
+BASE_SHA=$(git rev-parse "origin/$DEFAULT_BRANCH")
+BRANCH_SHA=$(git rev-parse HEAD)
+AHEAD_COUNT=$(git rev-list --count "origin/$DEFAULT_BRANCH..HEAD")
+echo "No-op guard: branch=$BRANCH branch_sha=$BRANCH_SHA base=$DEFAULT_BRANCH base_sha=$BASE_SHA ahead_count=$AHEAD_COUNT" >> "$TASK_DIR/supervisor.log"
+
+if [ "$AHEAD_COUNT" = "0" ]; then
+  NO_OP_REASON="branch '$BRANCH' (sha $BRANCH_SHA) has 0 commits ahead of base '$DEFAULT_BRANCH' (sha $BASE_SHA) -- real, legitimate no-op completion (deliverable already merged by a prior task), not a plumbing failure. No PR was created."
+  echo "NO-OP COMPLETION: $NO_OP_REASON" >> "$TASK_DIR/supervisor.log"
+  # Real, structured evidence hand-off to worker-exit-status-bridge.py's own
+  # ExecStopPost hook (see that script's _bridge_no_op_completion()) -- values
+  # passed via real environment variables and read with os.environ.get(),
+  # never interpolated directly into this Python source text (BRANCH/reason
+  # can contain quotes/backticks; same safer convention the OCID-linkage
+  # block further down this same file already established, PR #20).
+  NO_OP_TASK_DIR="$TASK_DIR" NO_OP_BASE_SHA="$BASE_SHA" NO_OP_BRANCH_SHA="$BRANCH_SHA" \
+  NO_OP_BASE_BRANCH="$DEFAULT_BRANCH" NO_OP_BRANCH="$BRANCH" NO_OP_REASON="$NO_OP_REASON" \
+  python3 -c "
+import json, os
+outp = os.path.join(os.environ['NO_OP_TASK_DIR'], 'no_op.json')
+with open(outp, 'w') as f:
+    json.dump({
+        'base_sha': os.environ['NO_OP_BASE_SHA'],
+        'branch_sha': os.environ['NO_OP_BRANCH_SHA'],
+        'base_branch': os.environ['NO_OP_BASE_BRANCH'],
+        'branch': os.environ['NO_OP_BRANCH'],
+        'reason': os.environ['NO_OP_REASON'],
+    }, f, indent=2)
+" >> "$TASK_DIR/supervisor.log" 2>&1
+  python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status completed_no_change --note "$NO_OP_REASON"
+  exit 0
+fi
+# --- NO-OP-BRANCH-GUARD-BLOCK-END ---
+
 TIER=$(python3 /opt/veridian/scripts/risk-tier.py "$WORKSPACE" "origin/$DEFAULT_BRANCH" 2>>"$TASK_DIR/supervisor.log")
 echo "Risk tier: $TIER" >> "$TASK_DIR/supervisor.log"
 
@@ -203,6 +273,14 @@ echo "$PR_URL" > "$TASK_DIR/pr_url.txt"
 # went on to for-real merge PR #84 via the autonomous path, with no genuine
 # Superboss review of PR #84's own diff ever having run. Fail loudly and
 # stop here instead: never let an unresolved PR_URL reach any gh pr call.
+#
+# UMR-20260813-215742-db64: the one real, legitimate reason `gh pr create`
+# can fail here -- a genuine zero-commits-ahead no-op branch -- is now
+# handled and exited on well before this point by the NO-OP-BRANCH-GUARD-
+# BLOCK above, so every PR_URL reaching this point with AHEAD_COUNT > 0 is,
+# by construction, real plumbing breakage (a real `gh` failure, a real
+# permissions/rate-limit issue, or the PR #84-shaped bug this block's own
+# original incident describes) and must stay a hard failure.
 if [ -z "$PR_URL" ]; then
   echo "PR_URL resolution FAILED for branch '$BRANCH': both 'gh pr create' and 'gh pr list --head' (open PRs only) found nothing — refusing to continue, since every later gh pr call in this script would silently fall back to whatever PR matches \$WORKSPACE's currently checked-out branch instead of this task's own PR (real incident: PR #84, 2026-07-26)." >> "$TASK_DIR/supervisor.log"
   python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status blocked --note "supervisor could not resolve a real PR for branch '$BRANCH' (gh pr create failed, no existing open PR found for it) — refusing to proceed rather than risk operating on an unrelated PR via gh's empty-argument fallback. See supervisor.log."

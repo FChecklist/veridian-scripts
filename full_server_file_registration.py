@@ -22,14 +22,26 @@ rather than reimplementing any of it:
                                 scan shape and the same OS-level _write_lock()
                                 (imported directly, not copy-pasted), just
                                 generalized to more roots/excludes.
-  - generate_wiring_registry.py -> `_hash_file_bytes()` (pure sha256 of file
-                                bytes, no path folded in -- the ONE existing
-                                function in this codebase that hashes content
-                                only, which is what real cross-path dedup
-                                needs) and the `file-{sha1(abs_path)[:12]}`
-                                entity_id convention its own
-                                Registry.get_or_create_file() already
-                                established (imported, both reused verbatim).
+  - generate_wiring_registry.py -> the `file-{sha1(abs_path)[:12]}` entity_id
+                                convention its own Registry.get_or_create_file()
+                                already established (same convention,
+                                reimplemented locally in make_entity_id() below
+                                since the real collision-widening loop needed
+                                here has no equivalent to call). Content
+                                hashing itself no longer reuses this module's
+                                _hash_file_bytes() (plain sha256 of bytes) --
+                                see git_hash_object_of() below, which computes
+                                git's own blob object model hash instead, per
+                                UMR-20260806-171945-5767 issue #921's real
+                                resolution.
+  - git                      -> hash-object's own content-addressable blob
+                                hash algorithm (sha1('blob '+len+'\0'+content)),
+                                computed in-process rather than shelled out to
+                                a real `git hash-object` subprocess per file
+                                (see git_hash_object_of()'s own docstring for
+                                why) -- verified byte-identical to a real `git
+                                hash-object` invocation in this file's test
+                                suite.
   - superboss-register.py   -> `_ensure_wiring_registry_table()` /
                                 `register_entity_row()` / `_connect()` /
                                 `init_db_silent()` (imported, not reimplemented).
@@ -116,16 +128,8 @@ def _load(name, path):
     return mod
 
 
-_gwr = None
 _sbr = None
 _finv = None
-
-
-def gwr():
-    global _gwr
-    if _gwr is None:
-        _gwr = _load("gwr_reuse", os.path.join(SCRIPTS_DIR, "generate_wiring_registry.py"))
-    return _gwr
 
 
 def sbr():
@@ -235,19 +239,59 @@ def list_files():
 
 # ---- hashing / entity_id ------------------------------------------------
 
-def content_hash_of(path):
-    """Pure content hash -- reuses generate_wiring_registry.py's
-    _hash_file_bytes() verbatim (sha256 of bytes only, no path folded in,
-    unlike that same module's compute_content_hash() wrapper). This is
-    deliberately NOT file_inventory.py's hash16 (truncated to 16 hex chars /
-    64 bits, tuned for that script's own drift-detection use case) -- the
-    wiring_registry.content_hash convention everywhere else in this codebase
-    (engine/gateway rows) is a full 64-char sha256 hex digest, so file
-    entities match that same convention."""
+def git_hash_object_of(path):
+    """Real content hash via git's own blob object model -- the identical
+    algorithm a real `git hash-object <file>` invocation computes:
+    sha1('blob ' + str(len(content)) + '\\0' + content). Verified
+    byte-identical against a real `git hash-object` subprocess in
+    test_full_server_file_registration.py, not assumed.
+
+    UMR-20260806-171945-5767 / UMR_5767_ISSUE_RESOLUTION_MATRIX.json
+    issue_number 921's own resolution says to reuse git's existing
+    content-addressable blob-hashing model as the real file-ID scheme
+    ('Wire a thin lookup (git hash-object <file>) ... rather than a new ID
+    service') and explicitly sanctions computing it locally ('the local
+    equivalent blob <len>\\0<content> SHA-1 computation if shelling out to
+    git per-file is judged too slow'). This file already scans the entire
+    server corpus (see list_files()'s find-based scan, potentially
+    thousands of files per run) and generate_wiring_registry.py's own
+    _hash_file_bytes() (this function's predecessor here) already documents
+    that file's real GB-scale-avoidance philosophy -- spawning one real git
+    subprocess per file would multiply real fork/exec overhead across that
+    same corpus for zero behavioral gain over computing the identical real
+    SHA-1 in-process, so the hash is computed here rather than shelled out
+    to a real `git hash-object` process per file. Streams the file in 64KB
+    chunks (same convention _hash_file_bytes() used) rather than reading it
+    whole, for the same reason."""
     try:
-        return gwr()._hash_file_bytes(path)
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    h = hashlib.sha1()
+    h.update(("blob %d" % size).encode() + b"\x00")
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                h.update(chunk)
     except (FileNotFoundError, PermissionError, OSError):
         return None
+    return h.hexdigest()
+
+
+def content_hash_of(path):
+    """Real content-addressable file hash -- git's own blob object model
+    (git_hash_object_of() above), not a bespoke sha256 scheme. Deliberately
+    NOT file_inventory.py's hash16 (truncated to 16 hex chars / 64 bits,
+    tuned for that script's own drift-detection use case) and, as of
+    UMR-20260806-171945-5767 issue #921's real resolution, deliberately NOT
+    generate_wiring_registry.py's own _hash_file_bytes() sha256-of-bytes
+    scheme either -- git's real blob hash (40-hex-char SHA-1) replaces it as
+    this file's file-entity content_hash convention. Existing legacy rows
+    computed under the old sha256 scheme are transparently re-hashed and
+    backfilled in place by run()'s own existing upsert-by-entity_id path
+    (entity_id is derived from path, not content_hash, so a format change
+    here updates the same row rather than creating a duplicate one)."""
+    return git_hash_object_of(path)
 
 
 def repo_relationship_for(abs_path, github_repo_by_dirname):

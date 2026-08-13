@@ -292,6 +292,38 @@ def classify_row(row, now, pr_cache):
         )
         return evidence
 
+    # Real, live safeguard against a well-documented race: veridian-task.py
+    # stops veridian-worker@<task_id>.service and starts
+    # veridian-supervisor@<task_id>.service the moment a task reaches
+    # pending_review -- ActiveState=inactive on the WORKER unit is the
+    # expected, correct outcome of a legitimate handoff, not evidence of a
+    # dead/orphaned dispatch. reconcile_stale_running_workers.py already
+    # found and fixed exactly this race (its own STEP 3 pending_review
+    # guard, live-confirmed on task-20260813-135613: a sweep that ran while
+    # the supervisor unit was still reviewing PR #147 would otherwise have
+    # requeued genuinely in-flight work). This script never checked the
+    # supervisor unit at all and reintroduced the identical false-terminal
+    # bug for source_trigger='owner_dispatch_gateway' rows -- live-confirmed
+    # by UMR-20260813-170956-5385, reconciled to 'killed' at 17:33:39 UTC
+    # while its own veridian-supervisor@task-20260813-171208-...service was
+    # still actively reviewing, four minutes before that same task's real PR
+    # #313 was opened (17:36:57) and merged (task.yaml status -> completed
+    # at 17:37:04). Reused here rather than re-solved.
+    if yml.get("status") == "pending_review":
+        supervisor_unit = f"veridian-supervisor@{task_id}.service"
+        supervisor_state = _systemd_is_active(supervisor_unit)
+        evidence["supervisor_unit"] = supervisor_unit
+        evidence["supervisor_is_active"] = supervisor_state
+        if supervisor_state not in ("inactive", "failed", "unknown", "no_unit"):
+            evidence["bucket"] = "NEEDS_AI_JUDGMENT"
+            evidence["reason"] = (
+                f"real task.yaml status='pending_review' and real supervisor unit "
+                f"{supervisor_unit} ActiveState={supervisor_state!r} -- real review still in "
+                "flight, not a dead dispatch; needs a real judgment call, not a mechanical "
+                "relabel."
+            )
+            return evidence
+
     # Only three real signals are safe for a pure status-relabeling script to
     # auto-correct on: a real MERGED PR, a real CLOSED-not-merged PR, or no
     # PR ever having been opened at all. Real, live-project precedent

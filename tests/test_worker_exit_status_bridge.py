@@ -23,6 +23,7 @@ established for this exact kind of ExecStopPost/CLI-writer script:
      asked for, for both unit_kind='worker' and unit_kind='supervisor'.
 """
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -163,6 +164,113 @@ def test_non_negative_statuses_never_write(monkeypatch, scratch_db, scratch_ai_o
 
     row = _real_row(scratch_db, umr_id)
     assert row["status"] == "running", f"must be left untouched, real row: {row}"
+
+
+# --- UMR-20260813-215742-db64: completed_no_change (real no-op-branch guard) ------
+
+# A real, known-good commit sha -- the real, live origin/main tip of the real local
+# /opt/veridian/repos/veridian-scripts checkout on this box at the time this test was
+# written -- reused here the exact same way tests/test_mark_umr_terminal_structured_
+# evidence.py's own real-commit-sha tests already do (see that file's own
+# test_completed_accepted_for_real_ancestor_commit), so this stays a real, live
+# ancestor-of-origin/main proof, not a fabricated sha. mark-umr-terminal's own
+# --repo veridian-scripts resolution (DEFAULT_OCID_RESOLVER_REPO_LOCAL_PATHS) points
+# at this exact real checkout, so this exercises the real git subprocess ancestor
+# check, never a mock.
+_REAL_VERIDIAN_SCRIPTS_MAIN_SHA = "bfbd3fc1304cab7993e51fc48fe18beba771a1ec"
+
+
+def _write_no_op_marker(scratch_ai_os, task_id, **fields):
+    task_dir = os.path.join(scratch_ai_os, "tasks", task_id)
+    os.makedirs(task_dir, exist_ok=True)
+    with open(os.path.join(task_dir, "no_op.json"), "w") as f:
+        json.dump(fields, f)
+
+
+def test_completed_no_change_with_real_marker_bridges_to_completed_real_end_to_end(
+        monkeypatch, scratch_db, scratch_ai_os):
+    """The real fix's core behavior on the bridge side: a task.yaml checkpoint of
+    status='completed_no_change' paired with a real no_op.json marker (written by
+    supervisor-entrypoint.sh's own NO-OP-BRANCH-GUARD-BLOCK) must bridge to
+    umr_tasks.status='completed' -- a real terminal SUCCESS, never left at 'running'
+    (which pm-sentinel-tick.sh's own dead-unit cross-check would otherwise catch and
+    dispatch an unnecessary RCA for) and never 'failed'/'killed' either."""
+    mod = _load_module()
+    monkeypatch.setattr(mod, "AI_OS", scratch_ai_os)
+    monkeypatch.setenv("SUPERBOSS_REGISTER_DB", scratch_db)
+
+    task_id = "test-task-completed-no-change"
+    unit_name = "veridian-supervisor@test-task-completed-no-change.service"
+    umr_id = "UMR-TEST-NO-CHANGE-1"
+    _insert_umr_row(scratch_db, umr_id, unit_name, status="running")
+    _write_task_yaml(scratch_ai_os, task_id, "completed_no_change")
+    task_dir = os.path.join(scratch_ai_os, "tasks", task_id)
+    with open(os.path.join(task_dir, "task.yaml")) as f:
+        task_doc = yaml.safe_load(f)
+    task_doc["repo"] = "veridian-scripts"
+    with open(os.path.join(task_dir, "task.yaml"), "w") as f:
+        yaml.safe_dump(task_doc, f)
+    _write_no_op_marker(
+        scratch_ai_os, task_id,
+        base_sha="0" * 40, branch_sha=_REAL_VERIDIAN_SCRIPTS_MAIN_SHA,
+        base_branch="main", branch="worker/test-no-op",
+        reason="branch 'worker/test-no-op' has 0 commits ahead of base 'main' -- real no-op",
+    )
+
+    mod.run(task_id, "supervisor")
+
+    row = _real_row(scratch_db, umr_id)
+    assert row["status"] == "completed", f"real scratch-DB row: {row}"
+    assert row["ts_completed"], "mark-umr-terminal must set a real ts_completed"
+    outputs = json.loads(row["outputs_json"])
+    assert outputs["commit_sha"] == _REAL_VERIDIAN_SCRIPTS_MAIN_SHA
+
+    log_path = os.path.join(task_dir, "supervisor.log")
+    assert os.path.exists(log_path)
+    with open(log_path) as f:
+        assert "mark-umr-terminal" in f.read()
+
+
+def test_completed_no_change_without_marker_leaves_running(monkeypatch, scratch_db, scratch_ai_os):
+    """Fail-safe direction: a 'completed_no_change' checkpoint with NO real no_op.json
+    evidence (should never happen in practice -- supervisor-entrypoint.sh always writes
+    both together -- but this hook must never guess) leaves the row at 'running' for a
+    human or the STEP 3 reconciler, exactly like the no-task.yaml case already does."""
+    mod = _load_module()
+    monkeypatch.setattr(mod, "AI_OS", scratch_ai_os)
+    monkeypatch.setenv("SUPERBOSS_REGISTER_DB", scratch_db)
+
+    task_id = "test-task-no-change-no-marker"
+    unit_name = "veridian-worker@test-task-no-change-no-marker.service"
+    umr_id = "UMR-TEST-NO-CHANGE-2"
+    _insert_umr_row(scratch_db, umr_id, unit_name, status="running")
+    _write_task_yaml(scratch_ai_os, task_id, "completed_no_change")
+    # Deliberately no no_op.json written.
+
+    mod.run(task_id, "worker")
+
+    row = _real_row(scratch_db, umr_id)
+    assert row["status"] == "running"
+
+
+def test_completed_no_change_marker_missing_branch_sha_leaves_running(monkeypatch, scratch_db, scratch_ai_os):
+    """Same fail-safe direction, real partial-evidence case: a no_op.json that exists
+    but carries no real branch_sha must not be trusted either."""
+    mod = _load_module()
+    monkeypatch.setattr(mod, "AI_OS", scratch_ai_os)
+    monkeypatch.setenv("SUPERBOSS_REGISTER_DB", scratch_db)
+
+    task_id = "test-task-no-change-bad-marker"
+    unit_name = "veridian-worker@test-task-no-change-bad-marker.service"
+    umr_id = "UMR-TEST-NO-CHANGE-3"
+    _insert_umr_row(scratch_db, umr_id, unit_name, status="running")
+    _write_task_yaml(scratch_ai_os, task_id, "completed_no_change")
+    _write_no_op_marker(scratch_ai_os, task_id, base_sha="0" * 40, branch_sha="", reason="missing sha")
+
+    mod.run(task_id, "worker")
+
+    row = _real_row(scratch_db, umr_id)
+    assert row["status"] == "running"
 
 
 def test_row_already_non_running_is_idempotent_noop(monkeypatch, scratch_db, scratch_ai_os):

@@ -149,19 +149,53 @@ def sut(tmp_path, monkeypatch):
     yield mod, tmp_path
 
 
-def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def _git_blob_hash(data: bytes) -> str:
+    """Real git blob object model hash -- what a real `git hash-object`
+    invocation computes: sha1('blob '+len(data)+'\\0'+data). Used as this
+    test file's own oracle for content_hash_of()/git_hash_object_of(), in
+    addition to (not instead of) verifying against a real `git hash-object`
+    subprocess below."""
+    h = hashlib.sha1()
+    h.update(("blob %d" % len(data)).encode() + b"\x00")
+    h.update(data)
+    return h.hexdigest()
 
 
 # ---------------------------------------------------------------------------
-# content_hash_of() -- pure function, real files, real error handling
+# content_hash_of() / git_hash_object_of() -- pure functions, real files,
+# real error handling, real UMR-20260806-171945-5767 issue #921 boolean test
 # ---------------------------------------------------------------------------
 
-def test_content_hash_of_real_file_matches_real_sha256(sut, tmp_path):
+def test_content_hash_of_real_file_matches_git_blob_hash(sut, tmp_path):
     mod, _ = sut
     f = tmp_path / "hashme.txt"
     f.write_bytes(b"some real bytes to hash, not a fixture placeholder")
-    assert mod.content_hash_of(str(f)) == _sha256(f.read_bytes())
+    assert mod.content_hash_of(str(f)) == _git_blob_hash(f.read_bytes())
+
+
+def test_content_hash_of_matches_real_git_hash_object_subprocess(sut, tmp_path):
+    """Real boolean proof (not just an in-repo oracle match) that
+    content_hash_of() computes the identical real hash a real `git
+    hash-object <file>` invocation would -- runs the actual git binary and
+    compares."""
+    mod, _ = sut
+    f = tmp_path / "gitcheck.py"
+    f.write_bytes(b"import os\nprint(os.getcwd())\n")
+    real_git = subprocess.run(
+        ["git", "hash-object", str(f)], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert mod.content_hash_of(str(f)) == real_git
+
+
+def test_content_hash_of_identical_content_different_filenames_same_hash(sut, tmp_path):
+    """The SPEC's own real boolean test: identical content across two
+    differently-named files returns the identical real hash."""
+    mod, _ = sut
+    a = tmp_path / "original_name.txt"
+    b = tmp_path / "totally_different_name.dat"
+    a.write_bytes(b"identical real content, different filenames\n")
+    b.write_bytes(b"identical real content, different filenames\n")
+    assert mod.content_hash_of(str(a)) == mod.content_hash_of(str(b))
 
 
 def test_content_hash_of_nonexistent_file_returns_none(sut, tmp_path):
@@ -380,7 +414,7 @@ def test_run_registers_distinct_content_dedupes_and_links_repo_relationship(sut,
 
     by_path = {r["path"]: r for r in rows}
     app_row = by_path[str(repos_root / "myrepo" / "app.py")]
-    assert app_row["content_hash"] == _sha256(b"print('app')\n")
+    assert app_row["content_hash"] == _git_blob_hash(b"print('app')\n")
     rels = json.loads(app_row["relationships"])
     assert rels[0]["relationship_type"] == "belongs_to_repo"
     assert rels[0]["evidence"] == str(repos_root / "myrepo")
@@ -390,7 +424,7 @@ def test_run_registers_distinct_content_dedupes_and_links_repo_relationship(sut,
                and r.get("evidence") == str(other_root / "app_copy.py") for r in rels)
 
     notes_row = by_path[str(other_root / "notes.txt")]
-    assert notes_row["content_hash"] == _sha256(b"some real notes content\n")
+    assert notes_row["content_hash"] == _git_blob_hash(b"some real notes content\n")
 
 
 def test_run_is_idempotent_on_second_invocation(sut, tmp_path, monkeypatch):
@@ -458,7 +492,7 @@ def test_run_backfills_legacy_row_with_same_deterministic_entity_id_and_null_has
     ).fetchone()
     conn.close()
     assert row["entity_id"] == legacy_eid  # same entity_id, not a new one
-    assert row["content_hash"] == _sha256(b"legacy content\n")
+    assert row["content_hash"] == _git_blob_hash(b"legacy content\n")
 
 
 def test_run_records_unreadable_file_as_error_not_a_crash(sut, tmp_path, monkeypatch):

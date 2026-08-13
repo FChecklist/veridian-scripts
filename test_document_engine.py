@@ -122,6 +122,85 @@ def test_cli_detect_duplicates_invalid_json_exits_nonzero_with_error():
 
 
 # ---------------------------------------------------------------------------
+# git_hash_object_of() / hash-object / detect-duplicates --files --
+# UMR-20260806-171945-5767 issue #921's real git hash-object wiring
+# ---------------------------------------------------------------------------
+
+def test_git_hash_object_of_matches_real_git_hash_object_subprocess(tmp_path):
+    f = tmp_path / "real.py"
+    f.write_bytes(b"import sys\nprint(sys.argv)\n")
+    real_git = subprocess.run(
+        ["git", "hash-object", str(f)], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert de.git_hash_object_of(str(f)) == real_git
+
+
+def test_git_hash_object_of_identical_content_different_filenames_same_hash(tmp_path):
+    """The SPEC's own real boolean test: identical content across two
+    differently-named files returns the identical real hash."""
+    a = tmp_path / "one_name.txt"
+    b = tmp_path / "a_completely_different_name.md"
+    a.write_bytes(b"identical real content, different filenames\n")
+    b.write_bytes(b"identical real content, different filenames\n")
+    assert de.git_hash_object_of(str(a)) == de.git_hash_object_of(str(b))
+
+
+def test_git_hash_object_of_nonexistent_file_returns_none(tmp_path):
+    assert de.git_hash_object_of(str(tmp_path / "missing.bin")) is None
+
+
+def test_cli_hash_object_real_subprocess(tmp_path):
+    f = tmp_path / "hashme.txt"
+    f.write_bytes(b"some real content\n")
+    result = _run(["hash-object", "--file", str(f)])
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    real_git = subprocess.run(
+        ["git", "hash-object", str(f)], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    assert payload == {"path": str(f), "contentHash": real_git}
+
+
+def test_cli_hash_object_unreadable_path_exits_nonzero(tmp_path):
+    result = _run(["hash-object", "--file", str(tmp_path / "missing.bin")])
+    assert result.returncode == 1
+    assert "error" in json.loads(result.stdout)
+
+
+def test_cli_detect_duplicates_files_mode_computes_real_hashes_and_finds_duplicate(tmp_path):
+    a = tmp_path / "a.txt"
+    b = tmp_path / "b.txt"
+    c = tmp_path / "c.txt"
+    a.write_bytes(b"shared real content\n")
+    b.write_bytes(b"shared real content\n")
+    c.write_bytes(b"different real content\n")
+    files = [
+        {"id": "doc-a", "path": str(a)},
+        {"id": "doc-b", "path": str(b)},
+        {"id": "doc-c", "path": str(c)},
+    ]
+    result = _run(["detect-duplicates", "--files", json.dumps(files)])
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["input_count"] == 3
+    assert payload["duplicate_groups"] == [["doc-a", "doc-b"]]
+
+
+def test_cli_detect_duplicates_files_mode_unreadable_path_exits_nonzero(tmp_path):
+    files = [{"id": "doc-a", "path": str(tmp_path / "missing.bin")}]
+    result = _run(["detect-duplicates", "--files", json.dumps(files)])
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert "unreadable_paths" in payload
+
+
+def test_cli_detect_duplicates_documents_and_files_are_mutually_exclusive():
+    result = _run(["detect-duplicates", "--documents", "[]", "--files", "[]"])
+    assert result.returncode != 0
+    assert "not allowed with argument" in result.stderr
+
+
+# ---------------------------------------------------------------------------
 # register-capabilities -- real subprocess, real superboss-register.py CLI,
 # real temp-file SQLite DB (never the live one)
 # ---------------------------------------------------------------------------

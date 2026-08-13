@@ -279,7 +279,12 @@ class OwnerPrioritySequenceTest(unittest.TestCase):
         advance_owner_priority_phases()) also genuinely accepts a real
         --commit-sha that IS a real ancestor of origin/main, against a real
         repo checkout, not a mock."""
-        real_repo_root = "/opt/veridian/repos/veridian-scripts"
+        # 2026-08-13 (task-20260813-103224, UMR-20260813-101142-5d24):
+        # _umr_genuinely_completed() now special-cases repo="veridian-scripts"
+        # to the real live checkout (/opt/veridian/scripts), not the
+        # orphaned /opt/veridian/repos/veridian-scripts mirror -- assert
+        # against the path the real code now actually uses.
+        real_repo_root = "/opt/veridian/scripts"
         self.assertTrue(os.path.isdir(os.path.join(real_repo_root, ".git")))
         real_ancestor_sha = "4d751bfa94a25a92163def398db08fd96c024dd9"  # real origin/main~1, verified ancestor
 

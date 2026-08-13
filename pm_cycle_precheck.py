@@ -144,14 +144,34 @@ def resolve_repo_root():
     """Same real self-discovery generate_wiring_registry.py's own
     resolve_doc_path()/REPO_ROOT already established: prefer this file's own
     git checkout (a worktree's .git is a FILE, not a directory -- os.path.exists,
-    never os.path.isdir, per that function's own documented bugfix) over the
-    server's real, cron-kept-current git mirror."""
+    never os.path.isdir, per that function's own documented bugfix) over any
+    fallback mirror.
+
+    2026-08-13 (task-20260813-103224, UMR-20260813-101142-5d24) fix: this file
+    lives at the *root* of the veridian-scripts checkout (confirmed:
+    `git ls-files | grep pm_cycle_precheck.py` -> top-level, no subdirectory),
+    so repo_root must be script_dir itself, not its parent -- the previous
+    `os.path.dirname(script_dir)` walked one level too far (to
+    VERIDIAN_ROOT, /opt/veridian, which never has a .git), so this always
+    fell through to the mirror fallback below on every real invocation. Not a
+    functional data-correctness bug (the two real evidence checks this feeds,
+    _umr_terminal_commit_exists / _is_umr_terminal_commit_ancestor_of_main,
+    both do a real `git fetch origin` first regardless of which local
+    checkout they run in), but it meant this always silently used the
+    fallback path instead of the intended real live checkout. Also: the
+    fallback default itself now points at the real live checkout
+    (/opt/veridian/scripts, kept current by sync-repos.sh's direct
+    `git pull --ff-only`) rather than /opt/veridian/repos/veridian-scripts,
+    which is an orphaned, unmaintained second checkout nothing has pulled
+    since 2026-08-06 (confirmed: 200 commits behind origin/main) -- it was
+    never actually "cron-kept-current" after sync-repos.sh's 2026-08-01
+    change stopped touching it."""
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    repo_root = os.path.dirname(script_dir)
+    repo_root = script_dir
     if os.path.exists(os.path.join(repo_root, ".git")):
         return repo_root
     mirror = os.environ.get(
-        "VERIDIAN_SCRIPTS_GIT_MIRROR", f"{VERIDIAN_ROOT}/repos/veridian-scripts")
+        "VERIDIAN_SCRIPTS_GIT_MIRROR", "/opt/veridian/scripts")
     if os.path.isdir(os.path.join(mirror, ".git")):
         return mirror
     return repo_root

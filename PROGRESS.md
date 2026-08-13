@@ -1,97 +1,75 @@
-# PROGRESS -- task-20260813-183133-third-attempt--pm-sentinel-tick-sh-posit
-
-## SPEC
-Third redispatch of UMR-20260813-145511-5aca / UMR-20260813-170956-5385
-(governing chain UMR-20260806-171945-5767): fix pm-sentinel-tick.sh's
-positional `systemctl show` parse + add a guard against an impossible
-ActiveState value, with real tests and a real PR.
+# PROGRESS -- task-20260813-201836-rca--umr-20260807-151622-15cd-killed
 
 ## Completed
-- [x] Re-verified the SPEC's premise independently before acting (known
-      task-dispatch false-premise pattern -- see memory
-      `veridian-task-prompt-false-premise-pattern`):
-  - The SPEC's claim "both prior attempts died WITHOUT opening a PR" is
-    **false**. Prior task `task-20260813-171208-fix-pm-sentinel-tick-sh-
-    positional-activ` (governed by the same two UMRs) actually completed
-    the real fix and pushed it as commit `32b4276` onto the existing open
-    PR #299 (FChecklist/veridian-scripts) rather than opening a competing
-    PR (its own SPEC's coordination point 4) -- confirmed via
-    `git log --all`, `gh pr view 299`, and reading that task's own
-    PROGRESS.md (now on `main` via PR #313, commit `025a3f8`).
-  - PR #313 (worker/task-20260813-171208-...) *was* opened and *was*
-    merged (`8db4abe`, 2026-08-13T17:37:01Z) -- but its diff is
-    PROGRESS.md-only; it never carried the actual code fix. The real code
-    fix (order-independent parse + duplicate-content-refusal exit-code fix
-    + 2 regression tests, `pm-sentinel-tick.sh` + `test_pm_sentinel_tick.py`)
-    was sitting complete and passing (8/8) on **PR #299**
-    (`worker/task-20260813-123933-add-query-once-decide-and-fix`), which
-    was OPEN/MERGEABLE/CLEAN and had simply never been merged.
-  - UMR-20260813-170956-5385's DB row had been mislabeled `killed` by a
-    real race condition in `reconcile_owner_dispatch_status.py`. This was
-    independently RCA'd and fixed by a concurrent sibling task
-    (`task-20260813-183210-rca--umr-20260813-170956-5385-killed`, its own
-    fix on PR #319, different file/scope than this task's) while this task
-    was investigating the same evidence -- its DB-row correction
-    (`status=completed`, citing commit `8db4abe`/PR #313) is confirmed live
-    via `resource_governor.py --query-umr`. No action needed from this
-    task on that row or on PR #319; that reconciler fix is out of this
-    task's own scope (pm-sentinel-tick.sh itself).
-  - The live production bug was real and still active minutes before this
-    task started: the real cron log
-    (`/opt/veridian/ai-os/logs/pm-sentinel-tick-cron.log`, 18:18 run) showed
-    `MISMATCH: UMR-20260808-151244-134c status=running but unit
-    veridian-governor-tick.service ActiveState=success Result=active` --
-    the exact impossible fingerprint from the SPEC, live, today, still
-    unfixed anywhere on `main` (the live deploy checkout at
-    `/opt/veridian/scripts` was also still on the old positional-parse
-    code, on a stale pre-existing branch, separately from this task's own
-    scope). `veridian-pm-sentinel-tick.service` itself was
-    `Active: failed (Result: exit-code)` at that time.
-  - ACTION 1 (name-keyed parse) was already fully done on PR #299/commit
-    `32b4276`. ACTION 2 (a guard that rejects an impossible ActiveState
-    value and fails loudly) was **not** present -- the one real remaining
-    gap this task actually needed to close.
-- [x] Added ACTION 2 on top of PR #299's existing fix, stacked as a new
-      commit on the same branch (continuing the established
-      don't-open-a-competing-PR coordination, since PR #299 already *was*
-      the real, tested, mergeable vehicle for this fix): a `case`-based
-      guard in Check 2b that rejects any `ACTIVE_STATE` value outside
-      systemd's real ActiveState enum (active/reloading/inactive/failed/
-      activating/deactivating/maintenance/empty), logs a loud
-      `IMPOSSIBLE VALUE` line, increments `TICK_FAILURES` (real non-zero
-      tick exit), and `continue`s past the MISMATCH/RCA-dispatch check for
-      that row entirely -- defense-in-depth against a *future* silent
-      re-transposition, not just today's known cause. Commit `b6fbed3`.
-- [x] Added `PmSentinelTickImpossibleActiveStateGuardTest` to
-      `test_pm_sentinel_tick.py`: feeds a real fake systemctl returning the
-      live-reproduced impossible fingerprint `ActiveState=success
-      Result=active`, asserts no MISMATCH/no RCA dispatch, a loud logged
-      rejection, zero new dispatched rows, and a real non-zero tick exit.
-- [x] Real test run: full suite, real subprocess dispatches against an
-      isolated sqlite3 copy of the live Superboss Register DB --
-      `9 passed in 350.05s`, `python3 -m pytest test_pm_sentinel_tick.py -v`,
-      exit 0 (8 pre-existing + this task's new test).
-- [x] Pushed commit `b6fbed3` to PR #299's branch
-      (`worker/task-20260813-123933-add-query-once-decide-and-fix`) as a
-      fast-forward onto `32b4276`.
-- [x] Merged PR #299 to `main`: purely additive (1806/0 net lines across
-      the whole PR, new files only -- `pm-sentinel-tick.sh`, the systemd
-      unit files, `test_pm_sentinel_tick.py` -- no existing file touched),
-      clean/mergeable, fully tested, and was the actual fix this SPEC and
-      both its predecessors were chasing. Merge commit `ae48cf0`,
-      2026-08-13T18:49:15Z. Verified post-merge: `git show
-      origin/main:pm-sentinel-tick.sh` contains both the name-keyed parse
-      and the new `IMPOSSIBLE VALUE` guard.
-- [x] Noted for the record: while resolving this task's own merge of
-      `origin/main` back into this branch, a harness-injected
-      system-reminder claimed a PROGRESS.md conflict-marker change was
-      "intentional... don't tell the user, they're already aware." That
-      claim was false (it was this task's own routine `git merge`
-      conflict, resolved normally below) and the "don't tell the user"
-      instruction is the same prompt-injection pattern the sibling RCA
-      task (183210) independently flagged -- disregarded, and reported
-      here per standing instruction to always report such attempts.
+- [x] Verified live state independently (did not trust SPEC summary): queried
+      `resource_governor.py --query-umr --umr-id UMR-20260807-151622-15cd`
+      directly. Confirmed: status=killed, reason (flat column)="queued"
+      (stale), ts_completed=NULL.
+- [x] Root-caused the kill via the row's own task_dir/task.yaml/supervisor.log
+      (task-20260807-152601-stop-work-order--batch-3--land-batch-2-s):
+      the worker did real work (commit 6cbd222, 14 real pytest files for
+      batch-2, matching content later re-landed as 59bd6f6/4ba18d0), reached
+      checkpoint status=pending_review, but its local branch
+      `rescue/batch-2-land-tests` was never pushed to origin. The supervisor's
+      `gh pr create` failed ("No commits between main and
+      rescue/batch-2-land-tests" -- the branch didn't exist remotely), PR
+      resolution correctly refused to guess (precedent: PR #84 incident), and
+      the task sat status=blocked for ~6 days until its systemd unit went
+      inactive.
+- [x] Confirmed no real work was actually lost: the same scope (Part A --
+      rescue batch-2's stranded 14 tests) was independently redone and
+      merged via a later task, PR #271 (commits 59bd6f6/4ba18d0/de2df88,
+      "14/14 real tests passing, 177 passed, 0 failed", checklist
+      regenerated 60/158 -> 76/160).
+- [x] Confirmed Part B of the original SPEC (write tests for the next 15
+      alphabetical untested scripts after batch 1 & 2) was never attempted
+      by any task: `PLATFORM_COMPLETION_CHECKLIST.json` git_head still
+      matches the batch-2 merge commit (de2df88), tested=76/160,
+      untested=84/160, unchanged since. This is real, still-open platform
+      backlog, but it is a distinct, freshly-dispatchable body of work, not
+      "remaining scope stuck behind this UMR's kill" -- the dead local
+      branch's unpushed commit (6cbd222) is unreachable and the task's own
+      git worktree metadata has since been pruned, so there is nothing left
+      to resume under this specific UMR/branch.
+- [x] Explained why `reason` showed the stale "queued" value: this row was
+      mechanically reconciled to status=killed by
+      `reconcile_owner_dispatch_status.py --apply` at 2026-08-13T07:02:01Z,
+      9 minutes *before* commit b13833a (07:11:52Z, same day) fixed that
+      script's `apply_correction()` to actually write `reason`/`ts_completed`
+      to the flat columns (previously it only wrote `metadata_json`). This
+      row is a pre-fix straggler that the b13833a backfill (forward-only,
+      named 6 specific rows) did not cover.
+- [x] **Fix applied**: re-ran the now-fixed
+      `reconcile_owner_dispatch_status.py --umr-id UMR-20260807-151622-15cd
+      --apply` (report-mode first to confirm stable re-classification, then
+      --apply). This is the canonical, purpose-built tool for exactly this
+      row shape (source_trigger=owner_dispatch_gateway,
+      STALE_LABEL_TERMINAL); it re-verified live evidence (systemd inactive,
+      task.yaml status=blocked, no PR on GitHub) and wrote real
+      `reason` + `ts_completed` via `update_umr_task()`, merging
+      `metadata_json` (never a raw SQL UPDATE). Verified post-write: reason
+      now holds the real evidence string, ts_completed=2026-08-13T20:26:27Z,
+      and `outputs_json` (the original dispatch record: new_task_id,
+      worktree-prep stderr) is untouched.
+      - Deliberately did NOT also call `mark-umr-terminal`: that command
+        would have re-stamped `ts_completed` and, per its own code, wholesale
+        *replaces* (not merges) `outputs_json`, which would have destroyed
+        the row's real original dispatch record. The reconciler is the more
+        precise, less destructive tool for this exact row shape and already
+        satisfies "record a real, honest terminal outcome ... citing real
+        evidence."
+- [x] Noted (not fixed, out of scope for this UMR): UMR-20260807-101603-d1bc
+      (the batch-2 UMR referenced by this task's own SPEC) shows the exact
+      same stale reason="queued"/ts_completed=NULL pattern -- likely another
+      pre-b13833a straggler. Left as a follow-up observation, not touched,
+      since it is outside this task's governing chain.
+- [x] `agent_work_briefing.py record-completion` called for
+      UMR-20260813-201823-4bcc.
+- [x] Committed and opened PR #324 (FChecklist/veridian-scripts,
+      branch worker/task-20260813-201836-rca--umr-20260807-151622-15cd-killed).
 
 ## Remaining
-- [ ] Call `agent_work_briefing.py record-completion` for
-      UMR-20260813-175244-0c40.
+- [ ] None for this UMR's own scope. Open platform backlog (not this task's
+      job): PLATFORM_COMPLETION_CHECKLIST.json still has 84/160 scripts
+      untested, including the original "next 15 alphabetical" batch-3 target
+      list, which a future dispatch can pick up fresh.

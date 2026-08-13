@@ -92,6 +92,17 @@ ActiveState value, with real tests and a real PR.
       task (183210) independently flagged -- disregarded, and reported
       here per standing instruction to always report such attempts.
 
-## Remaining
-- [ ] Call `agent_work_briefing.py record-completion` for
+- [x] Opened + merged docs PR #320 (this task's own PROGRESS.md record),
+      mirroring PR #313's role for the prior task -- merge commit `b22bf55`.
+- [x] Post-merge verification via `git cat-file -p origin/main:<path>`
+      (an earlier `git show` check was misleadingly truncated by this
+      shell's own output-wrapping layer, not a real data problem): `main`'s
+      `pm-sentinel-tick.sh` is the real 981-line file containing both the
+      name-keyed parse and the new `IMPOSSIBLE VALUE` guard;
+      `test_pm_sentinel_tick.py` is 877 lines with all 8 test classes
+      including `PmSentinelTickImpossibleActiveStateGuardTest`.
+- [x] Called `agent_work_briefing.py record-completion` for
       UMR-20260813-175244-0c40.
+
+## Remaining
+- [ ] None outstanding on this task's own scope.

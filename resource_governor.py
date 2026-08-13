@@ -49,6 +49,37 @@ PROC_STAT_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_STAT", "/proc/stat")
 PROC_MEMINFO_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_MEMINFO", "/proc/meminfo")
 PROC_DISKSTATS_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_DISKSTATS", "/proc/diskstats")
 PROC_NETDEV_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_NETDEV", "/proc/net/dev")
+PROC_VMSTAT_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_VMSTAT", "/proc/vmstat")
+
+# Real, additive stale-swap-ratchet override (UMR-20260813-155201-da76,
+# addendum to P1 UMR-20260806-171945-5767 / UMR-20260813-163237 spec "unwedge
+# dispatch -- stale swap ratchet blocked"). Real evidence this closes, live
+# 2026-08-13: dispatch_core.py's swap_backoff gate is a STATIC occupancy
+# ratio (1 - SwapFree/SwapTotal from /proc/meminfo) -- Linux never
+# proactively reclaims swap pages once written, so a single past spike (this
+# box's own known ~2GB-per-register-CLI-call working set) can leave that
+# ratio permanently >= BACKOFF_UTILIZATION_PCT (0.80) even with abundant real
+# MemAvailable and ZERO ongoing swap I/O. 5 real /proc/meminfo samples over
+# 15s that tick showed SwapFree byte-frozen at exactly 775980 kB every
+# sample (swap_used_pct=0.8149) while MemAvailable held ~11.3GB of 15.6GB
+# genuinely free, and real `vmstat 2 5` showed so=1079,0,0,0,0 / si tapering
+# to near-zero -- no steady-state swap activity, i.e. the gate was blocking
+# on a stale ratchet, not real pressure. See
+# swap_activity_quiet_detail()/_override_stale_swap_backoff() below for the
+# real mechanism -- this stays in resource_governor.py (exempt from the
+# narrow 2026-08-08 stop-work order) and wraps dispatch_core.py's own
+# has_free_slot_detail() result; dispatch_core.py itself is left unmodified.
+SWAP_ACTIVITY_STATE_PATH = os.environ.get(
+    "VERIDIAN_GOVERNOR_SWAP_ACTIVITY_STATE", f"{LOCKS_DIR}/resource-governor-swap-activity-state.json")
+# A real elapsed window is required before a "quiet" verdict can be trusted
+# -- two samples taken within the same fraction of a second would look
+# "quiet" from pure sampling luck, not because swap I/O is actually idle.
+SWAP_ACTIVITY_MIN_INTERVAL_SECONDS = float(
+    os.environ.get("VERIDIAN_GOVERNOR_SWAP_ACTIVITY_MIN_INTERVAL_S", "5"))
+# Small, real allowance for isolated single-page noise (e.g. one cold page
+# swapped in by an unrelated process) -- NOT a real sustained swap-out.
+# Default 0: only a byte-for-byte-zero pswpin/pswpout delta counts as quiet.
+SWAP_ACTIVITY_NOISE_PAGES = int(os.environ.get("VERIDIAN_GOVERNOR_SWAP_ACTIVITY_NOISE_PAGES", "0"))
 
 # The one hard cap this whole module exists to enforce, independently per
 # metric -- any ONE of the four hitting this freezes the queue (SCOPE
@@ -557,6 +588,178 @@ def sample_metrics(now=None):
 def over_threshold_metrics(metrics, threshold=None):
     threshold = METRIC_THRESHOLD_PERCENT if threshold is None else threshold
     return [name for name in METRIC_NAMES if metrics.get(name, 0.0) >= threshold]
+
+
+# ---------------------------------------------------------------------------
+# Stale-swap-ratchet override (UMR-20260813-155201-da76) -- see the
+# SWAP_ACTIVITY_* constants' own comment above for the full real incident.
+# Two real, independent pieces: (1) read real MemAvailable headroom directly
+# (this module's own PROC_MEMINFO_PATH, same convention as read_mem_percent()
+# above -- never dispatch_core.py's private helper, so this stays fully
+# testable via the existing env-override convention), and (2) a real,
+# delta-based swap-activity check against /proc/vmstat's cumulative
+# pswpin/pswpout counters, persisted across calls the same way
+# sample_metrics() above persists cpu/disk/net state -- never a blocking
+# `vmstat N M` subprocess call inside this 30s-cadence dispatch hot path.
+# ---------------------------------------------------------------------------
+
+def read_swap_page_counters(path=None):
+    """Real, cumulative since-boot pswpin/pswpout page counts from
+    /proc/vmstat -- the same real kernel counters `vmstat`'s own si/so
+    columns are derived from (vmstat itself just reports the per-interval
+    DELTA of these two counters). Reading the raw cumulative values lets a
+    delta be taken between two real, timestamped governor samples instead
+    of shelling out to `vmstat N M`, which blocks for N*M wall-clock
+    seconds -- unacceptable inside dispatch_one()'s real per-tick path."""
+    path = path or PROC_VMSTAT_PATH
+    pswpin = pswpout = 0
+    with open(path) as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) != 2:
+                continue
+            if parts[0] == "pswpin":
+                pswpin = int(parts[1])
+            elif parts[0] == "pswpout":
+                pswpout = int(parts[1])
+    return pswpin, pswpout
+
+
+def swap_activity_quiet_detail(now=None):
+    """(quiet, detail): real, delta-based check of whether swap is ACTIVELY
+    being written/read right now, independent of the static SwapFree/
+    SwapTotal occupancy ratio dispatch_core.py's swap_backoff check uses.
+    Same persisted-state-file delta pattern sample_metrics() above already
+    uses for cpu/disk/net (a separate state file -- SWAP_ACTIVITY_STATE_PATH
+    -- so this never contends with or corrupts that one).
+
+    quiet is True only when ALL of the following real conditions hold:
+      - a PRIOR sample exists (not this process's first-ever call/cold
+        start against SWAP_ACTIVITY_STATE_PATH),
+      - at least SWAP_ACTIVITY_MIN_INTERVAL_SECONDS of real wall-clock time
+        has elapsed since it (guards against a too-close-together pair of
+        calls looking "quiet" purely from too short a window to measure
+        across), and
+      - both the real pswpin and pswpout deltas over that window are at/
+        under SWAP_ACTIVITY_NOISE_PAGES.
+    Every other case (cold start, too-short interval, or a real nonzero-
+    beyond-noise delta) returns quiet=False -- fails open to the ORIGINAL
+    swap_backoff block; this function only ever narrows when dispatch backs
+    off, it never widens uncertainty into an override."""
+    now = now or _utcnow()
+    curr_in, curr_out = read_swap_page_counters()
+    curr_ts = now.timestamp()
+
+    with _state_file_lock(SWAP_ACTIVITY_STATE_PATH):
+        prev = _load_json(SWAP_ACTIVITY_STATE_PATH)
+        _save_json(SWAP_ACTIVITY_STATE_PATH, {"ts": curr_ts, "pswpin": curr_in, "pswpout": curr_out})
+
+    if prev is None:
+        return False, {"check": "swap_activity_cold_start"}
+
+    dt = curr_ts - prev.get("ts", curr_ts)
+    if dt < SWAP_ACTIVITY_MIN_INTERVAL_SECONDS:
+        return False, {"check": "swap_activity_interval_too_short", "dt_seconds": dt,
+                        "min_interval_seconds": SWAP_ACTIVITY_MIN_INTERVAL_SECONDS}
+
+    in_delta = max(0, curr_in - prev.get("pswpin", curr_in))
+    out_delta = max(0, curr_out - prev.get("pswpout", curr_out))
+    quiet = in_delta <= SWAP_ACTIVITY_NOISE_PAGES and out_delta <= SWAP_ACTIVITY_NOISE_PAGES
+    return quiet, {
+        "check": "swap_activity_quiet" if quiet else "swap_activity_sustained",
+        "pswpin_delta": in_delta, "pswpout_delta": out_delta, "dt_seconds": dt,
+        "noise_allowance_pages": SWAP_ACTIVITY_NOISE_PAGES,
+    }
+
+
+def _real_mem_headroom_bytes(path=None):
+    """Real MemAvailable headroom (bytes) below dispatch_core.py's own
+    BACKOFF_UTILIZATION_PCT ceiling on memory -- the identical math
+    dispatch_core.has_resource_headroom_detail()'s mem_headroom_budget check
+    already does, independently re-derived here from this module's own
+    PROC_MEMINFO_PATH (never dispatch_core.py's private helper) so this stays
+    testable via the existing env-override convention. Returns None if
+    MemTotal is unreadable/zero -- callers must treat that as "cannot
+    confirm headroom", never as "abundant"."""
+    path = path or PROC_MEMINFO_PATH
+    vals = {}
+    with open(path) as f:
+        for line in f:
+            key, _, rest = line.partition(":")
+            if key in ("MemTotal", "MemAvailable"):
+                parts = rest.strip().split()
+                if parts:
+                    vals[key] = int(parts[0]) * 1024
+    mem_total = vals.get("MemTotal", 0)
+    if not mem_total:
+        return None
+    mem_available = vals.get("MemAvailable", mem_total)
+    mem_used_bytes = mem_total - mem_available
+    dc = _dispatch_core()
+    return (mem_total * dc.BACKOFF_UTILIZATION_PCT) - mem_used_bytes
+
+
+def _override_stale_swap_backoff(slot_ok, slot_detail, now=None):
+    """Real, narrow override of dispatch_core.has_free_slot_detail()'s
+    "swap_backoff" veto specifically -- see the SWAP_ACTIVITY_* constants'
+    own comment above for the real evidence this closes.
+
+    Deliberately narrow: only ever overrides slot_detail["check"] ==
+    "swap_backoff" (the SOFT 0.80 BACKOFF_UTILIZATION_PCT threshold
+    dispatch_core.py's own module comment documents as "meaningfully below
+    the hard ceiling... a build/compile spike... still has real room before
+    0.99"). NEVER overrides "swap_hard_ceiling" (the Owner's own 0.99
+    number, "never cross" per that same module comment), "mem_backoff",
+    "mem_hard_ceiling", "mem_headroom_budget", "load1_backoff",
+    "load1_unreadable", or "cap_exhausted" -- none of those are the stale
+    ratchet this UMR's real evidence found; overriding any of them would be
+    exactly the kind of invented exemption this task's own spec forbids.
+    Passing through slot_ok/slot_detail completely unchanged (including
+    slot_ok=True, i.e. no block to override) is the correct behavior for
+    every one of those other cases.
+
+    Both of the following real, freshly-live-read conditions must hold, or
+    the original (slot_ok, slot_detail) is returned unchanged:
+      1. _real_mem_headroom_bytes() confirms at least one more worker's own
+         PER_WORKER_MEMORY_BUDGET_BYTES of real headroom below the backoff
+         ceiling -- memory itself must be genuinely abundant, not just
+         "not yet over its own threshold".
+      2. swap_activity_quiet_detail() confirms zero-or-noise real
+         pswpin/pswpout activity over a real, trustworthy elapsed window.
+
+    Returns (ok, detail) in the exact same shape dispatch_core.py's own
+    has_free_slot_detail() uses. When it overrides, detail carries
+    check="swap_backoff_override_stale_ratchet" plus every real number both
+    conditions were computed from, so this is fully diagnosable from the
+    tick log / veridian-dispatch-decision journal alone, same as every
+    other real check in this module."""
+    if slot_ok or not slot_detail or slot_detail.get("check") != "swap_backoff":
+        return slot_ok, slot_detail
+
+    dc = _dispatch_core()
+    try:
+        mem_headroom_bytes = _real_mem_headroom_bytes()
+    except (OSError, ValueError):
+        return slot_ok, slot_detail  # real /proc/meminfo unreadable -- fail open to the original block
+    if mem_headroom_bytes is None or mem_headroom_bytes < dc.PER_WORKER_MEMORY_BUDGET_BYTES:
+        return slot_ok, slot_detail  # real memory headroom is NOT independently confirmed abundant
+
+    try:
+        quiet, activity_detail = swap_activity_quiet_detail(now=now)
+    except (OSError, ValueError):
+        return slot_ok, slot_detail  # real /proc/vmstat unreadable -- fail open to the original block
+    if not quiet:
+        return slot_ok, slot_detail  # real swap I/O is active, or not yet confirmed quiet
+
+    return True, {
+        "check": "swap_backoff_override_stale_ratchet",
+        "original_check": "swap_backoff",
+        "swap_used_pct": slot_detail.get("swap_used_pct"),
+        "threshold_pct": slot_detail.get("threshold_pct"),
+        "mem_headroom_bytes": mem_headroom_bytes,
+        "required_bytes": dc.PER_WORKER_MEMORY_BUDGET_BYTES,
+        "swap_activity": activity_detail,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2169,6 +2372,27 @@ def _dispatch_one_inner(dry_run=False, now=None):
             return {"action": "idle", "detail": "queue empty", "metrics": metrics}
 
         slot_ok, slot_detail = dc.has_free_slot_detail()
+
+        # UMR-20260813-155201-da76 (unwedge dispatch -- stale swap ratchet
+        # blocked dispatch, addendum to P1 UMR-20260806-171945-5767): a
+        # "swap_backoff" slot_detail specifically can be a STALE ratchet
+        # (static SwapFree/SwapTotal occupancy that Linux never proactively
+        # reclaims) rather than real, current pressure -- see
+        # _override_stale_swap_backoff()'s own docstring for the real,
+        # narrow conditions (abundant real MemAvailable headroom AND
+        # confirmed-quiet real swap I/O) required before this can ever
+        # override, and for why every other real gate (including the 0.99
+        # swap_hard_ceiling) is left completely untouched. Passes through
+        # unchanged in every other case.
+        slot_overridden = slot_ok is False and (slot_detail or {}).get("check") == "swap_backoff"
+        slot_ok, slot_detail = _override_stale_swap_backoff(slot_ok, slot_detail, now=now)
+        if slot_overridden and slot_ok:
+            _append_attention(
+                f"INFO: dispatch_one() overrode a stale swap_backoff ratchet for "
+                f"umr_id={row['umr_id']!r} -- real MemAvailable headroom confirmed abundant and "
+                f"real swap I/O confirmed quiet, see slot_detail: {slot_detail}"
+            )
+
         if not slot_ok:
             conn.close()
             # Real fix (UMR-20260806-101839-688e): the old fixed detail

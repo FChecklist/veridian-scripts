@@ -636,9 +636,33 @@ $PROGRESS_INSTRUCTION"
   # UMR-20260801-153900-9100). credit-accountant.py's own check_existing_capability()
   # docstring requires curated, specific terms for exactly this reason. Surface
   # the real failing gate name(s) instead.
+  #
+  # 2026-08-13 (RCA task-20260813-082632, UMR-20260808-183926-70b6): the
+  # 2026-08-02 fix above narrowed the false-positive rate but did not close
+  # it -- bare gate names like "build" are still single common words, OR'd
+  # (not phrase-matched) by superboss-register.py's _fts_query() across
+  # FOUR tables including wiring_registry (7,783+ rows, added Stage 6,
+  # 2026-07-29, after the 2026-08-02 fix was written). Confirmed LIVE: a
+  # real auto-fix attempt on task-20260808-192230 (a docs-only commit,
+  # zero files_modified, blocked purely by a `next build` gate TIMEOUT)
+  # was rejected with "existing software/mechanism already covers this
+  # (system_index match)" backed by 1,966 unrelated FTS hits on the word
+  # "build" alone -- task never reached pending_review, no PR ever opened,
+  # eventually reconciled to killed. check-duplicate's OR-of-bare-words
+  # design is deliberate and correct for its real callers (a human
+  # reviewing a discovery list, per its own docstring) but wrong for this
+  # one automated hard-reject gate. Fix: wrap the search terms in an exact
+  # FTS5 phrase (double quotes) -- _fts_query() already special-cases
+  # quoted input as one adjacent phrase clause instead of OR'd bare words
+  # (see its own 2026-07-29 Stage 4 docstring), so this synthetic
+  # generated string (never a real path/purpose/capability-name literal in
+  # the registry) now correctly returns zero matches instead of flooding
+  # on any one common word. Verified live: check-duplicate
+  # '"quality gate auto-fix retry build"' -> found=0 (was found=1966
+  # unquoted).
   FAILING_GATES=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); names=sorted(k for k,v in d.items() if not v.get("passed", True)); print(",".join(names) if names else "unknown")' "$TASK_DIR/quality-gate-$((GATE_ATTEMPT-1)).json" 2>/dev/null)
   FAILING_GATES="${FAILING_GATES:-unknown}"
-  FIX_PROPOSE_OUT=$(python3 /opt/veridian/scripts/credit-accountant.py propose --task-id "$TASK_ID" --plan "auto-fix attempt $GATE_ATTEMPT/2 for quality gate failure on task $TASK_ID, see quality-gate-$((GATE_ATTEMPT-1)).json for the failing checks" --search-terms "quality gate auto-fix retry: $FAILING_GATES")
+  FIX_PROPOSE_OUT=$(python3 /opt/veridian/scripts/credit-accountant.py propose --task-id "$TASK_ID" --plan "auto-fix attempt $GATE_ATTEMPT/2 for quality gate failure on task $TASK_ID, see quality-gate-$((GATE_ATTEMPT-1)).json for the failing checks" --search-terms "\"quality gate auto-fix retry $FAILING_GATES\"")
   FIX_PROPOSE_RC=$?
   echo "$FIX_PROPOSE_OUT" >> "$TASK_DIR/worker.log"
   if [ "$FIX_PROPOSE_RC" -ne 0 ]; then

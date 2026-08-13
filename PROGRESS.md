@@ -1,3 +1,16 @@
+> **DEPRECATED (UMR-20260813-195922-f548, 2026-08-13).** This single shared
+> file is the real defect this fix closes: every worker rewrote it on its
+> own branch, so (a) a worker could satisfy the old progress protocol by
+> only ever editing this file (no real code required), and (b) every
+> long-lived branch that touched it conflicted with every other one that
+> also touched it, unrelated code or not -- 17 of 25 open/DIRTY PRs at the
+> time of this fix were PROGRESS.md-only diffs stuck CONFLICTING for this
+> reason alone. New workers write `progress/<task_id>.md` instead (see
+> `progress_completion_gate.py`); this file is left as historical record,
+> not maintained by any worker going forward. Run
+> `python3 progress_completion_gate.py rollup` for a live, generated
+> rolled-up view of every per-task progress file.
+
 # PROGRESS -- task-20260813-183133-third-attempt--pm-sentinel-tick-sh-posit
 
 ## SPEC

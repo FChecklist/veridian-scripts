@@ -65,9 +65,41 @@
 #                              db_path() already reads this).
 #   PM_SENTINEL_STATE_FILE  -- override the in-flight dedup state file path.
 #   PM_SENTINEL_MAX_DISPATCH -- override the per-tick dispatch cap (default 5).
+#   PM_SENTINEL_NOTIFY_OWNER_SCRIPT -- override the notify-owner.py path used
+#                              by escalate_financial_decision() below (real
+#                              testability seam, same convention).
 #   VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS="" -- disable the standing
 #                              stop-work gate for a test run (same env var
 #                              resource_governor.py itself already documents).
+#
+# ---------------------------------------------------------------------------
+# Owner-decision escalation scope -- real Owner-issued policy (2026-08-13
+# amendment, addendum UMR-20260813-091633-8b6a to this task's own governing
+# chain; the SAME policy already standing for the laptop-side hourly PM
+# sentinel): this script does NOT need to consult or escalate to the Owner
+# except for a genuine FINANCIAL decision -- spending money, a new financial
+# commitment, a payment, or a pricing/billing change. For every other gap a
+# tick finds -- technical judgment calls, RCA dispatch, PR audit/fix/merge
+# dispatch, and any other product/business decision within this script's own
+# real dispatched scope -- it decides and dispatches autonomously, citing the
+# real evidence gathered above. No Owner consultation, no "NEEDS OWNER
+# DECISION" wait state, for any of that.
+#
+# This does NOT relax any other hard rule this script already follows: it
+# still never fabricates a stop-work-order exemption (only a real, already-
+# recorded exemption applies), never fabricates completion or certification,
+# never bypasses a real posted AUDIT:FAIL, and never skips the zero-
+# duplication check (is_in_flight()) before dispatching.
+#
+# FINANCIAL_KEYWORDS is the real, deliberately narrow test for "is this a
+# financial decision" (spend/payment/invoice/pricing/billing/subscription/
+# refund/budget-approval language) -- narrow so it does not accidentally
+# swallow ordinary technical/product gaps into a fake escalation.
+# escalate_financial_decision() sends a real "NEEDS OWNER DECISION"
+# notification through the EXISTING notify-owner.py front door (never a
+# second, ad hoc notification path) and returns without dispatching;
+# dispatch_gap() below runs this check FIRST, before is_in_flight() or the
+# dispatch cap, so a genuine financial gap is never silently auto-dispatched.
 
 set -uo pipefail
 
@@ -77,7 +109,13 @@ cd "$SCRIPT_DIR"
 GH_ORG="${VERIDIAN_GH_ORG:-FChecklist}"
 MAX_DISPATCHES_PER_TICK="${PM_SENTINEL_MAX_DISPATCH:-5}"
 STATE_FILE="${PM_SENTINEL_STATE_FILE:-/opt/veridian/ai-os/logs/pm-sentinel-inflight.json}"
+NOTIFY_OWNER_SCRIPT="${PM_SENTINEL_NOTIFY_OWNER_SCRIPT:-notify-owner.py}"
 DISPATCH_COUNT=0
+
+# Real, deliberately narrow keyword test backing is_financial_decision()
+# below -- see the "Owner-decision escalation scope" header comment above
+# for the real Owner-issued policy this implements.
+FINANCIAL_KEYWORDS='(^|[^A-Za-z])(spend(ing)?|payment|invoic(e|ing)|pricing|billing|subscription (cost|fee|upgrade)|refund|purchas(e|ing)|financial commitment|budget approval|credit card|price increase|contract cost)([^A-Za-z]|$)'
 
 mkdir -p "$(dirname "$STATE_FILE")"
 [ -f "$STATE_FILE" ] || echo '{}' > "$STATE_FILE"
@@ -158,11 +196,47 @@ is_in_flight() {
   esac
 }
 
+# is_financial_decision <text> -- real, narrow keyword test (see the
+# "Owner-decision escalation scope" header comment above for the real
+# Owner-issued policy this implements). True only for genuine
+# spend/payment/invoice/pricing/billing/subscription/refund/budget-approval
+# language -- never for ordinary technical/product gaps.
+is_financial_decision() {
+  printf '%s' "$1" | grep -qiE "$FINANCIAL_KEYWORDS"
+}
+
+# escalate_financial_decision <target_key> <title> <prompt> -- the ONLY case
+# this script ever asks the Owner for a decision instead of deciding and
+# acting itself, per the real Owner-issued escalation-scope policy above.
+# Sends a real "NEEDS OWNER DECISION" notification through the EXISTING
+# notify-owner.py front door (its own real rate-limit/dedupe, not
+# reimplemented here) and records nothing in-flight -- this is a real
+# pending human decision, not a dispatch.
+escalate_financial_decision() {
+  local target_key="$1" title="$2" prompt="$3"
+  echo "  NEEDS OWNER DECISION (financial): $target_key -- $title -- escalating via $NOTIFY_OWNER_SCRIPT, NOT auto-dispatching"
+  local subject="NEEDS OWNER DECISION (financial): ${title}"
+  local body="A server-native PM sentinel tick found a real gap that looks like a financial decision (spending money, a new financial commitment, a payment, or a pricing/billing change), so per the real Owner-issued escalation-scope policy it is asking you first instead of deciding on its own. Real evidence: ${prompt}"
+  local out rc
+  out="$(python3 "$NOTIFY_OWNER_SCRIPT" --subject "$subject" --body "$body" --dedupe-key "pm-sentinel:financial:${target_key}" 2>&1)"
+  rc=$?
+  echo "$out" | sed 's/^/    /'
+  if [ "$rc" -ne 0 ]; then
+    echo "  WARNING: $NOTIFY_OWNER_SCRIPT failed (exit $rc) for $target_key -- Owner escalation NOT confirmed sent, see output above"
+  fi
+}
+
 # dispatch_gap <target_key> <title> <prompt> <tier> -- the ONLY place this
 # script ever creates new real work, and it does so exclusively through the
-# existing single front door.
+# existing single front door -- EXCEPT a genuine financial decision, which
+# it escalates to the Owner instead (checked first, below) per the real
+# Owner-issued escalation-scope policy in the header comment above.
 dispatch_gap() {
   local target_key="$1" title="$2" prompt="$3" tier="$4"
+  if is_financial_decision "$title $prompt"; then
+    escalate_financial_decision "$target_key" "$title" "$prompt"
+    return 0
+  fi
   if is_in_flight "$target_key"; then
     return 0
   fi

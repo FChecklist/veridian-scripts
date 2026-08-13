@@ -256,9 +256,15 @@ PYEOF
     # so it survives the requeue) falls back to one real long wait (the
     # original 700s) on the 4th consecutive loss, to guarantee eventual
     # forward progress and prevent starvation.
-    BUILD_LOCK_FILE="/tmp/veridian-quality-gate-build.lock"
-    BUILD_LOCK_SHORT_WAIT_SECONDS=20
-    BUILD_LOCK_LONG_WAIT_SECONDS=700
+    # Configurable (same precedent as GATE_STEP_TIMEOUT_SECONDS/
+    # BUILD_MAX_OLD_SPACE_MB above): default unchanged for every existing
+    # caller. Overrides exist so tests/test_build_lock_untracked_task_long_wait.py
+    # can exercise the real short-wait/long-wait/timeout code paths against
+    # an isolated lock file in bounded real time, instead of the shared
+    # production lock path and the real 700s wait.
+    BUILD_LOCK_FILE="${BUILD_LOCK_FILE:-/tmp/veridian-quality-gate-build.lock}"
+    BUILD_LOCK_SHORT_WAIT_SECONDS="${BUILD_LOCK_SHORT_WAIT_SECONDS:-20}"
+    BUILD_LOCK_LONG_WAIT_SECONDS="${BUILD_LOCK_LONG_WAIT_SECONDS:-700}"
     BUILD_LOCK_LOSS_COUNT_FILE="$TASK_DIR/.build-lock-loss-count"
 
     # Returns 0 with the lock held open on fd 9 (caller runs the build, then

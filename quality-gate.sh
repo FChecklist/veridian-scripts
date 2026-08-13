@@ -139,10 +139,10 @@ PYEOF
 # bug. Gating on the actual diff is general, verifiable from the commits
 # themselves, and does not trust anything the task claims about itself.
 #
-# DOCS_ONLY is deliberately conservative: any changed path with a
-# code-relevant extension (including bare .json, since that also matches
-# package.json/tsconfig.json/lockfile-adjacent config) keeps the full gate
-# suite running. A false negative here (running gates on a genuinely
+# DOCS_ONLY is deliberately conservative: it must fail CLOSED (gates run) on
+# anything it doesn't explicitly recognize as docs-only, never fail open
+# (gates skipped) on anything it doesn't explicitly recognize as
+# code-relevant. A false negative here (running gates on a genuinely
 # doc-only diff) just costs the same wasted build time this fix targets; a
 # false positive (skipping gates on a diff that touched real code) would
 # let a real defect reach pending_review unchecked, which is the one
@@ -152,19 +152,24 @@ DEFAULT_BRANCH="${DEFAULT_BRANCH:-master}"
 CHANGED_FILES=$(git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" 2>/dev/null || true)
 DOCS_ONLY=0
 # AUDIT:FAIL on this PR's own first head (b315ae9) caught a real
-# detection-precision bug here: the extension list omitted .txt/.toml/
-# .yml/.yaml and any extensionless-but-code-relevant filename, so a diff
-# touching ONLY requirements.txt or pyproject.toml (one of the most common
-# changes that legitimately needs the python lint/test gate), a CI/lint
-# config (.github/workflows/ci.yml, .eslintrc.yml), or a bare Dockerfile was
-# wrongly classified DOCS_ONLY=1 and gates got skipped -- exactly the "let a
-# real defect reach pending_review unchecked" failure mode this block's own
-# comment above says must never happen. Second grep below matches those
-# common extensionless build/CI filenames by name (optionally with a
-# `.suffix`, e.g. Dockerfile.prod) since they carry no file extension at all.
+# detection-precision bug: the original check was a code-relevant-extension
+# BLOCKLIST (\.(ts|js|py|...)$ etc.), so anything not on that list -- .txt,
+# .toml, .yml/.yaml, or any extensionless build filename at first, then a
+# fresh audit on the very next head (a63def8e) proved setup.cfg, tox.ini,
+# pytest.ini, yarn.lock, Cargo.lock, poetry.lock STILL slipped through --
+# was wrongly classified DOCS_ONLY=1 and gates got skipped. A blocklist can
+# only ever cover extensions someone remembered to add; it can never close
+# against an extension nobody has thought of yet. Inverted here to a small,
+# closed docs-only ALLOWLIST instead: prose (*.md, *.rst), anything under a
+# docs/ directory, LICENSE (with or without a suffix/extension), and common
+# image formats. Anything that does NOT match this allowlist -- including
+# every case above, plus any future unrecognized extension or extensionless
+# filename -- now fails closed to code-relevant (gates run), the one
+# direction this check is allowed to get wrong.
+DOCS_ONLY_EXT_PATTERN='\.(md|rst|png|jpe?g|gif|svg|ico|webp|bmp|tiff?|avif)$'
+DOCS_ONLY_NAME_PATTERN='(^|/)(docs/.*|LICENSE([.][A-Za-z0-9]+)?)$'
 if [ -n "$CHANGED_FILES" ] \
-   && ! echo "$CHANGED_FILES" | grep -qE '\.(ts|tsx|js|jsx|mjs|cjs|vue|svelte|css|scss|less|py|go|rs|java|rb|php|sql|sh|json|yml|yaml|txt|toml)$' \
-   && ! echo "$CHANGED_FILES" | grep -qE '(^|/)(Dockerfile|Makefile|Jenkinsfile|Procfile)([.][A-Za-z0-9_.-]+)?$'; then
+   && ! echo "$CHANGED_FILES" | grep -qvE "${DOCS_ONLY_EXT_PATTERN}|${DOCS_ONLY_NAME_PATTERN}"; then
   DOCS_ONLY=1
 fi
 

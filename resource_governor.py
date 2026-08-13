@@ -2943,6 +2943,13 @@ def run_tick(max_dispatches=None, now=None):
     while max_dispatches is None or len(results["dispatches"]) < max_dispatches:
         r = dispatch_one(now=now)
         results["dispatches"].append(r)
+        # UMR-20260813-120054-4e66: real, per-tick journal instrumentation --
+        # see dispatch_core.log_dispatch_decision()'s own docstring for the
+        # full real gap this closes (journalctl showed nothing useful about
+        # WHY a tick dispatched nothing, even on the real unit that owns
+        # this real dispatch loop). Best-effort/fail-open inside that
+        # function itself -- never allowed to break a real tick.
+        _dispatch_core().log_dispatch_decision(r)
         if r["action"] not in ROW_RESOLVED_NON_DISPATCH_ACTIONS:
             break
     return results

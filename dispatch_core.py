@@ -31,6 +31,7 @@ unit is guaranteed to be reflected in the NEXT running_worker_count() call
 import contextlib
 import datetime
 import fcntl
+import json
 import os
 import subprocess
 import sys
@@ -418,3 +419,149 @@ def record_dispatch_event(task_id, dispatched_by, source_queue_or_plan, worker_u
         _upsert_wiring_row(entity)
     except Exception as e:
         print(f"WARNING: record_dispatch_event wiring_registry write failed (non-fatal): {e}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Real-time journal instrumentation for every dispatch_one() decision
+# (UMR-20260813-120054-4e66, addendum to UMR-20260806-171945-5767 /
+# UMR-20260813-100854-e8a1: "restore the stalled dispatch pipeline").
+#
+# Real gap this closes: resource_governor.py's dispatch_one() already
+# computes a real, detailed blocking reason every tick (has_free_slot_detail()
+# -- itself the UMR-20260806-101839-688e fix for "cap_exhausted" vs a real
+# resource-headroom veto being indistinguishable in the tick log) -- but that
+# detail only ever reached /opt/veridian/ai-os/tasks/resource_governor_tick.log,
+# a single, ever-growing flat file, appended to by
+# resource_governor_tick_loop.sh's own `>> "$LOG" 2>&1` redirect. Two real,
+# live-confirmed consequences (2026-08-13, this UMR's own evidence-gathering
+# run): (1) `journalctl --user` on veridian-cron-dispatch-tick.service (the
+# unit the standard PM sentinel protocol checks first) shows nothing useful
+# about queued-row dispatch at all -- that unit's own dispatch-tick.py never
+# calls dispatch_one()/touches umr_tasks queued rows; the real dispatcher is
+# resource_governor.py's dispatch_one(), driven by the always-on
+# veridian-governor-tick.service loop instead. (2) EVEN journalctl on that
+# real unit is silent for this, because the tick loop's own subprocess
+# redirect keeps every real per-tick decision out of the journal entirely.
+# This is the same class of blind spot UMR-20260806-101839-688e already
+# fixed once for the DATA (has_free_slot_detail()'s real check name) -- this
+# closes the remaining VISIBILITY gap (the data existed, journalctl still
+# could not show it).
+# ---------------------------------------------------------------------------
+
+# Small, closed, real vocabulary -- one category per real gate this
+# codebase actually has, distinct from resource_governor.dispatch_one()'s
+# own larger Rule-2 "action" vocabulary (classify_dispatch_outcome()) so a
+# human grepping journalctl never needs to know every individual `action`
+# string, just which of these real mechanisms is currently blocking
+# dispatch. Every caller of log_dispatch_decision() gets the SAME mapping
+# for the SAME real gate -- never invented ad hoc per call site.
+_CAP_EXHAUSTED_CHECK = "cap_exhausted"
+_RESOURCE_HEADROOM_CHECKS = {
+    "mem_backoff", "swap_backoff", "mem_hard_ceiling", "swap_hard_ceiling",
+    "mem_headroom_budget", "load1_backoff", "load1_unreadable",
+}
+
+
+def classify_blocking_category(result):
+    """Real, deterministic, total mapping from a dispatch_one()-shaped
+    result dict to ONE of a small, closed set of real blocking categories:
+
+      cap_exhausted            -- dispatch_core's own fixed CONCURRENCY_CAP
+                                   slot count is genuinely full (real,
+                                   live systemd unit count -- see
+                                   running_worker_count()).
+      resource_headroom_veto   -- has_resource_headroom_detail()'s own real,
+                                   independent memory/swap/load veto tripped
+                                   (mem_backoff/swap_backoff/mem_hard_ceiling/
+                                   swap_hard_ceiling/mem_headroom_budget/
+                                   load1_backoff/load1_unreadable -- the
+                                   exact ambiguity UMR-20260806-101839-688e
+                                   already fixed inside has_free_slot_detail()
+                                   itself; this is what finally makes that
+                                   fix visible outside a flat log file).
+      resource_threshold_gate  -- resource_governor.py's own separate,
+                                   coarser 4-metric (cpu/ram/disk_io/network)
+                                   EMERGENCY_STOP-adjacent gate
+                                   (action in {"frozen", "emergency_stopped"}).
+      stop_work_gate           -- the real issue #980 standing stop-work-
+                                   order gate (action ==
+                                   "blocked_stop_work_order").
+      dedup_rejection          -- any of the real duplicate-dispatch guards
+                                   (rejected_duplicate_pr /
+                                   rejected_duplicate_reuse_verdict /
+                                   superseded_by_ocid_evidence).
+      superboss_unavailable    -- the Superboss Register DB itself was
+                                   unreachable this tick.
+      dispatched                -- a real spawn happened.
+      queue_empty               -- next_queued_task() found nothing queued.
+      would_dispatch             -- a dry-run pick (dispatch_one(dry_run=True)).
+      other                     -- any action not enumerated above -- kept
+                                   open so a future new real action can never
+                                   raise here, only fall into this real,
+                                   honestly-labeled catch-all (see this
+                                   function's own test for the contract).
+
+    Pure function, no I/O -- reads only `action` and, for a "deferred"
+    action, `slot_detail`."""
+    action = (result or {}).get("action")
+    if action == "deferred":
+        slot_detail = (result or {}).get("slot_detail") or {}
+        check = slot_detail.get("check")
+        if check == _CAP_EXHAUSTED_CHECK:
+            return "cap_exhausted"
+        # Any real headroom-veto check (enumerated or not -- has_free_slot_detail()
+        # only ever returns "cap_exhausted" or a headroom_detail dict for
+        # "deferred", so an unrecognized check name here is still, by
+        # construction, that same real gate) is reported as one category.
+        return "resource_headroom_veto"
+    if action in ("frozen", "emergency_stopped"):
+        return "resource_threshold_gate"
+    if action == "blocked_stop_work_order":
+        return "stop_work_gate"
+    if action in ("rejected_duplicate_pr", "rejected_duplicate_reuse_verdict", "superseded_by_ocid_evidence"):
+        return "dedup_rejection"
+    if action == "superboss_unavailable":
+        return "superboss_unavailable"
+    if action == "dispatched":
+        return "dispatched"
+    if action == "idle":
+        return "queue_empty"
+    if action == "would_dispatch":
+        return "would_dispatch"
+    return "other"
+
+
+def log_dispatch_decision(result, tag="veridian-dispatch-decision"):
+    """Real, best-effort systemd-journal line for EVERY real dispatch_one()
+    outcome -- written on every tick regardless of whether anything was
+    actually dispatched this tick, so `journalctl --user -t
+    veridian-dispatch-decision` shows the real, current blocking reason
+    directly, without ever needing to grep resource_governor_tick.log (a
+    single, ever-growing flat file) by hand. Piped through the real
+    `systemd-cat` binary (verified live against this exact box's own
+    journald, 2026-08-13) rather than a raw `logger` call, since
+    systemd-cat's whole job is "write stdin to the journal, tagged" with no
+    syslog-forwarding assumptions.
+
+    Best-effort / fail-open, same "logging is never load-bearing for the
+    real work it wraps" convention as record_tick()/record_dispatch_event()
+    above -- a missing systemd-cat binary, a timeout, or any other real
+    failure here is printed to stderr and swallowed, never allowed to break
+    the real dispatch tick this only observes."""
+    category = classify_blocking_category(result)
+    payload = {
+        "blocking_category": category,
+        "action": (result or {}).get("action"),
+        "umr_id": (result or {}).get("umr_id"),
+        "detail": (result or {}).get("detail"),
+        "slot_detail": (result or {}).get("slot_detail"),
+        "ts": _now_iso(),
+    }
+    line = json.dumps(payload, default=str)
+    try:
+        subprocess.run(
+            ["systemd-cat", "-t", tag, "--priority=info"],
+            input=line, text=True, timeout=5, capture_output=True,
+        )
+    except Exception as e:
+        print(f"WARNING: log_dispatch_decision journal write failed (non-fatal): {e}", file=sys.stderr)

@@ -23,6 +23,7 @@ allowed to reach it.
 import argparse
 import contextlib
 import fcntl
+import gzip
 import json
 import os
 import re
@@ -44,6 +45,88 @@ EMERGENCY_STATE_PATH = os.environ.get(
     "VERIDIAN_GOVERNOR_EMERGENCY_STATE", f"{LOCKS_DIR}/resource-governor-emergency-state.json")
 EMERGENCY_STOP_PATH = os.environ.get(
     "VERIDIAN_GOVERNOR_EMERGENCY_STOP", f"{LOCKS_DIR}/resource-governor-EMERGENCY_STOP")
+
+# UMR-20260813-125836-5809 (addendum to Priority-1 UMR-20260806-171945-5767):
+# real, bounded retention for the append-only TELEMETRY tables in
+# superboss-register.sqlite. Real dbstat evidence gathered 2026-08-13
+# against the live 4,091,764,736-byte file (see this UMR's PR for the full
+# breakdown): pm_report_snapshots alone was 1,805,238,272 bytes (44%),
+# growing ~130-275 rows/day (~1.5MB/row average -> ~150-410MB/day real,
+# matches the PRIOR KNOWLEDGE "~200MiB/day" claim this UMR was told to
+# re-verify, not assume -- CONFIRMED still roughly holds). umr_tasks was
+# separately found to be 2,132,381,696 bytes (52%) -- NOT "byte-static" as
+# earlier, smaller-DB-size analysis claimed; its own metadata_json column
+# average grew from ~55KB/row in 2026-07 to ~262KB/row in 2026-08. That
+# growth is real but explicitly OUT OF SCOPE here: umr_tasks is the single
+# source of truth and Scope F of this UMR forbids deleting, altering, or
+# losing any umr_tasks row -- it is intentionally never a key of
+# TELEMETRY_RETENTION_TABLES below and no code path in this section ever
+# opens a write cursor against it. Flagged for a separate follow-up UMR.
+# Both paths below are resolved PER-CONNECTION (see
+# _telemetry_retention_state_path()/_telemetry_retention_archive_dir()),
+# co-located next to whichever real sqlite file `conn` is actually open
+# against (via `PRAGMA database_list`), not a single fixed global path --
+# real fix for a real bug caught while building this: a pre-existing test
+# (test_resource_governor_owner_priority_advance.py) already calls
+# run_tick() against its own temporary sqlite3.backup() COPY of the live
+# DB; with a single fixed global state/archive path, that test's run would
+# have silently written into the REAL production lock-state file and the
+# REAL production archive directory even though its own DELETEs correctly
+# stayed scoped to its own temp copy -- confirmed live (caught and cleaned
+# up manually before the real production run in this UMR's own PR). These
+# two env vars, when set, still force an absolute override (e.g. for the
+# production default / ops runbooks); otherwise each is derived from the
+# real DB path in use.
+TELEMETRY_RETENTION_STATE_ENV = "VERIDIAN_GOVERNOR_TELEMETRY_RETENTION_STATE"
+TELEMETRY_RETENTION_ARCHIVE_DIR_ENV = "VERIDIAN_GOVERNOR_TELEMETRY_RETENTION_ARCHIVE_DIR"
+# Recurring enforcement (wired into _orchestrator_tick_maintenance() below,
+# the same once-per-tick step 12 VACUUM already runs from) self-gates to at
+# most once per this many real seconds, so the archive-then-delete pass
+# never runs on every ~5-10min dispatch-tick -- same "conditional, not
+# unconditional" reasoning step 12's own VACUUM already documents, and it
+# matches credit-accountant.py's real `prune --keep-days 30` cron cadence
+# (once/day, see veridian-cron-credit-ledger-prune.service) rather than
+# inventing a new cadence.
+TELEMETRY_RETENTION_MIN_INTERVAL_SECONDS = float(os.environ.get(
+    "VERIDIAN_GOVERNOR_TELEMETRY_RETENTION_MIN_INTERVAL_SECONDS", str(24 * 3600)))
+
+# table -> (timestamp_column, retention_days). Every table here was
+# verified (2026-08-13, UMR-20260813-125836-5809) to be:
+#  (a) genuinely append-only event/telemetry data, never UPDATEd in place
+#      after insert (status-mutable tables like pm_decisions_pending,
+#      master_issue_tracker, audit_findings, and anything owner-priority-
+#      or umr_tasks-adjacent were deliberately excluded);
+#  (b) NOT read by the deterministic pipeline -- grep-verified zero
+#      `FROM <table>` hits in resource_governor.py / dispatch_core.py /
+#      dispatch-tick.py;
+#  (c) read elsewhere, if at all, only via a bounded `ORDER BY ... DESC
+#      LIMIT <=10` recency query (e.g. generate_pm_report_v3.py's own
+#      TREND_WINDOW_SIZE=10 / get_recent_snapshots(), pm_cycle_precheck.py's
+#      get_prior_snapshot()), never a full historical scan -- so any
+#      retention window longer than a few hours cannot break a real reader.
+# Retention windows below are deliberately generous relative to (c) (days,
+# not hours) to preserve real incident-investigation lookback; nothing is
+# destroyed regardless -- see _telemetry_retention_archive_table()'s real
+# archive-before-delete contract.
+TELEMETRY_RETENTION_TABLES = {
+    "pm_report_snapshots":            ("ts", 3),
+    "log_index":                      ("ts", 14),
+    "directive_compliance_runs":      ("ts", 14),
+    "ocid_compliance_audit_log":      ("audit_timestamp", 30),
+    "ocid_master_standard_audit_log": ("recorded_at", 30),
+    "governance_cycle_log":           ("ts", 30),
+    "audit_events":                   ("ts", 30),
+    "audit_runs":                     ("ts", 30),
+    "audit_master_reports":           ("ts", 90),
+    "audit_orchestration_runs":       ("ts", 90),
+    "capability_graduation_log":      ("ts", 90),
+    "execution_log":                  ("ts", 30),
+    "task_audits":                    ("ts", 30),
+    "intent_unmatched_log":           ("ts", 30),
+    "learning_reflections":           ("ts", 90),
+    "route_replay":                   ("ts", 90),
+    "orchestrator_executions":        ("ts", 30),
+}
 
 PROC_STAT_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_STAT", "/proc/stat")
 PROC_MEMINFO_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_MEMINFO", "/proc/meminfo")
@@ -1496,6 +1579,142 @@ def _orchestrator_ocid_governance_check(sbr, conn, ocid_number):
     return evidence
 
 
+def _telemetry_retention_cutoff(now, retention_days):
+    return (now - timedelta(days=retention_days)).isoformat()
+
+
+def telemetry_retention_plan(conn, now=None, tables=None):
+    """Real, read-only dry run (UMR-20260813-125836-5809 Scope D): for every
+    configured telemetry table, counts real rows strictly older than that
+    table's own retention window. Never fetches row content, never writes,
+    never deletes -- safe to call against the live register at any time."""
+    now = now or datetime.now(timezone.utc)
+    tables = tables or TELEMETRY_RETENTION_TABLES
+    report = {"generated_at": now.isoformat(), "dry_run": True, "tables": {}}
+    for table, (ts_col, days) in tables.items():
+        cutoff = _telemetry_retention_cutoff(now, days)
+        try:
+            row = conn.execute(
+                f"SELECT COUNT(*), MIN({ts_col}), MAX({ts_col}) FROM {table} WHERE {ts_col} < ?",
+                (cutoff,),
+            ).fetchone()
+            report["tables"][table] = {
+                "ts_column": ts_col,
+                "retention_days": days,
+                "cutoff": cutoff,
+                "rows_would_remove": row[0],
+                "oldest_row_ts": row[1],
+                "newest_row_ts_being_removed": row[2],
+            }
+        except Exception as e:
+            report["tables"][table] = {"error": str(e)}
+    return report
+
+
+def _telemetry_retention_db_path(conn):
+    """The real, absolute path of the sqlite file `conn` is actually open
+    against, straight from sqlite's own PRAGMA database_list -- never
+    assumed/hardcoded, so archive/state paths derived from it are always
+    correct for whatever DB this connection really points at (the live
+    register, a test's temp copy, anything)."""
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        return row[2] if row and row[2] else None
+    except Exception:
+        return None
+
+
+def _telemetry_retention_archive_dir(conn):
+    env = os.environ.get(TELEMETRY_RETENTION_ARCHIVE_DIR_ENV)
+    if env:
+        return env
+    db_path = _telemetry_retention_db_path(conn)
+    if db_path:
+        return os.path.join(os.path.dirname(db_path), "backups", "register_retention_archive")
+    return f"{AI_OS}/memory/backups/register_retention_archive"
+
+
+def _telemetry_retention_state_path(conn):
+    env = os.environ.get(TELEMETRY_RETENTION_STATE_ENV)
+    if env:
+        return env
+    db_path = _telemetry_retention_db_path(conn)
+    if db_path:
+        return db_path + ".telemetry-retention-state.json"
+    return f"{LOCKS_DIR}/resource-governor-telemetry-retention-state.json"
+
+
+def _telemetry_retention_archive_table(conn, table, ts_col, cutoff, now):
+    """Streams every real row strictly older than `cutoff` out to a real,
+    gzip-compressed JSONL archive file under _telemetry_retention_archive_dir(conn)
+    BEFORE any DELETE runs -- write to a .tmp path, fsync, then os.replace()
+    into the final name, same atomic-rename convention this module's own
+    _save_json() already uses, so a crash mid-write can never leave a
+    half-written file at the real archive path. Iterates the cursor directly
+    (never fetchall()) so Python-side memory stays bounded to one row at a
+    time regardless of table size -- the real, evidenced reason this UMR
+    exists: UMR-20260813-125756-9221 found a single *bounded* read of this
+    same DB needed ~2.09GB RSS and wedged this box in D-state for 55 minutes
+    under real memory pressure (0 free RAM, swap exhausted). Returns
+    (archive_path_or_None, row_count); archive_path is None (and no file is
+    left behind) when there is nothing to archive."""
+    table_dir = os.path.join(_telemetry_retention_archive_dir(conn), table)
+    os.makedirs(table_dir, exist_ok=True)
+    stamp = now.strftime("%Y%m%dT%H%M%SZ")
+    final_path = os.path.join(table_dir, f"{table}.{stamp}.jsonl.gz")
+    tmp_path = final_path + ".tmp"
+    cur = conn.execute(f"SELECT * FROM {table} WHERE {ts_col} < ? ORDER BY {ts_col}", (cutoff,))
+    n = 0
+    with gzip.open(tmp_path, "wt", encoding="utf-8") as f:
+        for row in cur:
+            f.write(json.dumps(dict(row), default=str))
+            f.write("\n")
+            n += 1
+    if n == 0:
+        os.remove(tmp_path)
+        return None, 0
+    with open(tmp_path, "rb") as fchk:
+        os.fsync(fchk.fileno())
+    os.replace(tmp_path, final_path)
+    return final_path, n
+
+
+def telemetry_retention_execute(conn, now=None, tables=None):
+    """Real archive-then-delete retention enforcement (UMR-20260813-125836-5809
+    Scope C/D). For every configured telemetry table: archives every row
+    older than that table's own retention window to a real file FIRST
+    (fsynced, atomically renamed into place -- see
+    _telemetry_retention_archive_table()), THEN deletes exactly those same
+    rows and commits. If archiving raises for a table, that table's DELETE
+    never runs and the exception is caught per-table (fail-closed: nothing
+    is destroyed without a real, already-on-disk archive first; one table's
+    failure never blocks another's). umr_tasks is never a key of
+    TELEMETRY_RETENTION_TABLES and no code path here opens a DELETE/UPDATE
+    cursor against it -- see that dict's own docstring for the absolute
+    constraint this enforces."""
+    now = now or datetime.now(timezone.utc)
+    tables = tables or TELEMETRY_RETENTION_TABLES
+    report = {"generated_at": now.isoformat(), "dry_run": False, "tables": {}}
+    for table, (ts_col, days) in tables.items():
+        cutoff = _telemetry_retention_cutoff(now, days)
+        entry = {"ts_column": ts_col, "retention_days": days, "cutoff": cutoff}
+        try:
+            archive_path, n = _telemetry_retention_archive_table(conn, table, ts_col, cutoff, now)
+            entry["archived_rows"] = n
+            entry["archive_path"] = archive_path
+            if n > 0:
+                cur = conn.execute(f"DELETE FROM {table} WHERE {ts_col} < ?", (cutoff,))
+                conn.commit()
+                entry["rows_deleted"] = cur.rowcount
+            else:
+                entry["rows_deleted"] = 0
+        except Exception as e:
+            conn.rollback()
+            entry["error"] = str(e)
+        report["tables"][table] = entry
+    return report
+
+
 def _orchestrator_tick_maintenance(sbr, now=None):
     """Real, once-per-tick (never once-per-row) additions -- deliberately
     kept OUTSIDE the dispatch_core lock and outside any per-row hot path,
@@ -1522,6 +1741,19 @@ def _orchestrator_tick_maintenance(sbr, now=None):
     exception to "never raw sqlite3.connect": it reuses sbr._connect() (the
     real, already-trusted connection helper) rather than opening a second,
     independently-hardcoded raw connection.
+    Step 13 (UMR-20260813-125836-5809, addendum to Priority-1
+    UMR-20260806-171945-5767): real telemetry-table retention enforcement
+    -- calls telemetry_retention_execute() (archive-then-delete, real
+    writes) against TELEMETRY_RETENTION_TABLES, self-gated by a real state
+    file (see _telemetry_retention_state_path()) to run at most once per
+    TELEMETRY_RETENTION_MIN_INTERVAL_SECONDS (default 24h) so the real
+    archive+DELETE pass never runs on every ~5-10min dispatch-tick. This is
+    what makes the retention policy recurring and deterministic through the
+    real existing scheduling path (veridian-cron-dispatch-tick.timer ->
+    dispatch-tick.py -> run_tick() -> here) rather than a new ad-hoc
+    mechanism or a 19th/20th systemd unit (see
+    ~/.config/systemd/user/README.md's closed-set STANDING RULE). umr_tasks
+    is never touched -- see TELEMETRY_RETENTION_TABLES's own docstring.
 
     Returns a dict of real evidence for this tick; never raises."""
     now = now or _utcnow()
@@ -1596,6 +1828,40 @@ def _orchestrator_tick_maintenance(sbr, now=None):
             conn.close()
     except Exception as e:
         report["pragma_maintenance_error"] = str(e)
+
+    try:
+        conn = sbr._connect()
+        try:
+            # State path is derived from THIS connection's own real DB file
+            # (see _telemetry_retention_state_path()'s docstring for why --
+            # a fixed global path here would let any test/tool that points
+            # sbr at a different DB file silently gate/pollute the real
+            # production state).
+            state_path = _telemetry_retention_state_path(conn)
+            with _state_file_lock(state_path):
+                state = _load_json(state_path) or {}
+                last_run = state.get("last_run_ts")
+                should_run = True
+                if last_run:
+                    try:
+                        last_run_dt = datetime.fromisoformat(last_run)
+                        should_run = (now - last_run_dt).total_seconds() >= TELEMETRY_RETENTION_MIN_INTERVAL_SECONDS
+                    except ValueError:
+                        should_run = True
+                if should_run:
+                    report["telemetry_retention"] = telemetry_retention_execute(conn, now=now)
+                    state["last_run_ts"] = now.isoformat()
+                    _save_json(state_path, state)
+                else:
+                    report["telemetry_retention"] = {
+                        "skipped": True,
+                        "reason": f"last real run {last_run} was under "
+                                  f"{TELEMETRY_RETENTION_MIN_INTERVAL_SECONDS}s ago",
+                    }
+        finally:
+            conn.close()
+    except Exception as e:
+        report["telemetry_retention_error"] = str(e)
 
     return report
 
@@ -2624,6 +2890,13 @@ def run_tick(max_dispatches=None, now=None):
     while max_dispatches is None or len(results["dispatches"]) < max_dispatches:
         r = dispatch_one(now=now)
         results["dispatches"].append(r)
+        # UMR-20260813-120054-4e66: real, per-tick journal instrumentation --
+        # see dispatch_core.log_dispatch_decision()'s own docstring for the
+        # full real gap this closes (journalctl showed nothing useful about
+        # WHY a tick dispatched nothing, even on the real unit that owns
+        # this real dispatch loop). Best-effort/fail-open inside that
+        # function itself -- never allowed to break a real tick.
+        _dispatch_core().log_dispatch_decision(r)
         if r["action"] not in ROW_RESOLVED_NON_DISPATCH_ACTIONS:
             break
     return results
@@ -2655,34 +2928,7 @@ def scan_stuck_tasks(now=None):
     """timeout -> SIGTERM -> SIGTERM_TO_SIGKILL_GRACE_SECONDS -> SIGKILL,
     using each unit's real ActiveEnterTimestamp to measure elapsed time.
     Returns the list of actions actually taken this call (empty if nothing
-    was stuck).
-
-    Real fix (RCA, UMR-20260813-101757-f13c, live-reproduced incident,
-    UMR-20260808-150937-43d0): scoped to task_kind='veridian_task_create'
-    only. This whole SIGTERM/SIGKILL protocol assumes "running" means "an
-    ephemeral task unit that is expected to exit on its own within
-    STUCK_TASK_TIMEOUT_SECONDS of ITS OWN start" -- true for
-    veridian-worker@<task_id>.service units (Type=oneshot-ish, one task,
-    then exit), false for task_kind='systemctl_action' rows, whose
-    unit_name is often a persistent, always-on singleton daemon
-    (Restart=always/on-failure, WantedBy=default.target -- e.g.
-    veridian-superboss-gateway.service, veridian-glm-proxy.service,
-    veridian-governor-tick.service) that is SUPPOSED to keep running
-    forever. _perform_spawn() marks a systemctl_action row status="running"
-    the instant `systemctl start` returns 0 -- including when the unit was
-    ALREADY active, in which case _unit_active_enter_timestamp() reports
-    the timestamp of whenever it first started, which can trivially be
-    older than STUCK_TASK_TIMEOUT_SECONDS. That made this scan wrongly
-    conclude the row was "stuck" on its very next tick and SIGTERM/SIGKILL
-    (and, at line ~2565 below, disable) the real, healthy, always-on
-    gateway daemon -- confirmed live: UMR-20260808-150937-43d0 (a
-    registration-only "start veridian-superboss-gateway.service" row) was
-    SIGTERM'd 31s after dispatch and SIGKILL'd+disabled 60s after that, and
-    the real unit was still disabled/inactive 5 days later when this RCA
-    ran. systemctl_action rows have no "must exit" contract to police --
-    _perform_spawn() already resolves their real outcome synchronously
-    (status="running"/"failed" from the `systemctl start` returncode
-    itself) -- so they must never enter this ephemeral-task reaper at all."""
+    was stuck)."""
     now = now or _utcnow()
     # Real fix (independent review round 2, PR #20): see
     # _safe_superboss_register()'s own docstring. A broken/unavailable
@@ -2700,8 +2946,7 @@ def scan_stuck_tasks(now=None):
     actions = []
 
     running = conn.execute(
-        "SELECT * FROM umr_tasks WHERE status='running' AND unit_name IS NOT NULL "
-        "AND task_kind='veridian_task_create'"
+        "SELECT * FROM umr_tasks WHERE status='running' AND unit_name IS NOT NULL"
     ).fetchall()
     for row in running:
         row = dict(row)
@@ -3874,11 +4119,35 @@ def main():
                           "real use, since task-gateway.py has no other task_kind")
     ap.add_argument("--title", default=None)
     ap.add_argument("--umr-id", dest="umr_id", default=None)
+    ap.add_argument("--telemetry-retention", dest="telemetry_retention", action="store_true",
+                     help="UMR-20260813-125836-5809: real, bounded retention for the append-only "
+                          "TELEMETRY tables in superboss-register.sqlite (see "
+                          "TELEMETRY_RETENTION_TABLES -- umr_tasks is never touched). Dry run by "
+                          "default (reports real counts of what would be archived+removed, writes "
+                          "nothing); pass --execute to apply the real archive-then-delete. This same "
+                          "logic also runs automatically, at most once/24h, as Step 13 of "
+                          "_orchestrator_tick_maintenance() every real dispatch tick.")
     args = ap.parse_args()
 
     if args.clear_emergency_stop:
         clear_emergency_stop()
         print(json.dumps({"ok": True, "cleared": True}))
+        return
+
+    if args.telemetry_retention:
+        sbr, error = _safe_superboss_register("--telemetry-retention")
+        if error:
+            print(json.dumps({"error": error}))
+            sys.exit(1)
+        conn = sbr._connect()
+        try:
+            if args.execute:
+                result = telemetry_retention_execute(conn)
+            else:
+                result = telemetry_retention_plan(conn)
+        finally:
+            conn.close()
+        print(json.dumps(result, indent=2, default=str))
         return
 
     if args.check_task_start_gate:

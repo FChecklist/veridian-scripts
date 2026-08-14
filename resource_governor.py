@@ -2017,7 +2017,16 @@ def _orchestrator_reuse_verdict_gate(sbr, conn, row):
     non-blocking -- this is a NEW, additive gate on top of the two
     existing, independently-proven duplicate guards
     (superseded_by_ocid_evidence / rejected_duplicate_pr) already in
-    _dispatch_one_inner, never a replacement for them."""
+    _dispatch_one_inner, never a replacement for them.
+
+    Caller-enforced scope (UMR-20260814-010950): the caller in
+    _dispatch_one_inner only invokes this for task_kind=='veridian_task_create'
+    rows -- systemctl_action rows (start/stop/restart of an already-existing
+    unit, including every task-resume dispatch) are never passed here at
+    all, since "does this duplicate an existing wiring_registry/
+    capability_registry entity" is not a meaningful question for a row that
+    is not proposing to create anything new. See the call site's own comment
+    for the real 474/489-rejected-row evidence this scoping closes."""
     try:
         rve = _reuse_verdict_engine()
         raw_inputs = row.get("inputs_json")
@@ -2645,6 +2654,32 @@ _DISCLOSURE_CITATION_RE = re.compile(
 )
 
 
+def _title_pr_reference_is_citation_only(text, pr_num):
+    """UMR-20260814-010950: the mirror-image check to _DISCLOSURE_CITATION_RE
+    above, applied to THIS task's own title instead of a candidate PR's --
+    real incident, reproduced live 2026-08-14T01:01:52Z: UMR-20260814-010152-
+    7981's title, "...every audited merged fix (incl PR 322) is NOT
+    running", mentions 'PR 322' only as a supporting parenthetical aside (one
+    example among several merged-but-undeployed fixes), never claiming PR
+    322 as THIS task's own target/subject -- unlike the real #58/#64/#65/#66
+    shape Stage 6 exists to catch ("Resolve fresh conflict on PR #58", "Fix
+    PR #58 conflict"), where the number IS the sentence's stated subject,
+    never inside a parenthetical.
+
+    Returns True when `pr_num`'s reference in `text` falls strictly inside a
+    parenthetical span, i.e. between an unmatched '(' before it and a ')'
+    after it -- real, deterministic phrasing this repo's own titles actually
+    use for "citing", never a semantic/ML judgment call. False (not a
+    citation -- a real target reference) for every other placement,
+    including when `text` or `pr_num` is falsy."""
+    if not text or not pr_num:
+        return False
+    for m in re.finditer(r"\(([^()]*)\)", text):
+        if re.search(r"\bPR\s*#?\s*0*" + re.escape(pr_num) + r"\b", m.group(1), re.IGNORECASE):
+            return True
+    return False
+
+
 def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None, title=None):
     """Stage 4 (2026-07-29) duplicate-PR guard -- real, exact --head branch
     match against GitHub, ported from owner_backlog_orchestrator.py's
@@ -2725,9 +2760,36 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
     title (see _referenced_pr_number()), do one further bounded gh call per
     repo (same GH_PR_CHECK_TIMEOUT_SECONDS, same fail-open-on-error/timeout
     semantics as the branch-based checks above) and check whether any
-    existing OPEN/MERGED PR's title already references that same PR number --
-    a low-false-positive signal in practice: unrelated PRs essentially never
-    reference the exact same "PR #NNN" substring by coincidence.
+    existing OPEN/MERGED PR's title already references that same PR number.
+
+    UMR-20260814-010950 real fix (this guard turned OVER-broad, blocking
+    brand-new P0 work): the docstring's own original assumption above
+    ("unrelated PRs essentially never reference the exact same 'PR #NNN'
+    substring by coincidence") is false across repo boundaries -- PR numbers
+    are a PER-REPO sequence, not a global one, so "PR #NNN" in two different
+    repos' titles is a routine, expected collision, not evidence of anything.
+    Real incident, reproduced live 2026-08-14T01:01:52Z: a brand-new task
+    (task_identity='owner-task-20260814-010149-432146', zero prior branches)
+    titled "...every audited merged fix (incl PR 322) is NOT running" was
+    rejected citing claude-control#185, whose own title is "...audit and land
+    veridian-scripts PR 322...". Both titles genuinely reference "PR 322" --
+    but ONE means veridian-scripts#322, the OTHER is a claude-control PR that
+    merely talks about veridian-scripts#322; scanning the OLD code's full
+    `repos` list (hint_repo + every GH_PR_CHECK_REPOS member) for a bare
+    number match, with no repo attached to that number at all, cannot tell
+    those apart -- a number merely appearing in a title, unscoped to any
+    repo, is not evidence of duplicate work. This mirrors the exact class of
+    bug target_pr_already_resolved() already had to close for its own bare
+    "PR NNN" resolution (see that function's docstring, UMR-20260813-165620-
+    aac7) -- same real fix, applied here: prefer a REPO-QUALIFIED reference
+    (_repo_qualified_pr_ref() -- 'veridian-scripts#322', 'FChecklist/
+    veridian-scripts#322', a full github.com PR URL, or '<repo> PR #NNN')
+    and search ONLY that repo; otherwise fall back to a bare
+    _referenced_pr_number() match, but resolve it ONLY against hint_repo (the
+    SAME repository this task itself targets) -- never scan the rest of
+    `repos`. A cross-repo number collision must never block: correct
+    behaviour is "same task_identity" (Stage 4/5, above) OR "same target PR
+    in the SAME repository" (this stage), nothing weaker.
 
     Returns (pr_number, repo) if an OPEN or MERGED PR already exists for
     worker/<task_identity>, worker/<any of extra_task_ids>, OR (when `title`
@@ -2794,9 +2856,34 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
     # and excludes those titles from counting as a duplicate -- the #64/#65/
     # #66 shape this stage was built for used no such disclosure language,
     # so that real incident is still caught unchanged.
-    pr_num = _referenced_pr_number(title)
-    if pr_num:
-        for repo in repos:
+    #
+    # UMR-20260814-010950 real fix: resolve the PR-number reference the same
+    # repo-scoped way target_pr_already_resolved() already does (see this
+    # function's own docstring above for the real claude-control#185 /
+    # veridian-scripts#322 cross-repo collision this closes) -- prefer a
+    # repo-qualified reference and search ONLY that repo; otherwise a bare
+    # number is resolved ONLY against hint_repo, never scanned across the
+    # rest of `repos`. No hint_repo and no repo-qualified reference means
+    # there is no single repo to trust a bare number against -- skip Stage 6
+    # entirely rather than guess (same fail-open philosophy as every other
+    # branch of this guard). And, THIS task's own reference is dropped
+    # entirely (pr_num=None, no gh call at all) when it is a parenthetical
+    # citation rather than a stated target -- see
+    # _title_pr_reference_is_citation_only()'s own docstring for the real
+    # "(incl PR 322)" evidence this closes: the SAME repo the number lives in
+    # is not enough on its own when this task's own title never claimed that
+    # number as ITS target in the first place.
+    qualified_repo, qualified_pr_num = _repo_qualified_pr_ref(title, known_repos=repos)
+    if qualified_pr_num:
+        pr_num = qualified_pr_num
+        stage6_repos = [qualified_repo]
+    else:
+        pr_num = _referenced_pr_number(title)
+        stage6_repos = [hint_repo] if (pr_num and hint_repo) else []
+    if pr_num and _title_pr_reference_is_citation_only(title, pr_num):
+        pr_num, stage6_repos = None, []
+    if pr_num and stage6_repos:
+        for repo in stage6_repos:
             try:
                 r = _run(
                     ["gh", "pr", "list", "--repo", f"{GH_ORG}/{repo}", "--state", "all",
@@ -3369,7 +3456,32 @@ def _dispatch_one_inner(dry_run=False, now=None):
         # additive duplication gate on top of the two existing,
         # independently-proven guards just above. Fail-open (see
         # _orchestrator_reuse_verdict_gate()'s own docstring).
-        blocked, verdict_result = _orchestrator_reuse_verdict_gate(sbr, conn, row)
+        #
+        # UMR-20260814-010950 real fix: only ever run this for
+        # veridian_task_create rows -- the same scoping Stage 4/5/6 already
+        # applies just above, for the same underlying reason. This gate asks
+        # "does a wiring_registry/capability_registry entity already do this
+        # NEW work", which is only a meaningful question for a row that IS
+        # new work. A systemctl_action row (start/stop/restart an EXISTING
+        # unit -- includes every dispatch-tick:resume_interrupted_workers
+        # task-resume) acts on a unit that already exists by construction and
+        # can never be "duplicating" a registry file/script/capability.
+        # Real damage this closes, confirmed live: 474 of 489
+        # status=rejected_duplicate umr_tasks rows in the last 7 days (all
+        # task-resume systemctl_action rows, all ts_dispatched IS NULL --
+        # never spawned) were rejected with best_match={'source':
+        # 'wiring_registry', 'kind': 'file'} -- e.g. UMR-20260814-004301-2d07
+        # (task_identity='task-20260807-071557-retry-ai-cost-governance-
+        # finops-cost-vis', inputs={'action': 'start', ...}) blocked with
+        # score=0.953 against wiring_registry row 'file-10d3faee408e', which
+        # is that SAME task's own prior task.yaml, auto-registered as a
+        # generic 'file' entity by full_server_file_registration.py --
+        # comparing "should this unit resume" against "is this file already
+        # written" is a category error regardless of the score.
+        if row["task_kind"] != "veridian_task_create":
+            blocked, verdict_result = False, None
+        else:
+            blocked, verdict_result = _orchestrator_reuse_verdict_gate(sbr, conn, row)
         if blocked:
             reason = (
                 f"reuse_verdict_engine.assess() real verdict=duplication_blocked "

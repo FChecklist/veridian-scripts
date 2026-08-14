@@ -1,0 +1,35 @@
+# task-20260814-095433-make-both-live-checkouts-auto-sync-after cadence fix
+# (UMR-20260814-095405-2b53): raised from every-2h (OnCalendar=*-*-*
+# 0/2:06:00) to every 5 minutes -- the same clock-based-backstop cadence
+# already precedented by veridian-cron-prune-memory-backups.timer
+# (UMR-20260806-134738-eec3).
+#
+# ROOT CAUSE this closes: claude-control and /opt/veridian/scripts are the
+# two checkouts every worker/cron/dispatch unit on this box actually
+# EXECUTES CODE FROM (unlike the other 7 repos this same unit also pulls,
+# which are read-mostly mirrors). Real evidence gathered 2026-08-14T09:50Z
+# (this task's own SPEC, independently reconfirmed live at implementation
+# time): claude-control sat 16 commits behind origin/master and
+# /opt/veridian/scripts sat 6 commits behind origin/main AT THE SAME MOMENT
+# this unit was enabled+active -- the old 2h cadence could not keep up with
+# same-day merge volume, and a transient (real, correct) refuse-to-clobber
+# dirty-skip then had no automatic retry for up to 2 hours instead of
+# self-healing within minutes. Six separate one-shot manual "reconcile live
+# deploy drift" PRs were merged into veridian-scripts on 2026-08-14 alone to
+# paper over this same gap by hand, each time reopening within minutes.
+#
+# This is a cadence change to the ALREADY Owner-authorized unit #1
+# (sync-repos) -- not a new unit under the ~/.config/systemd/user/README.md
+# closed-set STANDING RULE ("a new periodic need that fits one of these ...
+# goes in ... inside the matching existing unit").
+[Unit]
+Description=Run veridian-cron-sync-repos on its scheduled cadence (jittered -- see the paired .service for why)
+
+[Timer]
+OnCalendar=*:0/5
+RandomizedDelaySec=30
+AccuracySec=10s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

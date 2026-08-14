@@ -44,3 +44,28 @@ each of those two files for the full real-evidence reasoning. This is a
 trigger-mechanism change to the already-authorized unit #19, not a new
 unit-#20 under the ~/.config/systemd/user/README.md closed-set STANDING
 RULE.
+
+## veridian-cron-sync-repos.{service,timer}
+
+Tracked here for the first time 2026-08-14
+(task-20260814-095433-make-both-live-checkouts-auto-sync-after,
+UMR-20260814-095405-2b53). This is unit #1 of the original 18 -- already
+live/installed since the 2026-07-29 cron-consolidation-phase6 rollout --
+never copied into this version-controlled directory until now. Real
+problem this closes: claude-control and /opt/veridian/scripts (the two
+checkouts every worker/cron/dispatch unit on this box actually runs code
+from) were found, at the same moment this unit was enabled+active, 16 and
+6 commits behind their remote default branch respectively. Root cause was
+the .timer's old every-2h cadence being outrun by same-day merge volume,
+compounded by a real (correct) refuse-to-clobber dirty-skip in
+sync-repos.sh having no automatic retry for up to 2h once it happened. Two
+real fixes, both to the ALREADY Owner-authorized unit #1 -- see each
+file's own header for full reasoning:
+  1. `sync_critical_checkout()` in sync-repos.sh: one shared function for
+     both critical checkouts (dirty-skip that reports the real diff,
+     wrong-branch detection, idempotent fetch+rev-list-count-gated pull),
+     replacing two slightly different bespoke copies of the same logic.
+  2. `.timer` cadence raised from every-2h to every-5min (same
+     clock-backstop pattern as veridian-cron-prune-memory-backups.timer).
+Not a new unit under the ~/.config/systemd/user/README.md closed-set
+STANDING RULE.

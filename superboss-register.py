@@ -755,6 +755,7 @@ def _migrate_schema(conn):
     _migrate_wiring_registry_entity_types(conn)
     _ensure_umr_table(conn)
     _ensure_ocid_artifact_links_table(conn)
+    _ensure_resume_dead_letter_table(conn)
     _ensure_ocid_canonical_registry_table(conn)
     _ensure_ocid_master_standard_audit_log_table(conn)
     _ensure_ocid_compliance_tables(conn)

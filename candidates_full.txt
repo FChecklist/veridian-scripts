@@ -1,0 +1,288 @@
+====================================================================================================
+PR #385 head_sha=3ebb76793797a70fb68edc15d8c96e40efa2b8a9
+  last comment created_at=2026-08-14T18:33:56Z sha_in_body(short7)=False sha_in_body(full)=False
+  BODY:
+AUDIT: PASS
+Objective Understood: Reviewed worker task 'Measure real token usage before-after dispatch, report the actual percentage delta' (risk tier: tier1) by reading the actual diff, not a self-report.
+Standards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.
+Scope Confirmed:  PROGRESS.md                                        |   2 +-
+ ...958-measure-real-token-usage-before-after-di.md |  90 +++++
+ resource_governor.py                               |  48 +++
+ superboss-register.py                              |  44 +++
+ task-gateway.py                                    |  93 +++++-
+ tests/test_token_usage_measurement.py              | 363 +++++++++++++++++++++
+ 6 files changed, 638 insertions(+), 2 deletions(-)
+Evidence Recorded: This diff adds a real, previously-nonexistent per-dispatch token-usage measurement: task-gateway.py's cmd_start now counts the raw pre-tightening instruction text and the final post-tightening prompt text with a shared count_tokens_real() (real tiktoken cl100k_base BPE counts, with a documented mechanical-word-count fallback only if tiktoken import/encode fails), records both onto the existing work_items.metadata_json field via the log-work call's pre-existing --metadata flag (no new table/column), and exposes a new resource_governor.py --query-token-usage mode backed by a new superboss-register.py query_work_item_token_usage() that reports both a mean-of-per-dispatch and an aggregate-sum reduction percentage plus a plain below/at/above-50% verdict. The change is additive and low-blast-radius: it touches no schema/migrations/auth/permission/billing/security-pathed files and does not touch .github/workflows/**, consistent with its tier1 classification. I independently verified rather than trusting the self-report: ran the new tests/test_token_usage_measurement.py directly (12/12 pass, including a cmd_start integration test that monkeypatches subprocess run() to avoid spawning a real systemd worker), confirmed all three touched files parse cleanly with ast, confirmed the _safe_superboss_register helper and the --metadata log-work flag it relies on are pre-existing (not fabricated), and manually exercised query_work_item_token_usage() end-to-end against a real scratch sqlite DB with a seeded row, getting the correct result back. Edge cases (zero/None raw_prompt_tokens, missing instruction row, incomplete token_usage pairs in older rows) are all handled without crashing. The PROGRESS.md entry candidly reports the real measured result (avg 46.29%, below the 50% goal) rather than adjusting the record to hit the target, and documents a reasonable, disclosed scope decision (test dispatches logged directly via the CLI rather than through a full cmd_start invocation, to avoid spawning real systemd worker sessions as an unrelated side effect). Issues found: none
+Severity Classified: none
+Verdict: pass
+Corrective Action Owner: Not required -- no issues found in this review.
+Re-Audit Scheduled: Not required -- approved as-is, no follow-up needed.
+
+====================================================================================================
+PR #384 head_sha=f7e95211f6eae676e02d7f160b77c7052214bac9
+  last comment created_at=2026-08-14T18:25:03Z sha_in_body(short7)=False sha_in_body(full)=False
+  BODY:
+AUDIT: PASS
+Objective Understood: Reviewed worker task 'Verify real PR state before recording a task as completed, do not trust self-report alone' (risk tier: tier1) by reading the actual diff, not a self-report.
+Standards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.
+Scope Confirmed:  PROGRESS.md                                        |   2 +-
+ agent_work_briefing.py                             | 198 +++++++++++++++-
+ ...1115-verify-real-pr-state-before-recording-a.md |  55 +++++
+ test_verify_real_completion_evidence.py            | 264 +++++++++++++++++++++
+ 4 files changed, 507 insertions(+), 12 deletions(-)
+Evidence Recorded: This diff adds a real, independent GitHub-backed evidence gate (verify_real_completion_evidence + _fetch_real_pr_state) to agent_work_briefing.py's record_completion(), so a status=completed/completed_unmerged self-report is checked against the actual PR's real changed files (or a supplied --files-touched list) before mark-umr-terminal is ever called, downgrading unverifiable or docs-only claims to status=unverified_self_report instead of writing a false 'completed'; I independently verified the referenced primitives (resource_governor._run/GH_ORG/GH_PR_CHECK_TIMEOUT_SECONDS, subprocess already imported, superboss-register.py's pre-existing validate_umr_terminal_completion_evidence/refused-key/_capture_json SystemExit-handling pattern) actually exist and match the diff's claims, confirmed this new gate is strictly additive (it never weakens the pre-existing commit/file-existence gate in cmd_mark_umr_terminal, which still runs afterward and still requires a real --umr-commit-sha/--umr-file-path to actually write), fetched real open PR #384 via gh to confirm it is a genuine PR against main, and actually ran both the new test_verify_real_completion_evidence.py (10/10 pass) and the pre-existing test_agent_work_briefing.py (pass, no regression) against the real PR branch in a scratch worktree rather than trusting the progress note's claimed output. The change is additive/isolated (new functions, one new optional trailing kwarg with a default, one new optional CLI flag), touches no migrations/auth/payment/security paths, does not touch .github/workflows/**, and is well within tier1 scope. Issues found: none
+Severity Classified: none
+Verdict: pass
+Corrective Action Owner: Not required -- no issues found in this review.
+Re-Audit Scheduled: Not required -- approved as-is, no follow-up needed.
+
+====================================================================================================
+PR #371 head_sha=cdacf22debacdcf3b684b1f15fd9b7fda095b93e
+  last comment created_at=2026-08-14T12:49:46Z sha_in_body(short7)=False sha_in_body(full)=False
+  BODY:
+AUDIT: PASS
+Objective Understood: Reviewed worker task 'Audit the two unaudited register-integrity fixes and the stale failed completion-gate fix' (risk tier: tier1) by reading the actual diff, not a self-report.
+Standards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.
+Scope Confirmed:  PROGRESS.md                                         |  2 +-
+ ...2844-audit-the-two-unaudited-register-integri.md | 21 +++++++++++++++++++++
+ 2 files changed, 22 insertions(+), 1 deletion(-)
+Evidence Recorded: This diff is purely record-keeping: it retitles PROGRESS.md's header to the current task id and adds a new progress/task-*.md file documenting the audit work performed on PRs 363, 361, and 360 (real diffs read, real tests run, real merges cited by commit sha) plus an honest, explicitly-flagged not-yet-verified item (the PR 363 functional-proof redispatch) rather than overclaiming completion. No source code, config, workflow, schema, auth, or permission files are touched -- only markdown progress notes -- so there is no architecture, correctness, or security surface to evaluate beyond internal consistency, and the content is consistent with itself and appropriately hedges the unverified sub-item instead of asserting it as done. Issues found: none
+Severity Classified: none
+Verdict: pass
+Corrective Action Owner: Not required -- no issues found in this review.
+Re-Audit Scheduled: Not required -- approved as-is, no follow-up needed.
+
+====================================================================================================
+PR #247 head_sha=c62d956f7b30b63b33a6eab0124b582e86f3f57f
+  last comment created_at=2026-08-07T05:46:06Z sha_in_body(short7)=False sha_in_body(full)=False
+  BODY:
+AUDIT: PASS
+Objective Understood: Reviewed worker task 'Upgrade script-and-capability search to real vector semantic search, reusing existing embedding infrastructure' (risk tier: tier1) by reading the actual diff, not a self-report.
+Standards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.
+Scope Confirmed:  PROGRESS.md                                       | 169 +++++----
+ capability_semantic_search.py                     | 407 ++++++++++++++++++++++
+ capability_semantic_search_capability_record.json |  36 ++
+ test_capability_semantic_search.py                | 104 ++++++
+ 4 files changed, 647 insertions(+), 69 deletions(-)
+Evidence Recorded: This diff adds a new, additive-only thin wrapper (capability_semantic_search.py) that composes real cosine-similarity semantic search over cached OpenRouter text-embedding-3-small vectors with the two existing unmodified deterministic tools (superboss-register.py lookup-capability and wiring_query.py query()), backed by its own separate SQLite cache file so it is never a second writer against the canonical superboss-register.sqlite; independent verification (not just trusting the self-report) confirmed the work is real: the 8 unit tests actually pass, a live search invocation against the real registries and OpenRouter succeeded, the local cache holds exactly 169 indexed rows (18 capability_registry + 151 wiring_registry) matching the claimed reindex counts exactly, the new capability_id CAP-20260807-054020-6688 is genuinely registered in the live capability_registry, and the diff's false-premise finding that superboss-register.py has no live search-task-precedent subcommand was independently confirmed true via the live CLI's own subcommand list. No .github/workflows/** paths are touched, no schema/migration/auth/permission/payment/billing/security paths are touched, all SQL is parameterized, the one subprocess call uses list-form argv (no shell injection risk), the canonical DB is opened read-only, and API failures degrade honestly (embedding_available=false, no fabricated score) rather than faking results -- this is consistent with a correctly-classified tier1 additive change. Issues found: Minor, non-blocking: reindex sends internal capability_registry/wiring_registry metadata (script names, paths, purposes, business rules) to a third-party API (OpenRouter) for embedding -- an established precedent exists (anthropic_openrouter_proxy.py already uses OPENROUTER_API_KEY in this environment) but this is a new data-egress path for ops-registry metadata specifically and is worth a brief owner-visible note, not a merge blocker.; Minor, non-blocking: _run_lookup_capability spawns a fresh subprocess per search call instead of importing superboss-register.py's lookup function directly (as is done for wiring_query.py) -- inefficient but not incorrect.
+Severity Classified: none
+Verdict: pass
+Corrective Action Owner: Not required -- no issues found in this review.
+Re-Audit Scheduled: Not required -- approved as-is, no follow-up needed.
+
+====================================================================================================
+PR #244 head_sha=cca322e2050a59251437994c86049ad7671fbb57
+  last comment created_at=2026-08-07T05:28:35Z sha_in_body(short7)=False sha_in_body(full)=False
+  BODY:
+AUDIT: PASS
+Objective Understood: Reviewed worker task 'RCA CONFIRMED + interference removed: now execute the real wiring_registry rebuild' (risk tier: tier1) by reading the actual diff, not a self-report.
+Standards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.
+Scope Confirmed:  ...wiring_registry_reescalation_loop_2026-08-07.md |  96 ++++++++++++++++++
+ PROGRESS.md                                        | 112 +++++++++++++++++++--
+ 2 files changed, 197 insertions(+), 11 deletions(-)
+Evidence Recorded: This is a docs-only diff (PROGRESS.md update + one new FINDING markdown file, no code/schema/workflow changes) in which the worker correctly recognized this task's SPEC as the 5th consecutive false-premise re-escalation over an already-resolved wiring_registry corruption incident, independently re-verified the live state (PRAGMA integrity_check returns ok, row count healthy and actively growing, timer already disabled with a well-behaved 6-hour cadence contradicting the SPEC's 'fires every few minutes' claim), and correctly declined to perform the destructive DROP/rebuild the SPEC demanded, which would have discarded a healthy 24k+ row table. The written finding usefully consolidates the incident timeline and flags the SPEC-generation process itself as the real problem needing human attention. Architecture/security risk is effectively nil since no executable code or infrastructure was touched. Issues found: Internal inconsistency left unreconciled in the diff itself: the removed PROGRESS.md content (from task-20260807-044711) claimed UMR-20260806-124055-bc80 had '0 matches (does not exist)', while this task's new PROGRESS.md content claims the same UMR ID 'is real, status=completed, tied to task-20260806-192052'. The diff doesn't acknowledge or explain this discrepancy between sibling tasks' verification results, which slightly undercuts confidence in the chain's own fact-checking rigor even though it doesn't affect the (correct) decision not to touch the database.; Confirms a real process-level problem: this is the 5th independently-dispatched task in ~5 hours re-investigating the same already-closed incident, burning worker time/resources on repeated no-op investigations. This diff itself does not fix that (nor could a single worker task), but per SUPERBOSS_DISPATCH_PROMPT.md's no-duplication rule (#8-9), the server-side Superboss should treat the recommendation in this task's FINDING doc as an actionable follow-up: pause/investigate the SPEC-generation source rather than dispatching a 6th identical investigation.; No .github/workflows/** files are touched by this diff, so the hard rule against workflow-file changes is not implicated.
+Severity Classified: none
+Verdict: pass
+Corrective Action Owner: Not required -- no issues found in this review.
+Re-Audit Scheduled: Not required -- approved as-is, no follow-up needed.
+
+====================================================================================================
+PR #233 head_sha=ba7ec64e2dde9cec97e4c07cb294ba2376291d08
+  last comment created_at=2026-08-06T23:59:46Z sha_in_body(short7)=False sha_in_body(full)=False
+  BODY:
+AUDIT: PASS
+Objective Understood: Reviewed worker task 'Merges must run inside a real worker unit, not the interactive session, complete PR 169 167 165' (risk tier: tier1) by reading the actual diff, not a self-report.
+Standards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.
+Scope Confirmed:  PROGRESS.md                             | 74 ++++++++++------------------
+ SPEC_VERIFICATION_2026-08-06T235757Z.md | 87 +++++++++++++++++++++++++++++++++
+ 2 files changed, 114 insertions(+), 47 deletions(-)
+Evidence Recorded: This diff is documentation-only (PROGRESS.md rewrite + a new SPEC_VERIFICATION_2026-08-06T235757Z.md), touching no executable code, no .github/workflows/**, no migrations/schema/auth/secrets paths, and performing no merges, pushes, or destructive actions -- squarely additive and low-blast-radius, consistent with tier1. The worker's report matches the recurring pattern already on file (urgent SPECs whose premise doesn't match live state): it found the dispatch SPEC's claim that PRs 169/167/165 were all ready-to-merge was false for two of three -- #169 has a live AUDIT:FAIL citing real guard bypasses (wrapper-flag-value handling and missing bare-& in _SEGMENT_BREAKS) and should not be merged as-is, #165 is 25 commits stale and would regress shipped functionality, and #167 was already merged and deployed by a separate dispatch, independently re-confirmed via ancestor check and byte-identical deployed blob. It correctly declined to force UMR terminal status to completed given that premise was false, instead recording an owner-proposal via the canonical script. This is the correct, diligence-first outcome for a tier1 doc/record-keeping change: no risky action taken, real state independently verified before any write. Issues found: none
+Severity Classified: none
+Verdict: pass
+Corrective Action Owner: Not required -- no issues found in this review.
+Re-Audit Scheduled: Not required -- approved as-is, no follow-up needed.
+
+====================================================================================================
+PR #232 head_sha=8d5fdff9ecf7ef853418f7868b61938694917fbc
+  last comment created_at=2026-08-06T23:56:11Z sha_in_body(short7)=False sha_in_body(full)=False
+  BODY:
+AUDIT: PASS
+Objective Understood: Reviewed worker task 'PM APPROVAL of proposal 62, implement the short-wait build lock fix, sequenced after the incident fix' (risk tier: tier1) by reading the actual diff, not a self-report.
+Standards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.
+Scope Confirmed:  PROGRESS.md                             |  87 ++++++------
+ SPEC_VERIFICATION_2026-08-06T234542Z.md | 110 +++++++++++++++
+ tests/test_build_lock_spin_bound.py     | 237 ++++++++++++++++++++++++++++++++
+ 3 files changed, 389 insertions(+), 45 deletions(-)
+Evidence Recorded: Independently re-verified every factual claim in this diff against live state (pm_decisions_pending row 62, all four cited UMR rows, PRs #168/#172 real-MERGED and real ancestors of origin/main, PID 3340115 nonexistent) and confirmed the SPEC's premise really is stale: the approved fix was already implemented, tested, and merged ~11h before dispatch. This task correctly avoided re-implementing already-live production code and avoided overwriting already-terminal UMR timestamps, instead closing the one genuine gap (a dedicated test proving the build-lock requeue path is bounded and cannot spin indefinitely); I extracted and ran the real acquire_build_lock_fd() function from the live quality-gate.sh myself and confirmed the new test's assumptions match its real rc=0/1/2 and loss-count-file semantics exactly, and that all 4 tests (new + pre-existing) pass together with no regression. The diff is purely additive (one new test file, two documentation files), touches no production code, no migrations/schema/auth/security/payment paths, and no .github/workflows/** files, so tier1 classification is correct. Issues found: none
+Severity Classified: none
+Verdict: pass
+Corrective Action Owner: Not required -- no issues found in this review.
+Re-Audit Scheduled: Not required -- approved as-is, no follow-up needed.
+
+====================================================================================================
+PR #205 head_sha=ebbb909f4183598dc4201e8b53b8c49235033e34
+  last comment created_at=2026-08-07T08:55:10Z sha_in_body(short7)=False sha_in_body(full)=False
+  BODY:
+AUDIT: PASS
+Objective Understood: Reviewed worker task 'Critical amendment, every task must search for prior similar work and graduate AI work into a permanent script whenever possible' (risk tier: tier1) by reading the actual diff, not a self-report.
+Standards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.
+Scope Confirmed:  PROGRESS.md                         | 242 ++++++----------
+ superboss-register.py               | 379 +++++++++++++++++++++++++
+ tests/test_capability_graduation.py | 535 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 996 insertions(+), 160 deletions(-)
+Evidence Recorded: Additive, well-isolated change: adds a capability_graduation_log table plus search-task-precedent (steps one+two: exact/FTS capability_registry match, then real cross-history search over umr_tasks/capability_graduation_log) and record-graduation (step four: mandatory post-AI-work graduation evaluation, refusing a 'graduated' decision without a real, already-registered capability_id and an on-disk script_path). Verified independently rather than trusting the self-report: code compiles, CLI subcommands wire correctly and are help-inspectable, the new test suite (15/15, including a follow-up hardening commit already at HEAD) passes for real against isolated scratch SQLite DBs, write-locking is applied only to the mutating record-graduation path, and the control-flow path that reuses the FTS query variable across the exact-match/FTS-fallback branches is safe on manual trace. No .github/workflows/** changes, no migrations/schema/auth/permission/payment/rls/security path matches, and no heavy-deletion pattern (deletions are confined to a PROGRESS.md prose rewrite) -- tier1 classification is correct. Issues found: record_capability_graduation()'s script_path resolution (os.path.join(VERIDIAN_ROOT, script_path) for non-absolute paths) does not confirm the resolved path stays inside VERIDIAN_ROOT, so a relative path containing '../' could point outside it; low severity since it only backs an os.path.exists() metadata check (no file read/execution), and it matches an existing convention already used elsewhere in this codebase rather than introducing a new pattern.; PROGRESS.md notes this task's own two registered capability_registry rows (task_precedent_search / capability_graduation_recording) had a bad 'apis' field (bare CLI subcommand instead of a real script path) per a sibling task's finding; that runtime-data correction is not visible in this diff and should be tracked as a follow-up, though it does not affect the code being reviewed here.
+Severity Classified: none
+Verdict: pass
+Corrective Action Owner: Not required -- no issues found in this review.
+Re-Audit Scheduled: Not required -- approved as-is, no follow-up needed.
+
+====================================================================================================
+PR #200 head_sha=1eaebee90c612b288411814d9024a091459f92ae
+  last comment created_at=2026-08-06T17:31:40Z sha_in_body(short7)=False sha_in_body(full)=False
+  BODY:
+AUDIT: PASS
+Objective Understood: Reviewed worker task 'Build real proactive system wiring health check, catch integration failures before they become symptoms' (risk tier: tier1) by reading the actual diff, not a self-report.
+Standards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.
+Scope Confirmed:  PROGRESS.md                 | 122 ++++-----
+ generate_pm_report_v3.py    |  52 ++++
+ test_wiring_health_check.py | 247 ++++++++++++++++++
+ wiring_health_check.py      | 614 ++++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 970 insertions(+), 65 deletions(-)
+Evidence Recorded: This is a well-engineered, additive-only change (new wiring_health_check.py + test_wiring_health_check.py, plus a small, exception-guarded, non-invasive integration into generate_pm_report_v3.py's main()/render path as a new report section) that genuinely exercises real integration seams (gateway pickup via dispatch-owner-task.sh + resource_governor.py --tick against an isolated scratch DB, registries reachability via superboss-register.py/wiring_query.py, pm-report freshness, external-agent-dispatch eligibility) rather than just checking that files exist; I independently verified the cited function/table names (_ensure_umr_table, _connect, _write_lock, insert_pm_decision_pending, check_external_agent_eligibility, wiring_query.query, next_queued_task/_perform_spawn/dispatch_one) all exist with matching signatures in the live scripts, confirmed veridian-task.py's cmd_create exits before creating any task_dir/worktree when the canary's repo is missing (no filesystem leak on the ~10-minute cadence), and confirmed no .github/workflows/** files are touched and no tier2-triggering paths (migrations/schema/auth/permission/payment/billing/rls/security/.env) are touched, so the given tier1 classification is correct. I did find one real, narrow correctness bug (see issues) in check_gateway_pickup_path()'s resource-freeze handling that will produce an occasional false-positive 'gateway_pickup_path' failure (and a spurious pm_decisions_pending escalation row) specifically when resource_governor.py's over_threshold_metrics() trips (the ~99% hard freeze gate, distinct from and above the ~80% swap_backoff soft gate this task did verify live) -- it is self-contained to this new module, wrapped in a try/except at the generate_pm_report_v3.py call site, deduped against repeat rows, and trivially fixable in a fast follow-up without touching any sensitive file, so it does not change the tier1/low-blast-radius/additive character of this diff. Issues found: check_gateway_pickup_path() (wiring_health_check.py) mishandles resource_governor.py's 'frozen' outcome: when over_threshold_metrics() trips (the hard ~99% METRIC_THRESHOLD_PERCENT freeze in resource_governor.py's _dispatch_one_inner(), separate from and above the ~80% swap_backoff/mem_backoff/load1_backoff soft gate that produces the 'deferred' action this task did verify live), resource_governor.py returns {'action': 'frozen', 'detail': ..., 'metrics': ...} with NO 'umr_id' key at all. wiring_health_check.py's post-tick matching loop is `if d.get('umr_id') == umr_id and d.get('action') in ('deferred', 'frozen')`, so for a real frozen tick `d.get('umr_id')` is None, the equality check against the real umr_id always fails, `considered` stays False, and the test incorrectly reports outcome='not_picked_up'/passed=False -- a false-positive wiring-health-check failure (and a real pm_decisions_pending escalation row) during exactly the genuine host-resource-exhaustion scenario the module's own docstring and test_wiring_health_check.py's assertion (`outcome in (...,'resource_deferred:frozen')`) claim is handled gracefully. This wasn't caught by this task's own testing because the live-observed condition during development was 94.3% swap (over the 80% soft threshold, correctly producing 'deferred' with a real umr_id) rather than a ~99% hard freeze. Fix: in the frozen branch, match on `d.get('action') == 'frozen'` alone (a frozen tick is row-independent by construction -- no row was even selected -- so requiring a umr_id match is the actual bug), not on a umr_id equality that a frozen dict can never satisfy.
+Severity Classified: none
+Verdict: pass
+Corrective Action Owner: Not required -- no issues found in this review.
+Re-Audit Scheduled: Not required -- approved as-is, no follow-up needed.
+
+====================================================================================================
+PR #198 head_sha=35ce0993f5e9cff594d86515774a73244cf6598c
+  last comment created_at=2026-08-06T17:18:33Z sha_in_body(short7)=False sha_in_body(full)=False
+  BODY:
+AUDIT: PASS
+Objective Understood: Reviewed worker task 'Extend deterministic report to cover PR merge state and PM own dispatch tracking, close the last manual-query gaps' (risk tier: tier1) by reading the actual diff, not a self-report.
+Standards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.
+Scope Confirmed:  PROGRESS.md                   | 137 ++++++++++++------------
+ TRACKED_PRS.json              |   1 +
+ generate_pm_report_v3.py      | 235 +++++++++++++++++++++++++++++++++++++++++-
+ test_generate_pm_report_v3.py | 182 ++++++++++++++++++++++++++++++++
+ 4 files changed, 489 insertions(+), 66 deletions(-)
+Evidence Recorded: This is a clean, well-architected additive change to generate_pm_report_v3.py: two new deterministic, zero-AI-call sections (16: tracked-PR merge state via list-form `gh pr view` subprocess calls against a real, configurable, file-backed JSON list with honest missing/malformed-config handling; 17: per-row recent owner-dispatched UMR status via a parameterized SQL query) that reuse existing helpers/constants (run_cmd, GH_ORG, OWNER_DISPATCH_SOURCE_TRIGGER, _age_hours_since, sbr._connect) rather than duplicating them, follow the file's established honest-error/no-fabrication conventions, and ship with 13 new unit tests covering missing/malformed config, gh success/failure, windowing, and graceful degradation on schema mismatch; I ran the full suite myself (not just trusting the self-report) and independently confirmed 115 passed / 1 pre-existing failure (test_end_to_end_smoke_run, an unrelated gtm_test_script_build_check.py fixture-mocking gap not touched by this diff). No .github/workflows/** changes, no migrations/schema/auth/payment/security path matches, so the tier1 classification is correct, and there is no command-injection or credential-handling concern since all `gh` calls use list-form argv with no shell. The one real caveat, verified independently with a read-only `git merge-tree` simulation rather than assumed: PR #198 currently shows GitHub mergeable=CONFLICTING/mergeStateStatus=DIRTY against main, but the conflict is confined entirely to PROGRESS.md (a shared running-log file every worker task rewrites, with an established repo convention of keeping the branch's own content) -- generate_pm_report_v3.py, TRACKED_PRS.json, and test_generate_pm_report_v3.py all merge cleanly with zero conflicts, so this is a mechanical docs-merge issue, not a code defect, but it does mean an autonomous `gh pr merge` will fail until PROGRESS.md is rebased/resolved. Issues found: PR #198 is currently GitHub mergeable=CONFLICTING / mergeStateStatus=DIRTY against main (verified via `gh pr view` and a read-only `git merge-tree` simulation). The conflict is isolated to PROGRESS.md (routine shared-log collision with PR #197, which merged into main after this branch's base) -- all code/test/config files merge cleanly. An autonomous `gh pr merge` will fail as-is; PROGRESS.md needs a rebase/resolve (keep this branch's own Completed/Remaining content, per this repo's established convention) before merge can actually succeed.; Minor: in get_recent_owner_umr_status_section(), if conn.execute() raises sqlite3.Error, the already-open `conn` is never closed (the close() call only runs on the success path) -- a low-severity connection/resource leak on the error path, not a functional bug since sqlite connections are eventually reclaimed, but worth a follow-up try/finally.
+Severity Classified: none
+Verdict: pass
+Corrective Action Owner: Not required -- no issues found in this review.
+Re-Audit Scheduled: Not required -- approved as-is, no follow-up needed.
+
+====================================================================================================
+PR #118 head_sha=f96ba716991b3221731f82d6b3b166492b2663ac
+  last comment created_at=2026-08-06T08:20:08Z sha_in_body(short7)=False sha_in_body(full)=False
+  BODY:
+AUDIT: PASS
+Objective Understood: Reviewed worker task 'Reconcile UMR-20260806-042322-994b: merge fresh AUDIT:PASS PR #118 (file_inventory corruption repair)' (risk tier: tier1) by reading the actual diff, not a self-report.
+Standards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.
+Scope Confirmed:  PROGRESS.md                       | 267 +++++++++++++++++++-------------------
+ repair_file_inventory_20260806.py |  81 ++++++++++++
+ 2 files changed, 214 insertions(+), 134 deletions(-)
+Evidence Recorded: This diff is a documentation update (PROGRESS.md) plus one new, already-executed, one-off script (repair_file_inventory_20260806.py) that performed a rename-swap repair of the corrupted file_inventory table on the live superboss-register.sqlite; it does not touch application code paths, migrations, auth, or .github/workflows, so tier1 classification is correct and merging this diff itself carries no additional production risk since the described repair already happened and was independently checkpointed (fresh pre-repair backup, rehearsal on a disposable copy, row-count guard, post-repair quick_check and row-count verification across all 90 tables). The repair strategy (quarantine-by-rename rather than DROP, which itself failed against the corrupted tree) is sound and the row-count guard plus flock-based writer serialization are reasonable safeguards. However, the script's docstring and PROGRESS.md both overstate its transactional safety: Python's sqlite3 module in default legacy isolation mode implicitly commits any open transaction before a DDL statement (CREATE TABLE, ALTER TABLE), so the manual BEGIN IMMEDIATE does not actually hold one atomic transaction across the CREATE+INSERT+rename sequence as claimed — a crash or mismatch discovered after the CREATE TABLE or between the two ALTER TABLE renames would not cleanly roll back to the pre-repair state the way the 'aborts, rolls back, live untouched on any mismatch' language promises. This did not cause a problem in this run (sub-second execution, verified correct end state), but it is a real latent gap worth fixing if this pattern is ever reused, and the record-keeping should not claim guarantees the code doesn't actually provide. Issues found: repair_file_inventory_20260806.py's BEGIN IMMEDIATE does not provide true atomicity: Python sqlite3's default legacy isolation_level implicitly commits before CREATE TABLE / ALTER TABLE statements, so the CREATE TABLE and the INSERT+rename steps land in separate auto-committed transactions rather than one all-or-nothing unit; a crash between those points would leave file_inventory_new and the corrupted original both present rather than rolling back cleanly as the docstring and PROGRESS.md claim. Recommend isolation_level=None with explicit BEGIN/COMMIT/ROLLBACK (or conn.autocommit=False on Python 3.12+) if this pattern is reused.; The script hardcodes the file_inventory CREATE TABLE schema rather than verifying it at runtime against the live table's actual pre-repair schema (PRAGMA table_info); this run's correctness relies on the out-of-band schema comparison documented separately in PROGRESS.md rather than an in-script check, so a future copy-paste of this script against a differently-shaped table could silently drop columns/constraints.; The live production repair (Step 5) was executed directly against /opt/veridian/ai-os/memory/superboss-register.sqlite before this PR was opened/reviewed, i.e. outside the normal worktree-then-review-then-merge order — unavoidable for fixing on-disk file corruption, but noting for the record since the dispatch model otherwise expects review before production effect.
+Severity Classified: none
+Verdict: pass
+Corrective Action Owner: Not required -- no issues found in this review.
+Re-Audit Scheduled: Not required -- approved as-is, no follow-up needed.
+
+====================================================================================================
+PR #99 head_sha=66fd9da54ed20332c5d7e4607be7e4a62ffba179
+  last comment created_at=2026-08-06T08:18:39Z sha_in_body(short7)=False sha_in_body(full)=False
+  BODY:
+AUDIT: PASS
+Objective Understood: Reviewed worker task 'Reconcile UMR-20260806-030048-5d7a: PR99 superboss-approved, merge retry' (risk tier: tier1) by reading the actual diff, not a self-report.
+Standards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.
+Scope Confirmed:  PROGRESS.md | 177 +++++++++++++++++++++++++++++++++++++++++++++++++++++-------
+ pr_url.txt  |   1 +
+ 2 files changed, 160 insertions(+), 18 deletions(-)
+Evidence Recorded: The diff is documentation-only (PROGRESS.md + a new pr_url.txt pointing to PR #99 on FChecklist/veridian-scripts) with zero code, schema, or workflow changes, matching the tier1 classification; independently confirmed against GitHub that PR #99 is real and its diff matches exactly what's shown here. The content itself reflects sound, cautious behavior consistent with the standing dispatch rules: on item 1 (sqlite3 recovery) it stopped at Step 4 on a genuine, well-evidenced live-write staleness gap rather than improvising a destructive swap, left the live corrupted DB untouched, and gave the Owner two concrete options; on item 2 (projexa-ai.com cutover) it independently re-verified live DNS/routing state, found the cutover premise false (already executed and live), correctly avoided a redundant/risky production DNS write, and opened a real downstream PR (#970) to document the finding instead. No security, correctness, or architecture issues in the diff itself, and no .github/workflows/** paths are touched. Issues found: PR #99 currently has a real merge conflict against main (gh api reports mergeable=false, mergeable_state=dirty) -- almost certainly because PR #92 (ocid-020 PROGRESS.md changes) merged to main after this branch was cut, and both touch PROGRESS.md. Approving this diff means it is ready for a human/automation to merge, but the autonomous 'gh pr merge' step as currently attempted will fail outright; the branch needs to be updated/rebased against current main (conflict resolved) before an autonomous tier1 merge can actually succeed -- this is the real blocker behind the task's own 'merge retry' framing, not something this diff resolves.
+Severity Classified: none
+Verdict: pass
+Corrective Action Owner: Not required -- no issues found in this review.
+Re-Audit Scheduled: Not required -- approved as-is, no follow-up needed.
+
+====================================================================================================
+PR #93 head_sha=8b2ef4a25ccd246b70816fd25ec290e0dba13a06
+  last comment created_at=2026-08-05T19:01:59Z sha_in_body(short7)=False sha_in_body(full)=False
+  BODY:
+AUDIT: PASS
+Objective Understood: Reviewed worker task 'OCID-020 GTM schema build, standalone top priority, plus real stall escalations' (risk tier: tier1) by reading the actual diff, not a self-report.
+Standards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.
+Scope Confirmed:  ...HEMA_STANDALONE_TASK_VERIFICATION_2026-08-05.md | 139 +++++++++++++++++++++
+ PROGRESS.md                                        |  60 +++++----
+ 2 files changed, 168 insertions(+), 31 deletions(-)
+Evidence Recorded: This diff is documentation-only (one new verification markdown file plus a PROGRESS.md rewrite) with zero code, schema, migration, or workflow changes, correctly classified tier1 and containing no .github/workflows/** touches. Per the standing memory on this repo's task-dispatch false-premise pattern, the worker independently re-verified all three SPEC items against live state (gh for PR #959, direct psql for the production schema, direct sqlite3 for umr_tasks/gtm_certification_categories) rather than trusting the SPEC narrative, found items 2 and 3 to be false (a terminal rejected_duplicate UMR misrepresented as a live stall, and an already-built 25-row GTM schema misrepresented as never built), and correctly took no destructive or duplicative action (no ALTER TABLE applied, no duplicate table created, no requeue of already-completed work) -- exactly the intended failure mode this memory pattern exists to prevent. It also surfaced a real, non-fabricated concurrency risk (sibling task 185207 operating on the identical false premise and at risk of racing this exact table) and correctly deferred resolving it rather than acting unilaterally outside its scope. No security, correctness, or architecture issues found in the actual diff. Issues found: none
+Severity Classified: none
+Verdict: pass
+Corrective Action Owner: Not required -- no issues found in this review.
+Re-Audit Scheduled: Not required -- approved as-is, no follow-up needed.
+
+====================================================================================================
+PR #90 head_sha=1085298e264aea612291f4bc28b9f003c18c4041
+  last comment created_at=2026-08-06T08:19:11Z sha_in_body(short7)=False sha_in_body(full)=False
+  BODY:
+AUDIT: PASS
+Objective Understood: Reviewed worker task 'OCID-020 cycle decision, adopt PR 954 on slot free, mint retroactive child UMR' (risk tier: tier1) by reading the actual diff, not a self-report.
+Standards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.
+Scope Confirmed:  ...ION_PR954_ADOPTION_REVERIFICATION_2026-08-05.md | 152 +++++++++++++++++++++
+ PROGRESS.md                                        |  72 ++++------
+ 2 files changed, 180 insertions(+), 44 deletions(-)
+Evidence Recorded: This diff is documentation-only (one new evidence markdown file and a rewritten PROGRESS.md) with no source code, schema, auth, or .github/workflows/** changes, correctly classified tier1; independently re-verified every material factual claim against live state -- gtm_certification_categories has exactly 25 rows, ocid_compliance_state has exactly 113 rows, ocid_artifact_links has exactly 215 rows, UMR-20260805-093138-2bd0 is genuinely rejected_duplicate (not stalled), PR #954/#959/#965 are all OPEN/MERGEABLE/BLOCKED with 0 real GitHub reviews against a live required_approving_review_count=1 + enforce_admins=true branch protection rule and a single-identity (FChecklist) credential gap, and the flagged PR #954-vs-#965 file-scope collision on src/app/signup/page.tsx and src/app/signup/signup-form.tsx is real -- and found no discrepancies that undermine the report's conclusions. The task correctly took zero destructive or premature action (no UMR re-minted, no worker restarted, no table mischaracterized as deprecated) given every one of the originating SPEC's six claims was independently found stale or false, which is the correct, cautious behavior for this environment's recurring false-premise-SPEC pattern. Issues found: none
+Severity Classified: none
+Verdict: pass
+Corrective Action Owner: Not required -- no issues found in this review.
+Re-Audit Scheduled: Not required -- approved as-is, no follow-up needed.
+
+====================================================================================================
+PR #71 head_sha=749e232b529bc4351f181354ac4b37fe07e49a6f
+  last comment created_at=2026-08-05T16:28:29Z sha_in_body(short7)=False sha_in_body(full)=False
+  BODY:
+AUDIT: PASS
+Objective Understood: Reviewed worker task 'Document the real UTR, UMR, and single source of truth taxonomy inside the database itself' (risk tier: tier1) by reading the actual diff, not a self-report.
+Standards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.
+Scope Confirmed:  ...TAXONOMY_INDEPENDENT_VERIFICATION_2026-08-05.md | 150 +++++++++++++++++++++
+ PROGRESS.md                                        | 118 ++++------------
+ 2 files changed, 178 insertions(+), 90 deletions(-)
+Evidence Recorded: Docs-only additive change (a new OCID-068 addendum markdown file plus a PROGRESS.md rewrite for this task) with no code, schema, migration, or .github/workflows/** touched, correctly classified tier1; I independently re-verified every load-bearing factual claim rather than trusting the self-report -- the registry_taxonomy_notes table/seed/accessor functions exist in superboss-register.py exactly as described (added in PR #57), the live DB row's note_text matches the claimed UTR/UMR taxonomy verbatim, UMR-20260805-093630-29d1 is now status=completed with ts_completed=2026-08-05T09:53:07Z matching PR #57's real merge timestamp, PR #57 is merged (c8f40eb) with a genuine pre-merge AUDIT:PASS comment from the same FChecklist account (the same-account caveat the new doc discloses checks out, not a glossed-over issue), the Phase 2 addendum's section 7 exists with the matching taxonomy heading, and the local diff matches PR #71's actual GitHub diff -- no discrepancies found between the claimed evidence and the real repo/DB state. Issues found: none
+Severity Classified: none
+Verdict: pass
+Corrective Action Owner: Not required -- no issues found in this review.
+Re-Audit Scheduled: Not required -- approved as-is, no follow-up needed.
+
+====================================================================================================
+PR #61 head_sha=75262419e8d22133bee25a344587bfe5b8f2dcd8
+  last comment created_at=2026-08-06T08:19:33Z sha_in_body(short7)=False sha_in_body(full)=False
+  BODY:
+AUDIT: PASS
+Objective Understood: Reviewed worker task 'Reconcile UMR-20260805-042152-e559: PR #61 rebased onto current main (3x, fast PROGRESS.md churn), all tests pass, re-review for merge' (risk tier: tier1) by reading the actual diff, not a self-report.
+Standards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.
+Scope Confirmed:  OCID_MASTER_STANDARD_V6_PHASE2_2026-08-05.md |  50 +++
+ PROGRESS.md                                  | 172 ++-------
+ superboss-register.py                        | 518 +++++++++++++++++++++++++++
+ tests/test_ocid_master_standard_phase2.py    | 426 ++++++++++++++++++++++
+ 4 files changed, 1029 insertions(+), 137 deletions(-)
+Evidence Recorded: This PR adds OCID Master Standard v6 Phase 2 (lifecycle state machine + registry integrity checks) as new, additive code in superboss-register.py plus 20 new tests, all passing; it does not modify any existing table schema in place, does not touch .github/workflows/** or any migrations/*.sql/auth/permission/payment/billing/rls/security paths, and the diff is insertion-heavy (1029 insertions vs 137 deletions, the deletions being a PROGRESS.md rewrite), consistent with its pre-classified tier1 status. The lifecycle transition table, refusal-plus-audit-on-illegal-transition, second-UMR-for-same-OCID refusal, and never-auto-establish-baseline discipline are all correctly implemented and match the codebase's existing conventions (write-lock on writes, pure decision functions separated from I/O, idempotent migrations). One latent defensive-correctness bug was found in check_registry_integrity()'s orphan-row detection: it uses `NOT IN (SELECT ocid_number FROM ocid_canonical_registry)`, and since ocid_number is declared TEXT PRIMARY KEY (SQLite does not enforce NOT NULL on non-INTEGER primary keys), a single NULL ocid_number row in ocid_canonical_registry would poison the NOT IN subquery and cause orphan_rows_ok to silently report True (no orphans) for every table, even when real orphans exist -- directly undermining this feature's own stated 'never silently treated as passing' design goal. This requires a specific, currently-unproduced data state (no code path in this diff or the rest of the file appears to intentionally insert a NULL ocid_number) so it is not a blocking issue for this additive, well-tested tier1 change, but it should be fixed (swap NOT IN for NOT EXISTS or add a WHERE ocid_number IS NOT NULL guard) in a fast follow-up. Issues found: check_registry_integrity()'s orphan_rows_ok check uses 'NOT IN (SELECT ocid_number FROM ocid_canonical_registry)'; because ocid_number is only a TEXT PRIMARY KEY (SQLite does not implicitly enforce NOT NULL on non-INTEGER primary keys, confirmed empirically), a single NULL ocid_number row in that table would make the NOT IN comparison evaluate to NULL for every row, silently suppressing all orphan detection across every tracked table. Recommend switching to NOT EXISTS (correlated subquery) or adding an explicit IS NOT NULL guard on the subquery.
+Severity Classified: none
+Verdict: pass
+Corrective Action Owner: Not required -- no issues found in this review.
+Re-Audit Scheduled: Not required -- approved as-is, no follow-up needed.
+
+====================================================================================================
+PR #60 head_sha=548c0b6349996984ac508e8772b0d37209f8726d
+  last comment created_at=2026-08-06T08:18:09Z sha_in_body(short7)=False sha_in_body(full)=False
+  BODY:
+AUDIT: PASS
+Objective Understood: Reviewed worker task 'Extend OCID canonical mapping methodology doc to cover OCID-069' (risk tier: tier1) by reading the actual diff, not a self-report.
+Standards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.
+Scope Confirmed:  ...HODOLOGY_EXTENSION_REVERIFICATION_2026-08-05.md | 113 +++++++++++++++++++++
+ PROGRESS.md                                        |  57 +++++------
+ 2 files changed, 137 insertions(+), 33 deletions(-)
+Evidence Recorded: This is a documentation-only diff (a new re-verification note plus a PROGRESS.md update) reporting that the SPEC's requested extension of the OCID canonical mapping methodology doc was already completed and merged by a prior task (PR #56, commit d27cf95); independent verification against the live system confirms every claim -- the live document already reads OCID-001..069 / 69 of 69 with a correct OCID-069 section, the live ocid_canonical_registry table holds exactly 69 rows with OCID-069's row matching the document, PR #56 is genuinely MERGED with its merge commit a real ancestor of origin/main, and the prior extension diff (d27cf95~1..d27cf95) is a clean 21-insertion/6-deletion single-file change consistent with pure extension rather than alteration of existing OCID-001..068 findings. No code, schema, auth, or .github/workflows/** paths are touched, and no redundant edits were made to the already-correct target document, correctly avoiding re-litigating settled work. Issues found: none
+Severity Classified: none
+Verdict: pass
+Corrective Action Owner: Not required -- no issues found in this review.
+Re-Audit Scheduled: Not required -- approved as-is, no follow-up needed.
+

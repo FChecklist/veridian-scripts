@@ -1,4 +1,4 @@
-# PROGRESS -- task-20260807-053223-upgrade-script-and-capability-search-to
+# PROGRESS -- task-20260814-183604-sweep-veridian-scripts-for-real-audited
 
 Governing chain: UMR-20260806-124055-bc80
 

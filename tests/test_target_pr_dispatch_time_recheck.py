@@ -17,8 +17,18 @@ had already resolved before/shortly after the row was even queued --
     current DIRTY/mergeable=false at dispatch time (not the queue-time
     UNKNOWN state) -- the RIGHT answer there is dispatch a fresh
     rebase+re-audit, NOT a self-reject, which is exactly why
-    target_pr_already_resolved() only blocks on a real MERGED/CLOSED state,
-    never on OPEN/DIRTY.
+    target_pr_already_resolved() only blocks on a real MERGED state, never
+    on OPEN/DIRTY.
+
+UMR-20260814-132703-a1f9 real fix, added later: the guard used to also
+block on a bare CLOSED (unmerged) state, which caused a real false
+self-rejection -- UMR-20260814-125933-3377 ("Merge real veridian-scripts
+PR#298") was submitted specifically to fix veridian-scripts PR#298 (real,
+CLOSED, mergedAt=null, 696 real diff lines never landed), and this guard
+rejected that very row as a duplicate because it saw the same CLOSED state
+its own title already named as the problem. CLOSED-without-merge is a real
+open gap, not "already handled" -- see test_closed_unmerged_target_pr_does_not_block()
+below, which replaces the old (incorrect) test_closed_unmerged_target_pr_blocks().
 
 Every real `gh` call is mocked at the `_run()` subprocess boundary (same
 convention as this module's other real gh-backed guards) -- never a real
@@ -118,18 +128,23 @@ def test_merged_target_pr_blocks_with_real_evidence():
     assert "249" in called_args and "FChecklist/veridian-scripts" in called_args
 
 
-def test_closed_unmerged_target_pr_blocks():
+def test_closed_unmerged_target_pr_does_not_block():
+    """UMR-20260814-132703-a1f9 real fix: a real, confirmed CLOSED-without-
+    merge PR must NOT block -- it is a real open gap, not a resolved
+    duplicate. Real shape: veridian-scripts PR#298 (UMR-20260814-125933-3377)
+    was CLOSED, mergedAt=null, 696 real diff lines never landed; the old
+    code here blocked on bare CLOSED and self-rejected the very row
+    submitted to fix that gap."""
     rg = _load_rg("rg_targetpr_3", {"VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR})
-    fake_pr = {"number": 135, "state": "CLOSED", "mergedAt": None,
-               "closedAt": "2026-08-13T10:40:46Z",
-               "url": "https://github.com/FChecklist/claude-control/pull/135"}
+    fake_pr = {"number": 298, "state": "CLOSED", "mergedAt": None,
+               "closedAt": "2026-08-13T14:09:30Z",
+               "url": "https://github.com/FChecklist/veridian-scripts/pull/298"}
     with mock.patch.object(rg, "_run", return_value=_FakeCompletedProcess(0, json.dumps(fake_pr))):
         blocked, evidence = rg.target_pr_already_resolved(
-            "Resolve PR 135 conflict and deliver real financial-escalation-policy scope",
-            hint_repo="claude-control")
-    assert blocked is True
-    assert evidence["state"] == "CLOSED"
-    assert evidence["closed_at"] == "2026-08-13T10:40:46Z"
+            "Merge real veridian-scripts PR#298 (outstanding gap, closed unmerged)",
+            hint_repo="veridian-scripts")
+    assert blocked is False
+    assert evidence is None
 
 
 def test_open_dirty_target_pr_never_blocks():
@@ -285,6 +300,59 @@ def test_dispatch_one_end_to_end_dirty_open_pr_is_not_rejected_by_this_guard():
             os.environ.pop("SUPERBOSS_REGISTER_DB", None)
 
         assert result["action"] != "rejected_target_pr_already_resolved", result
+        mock_spawn.assert_called_once()
+
+
+def test_dispatch_one_end_to_end_closed_unmerged_pr_is_not_rejected_by_this_guard():
+    """UMR-20260814-125933-3377's real shape verbatim: veridian-scripts
+    PR#298 real, CLOSED, mergedAt=null -- must NOT be caught by this guard
+    (dispatch proceeds to the real spawn path). Regression test for the
+    real false self-rejection UMR-20260814-132703-a1f9 fixed."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        sbr = _schema_helpers()
+        _seed_scratch_db(scratch_db, sbr)
+        env = {"SUPERBOSS_REGISTER_DB": scratch_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
+        rg = _load_rg("rg_targetpr_e2e_closed", env)
+        rg.EMERGENCY_STOP_PATH = os.path.join(d, "EMERGENCY_STOP_never_created")
+        rg.STOP_WORK_ORDER_TASK_IDS = ()
+
+        conn = _new_conn(scratch_db)
+        sbr.upsert_umr_task(conn, {
+            "task_identity": "test-targetpr-closed-298", "tier": 1, "status": "queued",
+            "source_trigger": "unit_test", "task_kind": "veridian_task_create",
+            "inputs": {"repo": "veridian-scripts",
+                       "title": "Merge real veridian-scripts PR#298 (outstanding gap, closed unmerged)",
+                       "prompt": "p"},
+            "reason": "queued",
+        })
+        conn.commit()
+        conn.close()
+
+        fake_pr = {"number": 298, "state": "CLOSED", "mergedAt": None,
+                   "closedAt": "2026-08-13T14:09:30Z",
+                   "url": "https://github.com/FChecklist/veridian-scripts/pull/298"}
+        dc_mod = rg._dispatch_core()
+
+        def fake_run(cmd, **kwargs):
+            if "view" in cmd:
+                return _FakeCompletedProcess(0, json.dumps(fake_pr))
+            return _FakeCompletedProcess(0, json.dumps([]))
+
+        os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
+        try:
+            with mock.patch.object(dc_mod, "has_free_slot_detail", return_value=(True, {"check": "ok"})), \
+                 mock.patch.object(rg, "_run", side_effect=fake_run), \
+                 mock.patch.object(dc_mod, "record_dispatch_event", return_value=None), \
+                 mock.patch.object(rg, "_perform_spawn",
+                                    return_value={"status": "running", "unit_name": "veridian-worker@x.service",
+                                                  "outputs": {}}) as mock_spawn:
+                result = rg.dispatch_one()
+        finally:
+            os.environ.pop("SUPERBOSS_REGISTER_DB", None)
+
+        assert result["action"] != "rejected_target_pr_already_resolved", result
+        assert result.get("action") != "rejected_duplicate_pr" or "298" not in str(result), result
         mock_spawn.assert_called_once()
 
 

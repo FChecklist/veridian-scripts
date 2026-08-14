@@ -3301,6 +3301,73 @@ def _umr_cross_repo_pr_check(row_task_identity, row_umr_id, dispatched_repo, tit
     }
 
 
+_SUPERSEDED_BY_RE = re.compile(r"superseded by (?:[\w.\-]+/)?#?(\d+)", re.IGNORECASE)
+
+
+def _closed_pr_superseded_by_merged_pr(repo, pr_number):
+    """UMR-20260814-132703-a1f9, part 2 -- real incident found while doing
+    the actual work item UMR-20260814-125933-3377 named (not a hypothetical):
+    veridian-scripts PR#298's own close comment reads "Superseded by #299,
+    which now carries this PR's full content forward as a strict superset
+    (script + tests + these systemd units, verified byte-identical via
+    diff) ... Real verification before closing: fresh clone of #299's
+    branch, full test_pm_sentinel_tick.py suite, 6/6 passed." -- and #299
+    is real, MERGED 2026-08-13T18:49:15Z, containing exactly those files.
+    PR#298 was NOT an abandoned gap; its content already landed under a
+    different PR number. Without this check, the CLOSED-without-merge fix
+    in target_pr_already_resolved() above would wrongly let a stale row
+    naming PR#298 redispatch and re-attempt work that is already done and
+    merged -- trading one false rejection for a future false non-rejection.
+
+    Scans the PR's body + comments (one extra bounded `gh` call, only for
+    the CLOSED path, never for MERGED/OPEN) for a "superseded by #NNN"
+    reference, and reports it as a real successor ONLY if that referenced
+    PR is itself real and MERGED -- a bare "superseded by" claim citing a
+    PR that turned out not to merge must not block anything.
+
+    Same fail-open philosophy as the rest of this guard: any error,
+    timeout, or no-match here returns None ("no known merged successor"),
+    never raises, never blocks by itself."""
+    try:
+        r = _run(
+            ["gh", "pr", "view", str(pr_number), "--repo", f"{GH_ORG}/{repo}",
+             "--json", "body,comments"],
+            timeout=GH_PR_CHECK_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        data = json.loads(r.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    texts = [data.get("body") or ""] + [c.get("body") or "" for c in (data.get("comments") or [])]
+    successor_num = None
+    for t in texts:
+        m = _SUPERSEDED_BY_RE.search(t)
+        if m:
+            successor_num = m.group(1)
+            break
+    if not successor_num or successor_num == str(pr_number):
+        return None
+    try:
+        r2 = _run(
+            ["gh", "pr", "view", successor_num, "--repo", f"{GH_ORG}/{repo}",
+             "--json", "number,state,mergedAt,url"],
+            timeout=GH_PR_CHECK_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if r2.returncode != 0:
+        return None
+    try:
+        successor = json.loads(r2.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return successor if successor.get("state") == "MERGED" else None
+
+
 def target_pr_already_resolved(title, hint_repo=None):
     """UMR-20260813-135626 (reconcile-stale-queued-rows-whose-target,
     addendum to P1 UMR-20260806-171945-5767): real, dispatch-time re-check
@@ -3345,15 +3412,20 @@ def target_pr_already_resolved(title, hint_repo=None):
     used to also block on a bare CLOSED state, treating "closed without
     merge" the same as "already handled". Real incident:
     UMR-20260814-125933-3377 ("Merge real veridian-scripts PR#298") was
-    itself submitted to fix an outstanding gap -- PR#298 real, CLOSED,
-    mergedAt=null, 696 real lines of diff never landed -- and this guard
-    self-rejected that very row as a duplicate because it saw the same
-    CLOSED state its own title already named as the problem. CLOSED without
-    a merge means the opposite of "resolved": the work is still a real,
-    open gap (abandoned/rejected PR, not landed), so it must NOT be
-    silently skipped here. Only MERGED means the queue-time premise is
-    actually dead; CLOSED-without-merge now falls through to the same
-    "not resolved, dispatch proceeds" path as OPEN.
+    itself submitted believing PR#298 was an abandoned gap -- real, CLOSED,
+    mergedAt=null -- and this guard self-rejected that very row as a
+    duplicate because it saw the same CLOSED state its own title already
+    named as the problem. CLOSED-without-merge is NOT, by itself, evidence
+    the work is resolved: it can equally mean the work is still a real,
+    open gap (abandoned/rejected PR). So a bare CLOSED no longer blocks by
+    itself -- only a real, confirmed MERGED state, OR a real, confirmed
+    MERGED *successor* PR (see _closed_pr_superseded_by_merged_pr() above),
+    means the queue-time premise is actually dead. (PR#298's own real story
+    turned out to be the second case -- see that function's docstring for
+    the full, non-hypothetical evidence -- so this guard still correctly
+    blocks PR#298 specifically, just for the real reason instead of a bare
+    CLOSED coincidence.) CLOSED-with-no-known-merged-successor falls
+    through to the same "not resolved, dispatch proceeds" path as OPEN.
 
     UMR-20260813-165620-aac7 (addendum to P1 UMR-20260806-171945-5767) real
     fix: this used to resolve a BARE "PR NNN" title reference by scanning
@@ -3430,12 +3502,21 @@ def target_pr_already_resolved(title, hint_repo=None):
         if state == "MERGED":
             return True, {"repo": repo, "number": pr.get("number"), "state": state,
                            "merged_at": pr.get("mergedAt"), "url": pr.get("url")}
-        # A real PR number resolved in this repo but its state is OPEN or
-        # CLOSED-without-merge (or anything else) -- not a resolved
+        if state == "CLOSED":
+            successor = _closed_pr_superseded_by_merged_pr(repo, pr.get("number"))
+            if successor:
+                return True, {"repo": repo, "number": pr.get("number"), "state": state,
+                               "closed_at": pr.get("closedAt"), "url": pr.get("url"),
+                               "superseded_by": {"number": successor.get("number"),
+                                                  "merged_at": successor.get("mergedAt"),
+                                                  "url": successor.get("url")}}
+        # A real PR number resolved in this repo but its state is OPEN, or
+        # CLOSED with no known real MERGED successor -- not a resolved
         # duplicate (see UMR-20260814-132703-a1f9 fix note in the docstring
-        # above: CLOSED-without-merge is a real open gap, not "handled").
-        # PR numbers are per-repo, so the search stops here rather than
-        # risking a same-number collision in a different repo.
+        # above: bare CLOSED-without-merge is a real open gap, not
+        # "handled", unless a merged successor says otherwise). PR numbers
+        # are per-repo, so the search stops here rather than risking a
+        # same-number collision in a different repo.
         return False, None
     return False, None
 
@@ -3734,12 +3815,18 @@ def _dispatch_one_inner(dry_run=False, now=None):
                 when = (f"mergedAt={target_pr_evidence.get('merged_at')}"
                         if target_pr_evidence["state"] == "MERGED"
                         else f"closedAt={target_pr_evidence.get('closed_at')}")
+                superseded_by = target_pr_evidence.get("superseded_by")
+                superseded_note = (
+                    f" -- superseded by real, MERGED #{superseded_by['number']} "
+                    f"(mergedAt={superseded_by.get('merged_at')}), {superseded_by.get('url')}"
+                    if superseded_by else ""
+                )
                 reason = (
                     f"target-PR dispatch-time re-check: {GH_ORG}/{target_pr_evidence['repo']}"
                     f"#{target_pr_evidence['number']} (this row's own title names it as its work "
-                    f"target) is real, current state={target_pr_evidence['state']!r} ({when}), "
-                    f"{target_pr_evidence.get('url')} -- the queue-time premise no longer holds, "
-                    f"redispatch skipped, not spawned"
+                    f"target) is real, current state={target_pr_evidence['state']!r} ({when})"
+                    f"{superseded_note}, {target_pr_evidence.get('url')} -- the queue-time premise "
+                    f"no longer holds, redispatch skipped, not spawned"
                 )
                 with sbr._write_lock():
                     sbr.update_umr_task(

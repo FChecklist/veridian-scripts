@@ -23,12 +23,20 @@ had already resolved before/shortly after the row was even queued --
 UMR-20260814-132703-a1f9 real fix, added later: the guard used to also
 block on a bare CLOSED (unmerged) state, which caused a real false
 self-rejection -- UMR-20260814-125933-3377 ("Merge real veridian-scripts
-PR#298") was submitted specifically to fix veridian-scripts PR#298 (real,
-CLOSED, mergedAt=null, 696 real diff lines never landed), and this guard
-rejected that very row as a duplicate because it saw the same CLOSED state
-its own title already named as the problem. CLOSED-without-merge is a real
-open gap, not "already handled" -- see test_closed_unmerged_target_pr_does_not_block()
+PR#298") was submitted believing veridian-scripts PR#298 (real, CLOSED,
+mergedAt=null) was an abandoned gap, and this guard rejected that row as a
+duplicate because it saw the same CLOSED state its own title already named
+as the problem. Bare CLOSED-without-merge is not, by itself, evidence the
+work is resolved -- see test_closed_unmerged_target_pr_with_no_known_successor_does_not_block()
 below, which replaces the old (incorrect) test_closed_unmerged_target_pr_blocks().
+Real follow-up finding (still UMR-20260814-132703-a1f9): PR#298 itself
+turned out to have a real merged successor (#299, its own close comment:
+"Superseded by #299, which now carries this PR's full content forward as
+a strict superset ... verified byte-identical via diff") -- so the guard
+must still block PR#298 specifically, just for that real reason instead of
+a bare-CLOSED coincidence. See _closed_pr_superseded_by_merged_pr() in
+resource_governor.py and test_closed_pr_with_real_merged_successor_still_blocks()
+below.
 
 Every real `gh` call is mocked at the `_run()` subprocess boundary (same
 convention as this module's other real gh-backed guards) -- never a real
@@ -128,22 +136,90 @@ def test_merged_target_pr_blocks_with_real_evidence():
     assert "249" in called_args and "FChecklist/veridian-scripts" in called_args
 
 
-def test_closed_unmerged_target_pr_does_not_block():
+def test_closed_unmerged_target_pr_with_no_known_successor_does_not_block():
     """UMR-20260814-132703-a1f9 real fix: a real, confirmed CLOSED-without-
-    merge PR must NOT block -- it is a real open gap, not a resolved
-    duplicate. Real shape: veridian-scripts PR#298 (UMR-20260814-125933-3377)
-    was CLOSED, mergedAt=null, 696 real diff lines never landed; the old
-    code here blocked on bare CLOSED and self-rejected the very row
-    submitted to fix that gap."""
+    merge PR, with no "superseded by a real merged PR" evidence found on
+    it (see test_closed_pr_with_real_merged_successor_still_blocks() below
+    for that case), must NOT block -- a bare abandoned/rejected-without-
+    successor PR is a real open gap, not a resolved duplicate. (Note: the
+    real veridian-scripts PR#298 that motivated this fix turned out to
+    have exactly such a merged successor -- #299 -- so it still correctly
+    blocks; this test uses a different, hypothetical PR number for the
+    genuinely-no-successor case the old code also got wrong.)"""
     rg = _load_rg("rg_targetpr_3", {"VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR})
-    fake_pr = {"number": 298, "state": "CLOSED", "mergedAt": None,
+    fake_pr = {"number": 400, "state": "CLOSED", "mergedAt": None,
                "closedAt": "2026-08-13T14:09:30Z",
-               "url": "https://github.com/FChecklist/veridian-scripts/pull/298"}
+               "url": "https://github.com/FChecklist/veridian-scripts/pull/400"}
     with mock.patch.object(rg, "_run", return_value=_FakeCompletedProcess(0, json.dumps(fake_pr))):
+        blocked, evidence = rg.target_pr_already_resolved(
+            "Merge real veridian-scripts PR#400 (outstanding gap, closed unmerged, no successor)",
+            hint_repo="veridian-scripts")
+    assert blocked is False
+    assert evidence is None
+
+
+def test_closed_pr_with_real_merged_successor_still_blocks():
+    """PR#298's real, full incident (not the simplified shape above):
+    CLOSED, mergedAt=null, close comment 'Superseded by #299, which now
+    carries this PR's full content forward as a strict superset ...
+    verified byte-identical via diff' -- and #299 is real, MERGED. This
+    must still block, for the real reason (a real merged successor), not
+    the old bare-CLOSED coincidence."""
+    rg = _load_rg("rg_targetpr_superseded_1", {"VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR})
+    closed_pr = {"number": 298, "state": "CLOSED", "mergedAt": None,
+                 "closedAt": "2026-08-13T14:09:30Z",
+                 "url": "https://github.com/FChecklist/veridian-scripts/pull/298"}
+    comments_payload = {
+        "body": "", "comments": [
+            {"body": "Superseded by #299, which now carries this PR's full content "
+                     "forward as a strict superset (script + tests + these systemd "
+                     "units, verified byte-identical via diff)."}
+        ],
+    }
+    successor_pr = {"number": 299, "state": "MERGED",
+                     "mergedAt": "2026-08-13T18:49:15Z", "closedAt": "2026-08-13T18:49:15Z",
+                     "url": "https://github.com/FChecklist/veridian-scripts/pull/299"}
+
+    def fake_run(cmd, **kwargs):
+        if "--json" in cmd and "body,comments" in cmd:
+            return _FakeCompletedProcess(0, json.dumps(comments_payload))
+        if "299" in cmd:
+            return _FakeCompletedProcess(0, json.dumps(successor_pr))
+        return _FakeCompletedProcess(0, json.dumps(closed_pr))
+
+    with mock.patch.object(rg, "_run", side_effect=fake_run):
         blocked, evidence = rg.target_pr_already_resolved(
             "Merge real veridian-scripts PR#298 (outstanding gap, closed unmerged)",
             hint_repo="veridian-scripts")
-    assert blocked is False
+    assert blocked is True, (blocked, evidence)
+    assert evidence["state"] == "CLOSED"
+    assert evidence["superseded_by"]["number"] == 299
+    assert evidence["superseded_by"]["merged_at"] == "2026-08-13T18:49:15Z"
+
+
+def test_closed_pr_superseded_claim_citing_unmerged_pr_does_not_block():
+    """A 'superseded by #NNN' claim is only real evidence if that PR is
+    itself actually MERGED -- citing a PR that never merged (or doesn't
+    exist) must not block."""
+    rg = _load_rg("rg_targetpr_superseded_2", {"VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR})
+    closed_pr = {"number": 500, "state": "CLOSED", "mergedAt": None,
+                 "closedAt": "2026-08-13T14:09:30Z",
+                 "url": "https://github.com/FChecklist/veridian-scripts/pull/500"}
+    comments_payload = {"body": "Superseded by #501, still under review.", "comments": []}
+    successor_pr = {"number": 501, "state": "OPEN", "mergedAt": None, "closedAt": None,
+                     "url": "https://github.com/FChecklist/veridian-scripts/pull/501"}
+
+    def fake_run(cmd, **kwargs):
+        if "--json" in cmd and "body,comments" in cmd:
+            return _FakeCompletedProcess(0, json.dumps(comments_payload))
+        if "501" in cmd:
+            return _FakeCompletedProcess(0, json.dumps(successor_pr))
+        return _FakeCompletedProcess(0, json.dumps(closed_pr))
+
+    with mock.patch.object(rg, "_run", side_effect=fake_run):
+        blocked, evidence = rg.target_pr_already_resolved(
+            "Merge real veridian-scripts PR#500", hint_repo="veridian-scripts")
+    assert blocked is False, (blocked, evidence)
     assert evidence is None
 
 
@@ -304,10 +380,16 @@ def test_dispatch_one_end_to_end_dirty_open_pr_is_not_rejected_by_this_guard():
 
 
 def test_dispatch_one_end_to_end_closed_unmerged_pr_is_not_rejected_by_this_guard():
-    """UMR-20260814-125933-3377's real shape verbatim: veridian-scripts
-    PR#298 real, CLOSED, mergedAt=null -- must NOT be caught by this guard
-    (dispatch proceeds to the real spawn path). Regression test for the
-    real false self-rejection UMR-20260814-132703-a1f9 fixed."""
+    """A CLOSED-without-merge PR with no known real merged successor must
+    NOT be caught by this guard (dispatch proceeds to the real spawn
+    path). Regression test for the real false self-rejection
+    UMR-20260814-132703-a1f9 fixed (see the module docstring above: the
+    real veridian-scripts PR#298 that motivated this fix turned out to
+    have a real merged successor, #299, so it still correctly blocks --
+    covered separately by
+    test_dispatch_one_end_to_end_closed_pr_with_merged_successor_still_rejects()
+    below; this test uses a different, hypothetical no-successor PR for
+    the genuinely-still-open-gap case)."""
     with tempfile.TemporaryDirectory() as d:
         scratch_db = os.path.join(d, "scratch.sqlite")
         sbr = _schema_helpers()
@@ -319,19 +401,19 @@ def test_dispatch_one_end_to_end_closed_unmerged_pr_is_not_rejected_by_this_guar
 
         conn = _new_conn(scratch_db)
         sbr.upsert_umr_task(conn, {
-            "task_identity": "test-targetpr-closed-298", "tier": 1, "status": "queued",
+            "task_identity": "test-targetpr-closed-400", "tier": 1, "status": "queued",
             "source_trigger": "unit_test", "task_kind": "veridian_task_create",
             "inputs": {"repo": "veridian-scripts",
-                       "title": "Merge real veridian-scripts PR#298 (outstanding gap, closed unmerged)",
+                       "title": "Merge real veridian-scripts PR#400 (outstanding gap, closed unmerged)",
                        "prompt": "p"},
             "reason": "queued",
         })
         conn.commit()
         conn.close()
 
-        fake_pr = {"number": 298, "state": "CLOSED", "mergedAt": None,
+        fake_pr = {"number": 400, "state": "CLOSED", "mergedAt": None,
                    "closedAt": "2026-08-13T14:09:30Z",
-                   "url": "https://github.com/FChecklist/veridian-scripts/pull/298"}
+                   "url": "https://github.com/FChecklist/veridian-scripts/pull/400"}
         dc_mod = rg._dispatch_core()
 
         def fake_run(cmd, **kwargs):
@@ -352,8 +434,75 @@ def test_dispatch_one_end_to_end_closed_unmerged_pr_is_not_rejected_by_this_guar
             os.environ.pop("SUPERBOSS_REGISTER_DB", None)
 
         assert result["action"] != "rejected_target_pr_already_resolved", result
-        assert result.get("action") != "rejected_duplicate_pr" or "298" not in str(result), result
+        assert result.get("action") != "rejected_duplicate_pr" or "400" not in str(result), result
         mock_spawn.assert_called_once()
+
+
+def test_dispatch_one_end_to_end_closed_pr_with_merged_successor_still_rejects():
+    """UMR-20260814-125933-3377's real shape verbatim: veridian-scripts
+    PR#298, real, CLOSED, mergedAt=null, close comment naming real MERGED
+    successor #299. dispatch_one() must still reject this row (correctly,
+    for the real reason) -- proves the CLOSED-without-merge fix did not
+    regress this exact real incident into a false non-rejection."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        sbr = _schema_helpers()
+        _seed_scratch_db(scratch_db, sbr)
+        env = {"SUPERBOSS_REGISTER_DB": scratch_db, "VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR}
+        rg = _load_rg("rg_targetpr_e2e_superseded", env)
+        rg.EMERGENCY_STOP_PATH = os.path.join(d, "EMERGENCY_STOP_never_created")
+        rg.STOP_WORK_ORDER_TASK_IDS = ()
+
+        conn = _new_conn(scratch_db)
+        umr_id = sbr.upsert_umr_task(conn, {
+            "task_identity": "test-targetpr-superseded-298", "tier": 1, "status": "queued",
+            "source_trigger": "unit_test", "task_kind": "veridian_task_create",
+            "inputs": {"repo": "veridian-scripts",
+                       "title": "Merge real veridian-scripts PR#298 (outstanding gap, closed unmerged)",
+                       "prompt": "p"},
+            "reason": "queued",
+        })
+        conn.commit()
+        conn.close()
+
+        closed_pr = {"number": 298, "state": "CLOSED", "mergedAt": None,
+                     "closedAt": "2026-08-13T14:09:30Z",
+                     "url": "https://github.com/FChecklist/veridian-scripts/pull/298"}
+        comments_payload = {"body": "", "comments": [
+            {"body": "Superseded by #299, which now carries this PR's full content forward "
+                     "as a strict superset, verified byte-identical via diff."}]}
+        successor_pr = {"number": 299, "state": "MERGED",
+                         "mergedAt": "2026-08-13T18:49:15Z", "closedAt": "2026-08-13T18:49:15Z",
+                         "url": "https://github.com/FChecklist/veridian-scripts/pull/299"}
+        dc_mod = rg._dispatch_core()
+
+        def fake_run(cmd, **kwargs):
+            if "--json" in cmd and "body,comments" in cmd:
+                return _FakeCompletedProcess(0, json.dumps(comments_payload))
+            if "299" in cmd:
+                return _FakeCompletedProcess(0, json.dumps(successor_pr))
+            if "view" in cmd:
+                return _FakeCompletedProcess(0, json.dumps(closed_pr))
+            return _FakeCompletedProcess(0, json.dumps([]))
+
+        os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
+        try:
+            with mock.patch.object(dc_mod, "has_free_slot_detail", return_value=(True, {"check": "ok"})), \
+                 mock.patch.object(rg, "_run", side_effect=fake_run), \
+                 mock.patch.object(rg, "_perform_spawn") as mock_spawn:
+                result = rg.dispatch_one()
+        finally:
+            os.environ.pop("SUPERBOSS_REGISTER_DB", None)
+
+        assert result["action"] == "rejected_target_pr_already_resolved", result
+        mock_spawn.assert_not_called()
+
+        conn = _new_conn(scratch_db)
+        row = conn.execute(
+            "SELECT status, reason FROM umr_tasks WHERE umr_id=?", (umr_id,)).fetchone()
+        conn.close()
+        assert row["status"] == "rejected_duplicate", row["status"]
+        assert "299" in row["reason"], row["reason"]
 
 
 # ---------------------------------------------------------------------------

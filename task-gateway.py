@@ -627,6 +627,17 @@ def cmd_start(args):
             guidance=tight_result.get("guidance"),
             prompt_file=args.prompt_file,
         )
+    if tight_result.get("warnings"):
+        # Advisory only (2026-08-14 PR#376 AUDIT:FAIL correction) -- FILE_PATHS
+        # is not yet emitted by any real prompt generator, so a missing/invalid
+        # value here does not block dispatch, only gets logged for visibility.
+        # See tight_task_validation.py's module docstring for the tracked
+        # follow-up to flip this back to a hard failure once the generators
+        # are migrated.
+        print(json.dumps({
+            "tight_task_validation_warnings": tight_result.get("warnings"),
+            "prompt_file": args.prompt_file,
+        }, default=str), file=sys.stderr)
 
     # Real fix for a real 2026-07-26 incident (task-20260726-071400-migration-drift-
     # audit-and-reconciliation): its own dispatch prompt's SCOPE told a worker to call

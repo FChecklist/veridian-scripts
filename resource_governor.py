@@ -3301,7 +3301,20 @@ def _umr_cross_repo_pr_check(row_task_identity, row_umr_id, dispatched_repo, tit
     }
 
 
-_SUPERSEDED_BY_RE = re.compile(r"superseded by (?:[\w.\-]+/)?#?(\d+)", re.IGNORECASE)
+# Anchored to a sentence/line START (optionally after "this PR/pull request
+# is/was") rather than matching "superseded by #NNN" anywhere in the text --
+# PR#376 AUDIT:FAIL note: an unanchored match could false-hit an unrelated
+# comment that merely mentions another PR's supersession mid-sentence (e.g.
+# "...unrelated to PR #298, which was superseded by #150 in a different
+# discussion"), wrongly treating that unrelated PR#150 as *this* PR's real
+# successor. Real close comments (see the #298/#299 incident in
+# _closed_pr_superseded_by_merged_pr()'s docstring below) state this as its
+# own clause -- "Superseded by #299, ..." -- so anchoring to a line/sentence
+# start costs nothing against the real evidence while narrowing the match.
+_SUPERSEDED_BY_RE = re.compile(
+    r"(?:^|[.\n]\s*)(?:this (?:pr|pull request) (?:is|was) )?superseded by (?:[\w.\-]+/)?#?(\d+)",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def _closed_pr_superseded_by_merged_pr(repo, pr_number):

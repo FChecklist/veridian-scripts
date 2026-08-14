@@ -119,6 +119,17 @@ def check_tight_task_schema(task_dir):
         result = ttv.validate_tight_task(fields)
         if not result.get("valid"):
             fail("tight_task_schema_violation", f"{result.get('reason')} {result.get('guidance')}")
+        if result.get("warnings"):
+            # Advisory only (2026-08-14 PR#376 AUDIT:FAIL correction): FILE_PATHS
+            # is not yet emitted by any real prompt generator (phase-continuation-
+            # tick.py, task-gateway.py, prompt_gateway/gateway.py, zai_agent_loop.py,
+            # status-remediation-tick.py, veridian_remediation_dispatcher.py,
+            # veridian-task-watchdog.py, auto_phase_continuation.py), so a missing/
+            # invalid value here must not abort dispatch -- only logged. See
+            # tight_task_validation.py's module docstring for the tracked follow-up
+            # to migrate the generators and flip this back to a hard failure.
+            for w in result["warnings"]:
+                print(json.dumps({"warning": w.get("code"), "detail": w.get("reason")}), file=sys.stderr)
     except ImportError:
         return  # validator module unavailable -- fail open, don't block on infra issue
 

@@ -34,9 +34,9 @@ closes this: it requires at least one SUCCESS_CRITERIA line that looks like
 a real, runnable shell command, per the heuristic documented on that
 function.
 
-2026-08-14 addition (UMR-20260814-132703-a1f9): a required FILE_PATHS
-field -- check_file_paths() -- closing the gap where a task's Objective/
-Scope/Expected output can name "the module" or "the feature" without ever
+2026-08-14 addition (UMR-20260814-132703-a1f9): a FILE_PATHS field --
+check_file_paths() -- closing the gap where a task's Objective/Scope/
+Expected output can name "the module" or "the feature" without ever
 naming a real, concrete repo-relative file, leaving file identity for the
 model to guess exactly the way this validator already refuses to let
 Objective/Scope/etc. do. This is a real, local divergence from
@@ -44,6 +44,29 @@ src/lib/task-tightening.ts (this file's own source of truth per the PORT
 note above) -- src/lib/task-tightening.ts lives in a different repo not
 reachable from here; this addition is scripts-fleet-only until/unless the
 TS original is updated to match.
+
+2026-08-14 correction (same day, PR#376 AUDIT:FAIL, closed here): the
+FILE_PATHS check above was initially wired as a HARD failure inside
+validate_tight_task() -- returning valid:false the same as a missing
+Objective/Scope/etc. But unlike those fields, no real prompt generator
+emits a '## FILE_PATHS' section yet (task-gateway.py, prompt_gateway/
+gateway.py, zai_agent_loop.py, status-remediation-tick.py,
+veridian_remediation_dispatcher.py, veridian-task-watchdog.py,
+auto_phase_continuation.py, phase-continuation-tick.py's build_prompt()
+all build the same 6-7 header prompt with no FILE_PATHS section), and
+BOTH real enforcement points read this same validate_tight_task() --
+preflight-guard.py's check_tight_task_schema() (preflight, direct
+import) AND task-gateway.py's cmd_start() (submit-time, subprocess CLI
+call to this file's __main__). A hard failure here would have aborted
+every task those generators dispatch, fleet-wide, the moment this PR
+merged. check_file_paths() is therefore now ADVISORY ONLY: a missing/
+invalid FILE_PATHS section is surfaced via the `warnings` list on the
+result dict (see validate_tight_task()'s return value) instead of
+flipping `valid` to False. Follow-up (tracked, not done here): once each
+generator listed above is updated to emit a real '## FILE_PATHS'
+section, flip check_file_paths()'s result back into a hard failure in
+validate_tight_task() (revert this correction) so the field is actually
+enforced instead of merely logged.
 """
 import json
 import os
@@ -353,17 +376,25 @@ def _parse_file_paths(raw):
 
 
 def check_file_paths(value):
-    """Required `filePaths` field (UMR-20260814-132703-a1f9, real incident:
+    """`filePaths` field (UMR-20260814-132703-a1f9, real incident:
     UMR-20260814-125933-3377's own gap-finding work named a real file path
     -- pm-sentinel-tick.sh -- only in free-text prose, nowhere machine-
-    readable). Every tight task must name the real repo-relative path(s)
+    readable). Every tight task should name the real repo-relative path(s)
     its scope touches, the same "don't leave this for the model to guess"
     principle this module already applies to Objective/Scope/Success
     criteria/Expected output. Reuses check_field() (for the missing/too-
     short/placeholder-as-a-whole case) and is_placeholder() (per individual
     path) -- this module's own existing helpers, not a second, parallel
     validator. Returns None if valid, else a {valid:false, reason,
-    guidance} dict per this module's contract."""
+    guidance} dict per this module's contract.
+
+    ADVISORY ONLY (see the 2026-08-14 correction note in this module's
+    docstring): validate_tight_task() surfaces a non-None result from this
+    function as a `warnings` entry, not a hard failure -- no real prompt
+    generator emits '## FILE_PATHS' yet, so hard-failing here would abort
+    every task those generators dispatch. Do not call sys.exit/fail()
+    directly from this function; return the dict and let the caller decide
+    severity."""
     paths = _parse_file_paths(value)
     joined = ", ".join(paths)
     whole_field_failure = check_field(
@@ -405,9 +436,12 @@ def validate_tight_task(task):
     if output_failure:
         return output_failure
 
-    file_paths_failure = check_file_paths(task.get("filePaths"))
-    if file_paths_failure:
-        return file_paths_failure
+    # ADVISORY ONLY, not a hard failure -- see the 2026-08-14 correction note
+    # in this module's docstring. Collected here and attached to the final
+    # {"valid": True} result as `warnings` instead of short-circuiting the
+    # way every other check_field() failure above does, because no real
+    # prompt generator emits '## FILE_PATHS' yet.
+    file_paths_warning = check_file_paths(task.get("filePaths"))
 
     for label, key in [("Objective", "objective"), ("Scope", "scope"), ("Success criteria", "successCriteria"), ("Expected output", "expectedOutput")]:
         ambiguity = detect_ambiguous_language(task.get(key) or "")
@@ -446,7 +480,14 @@ def validate_tight_task(task):
     if runnable_command_failure:
         return runnable_command_failure
 
-    return {"valid": True}
+    result = {"valid": True}
+    if file_paths_warning:
+        result["warnings"] = [{
+            "code": "file_paths_missing_or_invalid",
+            "reason": file_paths_warning.get("reason"),
+            "guidance": file_paths_warning.get("guidance"),
+        }]
+    return result
 
 
 def parse_labeled_fields(prompt_text):

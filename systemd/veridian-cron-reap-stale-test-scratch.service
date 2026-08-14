@@ -1,0 +1,54 @@
+# =============================================================================
+# Version-controlled reference copy of a unit NOT YET installed under
+# ~/.config/systemd/user/ as of this PR -- same "no automated deploy step
+# for this directory" convention as every other file here (see
+# systemd/README.md): a human still has to copy this + the paired .timer to
+# ~/.config/systemd/user/ and run `systemctl --user daemon-reload &&
+# systemctl --user enable --now veridian-cron-reap-stale-test-scratch.timer`
+# after this merges.
+#
+# Root cause this fixes (UMR-20260814-033442-c885, P0 disk exhaustion): at
+# 03:16 UTC 2026-08-14, /dev/sda1 was 288G used / 96MB free (100% full) --
+# /tmp held 2996 entries totalling ~122GB, almost entirely leaked test-
+# harness scratch (pm_sentinel_tick_*, rule7-*-test-*, rg_queue_mgmt_test_*,
+# plus standalone superboss-register.sqlite copies), each one a full copy of
+# the ~3-4GB live register a test harness never cleaned up. EVERY
+# veridian-worker unit died at preflight (disk_low), all 17 running units
+# failed, resource_governor.py --query-umr returned count=0 for every real
+# status -- the whole AI OS halted. This PR fixes the actual leak at its
+# three real call sites (test_pm_sentinel_tick.py, tests/
+# test_rule7_completion_evidence.py, test_resource_governor_queue_management.py
+# -- see their own real diffs) AND stops the ~4GB-per-test-run root cause
+# (full sqlite3 binary backups replaced with schema-only clones). This unit
+# is the SECOND layer per the task spec's own explicit requirement ("a
+# startup/periodic reaper... so this can never silently halt the fleet
+# again"): a real backstop so a future test added without the same
+# discipline (or a process genuinely SIGKILLed mid-run, e.g. by an OOM-kill)
+# still cannot silently refill the disk unnoticed between individual fixes.
+#
+# Checked against the ~/.config/systemd/user/README.md closed-set STANDING
+# RULE first: this purpose (reaping stale /tmp TEST SCRATCH by literal
+# leak-signature prefix) does not genuinely fit any of the existing 19 units
+# -- the nearest analog, veridian-cron-prune-memory-backups, prunes a
+# different class of file (verified DB *backups* under ai-os/memory) for a
+# different reason (backup retention, not test-harness-leak cleanup) at a
+# different path (/opt/veridian/ai-os/memory, never /tmp). This is a new
+# addition to that closed set, authorized by this real P0 task's own
+# explicit spec item 4 ("Add a real guard so this can never silently halt
+# the fleet again: a startup/periodic reaper"). NOTE: the live
+# ~/.config/systemd/user/README.md count was last updated 2026-08-06
+# (claims 19); `systemctl --user list-timers 'veridian-*'` shows units not
+# reflected in that count (e.g. veridian-pm-sentinel-tick.timer,
+# veridian-cron-zoekt-reindex.timer) -- whoever deploys this unit should
+# also true up that README's real count, not just add another silent
+# addition on top of an already-stale one.
+# =============================================================================
+[Unit]
+Description=VERIDIAN cron-replacement: reap stale (>2h) leaked test-harness scratch under /tmp (UMR-20260814-033442-c885 P0 disk-exhaustion backstop)
+ConditionPathExists=!/opt/veridian/ai-os/locks/resource-governor-EMERGENCY_STOP
+
+[Service]
+Type=oneshot
+ExecStart=/opt/veridian/scripts/run-logged.sh "reap-stale-test-scratch" /usr/bin/python3 /opt/veridian/scripts/reap_stale_test_scratch.py
+StandardOutput=append:/opt/veridian/ai-os/logs/reap-stale-test-scratch-cron.log
+StandardError=append:/opt/veridian/ai-os/logs/reap-stale-test-scratch-cron.log

@@ -34,14 +34,61 @@ sys.modules["queue_mgmt_rg_test_rg_mod"] = rg
 _rg_spec.loader.exec_module(rg)
 
 
+def _schema_only_copy(dest_conn, src_conn):
+    """Real root-cause fix (UMR-20260814-033442-c885, P0 disk exhaustion):
+    this used to be `src.backup(dst)`, a full sqlite3 binary backup of the
+    ENTIRE live ~3-4GB superboss-register.sqlite, for every single test
+    invocation. Every real test in this file only ever reads back rows it
+    seeded itself via _seed() -- it never depends on the live DB's actual
+    row data -- so the fix is to clone the schema (every real
+    table/index/trigger/view definition from sqlite_master) with ZERO row
+    data copied, not to just clean up the 4GB copy after the fact.
+
+    Three passes -- virtual tables (which auto-create their OWN correct
+    shadow tables) first, then every other ordinary table, then
+    indexes/triggers/views last. See the identical helper in
+    test_pm_sentinel_tick.py's own _schema_only_copy for the full,
+    real, confirmed-live rationale: raw sqlite_master rowid order is NOT
+    reliable creation order for FTS5 shadow tables vs. their owning
+    virtual table on this DB, and a naive single-pass rowid-ordered copy
+    silently left `umr_tasks_fts` never actually created."""
+    rows = src_conn.execute(
+        "SELECT type, name, sql FROM sqlite_master "
+        "WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    is_virtual_table = lambda t, sql: t == "table" and sql.strip().upper().startswith("CREATE VIRTUAL TABLE")
+    for _type, _name, sql in rows:
+        if is_virtual_table(_type, sql):
+            dest_conn.execute(sql)
+    for _type, _name, sql in rows:
+        if _type == "table" and not is_virtual_table(_type, sql):
+            try:
+                dest_conn.execute(sql)
+            except sqlite3.OperationalError as e:
+                if "already exists" not in str(e):
+                    raise
+    for _type, _name, sql in rows:
+        if _type != "table":
+            try:
+                dest_conn.execute(sql)
+            except sqlite3.OperationalError as e:
+                if "already exists" not in str(e):
+                    raise
+
+
 class QueueManagementTest(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="rg_queue_mgmt_test_")
+        # UMR-20260814-033442-c885: registered BEFORE the schema copy below
+        # so this real scratch dir is still reclaimed even if that copy
+        # itself raises (e.g. disk full mid-copy) -- addCleanup runs even
+        # when setUp raises after this point; tearDown alone does not.
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
         self.copy_path = os.path.join(self.tmpdir, "superboss-register.sqlite")
         src = sqlite3.connect(f"file:{LIVE_DB}?mode=ro", uri=True)
         dst = sqlite3.connect(self.copy_path)
         with dst:
-            src.backup(dst)
+            _schema_only_copy(dst, src)
         src.close()
         dst.close()
 

@@ -75,9 +75,61 @@ LIVE_DB = "/opt/veridian/ai-os/memory/superboss-register.sqlite"
 REAL_DISPATCH_OWNER_TASK_SH = "/opt/veridian/scripts/dispatch-owner-task.sh"
 
 
+def _schema_only_copy(dest_conn, src_conn):
+    """Real root-cause fix (UMR-20260814-033442-c885, P0 disk exhaustion):
+    this used to be `src.backup(dst)`, a full sqlite3 binary backup of the
+    ENTIRE live ~3-4GB superboss-register.sqlite, for every single test
+    invocation. This test (like every caller of _seeded_copy below) only
+    ever reads back rows it seeded itself -- it never depends on the live
+    DB's actual row data -- so the fix is to clone the schema (every real
+    table/index/trigger/view definition from sqlite_master) with ZERO row
+    data copied, not to just clean up the 4GB copy after the fact.
+
+    Three passes, deliberately NOT just "tables then indexes/triggers" by
+    raw sqlite_master rowid order -- a real, confirmed-live bug: on this
+    DB's actual sqlite_master, FTS5 shadow-table rows (umr_tasks_fts_data/
+    _idx/_docsize/_config) have LOWER rowids than their own owning virtual
+    table's row (umr_tasks_fts) -- i.e. rowid is not reliable creation
+    order across schema migrations/rebuilds. Executing the shadow tables'
+    plain CREATE TABLE statements before the virtual table's own
+    CREATE VIRTUAL TABLE ran left real, empty, non-fts5-linked tables
+    sitting under those names; the virtual table's own subsequent create
+    then found them "already exists" (swallowed, matching the FTS5-normal
+    case) and silently never actually created -- leaving a real
+    'no such table: main.umr_tasks_fts' failure the first time any insert
+    trigger tried to use it. Fix: create every CREATE VIRTUAL TABLE first
+    (pass 1, which then auto-creates ITS OWN correct shadow tables), then
+    every other ordinary table (pass 2 -- any shadow-table row here is now
+    the expected, benign "already exists"), then indexes/triggers/views
+    last (pass 3, once every table definitely exists)."""
+    rows = src_conn.execute(
+        "SELECT type, name, sql FROM sqlite_master "
+        "WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    is_virtual_table = lambda t, sql: t == "table" and sql.strip().upper().startswith("CREATE VIRTUAL TABLE")
+    for _type, _name, sql in rows:
+        if is_virtual_table(_type, sql):
+            dest_conn.execute(sql)
+    for _type, _name, sql in rows:
+        if _type == "table" and not is_virtual_table(_type, sql):
+            try:
+                dest_conn.execute(sql)
+            except sqlite3.OperationalError as e:
+                if "already exists" not in str(e):
+                    raise
+    for _type, _name, sql in rows:
+        if _type != "table":
+            try:
+                dest_conn.execute(sql)
+            except sqlite3.OperationalError as e:
+                if "already exists" not in str(e):
+                    raise
+
+
 def _seeded_copy(tmpdir, rows):
-    """Real, isolated sqlite3 COPY of the live DB (backup API), with
-    umr_tasks/umr_tasks_fts/owner_priority_sequence wiped and replaced with
+    """Real, isolated, SCHEMA-ONLY clone of the live DB (see
+    _schema_only_copy above -- never a full binary copy of the live data),
+    with umr_tasks/umr_tasks_fts/owner_priority_sequence seeded with
     exactly `rows` (a list of (umr_id, task_identity, status, reason)
     tuples) -- deterministic, no real live rows leaking in and triggering
     unrelated real dispatches or `gh` network calls."""
@@ -85,7 +137,7 @@ def _seeded_copy(tmpdir, rows):
     src = sqlite3.connect(f"file:{LIVE_DB}?mode=ro", uri=True)
     dst = sqlite3.connect(copy_path)
     with dst:
-        src.backup(dst)
+        _schema_only_copy(dst, src)
     src.close()
     dst.close()
 
@@ -176,6 +228,7 @@ class PmSentinelTickKilledRowTest(unittest.TestCase):
         # above for why a fixed id would collide with a prior real test run.
         self.TEST_UMR_ID = f"UMR-TESTFIX-20260101-000000-{uuid.uuid4().hex[:8]}"
         self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_test_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)  # UMR-20260814-033442-c885: runs even if setUp raises after this line (e.g. disk-full mid-copy) -- tearDown alone does not
         self.copy_path = _seeded_copy(self.tmpdir, [
             (self.TEST_UMR_ID, "test-seed-killed-task-0001", "killed",
              "test-seeded: stuck-task SIGKILL, no exit after grace period"),
@@ -270,6 +323,7 @@ class PmSentinelTickFinancialEscalationTest(unittest.TestCase):
     def setUp(self):
         self.FINANCIAL_UMR_ID = f"UMR-TESTFIX-20260101-000000-{uuid.uuid4().hex[:8]}"
         self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_fin_test_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)  # UMR-20260814-033442-c885: runs even if setUp raises after this line (e.g. disk-full mid-copy) -- tearDown alone does not
         # Real recorded reason is a genuine financial matter (payment/
         # invoice/billing language) -- this is what dispatch_gap()'s
         # is_financial_decision() check must catch.
@@ -344,6 +398,7 @@ class PmSentinelTickDispatchFailurePropagatesTest(unittest.TestCase):
     def setUp(self):
         self.TEST_UMR_ID = f"UMR-TESTFIX-20260101-000000-{uuid.uuid4().hex[:8]}"
         self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_failure_test_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)  # UMR-20260814-033442-c885: runs even if setUp raises after this line (e.g. disk-full mid-copy) -- tearDown alone does not
         self.copy_path = _seeded_copy(self.tmpdir, [
             (self.TEST_UMR_ID, "test-seed-killed-task-failx1", "killed",
              "test-seeded: real failure-propagation regression case"),
@@ -432,6 +487,7 @@ class PmSentinelTickQueryOncePerTickTest(unittest.TestCase):
     def setUp(self):
         self.TEST_UMR_ID = f"UMR-TESTFIX-20260101-000000-{uuid.uuid4().hex[:8]}"
         self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_queryonce_test_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)  # UMR-20260814-033442-c885: runs even if setUp raises after this line (e.g. disk-full mid-copy) -- tearDown alone does not
         self.copy_path = _seeded_copy(self.tmpdir, [
             (self.TEST_UMR_ID, "test-seed-queryonce-task-0001", "killed",
              "test-seeded: query-once-per-tick overlap case (chain head + killed)"),
@@ -545,6 +601,7 @@ class PmSentinelTickDecideAndFixTest(unittest.TestCase):
         self.UMR_A = f"UMR-TESTFIX-20260101-000000-{uuid.uuid4().hex[:8]}"
         self.UMR_B = f"UMR-TESTFIX-20260101-000000-{uuid.uuid4().hex[:8]}"
         self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_decidefix_test_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)  # UMR-20260814-033442-c885: runs even if setUp raises after this line (e.g. disk-full mid-copy) -- tearDown alone does not
         self.copy_path = _seeded_copy(self.tmpdir, [
             (self.UMR_A, "test-seed-decidefix-task-a", "killed",
              "test-seeded: real independent gap A, needs real RCA"),
@@ -672,6 +729,7 @@ class PmSentinelTickRunningRowOrderIndependentParseTest(unittest.TestCase):
         self.UMR_SWAPPED_ACTIVE = f"UMR-TESTFIX-20260101-000000-{uuid.uuid4().hex[:8]}"
         self.UMR_SWAPPED_DEAD = f"UMR-TESTFIX-20260101-000000-{uuid.uuid4().hex[:8]}"
         self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_orderparse_test_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)  # UMR-20260814-033442-c885: runs even if setUp raises after this line (e.g. disk-full mid-copy) -- tearDown alone does not
 
         self.copy_path = _seeded_copy(self.tmpdir, [
             (self.UMR_NORMAL_ACTIVE, "test-seed-orderparse-normal-active", "running", ""),
@@ -778,6 +836,7 @@ class PmSentinelTickImpossibleActiveStateGuardTest(unittest.TestCase):
     def setUp(self):
         self.UMR_IMPOSSIBLE = f"UMR-TESTFIX-20260101-000000-{uuid.uuid4().hex[:8]}"
         self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_impossible_test_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)  # UMR-20260814-033442-c885: runs even if setUp raises after this line (e.g. disk-full mid-copy) -- tearDown alone does not
 
         self.copy_path = _seeded_copy(self.tmpdir, [
             (self.UMR_IMPOSSIBLE, "test-seed-impossible-activestate", "running", ""),
@@ -863,6 +922,7 @@ class PmSentinelTickDuplicateContentRefusalDoesNotFailTickTest(unittest.TestCase
     def setUp(self):
         self.TEST_UMR_ID = f"UMR-TESTFIX-20260101-000000-{uuid.uuid4().hex[:8]}"
         self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_duprefusal_test_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)  # UMR-20260814-033442-c885: runs even if setUp raises after this line (e.g. disk-full mid-copy) -- tearDown alone does not
         self.copy_path = _seeded_copy(self.tmpdir, [
             (self.TEST_UMR_ID, "test-seed-duprefusal-task-0001", "killed",
              "test-seeded: duplicate-content-refusal-does-not-fail-tick regression case"),
@@ -1009,6 +1069,7 @@ class PmSentinelTickLiveDeployDriftFoundTest(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_drift_found_test_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)  # UMR-20260814-033442-c885: runs even if setUp raises after this line (e.g. disk-full mid-copy) -- tearDown alone does not
         # Empty umr_tasks (no seeded rows) -- isolates this test to Check 0
         # only; Checks 1/2a/2b/3 all no-op on a real empty table.
         self.copy_path = _seeded_copy(self.tmpdir, [])
@@ -1075,6 +1136,7 @@ class PmSentinelTickLiveDeployDriftInSyncTest(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_drift_insync_test_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)  # UMR-20260814-033442-c885: runs even if setUp raises after this line (e.g. disk-full mid-copy) -- tearDown alone does not
         self.copy_path = _seeded_copy(self.tmpdir, [])
         self.live_dir = _local_drift_fixture(self.tmpdir, extra_origin_commit=False)
 

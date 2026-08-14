@@ -34,7 +34,13 @@ Two real commands:
          agent_id memory row, so its own history grows.
       2. umr_tasks, the real standard system of record -- via
          superboss-register.py's own mark-umr-terminal (never a raw SQL
-         UPDATE).
+         UPDATE). UMR-20260814-181115: a status=completed/completed_unmerged
+         claim is never written on self-report alone -- see
+         verify_real_completion_evidence() below, which independently
+         fetches a cited PR's real state/files from GitHub (or requires a
+         real files_touched list when no PR is cited) and downgrades an
+         unverified claim to status=unverified_self_report instead of
+         writing a false 'completed'.
       3. gtm_certification_categories, "where relevant" -- via
          gtm_write_category_result.py, the one canonical writer every real
          gtm_check_*.py script already calls (same subprocess convention,
@@ -65,6 +71,17 @@ import sys
 
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 GTM_WRITER = os.path.join(SCRIPTS, "gtm_write_category_result.py")
+
+# UMR-20260814-181115: real independent PR-state check for record-completion
+# (see verify_real_completion_evidence() below) reuses resource_governor.py's
+# own real `gh` subprocess plumbing (_run/GH_ORG/GH_PR_CHECK_TIMEOUT_SECONDS)
+# rather than re-deriving it -- same sys.path + plain-import convention
+# progress_completion_gate.py already established for pulling real, tested
+# primitives out of resource_governor.py (no hyphen in its filename, so a
+# plain `import` works, unlike superboss-register.py/ai_agent_registry.py
+# above which need the importlib.util loader for their hyphenated names).
+sys.path.insert(0, SCRIPTS)
+import resource_governor  # noqa: E402
 
 _sbr = None
 _air = None
@@ -246,12 +263,134 @@ def assemble_briefing(umr_id, scope_terms, intent_text):
     }
 
 
+def _fetch_real_pr_state(pr_number, repo):
+    """Real `gh pr view --json state,mergedAt,files` call -- the one real,
+    independent ground-truth fetch verify_real_completion_evidence() below
+    uses to check a worker's self-reported --umr-pr-number against GitHub
+    itself, instead of trusting the self-report at face value. Same
+    subprocess convention resource_governor.py's own
+    _real_pr_state_for_backfill()/_pr_changed_files_are_docs_only() already
+    use (gh pr view, GH_PR_CHECK_TIMEOUT_SECONDS, GH_ORG) -- reused directly
+    via `import resource_governor` above rather than re-derived here; not
+    those two functions themselves, because their existing fail-open/
+    fail-closed direction is tuned for their own callers (a duplicate-PR
+    guard that must fail toward "still blocking" on an unverifiable PR),
+    the opposite of what this module needs (an unverifiable PR must fail
+    toward "not accepted as real evidence").
+
+    Returns {"ok": False, "error": ...} (never raises) on any real
+    timeout/non-zero-exit/unparseable-output; a real {"ok": True, "state":
+    ..., "merged_at": ..., "files": [...]} otherwise."""
+    try:
+        r = resource_governor._run(
+            ["gh", "pr", "view", str(pr_number), "--repo",
+             f"{resource_governor.GH_ORG}/{repo}", "--json", "state,mergedAt,files"],
+            timeout=resource_governor.GH_PR_CHECK_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"gh pr view #{pr_number} timed out "
+                                       f"(>{resource_governor.GH_PR_CHECK_TIMEOUT_SECONDS}s)"}
+    if r.returncode != 0:
+        return {"ok": False, "error": (r.stderr or f"gh pr view #{pr_number} failed, "
+                                                     f"exit {r.returncode}").strip()}
+    try:
+        data = json.loads(r.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return {"ok": False, "error": f"unparseable `gh pr view #{pr_number}` output"}
+    files = [f.get("path") for f in (data.get("files") or []) if f.get("path")]
+    return {"ok": True, "state": data.get("state"), "merged_at": data.get("mergedAt"), "files": files}
+
+
+def verify_real_completion_evidence(status, pr_number, repo, files_touched):
+    """UMR-20260814-181115 real independent check, the actual fix this
+    task's SPEC asks for: a completion claim of status=completed/
+    completed_unmerged (a real "resolved/merged" claim) must never be
+    accepted purely on a worker's own self-report. Real, repeated finding
+    this session: several register rows recorded status=completed even
+    though the cited PR's real diff was docs-only (progress-notes only, no
+    real code), or cited no PR and no real file-touched list at all -- i.e.
+    zero independently-checkable evidence backing a "real work landed"
+    claim.
+
+    Real rule, checked in this order:
+      1. a cited pr_number is independently fetched from GitHub itself
+         (never trusted at face value, via _fetch_real_pr_state above) and
+         must have at least one real changed file outside documentation
+         (*.md) in its real diff;
+      2. with no PR cited, a real non-empty files_touched list (the
+         worker's own self-reported list of real files it touched --
+         record_completion() below folds --umr-file-path into this same
+         list, so that existing evidence path counts too) is required
+         instead, filtered the same non-docs-only (*.md) way as the PR path
+         above -- a self-report citing only a progress-notes file is the
+         exact same loophole as a docs-only PR and is refused the same way;
+      3. neither present -> refused. Never inferred/guessed from entry_text
+         prose -- only real, structured evidence counts.
+
+    Returns {"verified": bool, "checked": bool, "reason": str, ...}. Never
+    raises. status values other than completed/completed_unmerged (failed,
+    killed) always pass through unchecked -- this gate only ever concerns
+    the "real work landed" claim, same scoping
+    validate_umr_terminal_completion_evidence() in superboss-register.py
+    already uses for its own (narrower: existence-only, not docs-only-
+    aware) evidence gate. A `gh` error/timeout/malformed response is
+    treated as NOT verified -- an unverifiable claim must never silently
+    count as real evidence."""
+    if status not in ("completed", "completed_unmerged"):
+        return {"verified": True, "checked": False,
+                "reason": f"status={status!r} is not a resolved/merged claim -- independent "
+                          "PR/file check does not apply"}
+
+    if pr_number is not None:
+        if not repo:
+            return {"verified": False, "checked": True,
+                    "reason": f"PR #{pr_number} cited but no --umr-repo given -- cannot "
+                              "independently verify which repo to check"}
+        pr_state = _fetch_real_pr_state(pr_number, repo)
+        if not pr_state.get("ok"):
+            return {"verified": False, "checked": True,
+                    "reason": f"could not independently verify {repo}#{pr_number} against "
+                              f"GitHub: {pr_state.get('error', 'unknown gh error')} -- an "
+                              "unverifiable PR citation is never accepted as real evidence",
+                    "pr_state": pr_state}
+        files = pr_state.get("files") or []
+        non_docs_files = [f for f in files if not str(f).lower().endswith(".md")]
+        if not non_docs_files:
+            return {"verified": False, "checked": True,
+                    "reason": f"{repo}#{pr_number}'s real diff has {len(files)} file(s), none "
+                              "outside documentation (*.md) -- a docs-only PR can never confirm "
+                              "real completed work",
+                    "pr_state": pr_state}
+        return {"verified": True, "checked": True,
+                "reason": f"{repo}#{pr_number} independently confirmed via GitHub: "
+                          f"{len(non_docs_files)} non-docs-only file(s) in its real diff "
+                          f"(state={pr_state.get('state')}, merged_at={pr_state.get('merged_at')})",
+                "pr_state": pr_state}
+
+    touched = [f for f in (files_touched or []) if f]
+    non_docs_touched = [f for f in touched if not str(f).lower().endswith(".md")]
+    if non_docs_touched:
+        return {"verified": True, "checked": True,
+                "reason": f"no PR cited; a real non-empty, non-docs-only file-touched list was "
+                          f"supplied ({len(non_docs_touched)} file(s))"}
+    if touched:
+        return {"verified": False, "checked": True,
+                "reason": f"no PR cited and the {len(touched)} file(s) self-reported as touched "
+                          "are all documentation (*.md) -- the same docs-only loophole as a "
+                          "docs-only PR, refused the same way"}
+
+    return {"verified": False, "checked": True,
+            "reason": "no PR number cited and no real file-touched list supplied -- a "
+                      f"status={status!r} claim with zero independently-checkable evidence "
+                      "is refused"}
+
+
 def record_completion(umr_id, entry_text, role_label, umr_status, umr_reason,
                        gtm_category_index, gtm_result, gtm_script_path,
                        gtm_evidence_summary, gtm_evidence_json, gtm_fix_commit,
                        gtm_fix_file_path, gtm_fix_pr_number, new_entity_record_file,
                        umr_commit_sha=None, umr_file_path=None, umr_pr_number=None,
-                       umr_repo=None, umr_repo_root=None):
+                       umr_repo=None, umr_repo_root=None, files_touched=None):
     """The real canonical write-back. Every write funnels through an
     existing, already-tested writer -- this function never issues a raw
     INSERT/UPDATE against umr_tasks or gtm_certification_categories itself,
@@ -273,15 +412,46 @@ def record_completion(umr_id, entry_text, role_label, umr_status, umr_reason,
     #    status=completed/completed_unmerged, plus repo/repo_root to resolve and
     #    verify that evidence -- this call must supply the same Namespace fields
     #    superboss-register.py's own mark-umr-terminal CLI would.
+    #
+    #    UMR-20260814-181115 real fix, the actual work item this task's SPEC
+    #    is for: mark_umr_terminal's own gate (validate_umr_terminal_completion_evidence)
+    #    only checks that a cited commit/file *exists*, never whether the real
+    #    diff behind it is docs-only or whether a cited PR number is even a
+    #    real PR -- verify_real_completion_evidence() above is the real,
+    #    independent check that closes that gap, and runs BEFORE
+    #    mark-umr-terminal is ever called. A claim that fails it is never
+    #    silently accepted as completed/completed_unmerged: umr_tasks is left
+    #    untouched (its real prior status, never a false 'completed') and the
+    #    write-back result is explicitly labeled "unverified_self_report" so
+    #    the next reader (a PM tier, an audit sweep) sees exactly why this
+    #    wasn't recorded as real, verified completion.
     if umr_status:
-        result["umr_tasks"] = _capture_json(
-            sbr.cmd_mark_umr_terminal,
-            argparse.Namespace(
-                umr_id=umr_id, status=umr_status, reason=umr_reason,
-                commit_sha=umr_commit_sha, file_path=umr_file_path,
-                pr_number=umr_pr_number, repo=umr_repo, repo_root=umr_repo_root,
-            ),
-        )
+        # --umr-file-path is itself real, self-reported "a file I touched"
+        # evidence -- folded into the same files_touched list
+        # verify_real_completion_evidence() checks, so a caller using only
+        # the pre-existing --umr-file-path evidence path (never --files-touched)
+        # is not spuriously downgraded.
+        effective_files_touched = list(files_touched or [])
+        if umr_file_path:
+            effective_files_touched.append(umr_file_path)
+        verification = verify_real_completion_evidence(umr_status, umr_pr_number, umr_repo, effective_files_touched)
+        result["completion_verification"] = verification
+        if verification["verified"]:
+            result["umr_tasks"] = _capture_json(
+                sbr.cmd_mark_umr_terminal,
+                argparse.Namespace(
+                    umr_id=umr_id, status=umr_status, reason=umr_reason,
+                    commit_sha=umr_commit_sha, file_path=umr_file_path,
+                    pr_number=umr_pr_number, repo=umr_repo, repo_root=umr_repo_root,
+                ),
+            )
+        else:
+            result["umr_tasks"] = {
+                "written": False,
+                "status": "unverified_self_report",
+                "claimed_status": umr_status,
+                "reason": verification["reason"],
+            }
 
     # 3. gtm_certification_categories -- "where relevant" only: a real
     #    --gtm-category-index must be given, never called unconditionally.
@@ -350,7 +520,7 @@ def cmd_record_completion(args):
         args.gtm_fix_file_path, args.gtm_fix_pr_number, args.new_entity_record_file,
         umr_commit_sha=args.umr_commit_sha, umr_file_path=args.umr_file_path,
         umr_pr_number=args.umr_pr_number, umr_repo=args.umr_repo,
-        umr_repo_root=args.umr_repo_root,
+        umr_repo_root=args.umr_repo_root, files_touched=args.files_touched,
     )
     print(json.dumps(result, indent=2, default=str))
 
@@ -392,6 +562,12 @@ def build_parser():
     r.add_argument("--umr-repo-root", dest="umr_repo_root", default=None,
                     help="local checkout used to verify --umr-commit-sha; defaults to the standard "
                          "path for --umr-repo (see DEFAULT_OCID_RESOLVER_REPO_LOCAL_PATHS)")
+    r.add_argument("--files-touched", dest="files_touched", action="append", default=None,
+                    help="a real file path this worker's own self-report claims it touched -- "
+                         "repeatable; required independent evidence for --umr-status "
+                         "completed/completed_unmerged when no --umr-pr-number is cited (see "
+                         "verify_real_completion_evidence) -- omitting both gets the claim "
+                         "downgraded to status=unverified_self_report rather than accepted")
     r.add_argument("--gtm-category-index", dest="gtm_category_index", type=int, default=None,
                     help="omit unless this real work actually maps to a gtm_certification_categories row")
     r.add_argument("--gtm-result", dest="gtm_result", default=None, choices=["pass", "fail", "blocked"])

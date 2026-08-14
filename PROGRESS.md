@@ -1,4 +1,4 @@
-# PROGRESS -- task-20260814-172611-fix-duplicate-pr-guard--a-matched-pr-wit
+# PROGRESS -- task-20260814-181115-verify-real-pr-state-before-recording-a
 
 ## Completed
 

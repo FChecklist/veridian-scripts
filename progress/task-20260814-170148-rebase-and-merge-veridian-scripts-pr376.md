@@ -9,8 +9,12 @@
 - [x] Ran the broader `resource_governor.py` test suite post-rebase (`test_resource_governor_queue_management.py`, `test_resource_governor_owner_priority_advance.py`, `test_resource_governor_telemetry_retention.py`, `tests/test_resource_governor_stuck_task_scope.py`) to confirm the rebase didn't regress adjacent behavior -- see result below.
 - [x] Self-certify basis: this is a pure mechanical rebase (one-line whitespace/header resolution in a legacy scratch file with no code semantics) with no behavior change to any of PR#376's real code -- no fresh audit required per the existing self-certify escape clause.
 
+- [x] Confirmed live via `task.yaml` that this task's own assigned branch is `worker/task-20260814-170148-rebase-and-merge-veridian-scripts-pr376` (its own fresh worker branch), not PR#376's branch -- so per the PR374->PR377 precedent, opened a successor PR (#379) from that branch instead of attempting a direct push to #376's branch (which the worker-branch-enforcement hook, PR#375, would fail-closed block).
+- [x] Pushed rebased commits to `worker/task-20260814-170148-rebase-and-merge-veridian-scripts-pr376`, opened PR #379 ("...(rebase of #376)") citing #376 as superseded, `mergeable=MERGEABLE`/`mergeStateStatus=CLEAN`.
+- [x] Merged PR #379 (`gh pr merge 379 --merge`) -- `origin/main` now at `85df9c0`, confirmed to include the merge commit.
+- [x] Closed PR #376 with a pointer comment to #379 (`gh pr comment 376` + `gh pr close 376`) -- state is `CLOSED`.
+
+- [x] `record-completion` write-back to UMR-20260814-170119-7a8a via `agent_work_briefing.py` -- done.
+
 ## Remaining
-- [ ] Push rebased commits (either directly to PR#376's branch, or -- if the worker-branch-enforcement hook fail-closed blocks pushing to a branch that isn't this worker's own -- open a successor PR from `worker/task-20260814-170148-rebase-and-merge-veridian-scripts-pr376`, citing PR#376 as superseded, per the PR374->PR377 precedent).
-- [ ] Merge (directly or via successor PR).
-- [ ] Close/annotate PR#376 if superseded by a new PR.
-- [ ] `record-completion` write-back to UMR-20260814-170119-7a8a via `agent_work_briefing.py`.
+(none -- task complete)

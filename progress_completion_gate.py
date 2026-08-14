@@ -100,12 +100,55 @@ _PROGRESS_ARTIFACT_RES = (
 # workspace is still caught by FILENAME_RE's path-prefixed form, so this is
 # a narrowing of one specific false-positive-prone signal, not a removal of
 # real coverage.
-_BOILERPLATE_TOOL_NAME_EXCLUDED = {"resource_governor.py", "superboss-register.py"}
+_BOILERPLATE_TOOL_NAME_EXCLUDED = {
+    "resource_governor.py", "superboss-register.py",
+    # 2026-08-14 (UMR-20260814-051532-2ae4): same false-positive class as
+    # the two above, caught live by this exact recurring task type
+    # ("reconcile live deploy drift") -- pm-sentinel-tick.sh's own RCA/
+    # dispatch template for this task cites check_live_scripts_drift.py by
+    # name as "the tool to run first" and sync-repos.sh by name as "the
+    # script whose dirty/non-main-skip behavior to read" in essentially
+    # every dispatch of this task, the same standing-CLI-tool-citation
+    # pattern as resource_governor.py/superboss-register.py above -- not a
+    # distinguishing objective inside the task's own --workspace repo. A
+    # task that genuinely targets either file's own code is still caught by
+    # FILENAME_RE's path-prefixed form (e.g. "scripts/sync-repos.sh").
+    "check_live_scripts_drift.py", "sync-repos.sh",
+}
 
 
 def is_progress_artifact(path):
     base = path.rsplit("/", 1)[-1]
     return any(p.match(path) or p.match(base) for p in _PROGRESS_ARTIFACT_RES)
+
+
+# 2026-08-14 (UMR-20260814-051532-2ae4): a THIRD instance of the same
+# false-positive class as _BOILERPLATE_TOOL_NAME_EXCLUDED above, this time
+# for check_live_scripts_drift.py's own real output format. Its "N real
+# tracked file(s) differ: a.py, b.py, ..." line (quoted verbatim into
+# essentially every "reconcile live deploy drift" dispatch prompt) lists
+# filenames that DIFFER BETWEEN TWO GIT REFS -- i.e. real evidence of what
+# the drift check found, not an instruction to edit those files inside
+# *this* task's own --workspace repo. This task's own real completion
+# shape proved it: the fix for two of those cited files (resource_governor.py
+# + a companion test file) had already landed via a separate, already-
+# merged PR; the real reconciliation action was merging that PR and
+# fast-forwarding the live checkout, never editing those files inside this
+# workspace. A filename cited ONLY inside such an evidence list, and
+# nowhere else in the prompt, is not a real, distinguishing objective the
+# way a path-prefixed mention outside the list still is.
+_EVIDENCE_LIST_RE = re.compile(
+    r"\d+\s+real\s+tracked\s+file\(s\)\s+differ:\s*(?P<list>[^\n]*?)"
+    r"(?:\.(?:\s|$)|\n|$)",
+    re.IGNORECASE,
+)
+
+
+def _evidence_list_spans(text):
+    """Character spans of filename lists following a real
+    check_live_scripts_drift.py-style "N real tracked file(s) differ:"
+    citation -- see _EVIDENCE_LIST_RE's own comment."""
+    return [m.span("list") for m in _EVIDENCE_LIST_RE.finditer(text or "")]
 
 
 def extract_named_code_files(text):
@@ -118,13 +161,33 @@ def extract_named_code_files(text):
     also excluded -- see that set's own comment. A path-prefixed mention
     (e.g. "scripts/resource_governor.py") is NOT excluded: that is a real,
     distinguishing reference to the file's own code, not a generic
-    boilerplate tool citation."""
+    boilerplate tool citation.
+
+    A filename that appears ONLY inside a check_live_scripts_drift.py-style
+    "N real tracked file(s) differ: ..." evidence list, and nowhere else in
+    the text, is also excluded -- see _EVIDENCE_LIST_RE's own comment. If
+    the same filename is also named elsewhere (outside any evidence list),
+    it is still a real objective and is kept."""
+    text = text or ""
+    evidence_spans = _evidence_list_spans(text)
+    all_matches = list(FILENAME_RE.finditer(text))
+    outside_evidence = {
+        m.group(0) for m in all_matches
+        if not any(lo <= m.start() and m.end() <= hi for lo, hi in evidence_spans)
+    }
+
     seen = []
-    for m in FILENAME_RE.finditer(text or ""):
+    for m in all_matches:
         candidate = m.group(0)
         if is_progress_artifact(candidate):
             continue
         if candidate in _BOILERPLATE_TOOL_NAME_EXCLUDED:
+            continue
+        in_evidence_only = (
+            any(lo <= m.start() and m.end() <= hi for lo, hi in evidence_spans)
+            and candidate not in outside_evidence
+        )
+        if in_evidence_only:
             continue
         if candidate not in seen:
             seen.append(candidate)

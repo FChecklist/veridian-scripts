@@ -60,6 +60,38 @@ def check_drift(live_dir=DEFAULT_LIVE_DIR):
     else:
         result["on_main_branch"] = True
 
+    # 2026-08-14 (UMR-20260814-051532-2ae4, this task's own real
+    # reconciliation): every prior "reconcile live deploy drift" task
+    # (013835, 021553, this one) had to manually re-derive the same two
+    # safety facts every time before it was safe to touch the checkout --
+    # (a) is the tracked tree actually dirty (sync-repos.sh's own guard
+    # only checks this, never surfaced here), and (b) if on a non-main
+    # branch, would switching away from it LOSE anything real, i.e. is
+    # local HEAD already fully pushed to its own origin remote-tracking
+    # branch. Surfacing both as real, checked facts here removes that
+    # repeated manual archaeology (git status + git reflog + git ls-remote)
+    # from every future occurrence of this same recurring task. Neither
+    # field is a "safe to auto-reconcile" verdict by itself -- a pushed,
+    # clean, non-main branch can still carry genuinely in-flight work with
+    # an open, unmerged PR (see this task's own progress file) -- that
+    # judgment call still requires checking whether the branch's real
+    # commits have actually landed (merged PR / already on origin/main),
+    # not just whether they're pushed.
+    dirty = run(["git", "diff", "--quiet"], cwd=live_dir)
+    dirty_cached = run(["git", "diff", "--cached", "--quiet"], cwd=live_dir)
+    result["tracked_tree_clean"] = dirty.returncode == 0 and dirty_cached.returncode == 0
+
+    result["branch_pushed_to_origin"] = None
+    if result["current_branch"]:
+        upstream_head = run(
+            ["git", "rev-parse", f"origin/{result['current_branch']}"], cwd=live_dir)
+        if upstream_head.returncode == 0:
+            local_head = run(["git", "rev-parse", "HEAD"], cwd=live_dir)
+            result["branch_pushed_to_origin"] = (
+                local_head.returncode == 0
+                and local_head.stdout.strip() == upstream_head.stdout.strip()
+            )
+
     live_head = head.stdout.strip()
     origin_head = origin_main.stdout.strip()
     result["live_head"] = live_head

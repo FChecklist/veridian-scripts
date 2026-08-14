@@ -6637,7 +6637,7 @@ def _umr_row_to_dict(row):
 
 
 def query_umr_tasks(conn, limit=20, status=None, tier=None, task_identity=None, query_text=None,
-                     umr_id=None, full=False):
+                     umr_id=None, full=False, exclude_rca_complete=False):
     """Real search over umr_tasks -- exact umr_id match first (umr_id is the
     real PRIMARY KEY, so this can only ever return the one row it names or
     nothing -- real fix, UMR-20260813-042207: --query-umr --umr-id X
@@ -6662,7 +6662,27 @@ def query_umr_tasks(conn, limit=20, status=None, tier=None, task_identity=None, 
     full=True). Getting this wrong is silent, not an error -- the excluded
     columns just come back as missing keys -- so any new caller that reads
     inputs_json/outputs_json/metadata_json/metric_snapshot_json off these
-    rows MUST pass full=True."""
+    rows MUST pass full=True.
+
+    `exclude_rca_complete` (real fix, UMR-20260814-013850-fd7f -- RCA of
+    UMR-20260813-060311-6eea): pm-sentinel-tick.sh's Check 2a scans
+    `--status killed --limit 15` every tick and dispatches a fresh RCA gap
+    for EVERY row it gets back, with no check for whether a prior RCA
+    already ran and wrote a real, evidenced verdict back into that row's
+    own `reason` (the established convention across every RCA task in this
+    codebase is a reason string starting literally with "RCA (UMR-...)" --
+    see mark-umr-terminal call sites and e.g. this exact row's own reason
+    after UMR-20260813-091810-5045 corrected it). Once dispatch-owner-task.sh's
+    own 6h content-duplicate window lapses, the identical already-resolved
+    row resurfaces and gets re-dispatched again, forever -- the exact
+    "Killed-RCA mislabel series" recurring-churn pattern. Only applies to
+    the plain-listing (no umr_id/task_identity/query_text) path -- those are
+    exact-match/search lookups where a caller asking for one specific row by
+    ID has no use for this filter, and filtering post-query there could make
+    an intentional exact match vanish. False positives are possible (a
+    legitimate non-RCA reason that happens to start with "RCA (") but this
+    is a scoped opt-in filter a caller must explicitly request, not a
+    default -- direct --umr-id lookups are completely unaffected."""
     limit = min(int(limit), MAX_UMR_QUERY_LIMIT) if limit else limit
     cols = _umr_select_columns(full)
     if umr_id:
@@ -6697,6 +6717,8 @@ def query_umr_tasks(conn, limit=20, status=None, tier=None, task_identity=None, 
         if tier is not None:
             clauses.append("tier=?")
             params.append(tier)
+        if exclude_rca_complete:
+            clauses.append("(reason IS NULL OR reason NOT LIKE 'RCA (%')")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(limit)
         # Real fix (UMR-20260813-125756-9221, see

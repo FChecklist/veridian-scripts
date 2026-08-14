@@ -303,6 +303,28 @@ GH_PR_CHECK_REPOS = tuple(
 )
 GH_PR_CHECK_TIMEOUT_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_GH_PR_CHECK_TIMEOUT_S", "8"))
 
+# UMR-20260814-092508-8a6b real fix: real incident, 2026-08-14 -- a
+# governance/integration UMR's real deliverable PR landed in the
+# veridian-scripts repo, but was dispatched against and tracked under
+# claude-control. Because GH_PR_CHECK_REPOS above (the narrower, 4-repo
+# duplicate-PR-guard scope) is deliberately NOT the full set of repos this
+# org actually uses, no code path anywhere ever looked in veridian-scripts
+# for that UMR's PR -- multiple rounds of a PM tier wrongly concluded the
+# real claude-control PR was fake/orphaned before a human caught it by
+# manually checking veridian-scripts by hand, wasting significant real
+# investigation time. ALL_KNOWN_REPOS is the full, real list (every repo
+# this org's `gh` org actually has, not a task-scoped subset) --
+# find_real_pr_across_repos() below defaults to searching all of it so this
+# class of "real work migrated repos mid-lifecycle, register never recorded
+# it" confusion cannot recur silently. Env-var override preserved for the
+# same reason GH_PR_CHECK_REPOS has one (tests / future repos).
+ALL_KNOWN_REPOS = tuple(
+    r.strip() for r in os.environ.get(
+        "VERIDIAN_GOVERNOR_ALL_KNOWN_REPOS",
+        "compliance-tracker,claude-control,veridian-scripts,projexa,"
+        "veda-advisors,global-revenue-engine,veridian-brain,sumeet-spec").split(",") if r.strip()
+)
+
 # Real issue #980 (UMR_5767_ISSUE_RESOLUTION_MATRIX.json, governed by
 # UMR-20260806-171945-5767 / UMR-20260807-161418-a63f): a standing Owner
 # stop-work order is only a real, deterministic gate if it lives in code, not
@@ -3029,6 +3051,110 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
     return None, None
 
 
+def find_real_pr_across_repos(query_text, known_repos=None):
+    """UMR-20260814-092508-8a6b real fix: reusable cross-repo PR lookup,
+    built to close the real 2026-08-14 incident recorded on
+    ALL_KNOWN_REPOS's own comment above -- a governance/integration UMR's
+    real deliverable PR landed in veridian-scripts but was dispatched
+    against and tracked under claude-control, and no existing lookup path
+    (find_pr_for_task_identity() above is scoped to GH_PR_CHECK_REPOS, a
+    narrower 4-repo duplicate-guard set, and only ever returns the FIRST
+    match it finds) ever looked in the repo the real work actually landed
+    in. Multiple PM-tier rounds wrongly concluded the real PR was
+    fake/orphaned before a human caught it by manually checking
+    veridian-scripts by hand.
+
+    Searches EVERY repo in `known_repos` (default ALL_KNOWN_REPOS -- all 8
+    real repos this org uses, not the narrower GH_PR_CHECK_REPOS scope) via
+    a real `gh pr list --search <query_text>` call per repo, and returns
+    EVERY real match found across ALL of them -- never just the first hit
+    in the first repo searched, unlike find_pr_for_task_identity() above,
+    which is deliberately first-match-wins for its own (different) duplicate-
+    dispatch-guard purpose. Each repo is checked independently: one repo's
+    `gh` call timing out or erroring only drops that repo's own results
+    (logged to ATTENTION.md) -- it never hides real matches already found in
+    the other repos, same fail-open-per-repo shape as
+    find_pr_for_task_identity()'s branch-based checks.
+
+    Returns a list of {"repo": str, "number": int, "title": str, "state":
+    str, "mergedAt": str|None} dicts, one per real match, in the same order
+    as `known_repos` -- [] if `query_text` is falsy or no repo returned a
+    real match (including if every repo's `gh` call failed)."""
+    if not query_text:
+        return []
+    repos = list(known_repos) if known_repos is not None else list(ALL_KNOWN_REPOS)
+    matches = []
+    for repo in repos:
+        try:
+            r = _run(
+                ["gh", "pr", "list", "--search", query_text, "--repo", f"{GH_ORG}/{repo}",
+                 "--state", "all", "--json", "number,title,state,mergedAt", "--limit", "20"],
+                timeout=GH_PR_CHECK_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            _append_attention(
+                f"WARNING: find_real_pr_across_repos() timed out searching {GH_ORG}/{repo} for "
+                f"query_text={query_text!r} (>{GH_PR_CHECK_TIMEOUT_SECONDS}s) -- skipping this repo "
+                f"only, continuing the cross-repo search against the rest (fail open per-repo)."
+            )
+            continue
+        if r.returncode != 0:
+            continue  # fail open on any gh error (auth hiccup, rate limit, repo doesn't exist, ...)
+        try:
+            prs = json.loads(r.stdout)
+        except (json.JSONDecodeError, ValueError):
+            prs = []
+        for pr in prs:
+            matches.append({
+                "repo": repo,
+                "number": pr.get("number"),
+                "title": pr.get("title"),
+                "state": pr.get("state"),
+                "mergedAt": pr.get("mergedAt"),
+            })
+    return matches
+
+
+def _umr_cross_repo_pr_check(row_task_identity, row_umr_id, dispatched_repo, title=None):
+    """UMR-20260814-092508-8a6b real fix: the closure-checklist / --query-umr
+    reporting path (resource_governor.py's `--query-umr --umr-id ...`) used
+    to report only the raw umr_tasks row -- no PR-existence signal at all --
+    leaving a caller (e.g. a PM tier manually checking "does this UMR have a
+    real PR yet") to search GitHub by hand, exactly the real 2026-08-14
+    incident ALL_KNOWN_REPOS's own comment records: a UMR's real deliverable
+    PR landed in a DIFFERENT repo than the one it was dispatched against,
+    and nothing automatically looked there.
+
+    Checks the row's own originally-dispatched repo FIRST (`dispatched_repo`
+    -- the same inputs_json['repo'] field find_pr_for_task_identity() already
+    uses as hint_repo at real dispatch time, see dispatch_one()'s Stage
+    4/5/6 call site). Only when that repo has NO real match does this fall
+    through to find_real_pr_across_repos() against the other repos in
+    ALL_KNOWN_REPOS -- automatic, default behavior wired into --query-umr's
+    normal response, never an opt-in flag, per this UMR's own SPEC.
+
+    Returns a dict recording both what was searched and what was found, so
+    a caller can see the cross-repo fallback ran rather than having to guess
+    whether "not found" meant "checked everywhere" or "checked one repo"."""
+    query_text = title or row_task_identity or row_umr_id
+    dispatched_matches = (
+        find_real_pr_across_repos(query_text, known_repos=[dispatched_repo])
+        if dispatched_repo else []
+    )
+    other_repos = [r for r in ALL_KNOWN_REPOS if r != dispatched_repo]
+    checked_other_repos = not dispatched_matches
+    other_matches = find_real_pr_across_repos(query_text, known_repos=other_repos) if checked_other_repos else []
+    return {
+        "query_text": query_text,
+        "dispatched_repo": dispatched_repo,
+        "dispatched_repo_matches": dispatched_matches,
+        "checked_other_repos": checked_other_repos,
+        "other_repos_checked": other_repos if checked_other_repos else [],
+        "other_repo_matches": other_matches,
+        "found_in_different_repo_than_dispatched": bool(other_matches),
+    }
+
+
 def target_pr_already_resolved(title, hint_repo=None):
     """UMR-20260813-135626 (reconcile-stale-queued-rows-whose-target,
     addendum to P1 UMR-20260806-171945-5767): real, dispatch-time re-check
@@ -5221,6 +5347,14 @@ def main():
                           "real use, since task-gateway.py has no other task_kind")
     ap.add_argument("--title", default=None)
     ap.add_argument("--umr-id", dest="umr_id", default=None)
+    ap.add_argument("--find-real-pr", dest="find_real_pr", default=None,
+                     help="UMR-20260814-092508-8a6b: real cross-repo PR lookup -- "
+                          "find_real_pr_across_repos(query_text) against ALL_KNOWN_REPOS (all 8 real "
+                          "repos this org uses, default), or --find-real-pr-repos to scope it. Prints "
+                          "every real match found across every repo searched, not just the first -- "
+                          "the standalone CLI entrypoint scripts/find-real-pr.sh wraps this flag.")
+    ap.add_argument("--find-real-pr-repos", dest="find_real_pr_repos", default=None,
+                     help="comma-separated repo list for --find-real-pr (default: ALL_KNOWN_REPOS)")
     ap.add_argument("--list-queue", dest="list_queue", action="store_true",
                      help="UMR-20260807-150524-a683 (real redispatch): list umr_tasks rows in "
                           "--status (default 'queued') in real dispatch order, up to --limit")
@@ -5287,6 +5421,20 @@ def main():
         print(json.dumps({"blocked": False, "check": None, "detail": None}))
         return
 
+    if args.find_real_pr:
+        repos = (
+            [r.strip() for r in args.find_real_pr_repos.split(",") if r.strip()]
+            if args.find_real_pr_repos else None
+        )
+        matches = find_real_pr_across_repos(args.find_real_pr, known_repos=repos)
+        print(json.dumps({
+            "query_text": args.find_real_pr,
+            "repos_searched": repos if repos is not None else list(ALL_KNOWN_REPOS),
+            "count": len(matches),
+            "matches": matches,
+        }, indent=2, default=str))
+        return
+
     if args.query_umr:
         # Real fix (independent review round 2, PR #20): see
         # _safe_superboss_register()'s own docstring. A broken/unavailable
@@ -5302,6 +5450,30 @@ def main():
                                     task_identity=args.task_identity, query_text=args.search,
                                     umr_id=args.umr_id, full=args.full,
                                     exclude_rca_complete=args.exclude_rca_complete)
+        # UMR-20260814-092508-8a6b real fix: for an exact single-row lookup
+        # (--umr-id, the real "closure checklist" shape a PM tier actually
+        # uses to ask "does this UMR have a real PR yet") this used to report
+        # only the raw row -- no PR-existence signal at all. Real incident,
+        # 2026-08-14: a UMR's real deliverable PR landed in veridian-scripts
+        # but was dispatched/tracked under claude-control; nothing here ever
+        # looked past the one dispatched repo, and multiple PM-tier rounds
+        # wrongly concluded the real PR was fake/orphaned. Automatically
+        # check the row's own originally-dispatched repo first, then fall
+        # through to the other ALL_KNOWN_REPOS repos when that repo has no
+        # match -- default behavior, no opt-in flag, per this UMR's SPEC.
+        cross_repo_pr_check = None
+        if args.umr_id and len(rows) == 1:
+            try:
+                inputs_row = conn.execute(
+                    "SELECT inputs_json FROM umr_tasks WHERE umr_id=?", (args.umr_id,)
+                ).fetchone()
+                row_inputs = json.loads(inputs_row["inputs_json"]) if inputs_row and inputs_row["inputs_json"] else {}
+            except Exception:
+                row_inputs = {}
+            cross_repo_pr_check = _umr_cross_repo_pr_check(
+                rows[0].get("task_identity"), args.umr_id, row_inputs.get("repo"),
+                title=row_inputs.get("title"),
+            )
         # Point 2 (task-gateway.py audit-24-points, UMR-20260808-145030-f3d1):
         # this IS the other canonical query path (alongside task-gateway.py
         # status) -- log it. Best-effort: a broken log write must never break
@@ -5318,7 +5490,10 @@ def main():
         except Exception:
             pass
         conn.close()
-        print(json.dumps({"count": len(rows), "matches": rows}, indent=2, default=str))
+        result = {"count": len(rows), "matches": rows}
+        if cross_repo_pr_check is not None:
+            result["cross_repo_pr_check"] = cross_repo_pr_check
+        print(json.dumps(result, indent=2, default=str))
         return
 
     if args.list_queue:

@@ -154,6 +154,10 @@ def test_genuine_same_repo_duplicate_still_blocked():
                     {"number": 65, "title": "Resolve fresh conflict on PR #58"},
                 ]))
             return _FakeCompletedProcess(0, json.dumps([]))
+        if cmd[:3] == ["gh", "pr", "view"]:
+            # UMR-20260814-172611: matched PR must carry a real (non-docs)
+            # file for the guard to still treat it as a genuine duplicate.
+            return _FakeCompletedProcess(0, json.dumps({"files": [{"path": "resource_governor.py"}]}))
         raise AssertionError(f"unexpected gh call: {cmd}")
 
     with mock.patch.object(rg, "_run", side_effect=fake_run):
@@ -181,6 +185,10 @@ def test_explicit_repo_qualified_reference_still_blocked_same_repo():
                     {"number": 185, "title": "fix: real duplicate of PR 185 (veridian-scripts)"},
                 ]))
             raise AssertionError(f"must not check unrelated repo for an explicitly-qualified reference: {cmd}")
+        if cmd[:3] == ["gh", "pr", "view"]:
+            # UMR-20260814-172611: matched PR must carry a real (non-docs)
+            # file for the guard to still treat it as a genuine duplicate.
+            return _FakeCompletedProcess(0, json.dumps({"files": [{"path": "resource_governor.py"}]}))
         raise AssertionError(f"unexpected gh call: {cmd}")
 
     with mock.patch.object(rg, "_run", side_effect=fake_run):

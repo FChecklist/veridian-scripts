@@ -2966,6 +2966,54 @@ def _title_pr_reference_is_citation_only(text, pr_num):
     return False
 
 
+def _pr_changed_files_are_docs_only(pr_number, repo):
+    """UMR-20260814-172611 real fix: a PR that find_pr_for_task_identity()'s
+    branch-lineage (Stage 4/5) or title-reference (Stage 6) match found does
+    not necessarily deliver the real code work a dispatch is asking for --
+    it only proves a PR EXISTS with that branch lineage / title citation,
+    never what that PR actually changed. Real incident this session: a
+    genuine code dispatch was repeatedly rejected as a duplicate of an
+    unrelated PR whose entire real diff was limited to progress-notes files
+    (paths under progress/, or a bare PROGRESS.md-only change) -- a docs-only
+    PR can never "already resolve" a real code target.
+
+    Fetches the matched PR's real file list via `gh pr view --json files`
+    and returns True only if EVERY changed path is a documentation/
+    progress-notes file (progress/*.md, PROGRESS.md, or generically *.md --
+    i.e. no other file type is present in the diff at all). Returns False
+    (i.e. "treat as blocking, do not waive") on any gh error, timeout,
+    malformed output, or an empty/missing file list -- an ambiguous answer
+    must never silently swallow a real duplicate-PR rejection; only a
+    positive, confirmed docs-only file list waives the guard."""
+    try:
+        r = _run(
+            ["gh", "pr", "view", str(pr_number), "--repo", f"{GH_ORG}/{repo}",
+             "--json", "files"],
+            timeout=GH_PR_CHECK_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        _append_attention(
+            f"WARNING: duplicate-PR guard timed out fetching {GH_ORG}/{repo}#{pr_number}'s "
+            f"file list (>{GH_PR_CHECK_TIMEOUT_SECONDS}s) -- treating as NOT docs-only "
+            f"(fail toward the existing blocking behavior for this matched PR)."
+        )
+        return False
+    if r.returncode != 0:
+        return False
+    try:
+        data = json.loads(r.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    files = data.get("files") or []
+    if not files:
+        return False
+    for f in files:
+        path = f.get("path") or ""
+        if not path or not path.endswith(".md"):
+            return False
+    return True
+
+
 def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None, title=None):
     """Stage 4 (2026-07-29) duplicate-PR guard -- real, exact --head branch
     match against GitHub, ported from owner_backlog_orchestrator.py's
@@ -3060,7 +3108,12 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
     match -- PR numbers are per-repo sequences, so cross-repo number
     collisions are coincidence, not evidence of duplication. Nor is a bare
     number this task's own title only cites parenthetically (see
-    _title_pr_reference_is_citation_only())."""
+    _title_pr_reference_is_citation_only()). Nor -- UMR-20260814-172611 real
+    fix -- is a PR whose entire real diff is docs/progress-notes-only (see
+    _pr_changed_files_are_docs_only()): such a PR is skipped by both the
+    branch-lineage and title-reference checks above, and the search
+    continues rather than returning it, since it cannot actually deliver the
+    real code work being dispatched."""
     if not task_identity:
         return None, None
     candidate_idents = [task_identity] + [t for t in (extra_task_ids or []) if t and t != task_identity]
@@ -3092,8 +3145,16 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
                 prs = json.loads(r.stdout)
             except (json.JSONDecodeError, ValueError):
                 prs = []
-            if prs:
-                return prs[0]["number"], repo
+            for pr in prs:
+                # UMR-20260814-172611 real fix: a branch-lineage match whose
+                # entire real diff is docs/progress-notes-only does not
+                # actually deliver the real code work this dispatch is
+                # asking for -- see _pr_changed_files_are_docs_only()'s
+                # docstring for the real incident. Skip it and keep looking
+                # rather than blocking the dispatch on it.
+                if _pr_changed_files_are_docs_only(pr["number"], repo):
+                    continue
+                return pr["number"], repo
 
     # Stage 6 (2026-07-29): see this function's docstring for the real
     # PR #64/#65/#66 evidence this closes -- a task_identity-fragmented
@@ -3193,6 +3254,12 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
                     continue
                 if _DISCLOSURE_CITATION_RE.search(candidate_title):
                     continue  # real citation-not-duplicate disclosure -- not a match
+                # UMR-20260814-172611 real fix: same docs-only waiver as the
+                # branch-lineage match above -- a title-reference match whose
+                # entire real diff is docs/progress-notes-only does not
+                # actually resolve the real code target either.
+                if _pr_changed_files_are_docs_only(pr["number"], repo):
+                    continue
                 return pr["number"], repo
     return None, None
 

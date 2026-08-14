@@ -119,7 +119,11 @@ def test_cross_repo_same_number_pr_does_not_block():
         dup_pr, dup_repo = rg.find_pr_for_task_identity(
             "owner-task-20260814-010149-432146", hint_repo="veridian-scripts",
             extra_task_ids=[],
-            title="P0 remediation: reconcile live /opt/veridian/scripts drift (PR 185 scope)")
+            # UMR-20260814-060148: NOT parenthesized -- this test's job is to
+            # prove cross-repo scoping specifically, kept separate from the
+            # parenthetical-citation case covered by
+            # test_same_repo_parenthetical_citation_does_not_block() below.
+            title="P0 remediation: reconcile live /opt/veridian/scripts drift, PR 185 scope")
     assert dup_pr is None, (dup_pr, dup_repo)
     assert dup_repo is None, (dup_pr, dup_repo)
     # Regression guard on the fix itself: Stage 6 must never even issue the
@@ -234,6 +238,66 @@ def test_new_work_intent_still_goes_through_reuse_verdict_engine():
     assert blocked is True, (blocked, result)
     assert result["best_match"]["id"] == "capability-real-dup"
     fake_rve.assess.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# (e) UMR-20260814-060148 follow-up: a bare "PR NNN" reference that resolves
+#     against hint_repo must still NOT block when this task's own title only
+#     cites that number parenthetically, rather than claiming it as its own
+#     target -- the narrower same-repo case #345's cross-repo hint_repo
+#     scoping does not, by itself, close. Salvaged as the one piece of real
+#     unique value out of superseded veridian-scripts PR #342 before it was
+#     closed as redundant with #345 -- see that closure's progress doc
+#     (task-20260814-060148) for the diff that established this.
+# ---------------------------------------------------------------------------
+
+def test_citation_only_pr_reference_helper_distinguishes_parenthetical_from_target():
+    rg = _load_rg("rg_scope_e_helper")
+    # Real shape this closes: a parenthetical citation, one example among
+    # several, never claiming the cited PR as this task's own target.
+    assert rg._title_pr_reference_is_citation_only(
+        "Live deploy drift P0: every audited merged fix (incl PR 322) is NOT running", "322")
+    # Real #58/#64/#65/#66 shape Stage 6 exists to still catch -- the number
+    # IS the sentence's stated subject, never inside parens.
+    assert not rg._title_pr_reference_is_citation_only("Resolve fresh conflict on PR #58", "58")
+    assert not rg._title_pr_reference_is_citation_only("Fix PR #58 conflict", "58")
+    # A parenthetical elsewhere in the title that does not itself contain
+    # the PR number must not trigger the exclusion.
+    assert not rg._title_pr_reference_is_citation_only(
+        "Merge audit-passed PR 141 (server-native PM integration)", "141")
+    assert not rg._title_pr_reference_is_citation_only(None, "58")
+    assert not rg._title_pr_reference_is_citation_only("Fix PR #58 conflict", None)
+
+
+def test_same_repo_parenthetical_citation_does_not_block():
+    """The narrow gap #345 leaves open: hint_repo resolves the bare number
+    to the SAME repo as a real, non-disclosure-language candidate PR -- but
+    this task's own title only cites that number parenthetically. Must NOT
+    block (unlike test_genuine_same_repo_duplicate_still_blocked, where the
+    number IS the title's stated subject)."""
+    rg = _load_rg("rg_scope_e_integration")
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "--head" in cmd:
+            return _FakeCompletedProcess(0, json.dumps([]))
+        if cmd[:3] == ["gh", "pr", "list"]:
+            assert "FChecklist/veridian-scripts" in cmd, cmd
+            return _FakeCompletedProcess(0, json.dumps([
+                {"number": 322, "title": "feat: per-task progress dir + completion gate"},
+            ]))
+        raise AssertionError(f"unexpected gh call: {cmd}")
+
+    with mock.patch.object(rg, "_run", side_effect=fake_run):
+        dup_pr, dup_repo = rg.find_pr_for_task_identity(
+            "owner-task-20260814-051500-777777", hint_repo="veridian-scripts", extra_task_ids=[],
+            title="Live deploy drift P0: every audited merged fix (incl PR 322) is NOT running")
+    assert dup_pr is None, (dup_pr, dup_repo)
+    assert dup_repo is None, (dup_pr, dup_repo)
+    # The citation-only short-circuit drops pr_num before ever building the
+    # title-reference gh call -- only the branch-name (--head) checks run.
+    assert not any(c[:3] == ["gh", "pr", "list"] and "--head" not in c for c in calls), calls
 
 
 if __name__ == "__main__":

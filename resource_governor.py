@@ -2017,7 +2017,32 @@ def _orchestrator_reuse_verdict_gate(sbr, conn, row):
     non-blocking -- this is a NEW, additive gate on top of the two
     existing, independently-proven duplicate guards
     (superseded_by_ocid_evidence / rejected_duplicate_pr) already in
-    _dispatch_one_inner, never a replacement for them."""
+    _dispatch_one_inner, never a replacement for them.
+
+    UMR-20260814-015201 real fix: scoped to task_kind == 'veridian_task_create'
+    only. reuse_verdict_engine.assess() answers "does an existing
+    wiring_registry/capability_registry entity already satisfy the NEW WORK
+    this intent_text proposes" -- a question that only makes sense for a row
+    actually proposing new work (a title describing a feature/fix to build).
+    A task_kind='systemctl_action' row (dispatch-tick.py's
+    resume_interrupted_workers_tick(), watchdog restarts, etc.) has no such
+    title at all -- inputs.get("title") is always absent for these, so
+    intent_text fell back to the bare task_identity slug, a task-id string
+    with zero relation to "is this capability already built". Confirmed
+    live: every dispatch-tick was writing 10 rejected_duplicate rows per
+    cycle (e.g. UMR-20260814-004301-2d07, UMR-20260814-003307-d246,
+    UMR-20260814-002256-bc46), each a task-RESUME intent scored
+    verdict=duplication_blocked / score=0.953 against the SAME wiring_registry
+    id=file-10d3faee408e, kind='file' row -- a resume/retry action being
+    cross-type-matched against an unrelated tracked source file purely
+    because its task_identity slug shared enough common tokens with that
+    file's path/metadata text. A task/resume intent is never "comparable" to
+    any wiring source record (it is not a proposal to build a file, script,
+    repo, project, or table); restricting this gate to real new-work
+    proposals (veridian_task_create rows) closes the cross-type match at its
+    source instead of trying to out-guess it per-candidate-kind."""
+    if row.get("task_kind") != "veridian_task_create":
+        return False, None
     try:
         rve = _reuse_verdict_engine()
         raw_inputs = row.get("inputs_json")
@@ -2731,9 +2756,13 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
 
     Returns (pr_number, repo) if an OPEN or MERGED PR already exists for
     worker/<task_identity>, worker/<any of extra_task_ids>, OR (when `title`
-    is given) any existing PR whose own title references the same PR number
-    as this task's title; (None, None) if none found (including on any
-    failure -- fail open, see above)."""
+    is given) an existing PR in the SAME repo this task's title references
+    (explicitly, via a repo-qualified reference, or implicitly via
+    hint_repo for a bare "PR NNN") whose own title references the same PR
+    number; (None, None) if none found (including on any failure -- fail
+    open, see above). A same-numbered PR in a DIFFERENT repo is never a
+    match -- PR numbers are per-repo sequences, so cross-repo number
+    collisions are coincidence, not evidence of duplication."""
     if not task_identity:
         return None, None
     candidate_idents = [task_identity] + [t for t in (extra_task_ids or []) if t and t != task_identity]
@@ -2794,9 +2823,40 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
     # and excludes those titles from counting as a duplicate -- the #64/#65/
     # #66 shape this stage was built for used no such disclosure language,
     # so that real incident is still caught unchanged.
-    pr_num = _referenced_pr_number(title)
+    #
+    # UMR-20260814-015201 real fix: Stage 6 used to scan the bare number
+    # extracted by _referenced_pr_number() against EVERY repo in `repos`
+    # (all of GH_PR_CHECK_REPOS), treating a same-number PR in an unrelated
+    # repo as evidence of duplication. PR numbers are per-repo sequences --
+    # claude-control#185 and a hypothetical veridian-scripts#185 are two
+    # unrelated PRs that merely share a integer by coincidence, never
+    # evidence either duplicates the other. Real incident: UMR-20260814-
+    # 010152-7981 (task_identity=owner-task-20260814-010149-432146, a
+    # BRAND-NEW identity with zero prior branches -- "prior real branch(es)
+    # []" was in the guard's own rejection reason) was rejected as a
+    # duplicate of claude-control#185 solely because its own title happened
+    # to contain a "PR 185"-shaped substring that also appeared in an
+    # unrelated claude-control PR's title. The fix: resolve which repo this
+    # task's own PR-number reference actually names -- a repo-qualified
+    # reference (_repo_qualified_pr_ref(), e.g. "veridian-scripts#185" or a
+    # full github.com URL) names it explicitly; a bare "PR 185" with no repo
+    # qualifier is only ever trusted against hint_repo, the SAME repo this
+    # task's own work is being dispatched into (row_inputs["repo"], passed
+    # in by the caller) -- never an arbitrary scan across every configured
+    # repo. If neither a qualified repo nor a hint_repo is available, Stage 6
+    # is skipped entirely rather than guessing.
+    qualified_repo, qualified_num = _repo_qualified_pr_ref(title, known_repos=repos)
+    if qualified_repo and qualified_num:
+        pr_num = qualified_num
+        title_check_repos = [r for r in repos if r.lower() == qualified_repo.lower()]
+    elif hint_repo:
+        pr_num = _referenced_pr_number(title)
+        title_check_repos = [hint_repo] if pr_num else []
+    else:
+        pr_num = None
+        title_check_repos = []
     if pr_num:
-        for repo in repos:
+        for repo in title_check_repos:
             try:
                 r = _run(
                     ["gh", "pr", "list", "--repo", f"{GH_ORG}/{repo}", "--state", "all",

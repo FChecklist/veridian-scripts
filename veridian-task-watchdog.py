@@ -83,13 +83,35 @@ TASKS_DIR = f"{AI_OS}/tasks"
 LOGS_DIR = f"{AI_OS}/logs"
 WATCHDOG_LOG = f"{LOGS_DIR}/watchdog.jsonl"
 ATTENTION_PATH = f"{LOGS_DIR}/ATTENTION.md"
-DB_PATH = "/opt/veridian/ai-os/memory/superboss-register.sqlite"
-SUPERBOSS_REGISTER = "/opt/veridian/scripts/superboss-register.py"
+SCRIPTS = "/opt/veridian/scripts"
+SUPERBOSS_REGISTER = os.path.join(SCRIPTS, "superboss-register.py")
 
 STALL_MINUTES = 20
 LOOP_COUNT = 3
 RECHECK_DELAY_SECONDS = 60
 SIGNATURE_LEN = 60
+
+# Real, canonical DB-path resolution -- same lazy-import-cached convention
+# reconcile_stale_running_workers.py / worker-exit-status-bridge.py already use:
+# never a hardcoded path, always the one real SUPERBOSS_REGISTER_DB override every
+# other real caller already honors.
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_watchdog", SUPERBOSS_REGISTER)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
 
 # 2026-07-27, SERVER RESOURCE GOVERNOR (ai-os/SERVER_RESOURCE_GOVERNOR_2026-07-27.md):
 # every real spawn call site below now submits through resource_governor.submit()
@@ -211,7 +233,7 @@ def search_prior_occurrence(signature):
         pass
 
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=10)
+        conn = sqlite3.connect(_resolve_db_path(), timeout=10)
         conn.execute(
             "CREATE TABLE IF NOT EXISTS task_audits (audit_id TEXT PRIMARY KEY, ts TEXT, work_item_id TEXT, "
             "software_task_id TEXT, audit_cmd TEXT, exit_code INTEGER, stdout_tail TEXT, stderr_tail TEXT, verdict TEXT)"
@@ -231,7 +253,7 @@ def search_prior_occurrence(signature):
 
 
 def lookup_known_fix(signature):
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn = sqlite3.connect(_resolve_db_path(), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute(
         "CREATE TABLE IF NOT EXISTS known_fixes (signature TEXT PRIMARY KEY, fix_action TEXT NOT NULL, "

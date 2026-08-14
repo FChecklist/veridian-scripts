@@ -110,7 +110,35 @@ SOFTWARE_CATALOG = f"{VERIDIAN_ROOT}/ai-os/SOFTWARE_CATALOG.yaml"
 # entry in MASTER_INDEX.yaml itself (no separate tracking file, per that census's own path note),
 # so this generator reads it the same resolve_doc_path()-aware way as every other doc source above.
 MASTER_INDEX = resolve_doc_path("MASTER_INDEX.yaml")
-DB_PATH = f"{VERIDIAN_ROOT}/ai-os/memory/superboss-register.sqlite"
+
+# Real, canonical READ-path DB-path resolution -- same lazy-import-cached
+# convention reconcile_stale_running_workers.py and worker-exit-status-bridge.py
+# already use: never a hardcoded path, always the one real SUPERBOSS_REGISTER_DB
+# override every other real caller already honors, and always the real
+# existence/size/SQLite-header/umr_tasks-table verification, not an unchecked
+# open. Distinct from this module's own pre-existing _sbr (below), which is the
+# real write/CLI-delegated path via superboss-register.py's own _connect() --
+# left unchanged.
+SCRIPTS = "/opt/veridian/scripts"
+SUPERBOSS_REGISTER = os.path.join(SCRIPTS, "superboss-register.py")
+
+_sbr_ro = None
+
+
+def _superboss_register():
+    global _sbr_ro
+    if _sbr_ro is None:
+        import importlib.util as _ilu3
+        _spec = _ilu3.spec_from_file_location(
+            "superboss_register_wiring_registry_ro", SUPERBOSS_REGISTER)
+        _mod = _ilu3.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr_ro = _mod
+    return _sbr_ro
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
 
 DEFAULT_OUT = os.path.join(REPO_AI_OS, "WIRING_ENGINE_REGISTRY_2026-07-25.json")
 
@@ -597,10 +625,8 @@ def build_scripts_and_cron(reg):
 def load_capability_registry():
     """Live read-only query -- never mutates the DB. Returns
     {capability_name: (confidence, ai_required)}."""
-    if not os.path.isfile(DB_PATH):
-        return {}
     try:
-        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=10)
+        conn = sqlite3.connect(f"file:{_resolve_db_path()}?mode=ro", uri=True, timeout=10)
         rows = conn.execute("SELECT capability_name, confidence, ai_required FROM capability_registry").fetchall()
         conn.close()
         return {r[0]: (r[1], r[2]) for r in rows}
@@ -614,11 +640,8 @@ def _fetch_governance_tagged_knowledge_engine_rows():
     single source of truth for what "the governance/constitution doc set" means, shared
     by build_governance_docs() and coverage_delta() below so the two can never disagree
     about which rows count (a real risk if each ran its own separate tag-filter query)."""
-    if not os.path.isfile(DB_PATH):
-        print(f"  ! {DB_PATH} not found, skipping governance_doc entities", file=sys.stderr)
-        return []
     try:
-        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=10)
+        conn = sqlite3.connect(f"file:{_resolve_db_path()}?mode=ro", uri=True, timeout=10)
         rows = conn.execute(
             "SELECT artifact_id, artifact_path, verification_status, tags FROM knowledge_engine"
         ).fetchall()
@@ -705,16 +728,15 @@ def coverage_delta():
     wr_engine_ids = set()
     wr_governance_paths = set()
     wr_ke_backed_paths = set()
-    if os.path.isfile(DB_PATH):
-        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=10)
-        for (eid,) in conn.execute("SELECT entity_id FROM wiring_registry WHERE entity_type='engine'"):
-            wr_engine_ids.add(eid)
-        for (path,) in conn.execute("SELECT path FROM wiring_registry WHERE entity_type='governance_doc'"):
-            wr_governance_paths.add(path)
-        for entity_id, path, source_ref in conn.execute("SELECT entity_id, path, source_ref FROM wiring_registry"):
-            if "knowledge_engine" in json.loads(source_ref or "[]"):
-                wr_ke_backed_paths.add(path)
-        conn.close()
+    conn = sqlite3.connect(f"file:{_resolve_db_path()}?mode=ro", uri=True, timeout=10)
+    for (eid,) in conn.execute("SELECT entity_id FROM wiring_registry WHERE entity_type='engine'"):
+        wr_engine_ids.add(eid)
+    for (path,) in conn.execute("SELECT path FROM wiring_registry WHERE entity_type='governance_doc'"):
+        wr_governance_paths.add(path)
+    for entity_id, path, source_ref in conn.execute("SELECT entity_id, path, source_ref FROM wiring_registry"):
+        if "knowledge_engine" in json.loads(source_ref or "[]"):
+            wr_ke_backed_paths.add(path)
+    conn.close()
 
     governance_covered_paths = expected_governance_abs_paths & (wr_governance_paths | wr_ke_backed_paths)
     return {
@@ -733,11 +755,8 @@ def build_from_knowledge_engine(reg):
     avoids a duplicate verification pass over an artifact already tracked
     there). entity_relationships passed through as ke:<type>, target
     resolved against this run's own path->entity_id map when possible."""
-    if not os.path.isfile(DB_PATH):
-        print(f"  ! {DB_PATH} not found, skipping knowledge_engine rows", file=sys.stderr)
-        return 0
     try:
-        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=10)
+        conn = sqlite3.connect(f"file:{_resolve_db_path()}?mode=ro", uri=True, timeout=10)
         rows = conn.execute(
             "SELECT artifact_id, artifact_path, verification_status, last_verified_ts, tags, entity_relationships "
             "FROM knowledge_engine"

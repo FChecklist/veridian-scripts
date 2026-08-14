@@ -48,10 +48,27 @@ import subprocess
 VERIDIAN_ROOT = os.environ.get("VERIDIAN_BASE", "/opt/veridian")
 SCRIPTS_ROOT_DIR = os.path.join(VERIDIAN_ROOT, "scripts")
 SUPERBOSS = os.path.join(SCRIPTS_ROOT_DIR, "superboss-register.py")
-DB_PATH = os.path.join(VERIDIAN_ROOT, "ai-os", "memory", "superboss-register.sqlite")
 PENDING_REVIEW_FILE = os.path.join(VERIDIAN_ROOT, "ai-os", "PENDING_OWNER_REVIEW.md")
 
 _SUBPROCESS_TIMEOUT_S = 30
+
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_gateway_persistence", SUPERBOSS)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
 
 
 def _run_superboss(args):
@@ -138,7 +155,7 @@ def _umr_tasks_fts_search(query_text, limit=5):
     coverage gap for STATUS_QUERY lookups without modifying search() itself
     or duplicating its five-table loop for one additional table."""
     try:
-        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{_resolve_db_path()}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         q = " ".join(w for w in query_text.split() if w.isalnum() or "-" in w) or query_text
         rows = conn.execute(

@@ -18,10 +18,33 @@ import sys
 
 VERIDIAN_ROOT = "/opt/veridian"
 AI_OS = f"{VERIDIAN_ROOT}/ai-os"
-DB_PATH = f"{AI_OS}/memory/superboss-register.sqlite"
+SCRIPTS = f"{VERIDIAN_ROOT}/scripts"
+SUPERBOSS_REGISTER = os.path.join(SCRIPTS, "superboss-register.py")
 CONTRACT_SCHEMA_PATH = f"{AI_OS}/WORKFLOW_CONTRACT_SCHEMA_2026-07-24.yaml"
 
 SCHEMA_VERSION = "1.0"
+
+# Real, canonical DB-path resolution -- same lazy-import-cached convention
+# reconcile_stale_running_workers.py / worker-exit-status-bridge.py already use:
+# never a hardcoded path, always the one real SUPERBOSS_REGISTER_DB override every
+# other real caller already honors.
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_workflow_contract", SUPERBOSS_REGISTER)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
 
 # workflow_contract_schema.phases_enum, verbatim from the schema file.
 WORKFLOW_PHASES = ["submitted", "planned", "dispatched", "logged", "closed"]
@@ -86,11 +109,7 @@ def cmd_validate_sequence(args):
     task-gateway.py subcommands already ran, per log-action content strings
     (task_start:/task_gateway,log/task_close: -- the same content
     conventions cmd_start/cmd_log/cmd_close already write)."""
-    if not os.path.isfile(DB_PATH):
-        print(json.dumps({"error": f"db not found: {DB_PATH}"}, indent=2))
-        sys.exit(1)
-
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(_resolve_db_path())
     conn.row_factory = sqlite3.Row
     wi = conn.execute(
         "SELECT work_item_id, instruction_id, status FROM work_items "

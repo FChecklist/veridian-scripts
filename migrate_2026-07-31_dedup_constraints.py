@@ -81,28 +81,44 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 
-DB_PATH = os.environ.get("SUPERBOSS_REGISTER_DB", "/opt/veridian/ai-os/memory/superboss-register.sqlite")
-_WRITE_LOCK_PATH = DB_PATH + ".writelock"
-# Root-cause fix, Real Owner directive UMR-20260806-084306-f599 Step 6.3: this
-# used to write its pre-migration snapshot as a sibling of DB_PATH itself
-# (i.e. directly into .../ai-os/memory/), which is exactly the ad-hoc-copy
-# pattern that let 20GB+ of redundant full-DB copies accumulate there with
-# nothing ever pruning them. Snapshots now go into DB_PATH's own backups/
-# subdirectory instead, so prune_memory_backups.py's retention policy
-# actually governs them.
-BACKUP_DIR = os.path.join(os.path.dirname(DB_PATH), "backups")
+SCRIPTS = "/opt/veridian/scripts"
+SUPERBOSS_REGISTER = os.path.join(SCRIPTS, "superboss-register.py")
+
+# Real, canonical DB-path resolution -- same lazy-import-cached convention
+# reconcile_stale_running_workers.py / worker-exit-status-bridge.py already use.
+# Respects SUPERBOSS_REGISTER_DB env var override, same as superboss-register.py
+# -- used by test_dedup_constraints_2026-07-31.py to run this against a
+# throwaway temp DB instead of the live one.
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_migrate_dedup", SUPERBOSS_REGISTER)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
 
 
 @contextlib.contextmanager
-def _write_lock():
+def _write_lock(db_path):
     """Same OS-level flock pattern as superboss-register.py's own
     _write_lock() -- reimplemented here (not imported) because that module's
     filename contains a hyphen and isn't importable as `import
     superboss-register`; every write-path CLI invocation of that script goes
     through the identical file + fcntl.LOCK_EX, so this is safe to run
     concurrently with any of them."""
-    os.makedirs(os.path.dirname(_WRITE_LOCK_PATH), exist_ok=True)
-    with open(_WRITE_LOCK_PATH, "w") as lockfile:
+    write_lock_path = db_path + ".writelock"
+    os.makedirs(os.path.dirname(write_lock_path), exist_ok=True)
+    with open(write_lock_path, "w") as lockfile:
         fcntl.flock(lockfile, fcntl.LOCK_EX)
         try:
             yield
@@ -110,13 +126,21 @@ def _write_lock():
             fcntl.flock(lockfile, fcntl.LOCK_UN)
 
 
-def _backup_db():
-    if not os.path.isfile(DB_PATH):
+def _backup_db(db_path):
+    if not os.path.isfile(db_path):
         return None
-    os.makedirs(BACKUP_DIR, exist_ok=True)
+    # Root-cause fix, Real Owner directive UMR-20260806-084306-f599 Step 6.3: this
+    # used to write its pre-migration snapshot as a sibling of db_path itself
+    # (i.e. directly into .../ai-os/memory/), which is exactly the ad-hoc-copy
+    # pattern that let 20GB+ of redundant full-DB copies accumulate there with
+    # nothing ever pruning them. Snapshots now go into db_path's own backups/
+    # subdirectory instead, so prune_memory_backups.py's retention policy
+    # actually governs them.
+    backup_dir = os.path.join(os.path.dirname(db_path), "backups")
+    os.makedirs(backup_dir, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%SZ")
-    backup_path = os.path.join(BACKUP_DIR, f"{os.path.basename(DB_PATH)}.pre-dedup-constraint-backup-{ts}")
-    src = sqlite3.connect(DB_PATH, timeout=30)
+    backup_path = os.path.join(backup_dir, f"{os.path.basename(db_path)}.pre-dedup-constraint-backup-{ts}")
+    src = sqlite3.connect(db_path, timeout=30)
     dst = sqlite3.connect(backup_path)
     with dst:
         src.backup(dst)
@@ -127,12 +151,13 @@ def _backup_db():
 
 def main():
     log = []
-    backup_path = _backup_db()
+    db_path = _resolve_db_path()
+    backup_path = _backup_db(db_path)
     if backup_path:
         log.append({"step": "backup", "backup_path": backup_path})
 
-    with _write_lock():
-        conn = sqlite3.connect(DB_PATH, timeout=30)
+    with _write_lock(db_path):
+        conn = sqlite3.connect(db_path, timeout=30)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.row_factory = sqlite3.Row
 
@@ -193,7 +218,7 @@ def main():
 
     result = {
         "ts": datetime.now(timezone.utc).isoformat(),
-        "db_path": DB_PATH,
+        "db_path": db_path,
         "log": log,
     }
     print(json.dumps(result, indent=2, default=str))

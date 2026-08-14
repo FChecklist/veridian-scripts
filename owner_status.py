@@ -1,9 +1,29 @@
 #!/usr/bin/env python3
+import os
 import sqlite3
 import subprocess
 import argparse
 
-DB = '/opt/veridian/ai-os/memory/superboss-register.sqlite'
+SCRIPTS = "/opt/veridian/scripts"
+SUPERBOSS_REGISTER = os.path.join(SCRIPTS, "superboss-register.py")
+
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_owner_status", SUPERBOSS_REGISTER)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
 
 
 def real_unit_state(unit_name):
@@ -26,7 +46,7 @@ def main():
     ap.add_argument('--verify-live', action='store_true')
     args = ap.parse_args()
 
-    con = sqlite3.connect(DB)
+    con = sqlite3.connect(_resolve_db_path())
     cur = con.cursor()
     if args.all:
         cur.execute(

@@ -27,8 +27,30 @@ import contextlib
 import fcntl
 from datetime import datetime, timezone
 
-DB_PATH = os.environ.get("SUPERBOSS_REGISTER_DB", "/opt/veridian/ai-os/memory/superboss-register.sqlite")
-_WRITE_LOCK_PATH = DB_PATH + ".writelock"
+SCRIPTS = "/opt/veridian/scripts"
+SUPERBOSS_REGISTER = os.path.join(SCRIPTS, "superboss-register.py")
+
+# Real, canonical DB-path resolution -- same lazy-import-cached convention
+# reconcile_stale_running_workers.py and worker-exit-status-bridge.py already
+# use: never a hardcoded path, always the one real SUPERBOSS_REGISTER_DB
+# override every other real caller already honors.
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_batch_import", SUPERBOSS_REGISTER)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
 
 
 @contextlib.contextmanager
@@ -40,8 +62,9 @@ def _write_lock():
     this importer is an especially high-risk unlocked writer: it holds ONE
     open transaction across hundreds of INSERTs (a full NDJSON batch) with
     no coordination against any other process writing the same DB."""
-    os.makedirs(os.path.dirname(_WRITE_LOCK_PATH), exist_ok=True)
-    with open(_WRITE_LOCK_PATH, "w") as lockfile:
+    write_lock_path = _resolve_db_path() + ".writelock"
+    os.makedirs(os.path.dirname(write_lock_path), exist_ok=True)
+    with open(write_lock_path, "w") as lockfile:
         fcntl.flock(lockfile, fcntl.LOCK_EX)
         try:
             yield
@@ -85,7 +108,7 @@ def main():
     counts = {"instructions": 0, "actions": 0, "skipped": 0, "malformed_lines": 0}
 
     with _write_lock():
-        conn = sqlite3.connect(DB_PATH, timeout=30)
+        conn = sqlite3.connect(_resolve_db_path(), timeout=30)
         conn.execute("PRAGMA journal_mode=WAL")
 
         with open(path, encoding="utf-8") as f:

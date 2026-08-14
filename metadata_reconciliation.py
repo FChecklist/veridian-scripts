@@ -30,8 +30,27 @@ import yaml
 
 VERIDIAN_ROOT = "/opt/veridian"
 SUPERBOSS = f"{VERIDIAN_ROOT}/scripts/superboss-register.py"
-DB_PATH = f"{VERIDIAN_ROOT}/ai-os/memory/superboss-register.sqlite"
 MASTER_INDEX_PATH = f"{VERIDIAN_ROOT}/ai-os/MASTER_INDEX.yaml"
+
+# Real, canonical DB-path resolution -- same lazy-import-cached convention
+# reconcile_stale_running_workers.py / worker-exit-status-bridge.py already use.
+_sbr = None
+
+
+def _superboss_register():
+    global _sbr
+    if _sbr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "superboss_register_metadata_reconciliation", SUPERBOSS)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _sbr = _mod
+    return _sbr
+
+
+def _resolve_db_path():
+    return _superboss_register().resolve_superboss_db_path()
 
 PATH_TOKEN_RE = re.compile(
     r"(?:/opt/veridian/[^\s,()]+|(?<![\w/])ai-os/[^\s,()]+|(?<![\w/])scripts/[^\s,()]+|(?<![\w/])repos/[^\s,()]+)"
@@ -55,9 +74,7 @@ def sb(args_list):
 
 
 def row_exists(path):
-    if not os.path.isfile(DB_PATH):
-        return False
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(_resolve_db_path())
     row = conn.execute(
         "SELECT 1 FROM knowledge_engine WHERE artifact_path = ? ORDER BY ts DESC LIMIT 1", (path,)
     ).fetchone()
@@ -69,9 +86,7 @@ def all_tagged_paths():
     """Every knowledge_engine row's (artifact_path, tags) pair, for the reverse
     orphan check -- direct sqlite read, same read-only-introspection pattern
     knowledge_registry_multisource.py's own row_exists() already uses."""
-    if not os.path.isfile(DB_PATH):
-        return []
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(_resolve_db_path())
     rows = conn.execute("SELECT artifact_path, tags FROM knowledge_engine").fetchall()
     conn.close()
     return rows

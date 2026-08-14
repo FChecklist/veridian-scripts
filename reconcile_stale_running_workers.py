@@ -40,6 +40,47 @@ SPEC constraint):
      structured-evidence gate refused a real-looking commit for an unexpected reason) ->
      genuinely ambiguous -> real re-queue.
 
+ADDENDUM (task-20260813-235841-reconciler-blind-spot--4-rows-stuck-runn): the original
+_fetch_affected_rows() query above scoped strictly to `unit_name LIKE 'veridian-worker@%'`
+-- real, live-confirmed blind spot: a status='running' row with unit_name NULL/empty (no
+per-task unit was ever recorded for it), or bound to a SHARED, non-per-task unit (e.g.
+veridian-governor-tick.service, a periodic tick service that runs on its own schedule for
+every task, not this row's own worker), was invisible to this sweep by construction --
+never fetched, never reconciled, stuck at running forever regardless of how many ticks
+ran. Real evidence gathered this task: 4 real rows (UMR-20260808-151244-134c,
+UMR-20260806-151632-431f, UMR-20260806-144816-22f4, UMR-20260806-112042-c027) sat at
+status='running' for 5-7 days, one bound to veridian-governor-tick.service and three with
+unit_name NULL, none corresponding to any real live veridian-worker@* unit on the box.
+
+Fixed by widening _fetch_affected_rows() to every status='running' row (not just
+per-task-unit ones) and branching the LIVENESS/settledness check in decide_and_apply() on
+whether unit_name is actually a real per-task veridian-worker@<task_id>.service unit
+(_is_per_task_worker_unit()):
+  - Real per-task unit -> unchanged: systemctl ActiveState is the liveness signal, exactly
+    as before.
+  - NULL/empty unit_name, OR a unit_name that is NOT a per-task veridian-worker@ unit
+    (shared/other) -> that unit's own ActiveState is NEVER consulted (a shared unit being
+    active proves nothing about THIS row's own work, and is unsafe to treat as "this row is
+    alive" -- see _is_per_task_worker_unit()'s own docstring). Liveness instead falls back
+    to _no_unit_liveness_stale(): a real timestamp-staleness bound over the MOST RECENT of
+    last_heartbeat/ts_dispatched/ts_submitted (never heartbeat alone -- confirmed live,
+    heartbeat is populated on only a tiny minority of real rows, so a heartbeat-only
+    fallback would leave most of these rows just as permanently invisible as before;
+    ts_dispatched/ts_submitted are populated on every real row).
+  - Once a no-reliable-unit row is confirmed stale (not settled otherwise), it feeds into
+    the exact same task_dir/task.yaml evidence pipeline as every other row (steps 1/3/4
+    above, completely unchanged) -- EXCEPT the two "genuinely absent/ambiguous evidence"
+    outcomes (steps 2 and 5 above) resolve to a real terminal 'failed' instead of a
+    re-queue for these rows specifically: a per-task-unit row's own re-queue is safe and
+    productive because dispatch always creates a fresh, real veridian-worker@<task_id> unit
+    for it, so a future sweep tick gets a real, reliable liveness signal to re-check
+    against; a no-reliable-unit row has no such established per-task-unit mapping to fall
+    back on (real evidence: none of the 4 rows above, nor their task_identity values, ever
+    had a matching veridian-worker@* unit on this box) -- re-queueing it would not create
+    one, it would just put the row back in an active status with the identical blind spot,
+    recurring forever. Terminal 'failed' (never 'completed' -- no evidence of completion
+    exists for these rows) is the honest, real outcome.
+
 Duplicate-safety: re-queueing NEVER creates a new umr_tasks row -- it is
 reset_umr_task_to_queued() applied to the SAME existing row (status='running' ->
 'queued'), and 'queued' is itself one of UMR_ACTIVE_STATUSES, so
@@ -61,8 +102,10 @@ Usage:
   python3 reconcile_stale_running_workers.py --execute   # real writes
 """
 import argparse
+import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -72,6 +115,30 @@ AI_OS = "/opt/veridian/ai-os"
 TASKS_DIR = os.path.join(AI_OS, "tasks")
 SCRIPTS = "/opt/veridian/scripts"
 SUPERBOSS_REGISTER = os.path.join(SCRIPTS, "superboss-register.py")
+
+# Real per-task worker unit naming convention (systemd/veridian-worker@.service,
+# instantiated as veridian-worker@<task_id>.service by the real dispatch path) -- the
+# ONLY unit_name shape this script trusts as a reliable, per-row systemd liveness signal.
+# Anything else (NULL, empty, or a real but SHARED unit like veridian-governor-tick.service
+# -- a periodic tick service that runs on its own schedule for every task, not this row's
+# own worker) falls back to _no_unit_liveness_stale() instead; see this module's own
+# ADDENDUM docstring above.
+_PER_TASK_WORKER_UNIT_RE = re.compile(r"^veridian-worker@.+\.service$")
+
+# Real, conservative "no per-task unit to check, use elapsed real time instead" bound --
+# deliberately NOT the same as HEARTBEAT_STALE_TTL_SECONDS (resource_governor.py, 15min):
+# that threshold assumes a row IS being heartbeat-updated and treats a MISSED update as
+# the stale signal; this one covers rows that may never receive a single heartbeat at all
+# (confirmed live: heartbeat is populated on only a tiny minority of real rows), so it
+# instead bounds real elapsed wall-clock time since the row's own last known real activity
+# (last_heartbeat if present, else ts_dispatched, else ts_submitted -- whichever is most
+# recent). 4 hours mirrors resource_governor.py's own MAX_QUEUED_AGE_SECONDS convention
+# for "comfortably above every legitimate delay actually observed on this box" -- the 4
+# real rows this addendum fixes were 5-7 DAYS stale, so this bound has wide real margin
+# before ever risking touching a genuinely still-in-flight no-unit row. Overridable for
+# tests only.
+NO_UNIT_STALENESS_TTL_SECONDS = int(os.environ.get(
+    "VERIDIAN_RECONCILE_NO_UNIT_TTL_S", str(4 * 60 * 60)))
 
 # Real, canonical DB-path resolution -- same lazy-import-cached convention
 # resource_governor.py's own _superboss_register() established and
@@ -138,13 +205,22 @@ def _run(cmd, timeout=35):
 
 def _fetch_affected_rows():
     """Real, read-only sqlite3 query -- the one and only direct DB read this script does;
-    every WRITE goes through superboss-register.py's own CLI (see module docstring)."""
+    every WRITE goes through superboss-register.py's own CLI (see module docstring).
+
+    ADDENDUM (task-20260813-235841-reconciler-blind-spot--4-rows-stuck-runn): widened from
+    the original `AND unit_name LIKE 'veridian-worker@%'` filter to every status='running'
+    row -- that filter made rows with a NULL/empty unit_name, or a real but SHARED
+    non-per-task unit (e.g. veridian-governor-tick.service), structurally invisible to this
+    sweep. decide_and_apply() itself now branches the liveness check on unit_name's real
+    shape (see _is_per_task_worker_unit()), so it is safe for this query to hand it every
+    running row."""
     import sqlite3
     conn = sqlite3.connect(_resolve_db_path())
     conn.row_factory = sqlite3.Row
     rows = [dict(r) for r in conn.execute(
-        "SELECT umr_id, unit_name, task_identity, outputs_json, status "
-        "FROM umr_tasks WHERE status='running' AND unit_name LIKE 'veridian-worker@%' "
+        "SELECT umr_id, unit_name, task_identity, outputs_json, status, "
+        "ts_dispatched, ts_submitted, last_heartbeat "
+        "FROM umr_tasks WHERE status='running' "
         "ORDER BY umr_id"
     ).fetchall()]
     conn.close()
@@ -154,6 +230,62 @@ def _fetch_affected_rows():
 def _unit_active_state(unit_name):
     r = _run(["systemctl", "--user", "show", unit_name, "-p", "ActiveState", "--value"], timeout=10)
     return (r.stdout or "").strip() or "unknown"
+
+
+def _is_per_task_worker_unit(unit_name):
+    """True iff `unit_name` is a real, per-task veridian-worker@<task_id>.service instance
+    -- the only unit shape whose ActiveState this script trusts as evidence about THIS row
+    specifically. False for NULL/empty, and False for any other real unit name too
+    (including a real, active, SHARED unit like veridian-governor-tick.service): a shared
+    unit's own ActiveState says nothing about whether this particular row's own work is
+    still happening -- it runs on its own schedule for every task, so reading it as "this
+    row is alive" would be a real false-positive (the row could be judged alive forever
+    purely because the shared tick service happens to be mid-run), and reading it as "this
+    row is dead" the moment it goes idle between ticks would be an equally real
+    false-negative. Neither is safe, so a shared/other unit is never consulted for liveness
+    at all here -- see _no_unit_liveness_stale() for the real fallback signal used
+    instead."""
+    return bool(unit_name) and bool(_PER_TASK_WORKER_UNIT_RE.match(unit_name))
+
+
+def _parse_iso_ts(value):
+    if not value:
+        return None
+    v = value.strip()
+    if v.endswith("Z"):
+        v = v[:-1] + "+00:00"
+    try:
+        dt = datetime.datetime.fromisoformat(v)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
+def _no_unit_liveness_stale(row, now, ttl_seconds):
+    """Real timestamp-staleness fallback liveness check for a row with no reliable
+    per-task systemd unit to check (NULL/empty unit_name, or a real shared/other unit --
+    see _is_per_task_worker_unit()). Never guesses: uses the MOST RECENT of
+    last_heartbeat/ts_dispatched/ts_submitted actually present on the row as the last real,
+    known activity signal -- deliberately never heartbeat alone (confirmed live: heartbeat
+    is populated on only a tiny minority of real rows, so a heartbeat-only fallback would
+    leave most no-unit rows just as permanently unreconciled as the original bug), and
+    ts_dispatched/ts_submitted are real, always-populated columns every row already has.
+
+    Returns (is_stale, reference_field, reference_dt). is_stale is False (never assumed
+    True) when this row has no parseable timestamp at all -- genuinely no evidence either
+    way, so this sweep leaves it alone rather than guessing staleness from absence."""
+    candidates = []
+    for field in ("last_heartbeat", "ts_dispatched", "ts_submitted"):
+        dt = _parse_iso_ts(row.get(field))
+        if dt is not None:
+            candidates.append((field, dt))
+    if not candidates:
+        return False, None, None
+    field, dt = max(candidates, key=lambda pair: pair[1])
+    age_seconds = (now - dt).total_seconds()
+    return age_seconds > ttl_seconds, field, dt
 
 
 def _task_dir_for_row(row):
@@ -361,51 +493,119 @@ def _requeue(umr_id, reason):
     return r.returncode, parsed, r.stderr
 
 
-def decide_and_apply(row, execute):
+def decide_and_apply(row, execute, now=None):
     umr_id = row["umr_id"]
     unit = row["unit_name"]
     entry = {"umr_id": umr_id, "unit_name": unit, "task_identity": row.get("task_identity")}
 
-    active_state = _unit_active_state(unit)
-    entry["active_state"] = active_state
-    if active_state not in ("inactive", "failed"):
-        # active/activating/deactivating/reloading -- real live or mid-transition unit,
-        # not this sweep's business; a future re-run picks it up once settled.
-        entry["decision"] = "skipped_not_settled"
-        entry["detail"] = f"ActiveState={active_state!r} -- real live/transitional unit, not touched"
-        return entry
+    has_reliable_unit = _is_per_task_worker_unit(unit)
+    entry["has_reliable_unit"] = has_reliable_unit
+
+    if has_reliable_unit:
+        active_state = _unit_active_state(unit)
+        entry["active_state"] = active_state
+        entry["liveness_mechanism"] = "systemd_unit"
+        if active_state not in ("inactive", "failed"):
+            # active/activating/deactivating/reloading -- real live or mid-transition unit,
+            # not this sweep's business; a future re-run picks it up once settled.
+            entry["decision"] = "skipped_not_settled"
+            entry["detail"] = f"ActiveState={active_state!r} -- real live/transitional unit, not touched"
+            return entry
+        liveness_detail = f"unit {unit} confirmed ActiveState={active_state}"
+    else:
+        # NULL/empty unit_name, or a real but SHARED/other unit (e.g.
+        # veridian-governor-tick.service) that is never a reliable per-row liveness signal
+        # -- see _is_per_task_worker_unit()'s own docstring. That unit's ActiveState is
+        # deliberately never even queried here; liveness falls back to real elapsed time
+        # since this row's own last known activity instead.
+        now = now or datetime.datetime.now(datetime.timezone.utc)
+        is_stale, ref_field, ref_dt = _no_unit_liveness_stale(row, now, NO_UNIT_STALENESS_TTL_SECONDS)
+        entry["liveness_mechanism"] = "timestamp_staleness_fallback"
+        entry["staleness_reference_field"] = ref_field
+        entry["staleness_reference_ts"] = ref_dt.isoformat() if ref_dt else None
+        if not is_stale:
+            entry["decision"] = "skipped_not_settled"
+            entry["detail"] = (
+                f"unit_name={unit!r} is not a real per-task veridian-worker@<task_identity> unit "
+                f"(NULL/empty or a shared/other unit) -- no systemd liveness signal available; "
+                + (f"real timestamp fallback ({ref_field}={ref_dt.isoformat()}) not yet older than "
+                   f"{NO_UNIT_STALENESS_TTL_SECONDS}s" if ref_field else
+                   "no real last_heartbeat/ts_dispatched/ts_submitted value found at all")
+                + " -- not this sweep's business yet"
+            )
+            return entry
+        liveness_detail = (
+            f"unit_name={unit!r} is not a real per-task worker unit (NULL/empty or shared/other); "
+            f"real timestamp fallback confirms staleness ({ref_field}={ref_dt.isoformat()}, "
+            f"older than {NO_UNIT_STALENESS_TTL_SECONDS}s)"
+        )
 
     task_dir, lookup_method = _task_dir_for_row(row)
     entry["task_dir"] = task_dir
     entry["lookup_method"] = lookup_method
 
     if task_dir is None:
-        reason = (f"reconcile_stale_running_workers.py (STEP 3, task-20260807-052027): unit {unit} "
-                  f"confirmed ActiveState={active_state}; {lookup_method} -- genuinely absent evidence, "
-                  f"real re-queue so the work is redone (duplicate-safe: same row, status stays one "
-                  f"of UMR_ACTIVE_STATUSES).")
-        entry["decision"] = "would_requeue" if not execute else "requeued"
+        if has_reliable_unit:
+            reason = (f"reconcile_stale_running_workers.py (STEP 3, task-20260807-052027): "
+                      f"{liveness_detail}; {lookup_method} -- genuinely absent evidence, "
+                      f"real re-queue so the work is redone (duplicate-safe: same row, status stays one "
+                      f"of UMR_ACTIVE_STATUSES).")
+            entry["decision"] = "would_requeue" if not execute else "requeued"
+            entry["reason"] = reason
+            if execute:
+                rc, parsed, err = _requeue(umr_id, reason)
+                entry["cli_rc"], entry["cli_result"] = rc, parsed
+                if rc != 0:
+                    entry["decision"], entry["cli_stderr"] = "requeue_failed", err[:500]
+            return entry
+        # No-reliable-unit addendum (task-20260813-235841-reconciler-blind-spot): re-queue
+        # is deliberately NOT used here -- unlike the per-task-unit branch, re-queueing
+        # this row would not create a real veridian-worker@<task_id> unit for it (real
+        # evidence: none of the 4 rows this addendum fixes, nor their task_identity
+        # values, ever had one), it would just put the row back in an active status with
+        # the identical blind spot, recurring forever. Real terminal failed instead --
+        # never 'completed' (no evidence of completion exists here).
+        reason = (f"reconcile_stale_running_workers.py (NULL/shared-unit fallback, "
+                  f"task-20260813-235841-reconciler-blind-spot): {liveness_detail}; {lookup_method} "
+                  f"-- genuinely absent evidence AND no reliable per-task unit for a future sweep to "
+                  f"retry against -- real terminal failed, never re-queued (re-queueing would recreate "
+                  f"the identical blind spot, not fix it).")
+        entry["decision"] = "would_mark_failed" if not execute else "failed"
         entry["reason"] = reason
         if execute:
-            rc, parsed, err = _requeue(umr_id, reason)
+            rc, parsed, err = _mark_terminal(umr_id, "failed", reason)
             entry["cli_rc"], entry["cli_result"] = rc, parsed
             if rc != 0:
-                entry["decision"], entry["cli_stderr"] = "requeue_failed", err[:500]
+                entry["decision"], entry["cli_stderr"] = "mark_failed_call_failed", err[:500]
         return entry
 
     task = _load_task_yaml(task_dir)
     if task is None:
-        reason = (f"reconcile_stale_running_workers.py (STEP 3, task-20260807-052027): unit {unit} "
-                  f"confirmed ActiveState={active_state}; real task dir {task_dir!r} found via "
-                  f"{lookup_method} but its task.yaml is missing/unreadable -- genuinely absent "
-                  f"evidence, real re-queue.")
-        entry["decision"] = "would_requeue" if not execute else "requeued"
+        if has_reliable_unit:
+            reason = (f"reconcile_stale_running_workers.py (STEP 3, task-20260807-052027): "
+                      f"{liveness_detail}; real task dir {task_dir!r} found via "
+                      f"{lookup_method} but its task.yaml is missing/unreadable -- genuinely absent "
+                      f"evidence, real re-queue.")
+            entry["decision"] = "would_requeue" if not execute else "requeued"
+            entry["reason"] = reason
+            if execute:
+                rc, parsed, err = _requeue(umr_id, reason)
+                entry["cli_rc"], entry["cli_result"] = rc, parsed
+                if rc != 0:
+                    entry["decision"], entry["cli_stderr"] = "requeue_failed", err[:500]
+            return entry
+        reason = (f"reconcile_stale_running_workers.py (NULL/shared-unit fallback, "
+                  f"task-20260813-235841-reconciler-blind-spot): {liveness_detail}; real task dir "
+                  f"{task_dir!r} found via {lookup_method} but its task.yaml is missing/unreadable -- "
+                  f"genuinely absent evidence AND no reliable per-task unit to retry against -- real "
+                  f"terminal failed, never re-queued.")
+        entry["decision"] = "would_mark_failed" if not execute else "failed"
         entry["reason"] = reason
         if execute:
-            rc, parsed, err = _requeue(umr_id, reason)
+            rc, parsed, err = _mark_terminal(umr_id, "failed", reason)
             entry["cli_rc"], entry["cli_result"] = rc, parsed
             if rc != 0:
-                entry["decision"], entry["cli_stderr"] = "requeue_failed", err[:500]
+                entry["decision"], entry["cli_stderr"] = "mark_failed_call_failed", err[:500]
         return entry
 
     checkpoints = task.get("checkpoints") or []
@@ -450,8 +650,8 @@ def decide_and_apply(row, execute):
     entry["completion_candidates"] = candidates
 
     if candidates:
-        base_reason = (f"reconcile_stale_running_workers.py (STEP 3, task-20260807-052027): unit {unit} "
-                       f"confirmed ActiveState={active_state}; real task dir {task_dir!r} via "
+        base_reason = (f"reconcile_stale_running_workers.py (STEP 3, task-20260807-052027): {liveness_detail}; "
+                       f"real task dir {task_dir!r} via "
                        f"{lookup_method}; task.yaml last status={last_status!r}; {len(candidates)} real "
                        f"completion candidate(s) gathered ({', '.join(c['source'] for c in candidates)}) -- "
                        f"letting mark-umr-terminal's own structured-evidence gate decide completed vs "
@@ -486,8 +686,8 @@ def decide_and_apply(row, execute):
         # drop the row.
 
     if last_status in SELF_REPORTED_NEGATIVE_STATUSES:
-        reason = (f"reconcile_stale_running_workers.py (STEP 3, task-20260807-052027): unit {unit} "
-                  f"confirmed ActiveState={active_state}; real task dir {task_dir!r} via "
+        reason = (f"reconcile_stale_running_workers.py (STEP 3, task-20260807-052027): {liveness_detail}; "
+                  f"real task dir {task_dir!r} via "
                   f"{lookup_method}; task.yaml's own last checkpoint status={last_status!r} "
                   f"(self-reported, no-more-automatic-progress outcome), no real unmerged commit "
                   f"evidence accepted -- real terminal failed.")
@@ -500,22 +700,41 @@ def decide_and_apply(row, execute):
                 entry["decision"], entry["cli_stderr"] = "mark_failed_call_failed", err[:500]
         return entry
 
-    reason = (f"reconcile_stale_running_workers.py (STEP 3, task-20260807-052027): unit {unit} "
-              f"confirmed ActiveState={active_state}; real task dir {task_dir!r} via {lookup_method}; "
-              f"task.yaml's own last checkpoint status={last_status!r}, no real commit evidence "
-              f"accepted -- genuinely ambiguous (worker likely killed/crashed mid-work), real "
-              f"re-queue so the work is redone rather than left silently stuck.")
-    entry["decision"] = "would_requeue" if not execute else "requeued"
+    if has_reliable_unit:
+        reason = (f"reconcile_stale_running_workers.py (STEP 3, task-20260807-052027): {liveness_detail}; "
+                  f"real task dir {task_dir!r} via {lookup_method}; "
+                  f"task.yaml's own last checkpoint status={last_status!r}, no real commit evidence "
+                  f"accepted -- genuinely ambiguous (worker likely killed/crashed mid-work), real "
+                  f"re-queue so the work is redone rather than left silently stuck.")
+        entry["decision"] = "would_requeue" if not execute else "requeued"
+        entry["reason"] = reason
+        if execute:
+            rc, parsed, err = _requeue(umr_id, reason)
+            entry["cli_rc"], entry["cli_result"] = rc, parsed
+            if rc != 0:
+                entry["decision"], entry["cli_stderr"] = "requeue_failed", err[:500]
+        return entry
+
+    # No-reliable-unit addendum: same "genuinely ambiguous" evidence state as the
+    # re-queue path above, but re-queueing offers no real advantage here (see the
+    # task_dir-is-None branch's own comment) -- real terminal failed instead.
+    reason = (f"reconcile_stale_running_workers.py (NULL/shared-unit fallback, "
+              f"task-20260813-235841-reconciler-blind-spot): {liveness_detail}; real task dir "
+              f"{task_dir!r} via {lookup_method}; task.yaml's own last checkpoint "
+              f"status={last_status!r}, no real commit evidence accepted, and no reliable per-task "
+              f"unit for a future sweep to retry against -- genuinely ambiguous, real terminal failed, "
+              f"never re-queued.")
+    entry["decision"] = "would_mark_failed" if not execute else "failed"
     entry["reason"] = reason
     if execute:
-        rc, parsed, err = _requeue(umr_id, reason)
+        rc, parsed, err = _mark_terminal(umr_id, "failed", reason)
         entry["cli_rc"], entry["cli_result"] = rc, parsed
         if rc != 0:
-            entry["decision"], entry["cli_stderr"] = "requeue_failed", err[:500]
+            entry["decision"], entry["cli_stderr"] = "mark_failed_call_failed", err[:500]
     return entry
 
 
-def sweep(execute):
+def sweep(execute, now=None):
     """Real, callable entry point factored out of main() (UMR-20260813-090037-9a34,
     addendum to UMR-20260806-171945-5767 / STEP 3's own original AUDIT:FAIL: this
     script was a real, tested, one-time sweep with zero periodic caller). Returns the
@@ -523,10 +742,14 @@ def sweep(execute):
     dispatch-tick.py's own run_stale_running_workers_reconciliation(), the same
     in-process-import wiring convention status-remediation-tick.py already uses for
     reconcile_owner_dispatch_status.py) get real, structured counts back instead of
-    re-parsing this script's own stdout JSON. Behavior is byte-for-byte identical to
-    the pre-refactor inline main() body -- pure extraction, no new decision logic."""
+    re-parsing this script's own stdout JSON.
+
+    `now` (task-20260813-235841-reconciler-blind-spot addendum): optional injected clock,
+    used only by the no-reliable-unit timestamp-staleness fallback (see
+    _no_unit_liveness_stale()) -- real `datetime.now(UTC)` when omitted (every real
+    caller); hermetic tests inject a fixed value instead."""
     rows = _fetch_affected_rows()
-    results = [decide_and_apply(row, execute) for row in rows]
+    results = [decide_and_apply(row, execute, now=now) for row in rows]
 
     counts = {}
     for e in results:

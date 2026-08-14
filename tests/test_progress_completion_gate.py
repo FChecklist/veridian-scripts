@@ -133,6 +133,42 @@ class TestExtractNamedCodeFiles(unittest.TestCase):
         )
         self.assertEqual(gate.extract_named_code_files(text), ["dispatch_core.py"])
 
+    def test_excludes_quoted_reason_citation_filenames(self):
+        """Real fix (UMR-20260814-080423-bd93): pm-sentinel-tick.sh's Check
+        2a RCA template quotes the TARGET row's own live `reason` field
+        verbatim ('real recorded reason: "..."'). A code filename that
+        appears only inside that quoted historical citation (e.g. the
+        script responsible for the ORIGINAL incident under investigation)
+        is not this RCA task's own objective and must not be treated as
+        one."""
+        text = (
+            "REAL GAP FOUND: resource_governor.py --query-umr --umr-id "
+            "UMR-X shows status=killed, real recorded reason: \"already-live "
+            "D-Bus StopUnit/KillUnit instrumentation "
+            "(directive-engine-stop-audit-monitor.sh, systemd unit "
+            "veridian-directive-engine-stop-audit.service)\" (unit_name=none). "
+            "This needs a real RCA: determine the real root cause, and "
+            "either fix + redispatch the real remaining scope, or record a "
+            "real, honest terminal outcome via superboss-register.py "
+            "mark-umr-terminal citing real evidence."
+        )
+        self.assertEqual(gate.extract_named_code_files(text), [])
+
+    def test_reason_citation_filename_also_named_elsewhere_still_counts(self):
+        """A filename cited inside a quoted reason AND named again elsewhere
+        as a real, distinguishing objective is NOT excluded -- only a
+        mention that appears exclusively inside the quoted citation is."""
+        text = (
+            "real recorded reason: \"directive-engine-stop-audit-monitor.sh "
+            "misbehaved\" (unit_name=none). The real fix belongs in "
+            "directive-engine-stop-audit-monitor.sh's own retry loop -- fix "
+            "it there."
+        )
+        self.assertEqual(
+            gate.extract_named_code_files(text),
+            ["directive-engine-stop-audit-monitor.sh"],
+        )
+
     def test_mixed_boilerplate_and_real_objective(self):
         """A prompt that cites the tools in boilerplate form AND names a
         real, different objective file keeps only the real objective."""
@@ -417,6 +453,67 @@ class TestCompletionGateRejectsDocOnlyDiff(unittest.TestCase):
                 )
             run(ws, "add", "-A")
             run(ws, "commit", "-q", "-m", "docs-only reconcile disposition")
+
+            ok, reason = gate.check_completion(task_dir, ws, "main")
+            self.assertTrue(ok, reason)
+
+
+    def test_rca_prompt_quoting_killed_row_reason_docs_only_diff_accepted(self):
+        """Real regression (UMR-20260814-080423-bd93), reconstructed from
+        real live evidence: PM sentinel gathered 31 of 120 umr_tasks
+        register rows (2026-08-14T01:51-07:47Z) with status='failed', ALL
+        carrying the identical worker-exit-status-bridge.py reason, while
+        `systemctl --user show` on the real units independently confirmed
+        Result=success/ExecMainStatus=0 -- i.e. clean exit-0 workers wrongly
+        recorded as failed. Root-caused to this exact gate: task
+        UMR-20260814-071851-4d86 (RCA of UMR-20260807-003517-23bb, real unit
+        veridian-worker@task-20260814-071919-rca--umr-20260807-003517-23bb-
+        killed.service) did real, correct work -- verified the original
+        decline, wrote a real RCA doc, called
+        `superboss-register.py mark-umr-terminal` for the target row -- with
+        a genuinely doc-only diff (confirmed live: `git diff` vs origin/main
+        touches only PROGRESS.md, ai-os/boss/ACTIVE-CLAIMS.yaml, and its own
+        progress/<task_id>.md). Before this fix, the target row's own
+        quoted `reason` field (naming
+        directive-engine-stop-audit-monitor.sh as part of the ORIGINAL
+        incident it investigated) made this gate wrongly reject that real,
+        correct completion -- forcing task.yaml to status='blocked', which
+        worker-exit-status-bridge.py then (correctly, per its own scope)
+        bridged to umr_tasks.status='failed' despite the real exit code
+        being 0. Must now be accepted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = self._make_task(
+                tmp,
+                "GOVERNING CHAIN: this task's own dispatching UMR (PM-sentinel "
+                "tick). REAL GAP FOUND: resource_governor.py --query-umr "
+                "--umr-id UMR-20260807-003517-23bb shows status=killed, real "
+                "recorded reason: \"a real, deliberate, principled decline of "
+                "a request to build new /proc-based attribution tooling to "
+                "identify the caller stopping veridian-directive-engine.service, "
+                "citing pm_decisions_pending proposal 296 as justification... "
+                "describing already-live D-Bus StopUnit/KillUnit "
+                "instrumentation (directive-engine-stop-audit-monitor.sh, "
+                "systemd unit veridian-directive-engine-stop-audit.service, "
+                "FChecklist/veridian-scripts commit b6c7be4)\" (unit_name=none). "
+                "This needs a real RCA: read the row's full real "
+                "outputs_json/reason (query resource_governor.py --query-umr "
+                "--umr-id UMR-20260807-003517-23bb yourself first, do not "
+                "trust this summary alone), determine the real root cause, "
+                "and either fix + redispatch the real remaining scope, or "
+                "record a real, honest terminal outcome via "
+                "superboss-register.py mark-umr-terminal citing real "
+                "evidence. Do not fabricate completion.",
+            )
+            ws = self._make_workspace(tmp)
+            with open(os.path.join(ws, "PROGRESS.md"), "w") as f:
+                f.write(
+                    "## Completed\n- [x] RCA confirms correctly-killed, no "
+                    "fix or redispatch needed; recorded real terminal "
+                    "outcome for the target row via mark-umr-terminal\n"
+                    "## Remaining\n"
+                )
+            run(ws, "add", "-A")
+            run(ws, "commit", "-q", "-m", "docs-only RCA disposition")
 
             ok, reason = gate.check_completion(task_dir, ws, "main")
             self.assertTrue(ok, reason)

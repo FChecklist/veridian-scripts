@@ -151,6 +151,52 @@ def _evidence_list_spans(text):
     return [m.span("list") for m in _EVIDENCE_LIST_RE.finditer(text or "")]
 
 
+# 2026-08-14 (UMR-20260814-080423-bd93, real dispatch off PM-desktop-sentinel
+# tick 2026-08-14T07:45-07:55Z): a FOURTH instance of the same false-positive
+# class as _BOILERPLATE_TOOL_NAME_EXCLUDED and _EVIDENCE_LIST_RE above, this
+# time for pm-sentinel-tick.sh's own Check 2a killed-row RCA template, which
+# quotes the TARGET row's own live `reason` field verbatim into the dispatch
+# prompt (`real recorded reason: "${REASON}"`). That reason field is real,
+# historical evidence about what caused the ORIGINAL incident under
+# investigation -- it frequently cites the script/unit responsible for that
+# past event (e.g. a `.sh` monitor script named inside a killed task's own
+# decline reason), never an instruction to edit that file inside *this* RCA
+# task's own workspace. Confirmed live against real evidence gathered by PM
+# sentinel (2026-08-14T07:45-07:55Z, resource_governor.py --query-umr):
+# UMR-20260814-071851-4d86 (the RCA worker dispatched for
+# UMR-20260807-003517-23bb) did real, correct work -- independently verified
+# the original decline, wrote a real RCA doc, and called
+# `superboss-register.py mark-umr-terminal` to record a real, honest
+# terminal outcome for the target row exactly as instructed -- touching zero
+# application code, a genuinely correct disposition. Because the target
+# row's own quoted `reason` text happened to cite
+# `directive-engine-stop-audit-monitor.sh`, extract_named_code_files() (pre-
+# fix) treated that citation as this RCA task's own objective file, absent
+# from its doc-only diff, and rejected it. worker-entrypoint.sh's
+# COMPLETION-GATE-BLOCK then checkpointed task.yaml status='blocked' (a
+# real self-reported negative outcome, per its own vocabulary) even though
+# the worker process went on to exit 0 -- and worker-exit-status-bridge.py
+# then (correctly, per its own narrower, already-audited scope: it only
+# ever bridges an ALREADY self-reported negative task.yaml status, never
+# invents one from a bare exit code) bridged that 'blocked' checkpoint into
+# umr_tasks.status='failed'. The exit-status bridge is not the defect; this
+# gate's over-broad filename extraction, applied to a quoted historical
+# citation rather than the task's own real objective, is.
+_REASON_CITATION_RE = re.compile(
+    r"reason:\s*\"(?P<list>.*?)\"", re.IGNORECASE | re.DOTALL
+)
+
+
+def _reason_citation_spans(text):
+    """Character spans of quoted text following a real `reason:` (or
+    `recorded reason:` / `original reason:`) citation -- see
+    _REASON_CITATION_RE's own comment. Same 'excluded only when the
+    filename appears NOWHERE else in the text' rule _evidence_list_spans
+    above already established -- a filename that is ALSO named as a real,
+    distinguishing objective elsewhere in the prompt is still kept."""
+    return [m.span("list") for m in _REASON_CITATION_RE.finditer(text or "")]
+
+
 def extract_named_code_files(text):
     """Real source/script filenames referenced in a task's own spec text
     (prompt.txt). Order-preserving de-dup; progress/doc artifacts excluded
@@ -167,9 +213,14 @@ def extract_named_code_files(text):
     "N real tracked file(s) differ: ..." evidence list, and nowhere else in
     the text, is also excluded -- see _EVIDENCE_LIST_RE's own comment. If
     the same filename is also named elsewhere (outside any evidence list),
-    it is still a real objective and is kept."""
+    it is still a real objective and is kept.
+
+    A filename that appears ONLY inside a quoted `reason:` citation (a
+    target row's own historical `reason` field, quoted verbatim into an RCA
+    dispatch prompt) is excluded the same way -- see
+    _REASON_CITATION_RE's own comment."""
     text = text or ""
-    evidence_spans = _evidence_list_spans(text)
+    evidence_spans = _evidence_list_spans(text) + _reason_citation_spans(text)
     all_matches = list(FILENAME_RE.finditer(text))
     outside_evidence = {
         m.group(0) for m in all_matches

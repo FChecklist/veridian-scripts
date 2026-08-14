@@ -314,6 +314,118 @@ def test_no_task_yaml_leaves_row_running_for_step3_reconciler(monkeypatch, scrat
     assert row["status"] == "running"
 
 
+def test_exit0_gate_accepted_rca_completion_never_recorded_as_failed(
+        monkeypatch, scratch_db, scratch_ai_os):
+    """Real end-to-end regression, UMR-20260814-080423-bd93: proves the FULL real chain
+    for the exact scenario PM sentinel gathered live evidence for (2026-08-14T07:45-
+    07:55Z) -- 31 of 120 umr_tasks register rows had status='failed', ALL carrying the
+    identical worker-exit-status-bridge.py reason, while `systemctl --user show`
+    independently confirmed Result=success/ExecMainStatus=0 on the real units. Root
+    cause: progress_completion_gate.py's check-completion (called from
+    worker-entrypoint.sh's COMPLETION-GATE-BLOCK before every worker's own final
+    checkpoint) wrongly treated a code filename quoted inside a killed row's own
+    `reason` field -- real historical evidence about a PAST incident, not this RCA
+    task's own objective -- as a required objective file, rejecting a genuinely correct,
+    evidence-backed, doc-only RCA disposition. That rejection forced task.yaml to
+    checkpoint status='blocked' (a self-reported negative outcome), which this bridge
+    then (correctly, per its own already-audited scope) bridged to
+    umr_tasks.status='failed' -- despite the worker process itself going on to exit 0.
+
+    Real, two-file chain exercised here, not mocked:
+      1. progress_completion_gate.check_completion() -- the real function
+         worker-entrypoint.sh's COMPLETION-GATE-BLOCK calls -- against the real
+         reconstructed dispatch prompt (pm-sentinel-tick.sh's own Check 2a RCA
+         template, quoting UMR-20260807-003517-23bb's own real historical reason
+         citing directive-engine-stop-audit-monitor.sh) and a real, doc-only git diff
+         (PROGRESS.md only). Confirms the gate now accepts (ok=True) -- so
+         worker-entrypoint.sh proceeds to checkpoint 'pending_review', never 'blocked'.
+      2. worker-exit-status-bridge.py's own real run(), against a real task.yaml whose
+         last checkpoint is 'pending_review' (what the gate's acceptance produces) --
+         confirms the real umr_tasks row is left at status='running' (a real,
+         evidence-gated, non-failed terminal state deferred to the supervisor /
+         reconcile_stale_running_workers.py, never guessed here), NOT bridged to
+         'failed'."""
+    import subprocess as _sp
+    import tempfile as _tf
+
+    import progress_completion_gate as gate
+
+    prompt_text = (
+        "GOVERNING CHAIN: this task's own dispatching UMR (PM-sentinel tick). REAL "
+        "GAP FOUND: resource_governor.py --query-umr --umr-id "
+        "UMR-20260807-003517-23bb shows status=killed, real recorded reason: \"a "
+        "real, deliberate, principled decline of a request to build new /proc-based "
+        "attribution tooling to identify the caller stopping "
+        "veridian-directive-engine.service, citing pm_decisions_pending proposal "
+        "296 as justification... describing already-live D-Bus StopUnit/KillUnit "
+        "instrumentation (directive-engine-stop-audit-monitor.sh, systemd unit "
+        "veridian-directive-engine-stop-audit.service, FChecklist/veridian-scripts "
+        "commit b6c7be4)\" (unit_name=none). This needs a real RCA: read the row's "
+        "full real outputs_json/reason (query resource_governor.py --query-umr "
+        "--umr-id UMR-20260807-003517-23bb yourself first, do not trust this "
+        "summary alone), determine the real root cause, and either fix + redispatch "
+        "the real remaining scope, or record a real, honest terminal outcome via "
+        "superboss-register.py mark-umr-terminal citing real evidence. Do not "
+        "fabricate completion."
+    )
+
+    with _tf.TemporaryDirectory() as tmp:
+        # --- Step 1: real completion-gate check against a real, doc-only diff. ---
+        task_dir_gate = os.path.join(tmp, "gate_task")
+        os.makedirs(task_dir_gate)
+        with open(os.path.join(task_dir_gate, "prompt.txt"), "w") as f:
+            f.write(prompt_text)
+
+        ws = os.path.join(tmp, "ws")
+        os.makedirs(ws)
+        _sp.run(["git", "init", "-q", "-b", "main", ws], check=True)
+        _sp.run(["git", "-C", ws, "config", "user.email", "test@example.com"], check=True)
+        _sp.run(["git", "-C", ws, "config", "user.name", "Test"], check=True)
+        with open(os.path.join(ws, "PROGRESS.md"), "w") as f:
+            f.write("## Completed\n## Remaining\n")
+        _sp.run(["git", "-C", ws, "add", "-A"], check=True)
+        _sp.run(["git", "-C", ws, "commit", "-q", "-m", "seed"], check=True)
+        _sp.run(["git", "-C", ws, "update-ref", "refs/remotes/origin/main", "HEAD"], check=True)
+        _sp.run(["git", "-C", ws, "checkout", "-q", "-b", "worker/test-task"], check=True)
+        with open(os.path.join(ws, "PROGRESS.md"), "w") as f:
+            f.write(
+                "## Completed\n- [x] RCA confirms correctly-killed, no fix or "
+                "redispatch needed; recorded real terminal outcome for the target "
+                "row via mark-umr-terminal\n## Remaining\n"
+            )
+        _sp.run(["git", "-C", ws, "add", "-A"], check=True)
+        _sp.run(["git", "-C", ws, "commit", "-q", "-m", "docs-only RCA disposition"], check=True)
+
+        gate_ok, gate_reason = gate.check_completion(task_dir_gate, ws, "main")
+        assert gate_ok, (
+            f"completion gate must accept this real, doc-only RCA disposition, got: {gate_reason}"
+        )
+
+        # --- Step 2: real worker-exit-status-bridge run against the real checkpoint
+        # status the gate's acceptance leads to (worker-entrypoint.sh's own
+        # NOOP-COMPLETION-BLOCK / COMPLETION-GATE-BLOCK: gate ok -> falls through to
+        # the normal quality-gate + `checkpoint --status pending_review` path, never
+        # 'blocked'). ---
+        mod = _load_module()
+        monkeypatch.setattr(mod, "AI_OS", scratch_ai_os)
+        monkeypatch.setenv("SUPERBOSS_REGISTER_DB", scratch_db)
+
+        task_id = "task-20260814-071919-rca--umr-20260807-003517-23bb-killed"
+        unit_name = f"veridian-worker@{task_id}.service"
+        umr_id = "UMR-TEST-20260814-071851-4d86"
+        _insert_umr_row(scratch_db, umr_id, unit_name, status="running")
+        _write_task_yaml(scratch_ai_os, task_id, "pending_review")
+
+        mod.run(task_id, "worker")
+
+        row = _real_row(scratch_db, umr_id)
+        assert row["status"] != "failed", (
+            f"a gate-accepted, exit-0 RCA completion must never be recorded as "
+            f"failed -- real row: {row}"
+        )
+        assert row["status"] == "running", f"real row: {row}"
+
+
 def test_unknown_unit_kind_argv_is_a_safe_noop(monkeypatch, scratch_db, scratch_ai_os):
     """main()'s own argv[2] validation -- an unrecognized unit_kind (e.g. a typo'd
     ExecStopPost) must never raise or crash this fail-open exit hook."""

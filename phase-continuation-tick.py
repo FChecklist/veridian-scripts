@@ -91,6 +91,7 @@ import yaml
 
 import backfill_phase_self_report
 import dispatch_core
+import resource_governor
 
 VERIDIAN_ROOT = dispatch_core.VERIDIAN_ROOT
 SCRIPTS = dispatch_core.SCRIPTS
@@ -534,6 +535,45 @@ judgment
 # Dispatch
 # ---------------------------------------------------------------------------
 
+# Stale-swap-ratchet override for this script's one real spawn call site
+# (task-20260814-123809-fix-chronic-swap-backoff-gate-wedging-di, closing the
+# still-open half of dispatch-tick.py's own PR #326: that PR's docstring
+# claimed its fix covered "every dispatch path on the box, not just the
+# umr_tasks queue" and even names this exact script ("across whatever else on
+# the box also imports dispatch_core (phase-continuation-tick.py)") in this
+# module's own top docstring above -- but this call site below still called
+# dispatch_core.has_free_slot() directly, so a stale swap_backoff ratchet
+# (dispatch_core.py's STATIC SwapFree/SwapTotal occupancy ratio, which Linux
+# never proactively reclaims once written -- see resource_governor.py's own
+# SWAP_ACTIVITY_* comment and UMR-20260813-155201-da76 for the real evidence)
+# could still permanently wedge phase dispatch even after dispatch-tick.py's
+# 3 call sites and resource_governor.dispatch_one() were both already fixed.
+# Same real, narrow, activity-based override as those two
+# (resource_governor._override_stale_swap_backoff(), re-checking real swap
+# I/O and MemAvailable headroom on every call, never reimplemented here) --
+# dispatch_core.py itself stays unmodified, same convention as the two prior
+# fixes (dispatch_core.py is NOT exempted from the narrow 2026-08-08
+# stop-work order; resource_governor.py is).
+def has_free_slot_with_stale_swap_override(cap=None):
+    """True if a real spawn is currently allowed -- dispatch_core's normal
+    two-gate has_free_slot_detail() check (fixed concurrency cap + real
+    memory/swap/load headroom veto), with
+    resource_governor._override_stale_swap_backoff() applied to a
+    swap_backoff-specific block before it's honored. Every other
+    slot_detail["check"] value (cap_exhausted, mem_backoff,
+    swap_hard_ceiling, mem_headroom_budget, load1_backoff, load1_unreadable,
+    or already-ok) passes through completely unchanged -- see that
+    function's own docstring for the exact two real, freshly-live-read
+    conditions required before a swap_backoff block can ever be overridden,
+    and for why the 0.99 swap_hard_ceiling and every other real gate are
+    never touched. Identical contract to dispatch-tick.py's own
+    has_free_slot_with_stale_swap_override() -- see
+    tests/test_phase_continuation_tick_stale_swap_override.py."""
+    slot_ok, slot_detail = dispatch_core.has_free_slot_detail(cap=cap)
+    slot_ok, _ = resource_governor._override_stale_swap_backoff(slot_ok, slot_detail)
+    return slot_ok
+
+
 def write_phase_plan_sidecar(task_id, plan_filename, phase_id, initiative_name):
     """Structured pointer from a dispatched task back to the exact
     phase-plan entry it was generated from -- mirrors the existing
@@ -575,7 +615,7 @@ def dispatch(prompt_text, title, repo=DEFAULT_REPO, plan_filename=None, phase_id
     # veridian-worker@<task_id>.service under the hood, so it is the one real
     # spawn point that needs to check the shared cap before running.
     with dispatch_core.acquire_dispatch_lock():
-        if not dispatch_core.has_free_slot():
+        if not has_free_slot_with_stale_swap_override():
             return {"dispatched": False, "step": "start", "instruction_id": instruction_id,
                     "deferred_reason": "shared dispatch_core concurrency cap reached this tick "
                                         "-- not yet dispatched, will be re-evaluated next tick"}

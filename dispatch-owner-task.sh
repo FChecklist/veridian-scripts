@@ -10,6 +10,23 @@
 # clear reason (duplicate content, duplicate target identifier, or
 # resource_governor.py rejection) -- it never silently does nothing.
 #
+# Real pipeline order, for discoverability (UMR-20260814-132703-a1f9; this
+# is documentation only, the mechanism below is unchanged):
+#   1. submit          -- task-gateway.py submit (called below)
+#   2. capability-lookup -- task-gateway.py's cmd_submit calls
+#                          superboss-register.py lookup-capability before
+#                          anything is queued
+#   3. queue-submit     -- resource_governor.py --submit (called below)
+#                          enqueues a 'queued' umr_tasks row and returns
+#                          immediately; it does not spawn anything itself
+#   4. execute          -- the live veridian-governor-tick loop's
+#                          resource_governor.py --tick -> dispatch_one()
+#                          later spawns the real veridian-worker@<id>.service
+#   5. validate         -- runs LAST, inside the spawned worker, before the
+#                          main claude invocation: worker-entrypoint.sh ->
+#                          preflight-guard.py -> tight_task_validation.py's
+#                          validate_tight_task()
+#
 # Usage: dispatch-owner-task.sh "<short title>" "<full prompt text>" [tier] [medium] [repo] [--no-relay]
 #   tier       - resource_governor.py tier, 0 (highest) .. 4 (lowest); default 2
 #   medium     - "claude_code_cli" (default, laptop-relayed) or "ssh_session"

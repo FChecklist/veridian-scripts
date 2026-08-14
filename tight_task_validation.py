@@ -33,6 +33,17 @@ rather than citing a real check. check_success_criteria_has_runnable_command()
 closes this: it requires at least one SUCCESS_CRITERIA line that looks like
 a real, runnable shell command, per the heuristic documented on that
 function.
+
+2026-08-14 addition (UMR-20260814-132703-a1f9): a required FILE_PATHS
+field -- check_file_paths() -- closing the gap where a task's Objective/
+Scope/Expected output can name "the module" or "the feature" without ever
+naming a real, concrete repo-relative file, leaving file identity for the
+model to guess exactly the way this validator already refuses to let
+Objective/Scope/etc. do. This is a real, local divergence from
+src/lib/task-tightening.ts (this file's own source of truth per the PORT
+note above) -- src/lib/task-tightening.ts lives in a different repo not
+reachable from here; this addition is scripts-fleet-only until/unless the
+TS original is updated to match.
 """
 import json
 import os
@@ -89,8 +100,21 @@ VALID_TIERS = ["mechanical", "integrative", "judgment"]
 # of a second hardcoded name list -- task-20260726-092433 dedup audit, SCOPE item 3:
 # this regex and task-gateway.py's cmd_start section-presence check used to name the
 # same 7 sections independently and could silently drift.
+#
+# FILE_PATHS (UMR-20260814-132703-a1f9) is deliberately NOT added to the
+# shared REQUIRED_TASK_SECTIONS list itself: that list is also consumed by
+# task-gateway.py's cmd_start()/has_all_required_sections() submit-time gate
+# and prompt_gateway/gateway.py's dispatch-readiness router, and this task's
+# scope is this validator only -- silently making FILE_PATHS required at
+# those OTHER, unrelated call sites too is a bigger, unreviewed blast radius
+# than "add a required field to the task-tightening validator" asked for.
+# It IS added to this module's own LOCAL_ONLY_SECTIONS below so a real
+# prompt can still supply "## FILE_PATHS" and have it parsed exactly like
+# every other labeled field, and check_file_paths() below enforces it here.
+LOCAL_ONLY_SECTIONS = ["FILE_PATHS"]
 FIELD_HEADER_RE = re.compile(
-    r"^##\s*(" + "|".join(REQUIRED_TASK_SECTIONS) + r")\s*$", re.IGNORECASE | re.MULTILINE
+    r"^##\s*(" + "|".join(REQUIRED_TASK_SECTIONS + LOCAL_ONLY_SECTIONS) + r")\s*$",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 # HOLD_FOR_OWNER_SIGNOFF marker (2026-07-26, root-caused against the PR563
@@ -308,6 +332,62 @@ def check_field(value, label, example):
     return None
 
 
+def _parse_file_paths(raw):
+    """Split a FILE_PATHS value into individual candidate path strings.
+    Accepts either a real list (a caller building `task` directly, not via
+    a prompt's labeled headers) or the raw multi-line/comma-separated
+    section text parse_labeled_fields() extracts -- one path per line
+    (an optional leading "-"/"1." list marker is stripped, same convention
+    SUCCESS_CRITERIA lines already use) or comma-separated on one line."""
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(p).strip() for p in raw]
+    parts = []
+    for line in str(raw).splitlines():
+        line = LIST_MARKER_RE.sub("", line).strip()
+        if not line:
+            continue
+        parts.extend(p.strip() for p in line.split(","))
+    return parts
+
+
+def check_file_paths(value):
+    """Required `filePaths` field (UMR-20260814-132703-a1f9, real incident:
+    UMR-20260814-125933-3377's own gap-finding work named a real file path
+    -- pm-sentinel-tick.sh -- only in free-text prose, nowhere machine-
+    readable). Every tight task must name the real repo-relative path(s)
+    its scope touches, the same "don't leave this for the model to guess"
+    principle this module already applies to Objective/Scope/Success
+    criteria/Expected output. Reuses check_field() (for the missing/too-
+    short/placeholder-as-a-whole case) and is_placeholder() (per individual
+    path) -- this module's own existing helpers, not a second, parallel
+    validator. Returns None if valid, else a {valid:false, reason,
+    guidance} dict per this module's contract."""
+    paths = _parse_file_paths(value)
+    joined = ", ".join(paths)
+    whole_field_failure = check_field(
+        joined, "File paths", "scripts/tight_task_validation.py, tests/test_tight_task_validation.py")
+    if whole_field_failure:
+        return whole_field_failure
+    for p in paths:
+        if not p or is_placeholder(p):
+            return {
+                "valid": False,
+                "reason": f'File paths contains a placeholder or empty entry ("{p}").',
+                "guidance": "Every entry in FILE_PATHS must be a real repo-relative path (e.g. "
+                            '"scripts/tight_task_validation.py"), not a placeholder or a blank line.',
+            }
+        if p.startswith("/") or "://" in p:
+            return {
+                "valid": False,
+                "reason": f'File paths entry "{p}" is not a repo-relative path.',
+                "guidance": "Use a path relative to the repo root (e.g. "
+                            '"scripts/tight_task_validation.py"), not an absolute filesystem path or a URL.',
+            }
+    return None
+
+
 def validate_tight_task(task):
     objective_failure = check_field(task.get("objective"), "Objective", "Document the Leads module end to end")
     if objective_failure:
@@ -324,6 +404,10 @@ def validate_tight_task(task):
     output_failure = check_field(task.get("expectedOutput"), "Expected output", "One markdown file per module, committed and pushed")
     if output_failure:
         return output_failure
+
+    file_paths_failure = check_file_paths(task.get("filePaths"))
+    if file_paths_failure:
+        return file_paths_failure
 
     for label, key in [("Objective", "objective"), ("Scope", "scope"), ("Success criteria", "successCriteria"), ("Expected output", "expectedOutput")]:
         ambiguity = detect_ambiguous_language(task.get(key) or "")
@@ -377,6 +461,7 @@ def parse_labeled_fields(prompt_text):
         "OBJECTIVE": "objective", "SCOPE": "scope", "SUCCESS_CRITERIA": "successCriteria",
         "EXPECTED_OUTPUT": "expectedOutput", "CONSTRAINTS": "constraints",
         "COMPLEXITY_TIER": "complexityTier", "KNOWN_CONTEXT": "knownContext",
+        "FILE_PATHS": "filePaths",
     }
     for i, m in enumerate(headers):
         name = m.group(1).upper()

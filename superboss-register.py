@@ -3423,6 +3423,141 @@ def _ensure_ocid_artifact_links_table(conn):
     conn.commit()
 
 
+def _ensure_resume_dead_letter_table(conn):
+    """UMR-20260813-235702 fix: resume_interrupted_workers_tick() (dispatch-
+    tick.py) used to call resource_governor.submit() unconditionally, every
+    tick, for every task_identity still in RESUMABLE_STATUSES with no active
+    unit -- even when that identity had already been rejected as a duplicate
+    dozens of times in a row by reuse_verdict_engine.assess()'s content-
+    similarity check (verdict=duplication_blocked against an unrelated
+    already-registered entity, not the find_active_umr_by_identity() check
+    _existing_active_umr() already short-circuits in dispatch-tick.py -- a
+    completely separate rejection path, so that earlier fix
+    (UMR-20260806-103711-bf00) never touched this one). Confirmed live via
+    production superboss-register.sqlite: 10 real task identities (dated
+    2026-07-18 and 2026-08-07) each carrying 40 consecutive rejected_duplicate
+    rows from source_trigger='dispatch-tick:resume_interrupted_workers', still
+    growing every ~10-minute tick as of 2026-08-13T23:52Z.
+
+    This table is the durable, small, additive bounded-retry ledger: one row
+    per task_identity that has been resubmitted through
+    resume_interrupted_workers_tick(), tracking how many CONSECUTIVE times in
+    a row the most recent outcome was a rejection, and -- once that streak
+    reaches dispatch-tick.py's own MAX_CONSECUTIVE_RESUME_REJECTIONS named
+    constant -- a real, permanent marked_dead_ts. A permanently-dead
+    task_identity is skipped by resume_interrupted_workers_tick() BEFORE it
+    calls resource_governor.submit() at all: no fresh umr_tasks row, no
+    reuse_verdict_engine similarity scan. A genuine forward-progress outcome
+    (accepted=True, i.e. actually queued) clears the row entirely (see
+    record_resume_outcome() below) -- this ledger tracks only CONSECUTIVE
+    failure streaks, never a lifetime failure count, so a task_identity that
+    starts resuming successfully again is never wrongly kept dead by stale
+    history.
+
+    Deliberately a NEW, separate table -- umr_tasks itself is the audit trail
+    (never purged/rewritten, see this fix's own governing SPEC step 7); this
+    ledger only ever reads outcome signals passed to it explicitly by the
+    caller and writes exclusively to its own table. Same idempotent CREATE
+    TABLE IF NOT EXISTS + standalone-callable convention as
+    _ensure_ocid_artifact_links_table/_ensure_umr_table above."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS resume_dead_letter (
+        task_identity TEXT PRIMARY KEY,
+        consecutive_rejections INTEGER NOT NULL DEFAULT 0,
+        last_status TEXT,
+        last_ts TEXT NOT NULL,
+        marked_dead_ts TEXT,
+        reason TEXT
+    )""")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_resume_dead_letter_marked "
+                 "ON resume_dead_letter(marked_dead_ts)")
+    conn.commit()
+
+
+def is_resume_dead(conn, task_identity):
+    """True if task_identity has already been marked permanently dead /
+    non-resumable (see _ensure_resume_dead_letter_table's docstring above).
+    Read-only, safe to call every tick before resource_governor.submit()."""
+    _ensure_resume_dead_letter_table(conn)
+    row = conn.execute(
+        "SELECT marked_dead_ts FROM resume_dead_letter WHERE task_identity=?",
+        (task_identity,),
+    ).fetchone()
+    return bool(row and row["marked_dead_ts"])
+
+
+def record_resume_outcome(conn, task_identity, accepted, max_consecutive, reason_note=None):
+    """Records the real outcome of one resume_interrupted_workers_tick()
+    resubmission attempt for task_identity, and marks it permanently dead the
+    moment its CONSECUTIVE rejection streak reaches max_consecutive (a
+    caller-supplied named constant -- see dispatch-tick.py's
+    MAX_CONSECUTIVE_RESUME_REJECTIONS). accepted=True (resource_governor.
+    submit() actually queued it) clears any existing streak -- real forward
+    progress means this identity is not stuck, regardless of past history.
+    accepted=False (rejected_duplicate, or a prior resume that ended in
+    'failed') increments the streak.
+
+    Returns True the moment this call is what pushed the identity over the
+    threshold (so the caller can log a clear one-time "marked permanently
+    dead" line), False otherwise (including every call after the identity
+    was already dead, and every accepted=True call)."""
+    _ensure_resume_dead_letter_table(conn)
+    ts = _now_iso()
+    if accepted:
+        conn.execute("DELETE FROM resume_dead_letter WHERE task_identity=?", (task_identity,))
+        conn.commit()
+        return False
+
+    row = conn.execute(
+        "SELECT consecutive_rejections, marked_dead_ts FROM resume_dead_letter WHERE task_identity=?",
+        (task_identity,),
+    ).fetchone()
+    if row and row["marked_dead_ts"]:
+        return False  # already dead; nothing new to record
+
+    new_count = (row["consecutive_rejections"] if row else 0) + 1
+    just_died = new_count >= max_consecutive
+    marked_dead_ts = ts if just_died else None
+    reason = (
+        f"{new_count} consecutive rejected resume attempts (cap={max_consecutive}); "
+        f"{reason_note or 'source_trigger=dispatch-tick:resume_interrupted_workers'}"
+    ) if just_died else None
+    conn.execute(
+        """INSERT INTO resume_dead_letter
+               (task_identity, consecutive_rejections, last_status, last_ts, marked_dead_ts, reason)
+           VALUES (?, ?, 'rejected', ?, ?, ?)
+           ON CONFLICT(task_identity) DO UPDATE SET
+               consecutive_rejections=excluded.consecutive_rejections,
+               last_status=excluded.last_status,
+               last_ts=excluded.last_ts,
+               marked_dead_ts=excluded.marked_dead_ts,
+               reason=excluded.reason""",
+        (task_identity, new_count, ts, marked_dead_ts, reason),
+    )
+    conn.commit()
+    return just_died
+
+
+def mark_resume_dead(conn, task_identity, reason):
+    """Explicit, direct one-time marker (this fix's own SPEC step 4 cleanup
+    pass) -- sets marked_dead_ts immediately regardless of recorded
+    consecutive_rejections history, for a task_identity whose real umr_tasks
+    history already proves (independently of this ledger, which only started
+    counting once this fix shipped) that it is permanently stuck. Idempotent:
+    safe to call more than once for the same identity."""
+    _ensure_resume_dead_letter_table(conn)
+    ts = _now_iso()
+    conn.execute(
+        """INSERT INTO resume_dead_letter
+               (task_identity, consecutive_rejections, last_status, last_ts, marked_dead_ts, reason)
+           VALUES (?, 0, 'rejected', ?, ?, ?)
+           ON CONFLICT(task_identity) DO UPDATE SET
+               marked_dead_ts=excluded.marked_dead_ts,
+               reason=excluded.reason""",
+        (task_identity, ts, ts, reason),
+    )
+    conn.commit()
+
+
 def _ensure_ocid_canonical_registry_table(conn):
     """UMR-20260805-032326-becc (Owner directive): a real, complete, permanent
     OCID-001..068 -> canonical UMR roster, stored durably here (the same

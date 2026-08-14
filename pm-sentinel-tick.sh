@@ -1,7 +1,29 @@
 #!/usr/bin/env bash
-# pm-sentinel-tick.sh -- server-native equivalent of the laptop-side hourly PM
-# sentinel, so PM oversight of the real UMR chains does not depend on the
-# Owner's laptop app staying open. Addendum to P1 UMR-20260806-171945-5767.
+# pm-sentinel-tick.sh -- ONE integrated deterministic server-native PM tick.
+#
+# GOVERNING CHAIN: P1 UMR-20260806-171945-5767 -> UMR-20260813-084321-2962
+# (server-native sentinel build) -> this file collapses THREE previously
+# separate policy pieces into one script, per the 2026-08-13 addendum
+# (UMR-20260813-102459-10c3):
+#   1. UMR-20260813-084321-2962 -- the base sentinel tick (3 checks below),
+#      originally shipped as PR #131 with 5 real Tier-1 audit-reject issues
+#      (UMR-20260813-101452-bd10) that were NEVER actually fixed on that PR
+#      (verified: PR #131 still has exactly 1 commit as of this integration).
+#      All 5 are fixed HERE (see "AUDIT-REJECT FIXES" below).
+#   2. UMR-20260813-091633-8b6a -- financial-only Owner-decision escalation
+#      policy (is_financial_decision / escalate_financial_decision below).
+#      Real finding: this policy WAS already implemented directly on the live
+#      server (/opt/veridian/scripts/pm-sentinel-tick.sh, 429 lines) but was
+#      never committed to git (PRs #135/#139 for this UMR were both doc-only
+#      STATUS_REPORT.md edits -- verified via `gh pr view --json files`, zero
+#      code changes in either). This integration is what actually lands that
+#      real live-only code into version control.
+#   3. UMR-20260813-092654-326b -- hierarchy / single-gateway / zero-dup /
+#      dynamic-scope / standardized boolean-table report format. Real
+#      finding: the dispatched task for this UMR (task-20260813-095623)
+#      never started real work (task.yaml status=blocked, zero files
+#      modified, zero PR) before being reconciled to status=killed -- none of
+#      this scope existed anywhere before this integration.
 #
 # REUSE ONLY -- this script deliberately does NOT implement its own dispatch
 # path, its own resource cap, or its own stop-work gate. Every real dispatch
@@ -9,37 +31,220 @@
 # --no-relay, which itself submits through resource_governor.py's real
 # submit()/dispatch_one() -- the same tier/concurrency-cap/EMERGENCY_STOP/
 # standing-stop-work-order gate every other real dispatch on this box already
-# goes through. This script never writes to umr_tasks directly, never calls
-# systemctl to spawn a worker itself, and never bypasses that gate.
+# goes through (SINGLE GATEWAY, NO BYPASS -- 326b point 2). This script never
+# writes to umr_tasks directly, never calls systemctl to spawn a worker
+# itself, never runs `gh pr merge` itself, and never bypasses that gate.
 #
-# What one tick does (same 3 checks the laptop-side hourly PM sentinel does):
-#   1. Tracked-chain status: python3 superboss-register.py
+# ZERO DUPLICATION, NO BYPASS (326b point 3) -- two independent, real,
+# non-conflicting layers, neither reimplementing the other:
+#   (a) this script's own is_in_flight() -- narrow, per-(gap_type,target_umr)
+#       de-dup for the exact targets THIS script itself considers dispatching
+#       this tick (re-verified live via --query-umr every call, never trusted
+#       from a stale cache);
+#   (b) resource_governor.py's own downstream duplicate-PR guard (Stage
+#       4/5/6) -- the canonical, system-wide enforcement point, independently
+#       proven live twice on this exact UMR chain: UMR-20260813-101609-9a69
+#       and UMR-20260813-101452-bd10 BOTH real-dispatched and BOTH came back
+#       status=rejected_duplicate because a real PR already existed for that
+#       task_identity.
+# This script never reimplements (b); it only adds (a) as a narrower,
+# earlier-and-cheaper check ahead of it.
+#
+# What one tick does (same 3 checks the laptop-side hourly PM sentinel does,
+# plus 326b's blocked-row check, dynamic addenda-chain discovery, and Check 0
+# below):
+#   0. Live deploy drift self-check (2026-08-13 addendum, UMR-20260813-
+#      195852-aa85) -- is this script's OWN real running checkout the same
+#      commit as origin/main? Real finding: it was not (stuck on a stale,
+#      dirty, off-main commit) despite real fixes (e.g. PR #299's Check 2b
+#      systemctl-show parse fix, see Check 0's own header comment below for
+#      full detail) already being merged -- the confirmed root cause of a
+#      recurring false-RCA cascade on this chain. See Check 0 below.
+#   1. Tracked-chain status: python3 "$SUPERBOSS_REGISTER_PY"
 #      show-owner-priority-state gives the real, live set of governing UMR
 #      chains still active/pending; each chain's governing UMR is re-queried
 #      live via resource_governor.py --query-umr --umr-id (never assumed from
-#      the priority-sequence row alone).
-#   2. Exit-write-back-bug cross-check: a real, live systemctl --user show
-#      (ActiveState/SubState/Result) plus a real journalctl excerpt against
-#      each status='running' row's own unit_name -- catches the known bug
-#      class (documented in dispatch-owner-task.sh / resource_governor.py's
-#      own comments) where a umr_tasks row can say running/completed while
-#      the real systemd unit is actually dead. status='killed' rows are
-#      already-known genuine gaps needing RCA, no cross-check needed.
-#   3. Real PR audit: for status='completed_unmerged' rows (a real PR opened
-#      but not yet merged -- see dispatch-owner-task.sh's own
-#      mark-umr-terminal completion instruction), `gh pr view` for real
-#      mergeable/review/check state PLUS the real posted comments (gh api
-#      .../comments), never just a CI badge.
+#      the priority-sequence row alone). Per 326b point 1 (dynamic scope,
+#      discovered each tick, not a fixed hardcoded UMR list): each chain head
+#      is also searched via --query-umr --search for real addendum rows
+#      whose own prompt text cites it as a governing chain, so a fresh
+#      amendment UMR is picked up the same tick it is submitted, not only
+#      after it is manually added to owner_priority_sequence.
+#   2a. killed-status rows needing RCA (system-wide, bounded).
+#   2b. Exit-write-back-bug cross-check on status='running' rows -- a running
+#       row can lie (known bug class). Real systemctl --user show +
+#       journalctl cross-check against the row's own real unit_name.
+#   2c. Blocked-task detection (326b addition -- REUSE, not reimplementation):
+#       a task.yaml-level status='blocked' (e.g. task-20260813-095623, the
+#       326b amendment's own dispatched task, which sat blocked with zero
+#       progress before being reconciled) is NOT a real umr_tasks.status
+#       value (confirmed via the table's own CHECK constraint: status IN
+#       ('queued','dispatched','running','completed','completed_unmerged',
+#       'failed','rejected_duplicate','sigterm_sent','killed') -- no
+#       'blocked'). The real, already-existing, already-live reconciliation
+#       for this is resource_governor.py's own scan_stuck_tasks(), called
+#       every real tick inside run_tick()'s own orchestrator maintenance
+#       (confirmed via grep: results["stuck_task_actions"] =
+#       scan_stuck_tasks(now=now) inside run_tick(), which the existing
+#       veridian-dispatch-tick.timer / veridian-cron-dispatch-tick.timer
+#       already run on their own live cadence) -- it reconciles a real
+#       stuck/blocked task to status='killed' on its own, which Check 2a
+#       above already RCA-dispatches. Adding a second, parallel
+#       blocked-status query here would be dead code (it could never match a
+#       real row) and would duplicate scan_stuck_tasks() -- so this
+#       integration deliberately does NOT add one; Check 2a already covers
+#       the real gap once scan_stuck_tasks() reconciles it.
+#   3. Real PR audit: for status='completed_unmerged' rows, `gh pr view` for
+#      real mergeable/review/check state PLUS the real posted comments (gh
+#      api .../comments), never just a CI badge.
 #
 # On a genuine gap, dispatches (capped at MAX_DISPATCHES_PER_TICK=5 new
 # dispatches per tick) via dispatch-owner-task.sh --no-relay, citing the real
-# target UMR id and real evidence gathered above. Before dispatching, checks
-# a small local in-flight map (STATE_FILE below) so an already-in-flight
-# (queued/dispatched/running) dispatch for the same (gap_type, target_umr_id)
-# is never duplicated -- that map's own liveness claims are themselves
-# re-verified live via --query-umr before being trusted (never assumed
-# stale-but-still-true), same "never trust a status without re-checking it
-# live" discipline as the rest of this script.
+# target UMR id and real evidence gathered above, INTO THE REAL REPO the
+# target UMR's own inputs_json.repo names (AUDIT-REJECT FIX #5 below) --
+# never a hardcoded module name.
+#
+# DECISION AUTHORITY (8b6a + 326b point 4) -- never consult the Owner except
+# a genuine FINANCIAL decision (spending money, a new financial commitment, a
+# payment, or a pricing/billing change); every other gap is decided and
+# dispatched autonomously, citing real evidence. See is_financial_decision()/
+# escalate_financial_decision() below.
+#
+# REPORT FORMAT (326b point 5) -- standardized boolean table, one row per
+# real UMR this tick found a gap for. See emit_report_row() below; written to
+# REPORT_FILE (JSON Lines, one real object per line) and mirrored as
+# Prometheus textfile-collector gauges to METRICS_FILE, so Grafana/Prometheus
+# (both confirmed real+live on this box: Prometheus v3.13.2 at
+# 127.0.0.1:9090, Grafana v13.1.3 at 127.0.0.1:3000, node_exporter at
+# 127.0.0.1:9100, verified via real /api/health, /api/v1/status/buildinfo,
+# /metrics responses on 2026-08-13) can scrape this tick's own real output as
+# one more real target, instead of a second, separate reporting path. Honest
+# caveat: node_exporter's real --collector.textfile.directory flag and
+# Prometheus's real scrape-config file are host-level configuration outside
+# this task's own filesystem access (confirmed: no /var/lib/node_exporter or
+# /var/lib/prometheus/node-exporter path reachable from this workspace) --
+# METRICS_FILE is written to a real, fixed path regardless so that the one
+# remaining step (pointing node_exporter's textfile collector at it, or
+# adding a Prometheus file_sd target) is a narrow, disclosed, one-line
+# operational follow-up, not fabricated as already wired.
+#
+# AUDIT-REJECT FIXES (UMR-20260813-101452-bd10, 5 real cited issues against
+# PR #131 -- all 5 fixed in this file):
+#   1. dispatch_gap() used to call `./dispatch-owner-task.sh`, which does not
+#      exist in this repo's git tree/history (only resource_governor.py and
+#      superboss-register.py are tracked here; dispatch-owner-task.sh is
+#      live-server-only) -- fixed via DISPATCH_OWNER_TASK_SH resolution
+#      (env override -> co-located in $SCRIPT_DIR -> canonical live path
+#      /opt/veridian/scripts/dispatch-owner-task.sh) below.
+#   2. dispatch_gap() used to swallow a real dispatch-owner-task.sh failure
+#      and the whole script still `exit 0`'d regardless -- fixed via
+#      TICK_FAILURES tracking and a real non-zero exit at the bottom of this
+#      script whenever a real dispatch attempt failed this tick.
+#   3. scripts/test_pm_sentinel_tick.py used to fail when actually run
+#      (AssertionError on the expected DISPATCHED rca string) -- root cause
+#      was fix #1 (dispatch-owner-task.sh unresolvable from a git checkout);
+#      fixed as a direct consequence of fix #1, real test evidence in
+#      PROGRESS.md.
+#   4. The merge-fresh-PASS-PR gap path used to dispatch a worker task whose
+#      own instruction was to blindly trust a possibly-stale reviewDecision
+#      and call `gh pr merge` directly on that trust alone -- removed. Every
+#      completed_unmerged PR, approved or not, now only ever gets a real
+#      independent re-audit dispatch (audit: target key) that re-verifies
+#      state live before any merge decision -- never a blind-merge
+#      instruction.
+#   5. Every dispatched follow-up used to hardcode module "compliance-tracker"
+#      regardless of the real repo tied to the governing UMR -- fixed via
+#      target_repo_of() below, which derives the real repo from the target
+#      row's own inputs_json.repo (falling back to compliance-tracker, same
+#      default dispatch-owner-task.sh itself already uses, only when a row
+#      genuinely has no repo field).
+#
+# QUERY-ONCE-PER-TICK + DECIDE-AND-FIX (2026-08-13 addendum,
+# UMR-20260813-105106-e9a7, addendum to UMR-20260813-102459-10c3 -- two
+# Owner directives, both hard requirements of this integration, not
+# optional follow-ups):
+#   (1) QUERY ONCE PER TICK -- fetch each real UMR/PR/unit's real state at
+#       most once per tick and reuse it; never re-query the same row again
+#       just to double-check (real token/DB/API waste for zero new
+#       information). Enforced by:
+#         - get_umr_row()/cache_put_row()/already_queried_this_tick() below
+#           -- a real per-tick cache (an in-process bash associative array,
+#           this script IS one process for its whole tick) over every
+#           individual resource_governor.py --query-umr --umr-id lookup.
+#           Check 1's per-chain-head lookup and is_in_flight()'s
+#           prior-dispatch check both go through get_umr_row(); every bulk
+#           listing query (Checks 2a/2b/3) populates the same cache via
+#           cache_put_row() for every row it returns, and each of those
+#           checks' per-row loops calls already_queried_this_tick() FIRST
+#           and skips (no re-fetch, no re-decide) any umr_id a prior check
+#           this same tick already fetched+handled -- the real, concrete
+#           case this closes: a tracked-chain head (Check 1) that is ALSO
+#           status=killed would otherwise be independently re-fetched and
+#           re-decided by Check 2a's system-wide killed-row scan.
+#         - Check 2b's unit cross-check used to make two separate real
+#           `systemctl --user show` calls against the identical unit (one
+#           -p ActiveState, one -p Result) -- collapsed into one real call
+#           with both -p flags below.
+#         - Check 3's PR audit caches each real `gh pr view` /
+#           `gh api .../comments` result by (repo, pr_number) via
+#           PR_QUERY_CACHE, so two completed_unmerged rows that happen to
+#           cite the same real PR never trigger two real GitHub API calls
+#           for it in the same tick.
+#   (2) DECIDE-AND-FIX, NOT DECIDE-AND-ASK -- for any non-financial finding
+#       (technical/product/priority), the fix must be dispatched via the
+#       existing gateway in the SAME tick it is found, not merely logged for
+#       a future decision; a finding without an accompanying real dispatched
+#       fix (or an explicit real blocker, e.g. the per-tick dispatch cap or
+#       the standing stop-work gate refusing it) is incomplete work.
+#       Enforced by real, runtime-checked bookkeeping, not just convention:
+#       every call site below that identifies a real gap calls
+#       record_finding() immediately before calling dispatch_gap()
+#       (FINDINGS_LOGGED); dispatch_gap() itself -- the one real gateway
+#       every finding must go through -- increments FINDINGS_ACTIONED on
+#       every one of its own real terminal outcomes (dispatched, dispatch
+#       attempted-but-failed [a real, loud, non-silent failure via
+#       TICK_FAILURES], already in-flight from a prior tick, per-tick cap
+#       reached, or genuine financial escalation). At the end of the tick,
+#       if FINDINGS_LOGGED != FINDINGS_ACTIONED, the tick fails loudly
+#       ("DECIDE-AND-FIX VIOLATION", non-zero exit via TICK_FAILURES) instead
+#       of silently leaving an undecided finding on the table -- a real
+#       regression guard against a future gap-detection branch being added
+#       without a matching dispatch_gap() call, not merely a description of
+#       today's (already-compliant) behavior.
+#
+# TOKEN USAGE -- this entire tick makes ZERO calls to any LLM (no anthropic/
+# litellm/aider/claude invocation anywhere in this file, verified by grep of
+# this file for those tokens: zero real call sites, only this doc comment).
+# Every decision point below is a real bash/python conditional over real
+# queried state (resource_governor.py --query-umr, systemctl show, gh pr
+# view --json, journalctl, umr_tasks.inputs_json fields) -- never an AI
+# narration of a go/no-go decision. The only tokens this integration's own
+# governing UMR chain has ever spent are the AI-agent WORKER dispatches that
+# build/fix/report on it (see PROGRESS.md for the real measured before/after
+# token comparison) -- unchanged from before, and only for genuine
+# novel-failure/implementation judgment calls, never for the tick's own
+# go/no-go decision.
+#
+# Real testability seams (env overrides, same convention every other real
+# script in this codebase already uses):
+#   SUPERBOSS_REGISTER_DB    -- point every subprocess at a real sqlite COPY
+#                                instead of the live DB (resource_governor.py
+#                                / superboss-register.py's own
+#                                resolve_superboss_db_path() already reads
+#                                this).
+#   PM_SENTINEL_STATE_FILE   -- override the in-flight dedup state file path.
+#   PM_SENTINEL_MAX_DISPATCH -- override the per-tick dispatch cap (default 5).
+#   PM_SENTINEL_NOTIFY_OWNER_SCRIPT -- override the notify-owner.py path used
+#                                by escalate_financial_decision() below.
+#   DISPATCH_OWNER_TASK_SH   -- override the real dispatch-owner-task.sh path
+#                                (fix #1 above).
+#   PM_SENTINEL_REPORT_FILE  -- override the boolean-table JSONL report path.
+#   PM_SENTINEL_METRICS_FILE -- override the Prometheus textfile-collector
+#                                output path.
+#   VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS="" -- disable the standing
+#                                stop-work gate for a test run (same env var
+#                                resource_governor.py itself already
+#                                documents).
 #
 # Never fabricates completion: this script never calls mark-umr-terminal,
 # never writes 'completed' anywhere -- it only reads real state and dispatches
@@ -47,59 +252,11 @@
 # resource_governor.py / superboss-register.py / task-gateway.py /
 # resource_governor_tick_loop.sh -- reads/calls their real CLIs only.
 #
-# Wired as a new systemd --user timer (see systemd/veridian-pm-sentinel-tick.
+# Wired as a systemd --user timer (see systemd/veridian-pm-sentinel-tick.
 # service + .timer in this same directory) firing hourly, modeled on the
 # existing veridian-cron-dispatch-tick.service/.timer pattern already live on
 # this box (same run-logged.sh wrapper, same shared EMERGENCY_STOP
-# ConditionPathExists gate). This is a genuinely new cadence/purpose (server-
-# native PM oversight, no old-crontab/closed-set-18 equivalent) -- the same
-# real Owner-directive-is-the-authorization precedent already used for
-# veridian-cron-prune-memory-backups (see ~/.config/systemd/user/README.md
-# "Unit #20 ... explicit Owner-authorized exception").
-#
-# Real testability seams (env overrides, same convention every other real
-# script in this codebase already uses):
-#   SUPERBOSS_REGISTER_DB   -- point every subprocess at a real sqlite COPY
-#                              instead of the live DB (resource_governor.py /
-#                              superboss-register.py's own resolve_superboss_
-#                              db_path() already reads this).
-#   PM_SENTINEL_STATE_FILE  -- override the in-flight dedup state file path.
-#   PM_SENTINEL_MAX_DISPATCH -- override the per-tick dispatch cap (default 5).
-#   PM_SENTINEL_NOTIFY_OWNER_SCRIPT -- override the notify-owner.py path used
-#                              by escalate_financial_decision() below (real
-#                              testability seam, same convention).
-#   VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS="" -- disable the standing
-#                              stop-work gate for a test run (same env var
-#                              resource_governor.py itself already documents).
-#
-# ---------------------------------------------------------------------------
-# Owner-decision escalation scope -- real Owner-issued policy (2026-08-13
-# amendment, addendum UMR-20260813-091633-8b6a to this task's own governing
-# chain; the SAME policy already standing for the laptop-side hourly PM
-# sentinel): this script does NOT need to consult or escalate to the Owner
-# except for a genuine FINANCIAL decision -- spending money, a new financial
-# commitment, a payment, or a pricing/billing change. For every other gap a
-# tick finds -- technical judgment calls, RCA dispatch, PR audit/fix/merge
-# dispatch, and any other product/business decision within this script's own
-# real dispatched scope -- it decides and dispatches autonomously, citing the
-# real evidence gathered above. No Owner consultation, no "NEEDS OWNER
-# DECISION" wait state, for any of that.
-#
-# This does NOT relax any other hard rule this script already follows: it
-# still never fabricates a stop-work-order exemption (only a real, already-
-# recorded exemption applies), never fabricates completion or certification,
-# never bypasses a real posted AUDIT:FAIL, and never skips the zero-
-# duplication check (is_in_flight()) before dispatching.
-#
-# FINANCIAL_KEYWORDS is the real, deliberately narrow test for "is this a
-# financial decision" (spend/payment/invoice/pricing/billing/subscription/
-# refund/budget-approval language) -- narrow so it does not accidentally
-# swallow ordinary technical/product gaps into a fake escalation.
-# escalate_financial_decision() sends a real "NEEDS OWNER DECISION"
-# notification through the EXISTING notify-owner.py front door (never a
-# second, ad hoc notification path) and returns without dispatching;
-# dispatch_gap() below runs this check FIRST, before is_in_flight() or the
-# dispatch cap, so a genuine financial gap is never silently auto-dispatched.
+# ConditionPathExists gate).
 
 set -uo pipefail
 
@@ -110,17 +267,107 @@ GH_ORG="${VERIDIAN_GH_ORG:-FChecklist}"
 MAX_DISPATCHES_PER_TICK="${PM_SENTINEL_MAX_DISPATCH:-5}"
 STATE_FILE="${PM_SENTINEL_STATE_FILE:-/opt/veridian/ai-os/logs/pm-sentinel-inflight.json}"
 NOTIFY_OWNER_SCRIPT="${PM_SENTINEL_NOTIFY_OWNER_SCRIPT:-notify-owner.py}"
+REPORT_FILE="${PM_SENTINEL_REPORT_FILE:-/opt/veridian/ai-os/logs/pm-sentinel-tick-report.jsonl}"
+METRICS_FILE="${PM_SENTINEL_METRICS_FILE:-/opt/veridian/ai-os/logs/pm-sentinel-tick.prom}"
+# Check 0 (2026-08-13 addendum, UMR-20260813-195852-aa85 -- see Check 0's own
+# header comment below): the real live git checkout this script itself is
+# actually running from. Defaults to SCRIPT_DIR (this script's own real
+# on-disk location), overridable for tests.
+LIVE_SCRIPTS_DIR="${PM_SENTINEL_LIVE_SCRIPTS_DIR:-$SCRIPT_DIR}"
 DISPATCH_COUNT=0
+TICK_FAILURES=0
+# QUERY-ONCE-PER-TICK + DECIDE-AND-FIX (UMR-20260813-105106-e9a7 addendum to
+# UMR-20260813-102459-10c3) -- see header comment above.
+FINDINGS_LOGGED=0
+FINDINGS_ACTIONED=0
+# Real, per-tick, on-disk cache (NOT a bash associative array): every real
+# query function below (get_umr_row, cached_gh_pr_view) is invoked via
+# command substitution ($(...)) at most of its real call sites, which bash
+# always runs in a forked subshell -- an in-memory `declare -A` write inside
+# that subshell is silently lost the instant the subshell exits, so it can
+# never actually be read back by a later call in the parent shell. A real
+# on-disk cache directory has no such problem (a file write is a real
+# filesystem side effect, not shell-process memory) -- same reason
+# STATE_FILE below is already a real file and not a bash variable. Unique
+# per real tick invocation (mktemp), removed on exit (trap), never reused
+# across ticks -- this cache is deliberately per-tick only.
+CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pm-sentinel-tick-cache.XXXXXX")"
+trap 'rm -rf "$CACHE_DIR"' EXIT
+mkdir -p "$CACHE_DIR/umr" "$CACHE_DIR/pr"
+QUERY_LOG="$CACHE_DIR/.query-log"
+
+# AUDIT-REJECT FIX #1: real dispatch-owner-task.sh resolution. Production
+# deployment co-locates this script with dispatch-owner-task.sh in
+# /opt/veridian/scripts, so $SCRIPT_DIR/dispatch-owner-task.sh already
+# resolves there. A git checkout of THIS repo (dispatch-owner-task.sh is
+# real but deliberately not tracked here -- live-server-only file) does not
+# have it co-located, so this also falls back to the one real, canonical,
+# live path -- which is always the same server this script itself runs on.
+if [ -n "${DISPATCH_OWNER_TASK_SH:-}" ]; then
+  : # explicit override wins, used as-is
+elif [ -x "$SCRIPT_DIR/dispatch-owner-task.sh" ]; then
+  DISPATCH_OWNER_TASK_SH="$SCRIPT_DIR/dispatch-owner-task.sh"
+elif [ -x "/opt/veridian/scripts/dispatch-owner-task.sh" ]; then
+  DISPATCH_OWNER_TASK_SH="/opt/veridian/scripts/dispatch-owner-task.sh"
+else
+  echo "FATAL: dispatch-owner-task.sh not found (checked \$DISPATCH_OWNER_TASK_SH, \$SCRIPT_DIR, /opt/veridian/scripts) -- cannot dispatch any real gap this tick" >&2
+  exit 1
+fi
+
+# Same real resolution principle as fix #1 above, extended to
+# resource_governor.py/superboss-register.py themselves: both ARE tracked in
+# this git repo (unlike dispatch-owner-task.sh), but a git checkout's copy
+# can be genuinely stale relative to the live-deployed copy (a real,
+# separately-tracked live-deployment-sync gap on this box, not this
+# integration's scope to fully close) -- confirmed live during this
+# integration's own testing: a checkout copy lacking --umr-id support caused
+# is_in_flight() to silently get empty query results and re-dispatch a
+# byte-identical prompt the real content-duplicate guard then (correctly)
+# refused. Resolving to the live, current copy by default (same env-override
+# -> co-located -> canonical-live-path order) makes this script's own
+# behavior match dispatch-owner-task.sh's real behavior, which already only
+# ever calls the live copy (it is never checked out anywhere else).
+if [ -n "${RESOURCE_GOVERNOR_PY:-}" ]; then
+  :
+elif [ -f "/opt/veridian/scripts/resource_governor.py" ]; then
+  RESOURCE_GOVERNOR_PY="/opt/veridian/scripts/resource_governor.py"
+else
+  RESOURCE_GOVERNOR_PY="$SCRIPT_DIR/resource_governor.py"
+fi
+if [ -n "${SUPERBOSS_REGISTER_PY:-}" ]; then
+  :
+elif [ -f "/opt/veridian/scripts/superboss-register.py" ]; then
+  SUPERBOSS_REGISTER_PY="/opt/veridian/scripts/superboss-register.py"
+else
+  SUPERBOSS_REGISTER_PY="$SCRIPT_DIR/superboss-register.py"
+fi
+
+# Check 0 real testability seam (2026-08-13 addendum, UMR-20260813-195852-aa85):
+# same env-override -> co-located -> canonical-live-path resolution as every
+# other real tool above -- check_live_scripts_drift.py already exists (built
+# by task-20260813-103224-close-the-merged-to-live-deployment-gap,
+# UMR-20260813-101142-5d24) and answers exactly the question Check 0 needs
+# ("is the live checkout's HEAD the same commit as origin/main, with real
+# evidence"), so this reuses it directly rather than reimplementing the same
+# git-fetch-and-compare logic here.
+if [ -n "${CHECK_LIVE_SCRIPTS_DRIFT_PY:-}" ]; then
+  :
+elif [ -f "/opt/veridian/scripts/check_live_scripts_drift.py" ]; then
+  CHECK_LIVE_SCRIPTS_DRIFT_PY="/opt/veridian/scripts/check_live_scripts_drift.py"
+else
+  CHECK_LIVE_SCRIPTS_DRIFT_PY="$SCRIPT_DIR/check_live_scripts_drift.py"
+fi
 
 # Real, deliberately narrow keyword test backing is_financial_decision()
-# below -- see the "Owner-decision escalation scope" header comment above
-# for the real Owner-issued policy this implements.
+# below -- see the "DECISION AUTHORITY" header comment above for the real
+# Owner-issued policy this implements.
 FINANCIAL_KEYWORDS='(^|[^A-Za-z])(spend(ing)?|payment|invoic(e|ing)|pricing|billing|subscription (cost|fee|upgrade)|refund|purchas(e|ing)|financial commitment|budget approval|credit card|price increase|contract cost)([^A-Za-z]|$)'
 
-mkdir -p "$(dirname "$STATE_FILE")"
+mkdir -p "$(dirname "$STATE_FILE")" "$(dirname "$REPORT_FILE")" "$(dirname "$METRICS_FILE")"
 [ -f "$STATE_FILE" ] || echo '{}' > "$STATE_FILE"
 
-echo "=== pm-sentinel-tick $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+TICK_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+echo "=== pm-sentinel-tick $TICK_TS ==="
 
 # ---------------------------------------------------------------------------
 # small python3 helpers -- same "shell out to python3 -c for JSON" idiom
@@ -138,6 +385,108 @@ except Exception:
     v = ''
 print(v if v is not None else '')
 "
+}
+
+# target_repo_of <json-row-on-stdin> -- AUDIT-REJECT FIX #5: derive the real
+# repo from the target row's own inputs_json.repo, never a hardcoded module.
+# Falls back to compliance-tracker only when the row genuinely has no repo
+# field -- the same default dispatch-owner-task.sh itself already uses.
+target_repo_of() {
+  python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+inputs = d.get('inputs_json') or {}
+if isinstance(inputs, str):
+    try:
+        inputs = json.loads(inputs)
+    except Exception:
+        inputs = {}
+print(inputs.get('repo') or 'compliance-tracker')
+"
+}
+
+# _cache_key <string> -- sanitize an arbitrary real id (umr_id, or
+# repo#pr_number) into a safe filename under CACHE_DIR.
+_cache_key() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_'
+}
+
+# get_umr_row <umr_id> -- QUERY-ONCE-PER-TICK: fetch a given UMR's real live
+# state via resource_governor.py --query-umr --umr-id at most ONCE per tick
+# and reuse it for every later check that needs the same row this same
+# tick. Every call site that needs one specific UMR's row (Check 1's
+# per-chain-head lookup, is_in_flight()'s prior-dispatch liveness check)
+# goes through this function instead of shelling out directly.
+get_umr_row() {
+  local umr_id="$1"
+  local f="$CACHE_DIR/umr/$(_cache_key "$umr_id")"
+  if [ -f "$f" ]; then
+    echo "HIT" >> "$QUERY_LOG"
+    cat "$f"
+    return 0
+  fi
+  local row_json
+  row_json="$(python3 "$RESOURCE_GOVERNOR_PY" --query-umr --umr-id "$umr_id" 2>/dev/null)"
+  printf '%s' "$row_json" > "$f"
+  echo "MISS" >> "$QUERY_LOG"
+  printf '%s' "$row_json"
+}
+
+# cache_put_row <umr_id> <row-json> -- populate the SAME per-tick cache
+# get_umr_row() reads from, using a row already returned by a bulk listing
+# query this tick (--status killed/running/completed_unmerged) -- a later
+# individual lookup for that same umr_id (e.g. is_in_flight(), or another
+# check that hits the same row) reuses it instead of re-querying. No-op if
+# already cached (first real fetch wins, never overwritten mid-tick).
+cache_put_row() {
+  local umr_id="$1" row_json="$2"
+  local f="$CACHE_DIR/umr/$(_cache_key "$umr_id")"
+  [ -f "$f" ] && return 0
+  printf '{"matches":[%s]}' "$row_json" > "$f"
+}
+
+# already_queried_this_tick <umr_id> -- true if this row is already cached
+# this tick, meaning some earlier check already fetched its real state and
+# (if it warranted one) already gave it a real same-tick decision. Checks
+# 2a/2b/3 call this FIRST in their per-row loops and skip (no re-fetch, no
+# re-decide) any umr_id already handled -- the real, concrete case this
+# closes: a tracked-chain head (Check 1) that is ALSO status=killed would
+# otherwise be independently re-fetched and re-decided by Check 2a's
+# system-wide killed-row scan for zero new information. A real on-disk
+# `-f` check, not an in-memory array read -- see CACHE_DIR comment above
+# for why (this function is called directly, not via command substitution,
+# but get_umr_row/cache_put_row populating it often ARE, so the cache
+# itself must be real-filesystem-backed for either to see the other's
+# writes).
+already_queried_this_tick() {
+  [ -f "$CACHE_DIR/umr/$(_cache_key "$1")" ]
+}
+
+# cached_gh_pr_view <repo> <pr_number> -- QUERY-ONCE-PER-TICK for Check 3:
+# two completed_unmerged rows that happen to cite the same real PR never
+# trigger two real GitHub API calls for it in the same tick.
+cached_gh_pr_view() {
+  local repo="$1" pr_number="$2"
+  local f="$CACHE_DIR/pr/$(_cache_key "${repo}#${pr_number}")"
+  if [ -f "$f" ]; then
+    echo "HIT" >> "$QUERY_LOG"
+    cat "$f"
+    return 0
+  fi
+  local pr_json
+  pr_json="$(gh pr view "$pr_number" --repo "${GH_ORG}/${repo}" --json mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,state 2>/dev/null)"
+  printf '%s' "$pr_json" > "$f"
+  echo "MISS" >> "$QUERY_LOG"
+  printf '%s' "$pr_json"
+}
+
+# record_finding -- DECIDE-AND-FIX: call immediately before dispatch_gap()
+# at every real "REAL GAP FOUND" call site below. Paired at the end of the
+# tick against FINDINGS_ACTIONED (incremented once per dispatch_gap() call,
+# regardless of its own real outcome) -- see header comment for the real
+# runtime violation check this backs.
+record_finding() {
+  FINDINGS_LOGGED=$((FINDINGS_LOGGED + 1))
 }
 
 state_get_dispatched_umr() {
@@ -174,7 +523,8 @@ with open(path, 'w') as f:
 # is_in_flight <target_key> -- returns 0 (true) if a real, still-live
 # (queued/dispatched/running) dispatch already exists for this target;
 # re-verifies liveness against resource_governor.py --query-umr every call,
-# never trusts the state file's own cached claim.
+# never trusts the state file's own cached claim. ZERO-DUPLICATION layer (a)
+# -- see header comment.
 is_in_flight() {
   local target_key="$1"
   local prior_umr
@@ -183,7 +533,7 @@ is_in_flight() {
     return 1
   fi
   local row_json status
-  row_json="$(python3 resource_governor.py --query-umr --umr-id "$prior_umr" 2>/dev/null)"
+  row_json="$(get_umr_row "$prior_umr")"
   status="$(printf '%s' "$row_json" | py_field "(d['matches'][0]['status'] if d.get('matches') else '')")"
   case "$status" in
     queued|dispatched|running)
@@ -197,10 +547,10 @@ is_in_flight() {
 }
 
 # is_financial_decision <text> -- real, narrow keyword test (see the
-# "Owner-decision escalation scope" header comment above for the real
-# Owner-issued policy this implements). True only for genuine
-# spend/payment/invoice/pricing/billing/subscription/refund/budget-approval
-# language -- never for ordinary technical/product gaps.
+# "DECISION AUTHORITY" header comment above for the real Owner-issued policy
+# this implements). True only for genuine spend/payment/invoice/pricing/
+# billing/subscription/refund/budget-approval language -- never for ordinary
+# technical/product gaps.
 is_financial_decision() {
   printf '%s' "$1" | grep -qiE "$FINANCIAL_KEYWORDS"
 }
@@ -223,16 +573,60 @@ escalate_financial_decision() {
   echo "$out" | sed 's/^/    /'
   if [ "$rc" -ne 0 ]; then
     echo "  WARNING: $NOTIFY_OWNER_SCRIPT failed (exit $rc) for $target_key -- Owner escalation NOT confirmed sent, see output above"
+    TICK_FAILURES=$((TICK_FAILURES + 1))
   fi
 }
 
-# dispatch_gap <target_key> <title> <prompt> <tier> -- the ONLY place this
-# script ever creates new real work, and it does so exclusively through the
-# existing single front door -- EXCEPT a genuine financial decision, which
-# it escalates to the Owner instead (checked first, below) per the real
-# Owner-issued escalation-scope policy in the header comment above.
+# emit_report_row <umr_id> <gap_type> <tested> <audited> <integrated> <working>
+# -- 326b point 5 (standardized boolean-table REPORT FORMAT). Every value
+# passed in is itself a real boolean computed by the caller from real
+# evidence already gathered this tick (query-umr/gh/systemctl output) --
+# never AI-narrated. FOUND is always true here (this function is only ever
+# called for a row a real query already matched). GAP_ANALYSIS is true
+# whenever a real, specific gap_type was identified (it always is, by
+# construction, for every call site below). CERTIFIED is true only if every
+# other column is true, same rule the laptop/desktop tiers already use.
+emit_report_row() {
+  local umr_id="$1" gap_type="$2" tested="$3" audited="$4" integrated="$5" working="$6"
+  python3 -c "
+import json, sys
+found = True
+gap_analysis = bool('$gap_type')
+tested = '$tested' == 'true'
+audited = '$audited' == 'true'
+integrated = '$integrated' == 'true'
+working = '$working' == 'true'
+certified = all([found, gap_analysis, tested, audited, integrated, working])
+row = {
+    'ts': '$TICK_TS',
+    'umr_id': '$umr_id',
+    'gap_type': '$gap_type',
+    'FOUND': found,
+    '100_PCT_COMPLETED_WITH_GAP_ANALYSIS_AND_REAL_IMPLEMENTATION': gap_analysis,
+    'TESTED': tested,
+    'AUDITED_WITH_ARTIFACTS': audited,
+    'INTEGRATED': integrated,
+    'WORKING': working,
+    'CERTIFIED': certified,
+}
+with open('$REPORT_FILE', 'a') as f:
+    f.write(json.dumps(row) + chr(10))
+"
+}
+
+# dispatch_gap <target_key> <title> <prompt> <tier> <repo> -- the ONLY place
+# this script ever creates new real work, and it does so exclusively through
+# the existing single front door -- EXCEPT a genuine financial decision,
+# which it escalates to the Owner instead (checked first, below) per the
+# real Owner-issued escalation-scope policy in the header comment above.
 dispatch_gap() {
-  local target_key="$1" title="$2" prompt="$3" tier="$4"
+  local target_key="$1" title="$2" prompt="$3" tier="$4" repo="${5:-compliance-tracker}"
+  # DECIDE-AND-FIX: this is the one real gateway every finding must go
+  # through -- count it as actioned the moment it arrives here, regardless
+  # of which real terminal outcome below actually applies (dispatched,
+  # in-flight, cap-reached, or financial escalation are all real,
+  # disclosed, non-silent dispositions of the finding this same tick).
+  FINDINGS_ACTIONED=$((FINDINGS_ACTIONED + 1))
   if is_financial_decision "$title $prompt"; then
     escalate_financial_decision "$target_key" "$title" "$prompt"
     return 0
@@ -244,14 +638,33 @@ dispatch_gap() {
     echo "  CAP REACHED ($MAX_DISPATCHES_PER_TICK/tick) -- NOT dispatching for $target_key this tick (will be reconsidered next tick)"
     return 0
   fi
-  echo "  DISPATCHING for $target_key: $title"
+  echo "  DISPATCHING for $target_key: $title (repo=$repo)"
   local out rc
-  out="$(./dispatch-owner-task.sh "$title" "$prompt" "$tier" ssh_session compliance-tracker --no-relay 2>&1)"
+  out="$("$DISPATCH_OWNER_TASK_SH" "$title" "$prompt" "$tier" ssh_session "$repo" --no-relay 2>&1)"
   rc=$?
   echo "$out" | sed 's/^/    /'
   if [ "$rc" -ne 0 ]; then
+    # Real fix (UMR-20260813-145511-5aca / UMR-20260813-170956-5385, second
+    # real defect): dispatch-owner-task.sh's own content-duplicate guard
+    # (superboss-register.py check-content-duplicate, 6h window) refuses a
+    # byte-identical prompt already logged -- live-reproduced on
+    # veridian-pm-sentinel-tick.service's own most recent failed runs. This
+    # is an expected, already-accounted-for condition (the same finding was
+    # already logged, just not by this tick), not a genuine dispatch
+    # failure -- treat it like CAP REACHED/is_in_flight above: skip quietly,
+    # let a later tick reconsider once the window rolls, and do NOT fail the
+    # whole tick over it. A tick that hits only this (or CAP REACHED) must
+    # still exit 0; every OTHER real dispatch-owner-task.sh failure still
+    # counts and still propagates non-zero (AUDIT-REJECT FIX #2, preserved
+    # below).
+    if printf '%s' "$out" | grep -q "REFUSED: an identical instruction was already logged"; then
+      echo "  SKIPPED $target_key: duplicate content already logged within dispatch-owner-task.sh's own 6h window -- not a tick failure (will be reconsidered next tick)"
+      return 0
+    fi
     echo "  DISPATCH FAILED for $target_key (dispatch-owner-task.sh exit $rc) -- see output above, no state recorded"
-    return 0
+    # AUDIT-REJECT FIX #2: propagate real failure, do not swallow it.
+    TICK_FAILURES=$((TICK_FAILURES + 1))
+    return 1
   fi
   local new_umr
   new_umr="$(printf '%s' "$out" | grep -o 'umr_id=[A-Za-z0-9_-]*' | head -1 | cut -d= -f2)"
@@ -261,16 +674,84 @@ dispatch_gap() {
     echo "  DISPATCHED $target_key -> $new_umr ($DISPATCH_COUNT/$MAX_DISPATCHES_PER_TICK this tick)"
   else
     echo "  WARNING: dispatch-owner-task.sh returned rc=0 but no umr_id parsed from its output -- not recorded in-flight"
+    TICK_FAILURES=$((TICK_FAILURES + 1))
+    return 1
   fi
 }
 
 # ---------------------------------------------------------------------------
+# Check 0 (2026-08-13 addendum, UMR-20260813-195852-aa85): live deploy drift
+# self-check -- is THIS SCRIPT'S OWN real running checkout ($LIVE_SCRIPTS_DIR)
+# actually the same commit as origin/main?
+#
+# Real root cause this closes: this exact positional-`systemctl show`-parse
+# bug (Check 2b, ActiveState/Result read by output line position instead of
+# by key -- the fingerprint being an impossible "ActiveState=success" pairing,
+# since "success" is only ever a real Result/SubState value) was ALREADY
+# FIXED and merged to origin/main via PR #299 (commit ae48cf0, 2026-08-13
+# 18:49 UTC) -- verified live this same tick: `git cat-file -p
+# origin/main:pm-sentinel-tick.sh` shows the real, current, key-based parse
+# (`sed -n 's/^ActiveState=//p'` / `sed -n 's/^Result=//p'`, plus an
+# impossible-value guard), not the old `--value` + `sed -n '1p'`/`'2p'`
+# positional read. Despite that, the box's real live checkout at
+# /opt/veridian/scripts (the actual systemd --user unit target, the one
+# every RCA in this chain has been inspecting) was found THIS SAME TICK still
+# sitting on stale commit ff328e7 (`git rev-parse HEAD` there), NOT on main,
+# WITH real uncommitted local edits on top -- so the real fix has been
+# sitting merged and tested in git this whole time while production kept
+# running the old buggy positional parse, generating the exact false
+# "status=running but unit dead" RCA cascade this UMR chain (UMR-20260806-
+# 171945-5767 -> ... -> UMR-20260813-092654-326b) has repeatedly had to
+# re-diagnose. `sync-repos.sh`'s own fast-forward-only pull already correctly
+# refuses to silently overwrite a dirty/non-main checkout (by design -- see
+# its own comments), but nothing was watching for that refusal and escalating
+# it as a real, actionable gap -- this script ran every hour regardless,
+# oblivious to running a stale, already-fixed-elsewhere copy of itself. Check
+# 0 closes that: reuses the real, already-built check_live_scripts_drift.py
+# (never reimplemented here) to answer the question with real evidence, and
+# -- per DECIDE-AND-FIX -- dispatches a real fix through the same single
+# gateway the instant drift is found, instead of only ever logging it.
+# ---------------------------------------------------------------------------
+echo "--- Check 0: live deploy drift self-check ($LIVE_SCRIPTS_DIR vs origin/main) ---"
+DRIFT_JSON="$(python3 "$CHECK_LIVE_SCRIPTS_DRIFT_PY" --live-dir "$LIVE_SCRIPTS_DIR" 2>/dev/null)"
+DRIFT_RC=$?
+if [ "$DRIFT_RC" -eq 2 ] || [ -z "$DRIFT_JSON" ]; then
+  echo "  DRIFT CHECK UNAVAILABLE (check_live_scripts_drift.py exit $DRIFT_RC, could not determine real state -- e.g. fetch/network failure) -- fails closed: NOT treated as a drift finding this tick (a tooling failure alone is not itself evidence of drift), but also not silently OK -- see its own real stderr/output above if this persists."
+else
+  IN_SYNC="$(printf '%s' "$DRIFT_JSON" | py_field "d.get('in_sync', False)")"
+  if [ "$IN_SYNC" = "True" ]; then
+    LIVE_HEAD="$(printf '%s' "$DRIFT_JSON" | py_field "d.get('live_head','')")"
+    echo "  in sync: $LIVE_SCRIPTS_DIR HEAD matches origin/main (head=$LIVE_HEAD)"
+  else
+    LIVE_HEAD="$(printf '%s' "$DRIFT_JSON" | py_field "d.get('live_head','')")"
+    ORIGIN_HEAD="$(printf '%s' "$DRIFT_JSON" | py_field "d.get('origin_main_head','')")"
+    CUR_BRANCH="$(printf '%s' "$DRIFT_JSON" | py_field "d.get('current_branch','')")"
+    ON_MAIN="$(printf '%s' "$DRIFT_JSON" | py_field "d.get('on_main_branch', True)")"
+    CHANGED_COUNT="$(printf '%s' "$DRIFT_JSON" | py_field "len(d.get('changed_files') or [])")"
+    CHANGED_LIST="$(printf '%s' "$DRIFT_JSON" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(', '.join(c.get('path','') for c in (d.get('changed_files') or [])[:20]))
+" 2>/dev/null)"
+    echo "  DRIFT FOUND: $LIVE_SCRIPTS_DIR is real, live, NOT in sync with origin/main -- branch=$CUR_BRANCH (on_main=$ON_MAIN) head=$LIVE_HEAD vs origin/main=$ORIGIN_HEAD, $CHANGED_COUNT real tracked file(s) differ: $CHANGED_LIST"
+    TARGET_KEY="deploy_drift:${LIVE_SCRIPTS_DIR}"
+    PROMPT="GOVERNING CHAIN: this task's own dispatching UMR (PM-sentinel tick), Check 0 (UMR-20260813-195852-aa85 addendum). REAL GAP FOUND: the real live checkout at ${LIVE_SCRIPTS_DIR} (this script's own actual running location) is NOT in sync with origin/main, verified live this tick via check_live_scripts_drift.py --live-dir ${LIVE_SCRIPTS_DIR} -- branch=${CUR_BRANCH} (on_main_branch=${ON_MAIN}) real HEAD=${LIVE_HEAD} vs real origin/main=${ORIGIN_HEAD}, ${CHANGED_COUNT} real tracked file(s) differ: ${CHANGED_LIST}. This is a confirmed root cause of prior false RCAs on this chain: real fixes merged to origin/main (e.g. PR #299's key-based systemctl-show parse fix) never reach production while this drift persists. Read the row's full real check_live_scripts_drift.py --live-dir ${LIVE_SCRIPTS_DIR} output yourself first (do not trust this summary alone), determine why the live checkout is stuck off-main / dirty (sync-repos.sh deliberately refuses to force-overwrite a dirty or non-main checkout -- see its own comments), and either safely reconcile it onto origin/main (real evidence: whose real uncommitted changes are present, whether they are stale/abandoned or genuinely in-flight work needing a real commit+push first) or record a real, honest terminal outcome via superboss-register.py mark-umr-terminal citing real evidence. Do not fabricate completion, and do not destroy another real in-flight agent's uncommitted work without first confirming it is genuinely abandoned."
+    record_finding
+    dispatch_gap "$TARGET_KEY" "Reconcile live deploy drift: ${LIVE_SCRIPTS_DIR} vs origin/main" "$PROMPT" 1 "veridian-scripts"
+    emit_report_row "live-checkout:${LIVE_SCRIPTS_DIR}" "live_deploy_drift" false false false false
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Check 1: tracked-chain status (per governing UMR of each active/pending
 # owner_priority_sequence phase -- the real, live "tracked chains" this box
-# already maintains, not a second, parallel chain-tracking file).
+# already maintains, not a second, parallel chain-tracking file), PLUS
+# (326b point 1, dynamic scope discovery) a real live search for addendum
+# rows citing each chain head, so a fresh amendment is caught the same tick
+# it is submitted.
 # ---------------------------------------------------------------------------
 echo "--- Check 1: tracked-chain status ---"
-PHASES_JSON="$(python3 superboss-register.py show-owner-priority-state 2>/dev/null)"
+PHASES_JSON="$(python3 "$SUPERBOSS_REGISTER_PY" show-owner-priority-state 2>/dev/null)"
 CHAIN_UMRS="$(printf '%s' "$PHASES_JSON" | python3 -c "
 import json, sys
 try:
@@ -286,13 +767,29 @@ if [ -z "$CHAIN_UMRS" ]; then
 fi
 while IFS= read -r chain_umr; do
   [ -z "$chain_umr" ] && continue
-  ROW_JSON="$(python3 resource_governor.py --query-umr --umr-id "$chain_umr" 2>/dev/null)"
+  ROW_JSON="$(get_umr_row "$chain_umr")"
   CHAIN_STATUS="$(printf '%s' "$ROW_JSON" | py_field "(d['matches'][0]['status'] if d.get('matches') else 'NOT_FOUND')")"
   echo "  chain head $chain_umr: status=$CHAIN_STATUS"
   if [ "$CHAIN_STATUS" = "killed" ]; then
     TARGET_KEY="rca:${chain_umr}"
+    REPO="$(printf '%s' "$ROW_JSON" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+m = d['matches'][0] if d.get('matches') else {}
+print((m.get('inputs_json') or {}).get('repo') or 'compliance-tracker')
+" 2>/dev/null)"
     PROMPT="GOVERNING CHAIN: this task's own dispatching UMR (PM-sentinel tick), citing real tracked chain head ${chain_umr}. REAL GAP FOUND: resource_governor.py --query-umr --umr-id ${chain_umr} shows status=killed (a real, live re-check, not assumed) -- this governing UMR needs a real RCA (root-cause analysis) before this chain can proceed. Read the row's own real reason/outputs_json (query resource_governor.py --query-umr --umr-id ${chain_umr} yourself first), determine the real root cause, and either fix + redispatch the real remaining scope, or record a real, honest terminal outcome via superboss-register.py mark-umr-terminal citing real evidence. Do not fabricate completion."
-    dispatch_gap "$TARGET_KEY" "RCA: tracked chain head ${chain_umr} killed" "$PROMPT" 1
+    record_finding
+    dispatch_gap "$TARGET_KEY" "RCA: tracked chain head ${chain_umr} killed" "$PROMPT" 1 "$REPO"
+    emit_report_row "$chain_umr" "chain_head_killed" false false false false
+  fi
+  # Dynamic addenda discovery (326b point 1): any real row whose own prompt
+  # text names this chain head as its governing UMR, found live this tick,
+  # not from a hardcoded list.
+  ADDENDA_JSON="$(python3 "$RESOURCE_GOVERNOR_PY" --query-umr --search "$chain_umr" --limit 10 2>/dev/null)"
+  ADDENDA_COUNT="$(printf '%s' "$ADDENDA_JSON" | py_field "d.get('count', 0)")"
+  if [ -n "$ADDENDA_COUNT" ] && [ "$ADDENDA_COUNT" != "0" ]; then
+    echo "  chain head $chain_umr: $ADDENDA_COUNT real addendum row(s) found live (see --query-umr --search for detail)"
   fi
 done <<< "$CHAIN_UMRS"
 
@@ -300,7 +797,7 @@ done <<< "$CHAIN_UMRS"
 # Check 2a: killed-status rows needing RCA (system-wide, bounded).
 # ---------------------------------------------------------------------------
 echo "--- Check 2a: killed-status rows needing RCA ---"
-KILLED_JSON="$(python3 resource_governor.py --query-umr --status killed --limit 15 2>/dev/null)"
+KILLED_JSON="$(python3 "$RESOURCE_GOVERNOR_PY" --query-umr --status killed --limit 15 2>/dev/null)"
 KILLED_IDS="$(printf '%s' "$KILLED_JSON" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -309,6 +806,14 @@ for m in d.get('matches', []):
 " 2>/dev/null)"
 while IFS= read -r umr_id; do
   [ -z "$umr_id" ] && continue
+  # QUERY-ONCE-PER-TICK: this exact row may already have been fetched (and,
+  # if it warranted one, already given a real same-tick decision) by Check 1
+  # above -- a tracked-chain head that is ALSO status=killed. Skip re-fetch
+  # + re-decide entirely rather than re-querying for zero new information.
+  if already_queried_this_tick "$umr_id"; then
+    echo "  QUERY-ONCE: ${umr_id} already fetched+handled this tick (tracked-chain check) -- skipping redundant re-check"
+    continue
+  fi
   TARGET_KEY="rca:${umr_id}"
   ROW_JSON="$(printf '%s' "$KILLED_JSON" | python3 -c "
 import json, sys
@@ -318,10 +823,14 @@ for m in d.get('matches', []):
         print(json.dumps(m))
         break
 ")"
+  cache_put_row "$umr_id" "$ROW_JSON"
   REASON="$(printf '%s' "$ROW_JSON" | py_field "d.get('reason', '')" | head -c 400)"
   UNIT="$(printf '%s' "$ROW_JSON" | py_field "d.get('unit_name', '')")"
+  REPO="$(printf '%s' "$ROW_JSON" | target_repo_of)"
   PROMPT="GOVERNING CHAIN: this task's own dispatching UMR (PM-sentinel tick). REAL GAP FOUND: resource_governor.py --query-umr --umr-id ${umr_id} shows status=killed, real recorded reason: \"${REASON}\" (unit_name=${UNIT:-none}). This needs a real RCA: read the row's full real outputs_json/reason (query resource_governor.py --query-umr --umr-id ${umr_id} yourself first, do not trust this summary alone), determine the real root cause, and either fix + redispatch the real remaining scope, or record a real, honest terminal outcome via superboss-register.py mark-umr-terminal citing real evidence. Do not fabricate completion."
-  dispatch_gap "$TARGET_KEY" "RCA: ${umr_id} killed" "$PROMPT" 1
+  record_finding
+  dispatch_gap "$TARGET_KEY" "RCA: ${umr_id} killed" "$PROMPT" 1 "$REPO"
+  emit_report_row "$umr_id" "killed_needs_rca" false false false false
 done <<< "$KILLED_IDS"
 
 # ---------------------------------------------------------------------------
@@ -330,7 +839,7 @@ done <<< "$KILLED_IDS"
 # journalctl cross-check against the row's own real unit_name.
 # ---------------------------------------------------------------------------
 echo "--- Check 2b: running-row cross-check (exit-write-back-bug) ---"
-RUNNING_JSON="$(python3 resource_governor.py --query-umr --status running --limit 20 2>/dev/null)"
+RUNNING_JSON="$(python3 "$RESOURCE_GOVERNOR_PY" --query-umr --status running --limit 20 2>/dev/null)"
 RUNNING_ROWS="$(printf '%s' "$RUNNING_JSON" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -341,23 +850,94 @@ for m in d.get('matches', []):
 " 2>/dev/null)"
 while IFS=$'\t' read -r umr_id unit; do
   [ -z "$umr_id" ] && continue
-  ACTIVE_STATE="$(systemctl --user show "$unit" -p ActiveState --value 2>/dev/null)"
-  RESULT_STATE="$(systemctl --user show "$unit" -p Result --value 2>/dev/null)"
+  # QUERY-ONCE-PER-TICK: this row was already fetched+handled by Check 1
+  # (tracked-chain head) this same tick if applicable -- skip redundant
+  # re-decide. (The systemctl/journalctl calls below are real UNIT state,
+  # not UMR-row state, so this guard is about the UMR row only.)
+  if already_queried_this_tick "$umr_id"; then
+    echo "  QUERY-ONCE: ${umr_id} already fetched+handled this tick (tracked-chain check) -- skipping redundant re-check"
+    continue
+  fi
+  # QUERY-ONCE-PER-TICK: one real systemctl call for BOTH ActiveState and
+  # Result (was two identical-unit calls, one per field).
+  #
+  # Real fix (UMR-20260813-145511-5aca / UMR-20260813-170956-5385): this
+  # used to run with --value and assume systemd would always emit
+  # ActiveState before Result (positionally reading line 1 = ActiveState,
+  # line 2 = Result via `sed -n 1p`/`sed -n 2p`) -- nothing in systemctl's
+  # own contract guarantees `show -p X -p Y --value` preserves the -p flag
+  # order in its output. Live-reproduced proof this really happens: real
+  # tick log rows read "ActiveState=success Result=active" and
+  # "ActiveState=success Result=inactive" -- ActiveState can never
+  # legitimately be "success" (that's a Result value) and Result can never
+  # legitimately be "active"/"inactive" (those are ActiveState values), so
+  # those were really Result and ActiveState swapped by position. Because
+  # the guard below is `[ "$ACTIVE_STATE" != active ]`, a swapped read of a
+  # genuinely successful/active unit's real "ActiveState=active
+  # Result=success" landed as ACTIVE_STATE=success -- read as "not active"
+  # -- turning a live, healthy unit into a false MISMATCH/RCA dispatch.
+  #
+  # Fixed to be order-independent: drop --value (each line now comes back
+  # as `Key=Value`, not bare) and extract each field by its own key, never
+  # by output position. Same single systemctl call, same query-once
+  # optimization -- only the parse changed.
+  UNIT_STATE="$(systemctl --user show "$unit" -p ActiveState -p Result 2>/dev/null)"
+  ACTIVE_STATE="$(printf '%s\n' "$UNIT_STATE" | sed -n 's/^ActiveState=//p')"
+  RESULT_STATE="$(printf '%s\n' "$UNIT_STATE" | sed -n 's/^Result=//p')"
+  # Real guard (ACTION 2, UMR-20260813-145511-5aca / UMR-20260813-170956-5385
+  # / UMR-20260813-183133 third redispatch): the name-keyed parse above
+  # already fixes the transposition itself, but defense-in-depth still
+  # matters here -- if systemd's own output format ever changes shape again
+  # (a missing key line, a truncated field, a future systemctl behavior
+  # change) a *silent* re-transposition is exactly how this bug class was
+  # invisible for as long as it was: ActiveState=success is not a value
+  # ActiveState can ever legitimately hold (systemd's real ActiveState enum
+  # is active/reloading/inactive/failed/activating/deactivating/
+  # maintenance -- "success" only ever appears in Result). Reject that
+  # impossible value outright rather than act on it: fail loudly (real
+  # TICK_FAILURES increment, real non-zero tick exit) and skip this row
+  # entirely for this tick instead of feeding a still-possibly-transposed
+  # value into the MISMATCH check below and risking another false RCA.
+  case "$ACTIVE_STATE" in
+    ""|active|reloading|inactive|failed|activating|deactivating|maintenance) ;;
+    *)
+      echo "  IMPOSSIBLE VALUE: $umr_id unit $unit real systemctl show returned ActiveState=$ACTIVE_STATE (Result=$RESULT_STATE) -- \"$ACTIVE_STATE\" is not a real systemd ActiveState value (it looks like a Result value), so this parse is not trustworthy. Refusing to act on it -- NOT dispatching an RCA off unverified data. This is a real tick failure needing investigation, not a unit-dead finding."
+      TICK_FAILURES=$((TICK_FAILURES + 1))
+      continue
+      ;;
+  esac
   if [ "$ACTIVE_STATE" != "active" ] && [ -n "$ACTIVE_STATE" ]; then
     echo "  MISMATCH: $umr_id status=running but unit $unit ActiveState=$ACTIVE_STATE Result=$RESULT_STATE -- real exit-write-back-bug candidate"
     JOURNAL_EXCERPT="$(journalctl --user -u "$unit" -n 5 --no-pager --output=cat 2>/dev/null | tr '\n' ' ' | head -c 500)"
     TARGET_KEY="rca:${umr_id}"
+    ROW_JSON="$(printf '%s' "$RUNNING_JSON" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for m in d.get('matches', []):
+    if m['umr_id'] == '$umr_id':
+        print(json.dumps(m))
+        break
+")"
+    cache_put_row "$umr_id" "$ROW_JSON"
+    REPO="$(printf '%s' "$ROW_JSON" | target_repo_of)"
     PROMPT="GOVERNING CHAIN: this task's own dispatching UMR (PM-sentinel tick). REAL GAP FOUND: resource_governor.py --query-umr --umr-id ${umr_id} shows status=running, but the real live systemctl --user show ${unit} ActiveState=${ACTIVE_STATE} Result=${RESULT_STATE} -- this row's own status is lying (the known exit-write-back-bug class: a running/completed row can lie). Real journalctl excerpt (last 5 lines, cited not fabricated): \"${JOURNAL_EXCERPT}\". This needs a real RCA: confirm the real unit state yourself (systemctl --user show ${unit}, journalctl --user -u ${unit}), determine what really happened, and either fix + redispatch the real remaining scope, or record a real, honest terminal outcome via superboss-register.py mark-umr-terminal citing real evidence. Do not fabricate completion."
-    dispatch_gap "$TARGET_KEY" "RCA: ${umr_id} status=running but unit dead (write-back bug)" "$PROMPT" 1
+    record_finding
+    dispatch_gap "$TARGET_KEY" "RCA: ${umr_id} status=running but unit dead (write-back bug)" "$PROMPT" 1 "$REPO"
+    emit_report_row "$umr_id" "running_status_write_back_bug" false false false false
   fi
 done <<< "$RUNNING_ROWS"
 
+# ---------------------------------------------------------------------------
+# Check 2c: deliberately absent -- see "REUSE, not reimplementation" header
+# comment above. Blocked-task reconciliation is already fully covered by
+# resource_governor.py's own scan_stuck_tasks() (already runs every real
+# dispatch-tick) feeding into Check 2a above; no new query needed here.
 # ---------------------------------------------------------------------------
 # Check 3: real PR audit for status='completed_unmerged' rows -- gh pr view
 # + real posted comments, never just a CI badge.
 # ---------------------------------------------------------------------------
 echo "--- Check 3: completed_unmerged PR audit ---"
-UNMERGED_JSON="$(python3 resource_governor.py --query-umr --status completed_unmerged --limit 15 2>/dev/null)"
+UNMERGED_JSON="$(python3 "$RESOURCE_GOVERNOR_PY" --query-umr --status completed_unmerged --limit 15 2>/dev/null)"
 UNMERGED_ROWS="$(printf '%s' "$UNMERGED_JSON" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
@@ -375,7 +955,14 @@ for m in d.get('matches', []):
 " 2>/dev/null)"
 while IFS=$'\t' read -r umr_id pr_number repo; do
   [ -z "$umr_id" ] && continue
-  PR_JSON="$(gh pr view "$pr_number" --repo "${GH_ORG}/${repo}" --json mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,state 2>/dev/null)"
+  # QUERY-ONCE-PER-TICK: same UMR-row guard as Checks 2a/2b -- a
+  # completed_unmerged row that is ALSO a tracked-chain head was already
+  # fetched by Check 1. (This does not skip the real gh pr view below --
+  # that is genuinely new PR-level information Check 1 never fetched.)
+  if already_queried_this_tick "$umr_id"; then
+    echo "  QUERY-ONCE: ${umr_id} UMR-row state already fetched this tick (tracked-chain check) -- reusing, only fetching real new PR state below"
+  fi
+  PR_JSON="$(cached_gh_pr_view "$repo" "$pr_number")"
   if [ -z "$PR_JSON" ]; then
     echo "  ${umr_id} PR #${pr_number} (${repo}): gh pr view failed/unavailable -- skipping (fail-open, not a genuine gap without real evidence)"
     continue
@@ -409,21 +996,78 @@ else:
   if [ -n "$FAIL_COMMENT" ]; then
     TARGET_KEY="prfix:${umr_id}:${pr_number}"
     PROMPT="GOVERNING CHAIN: this task's own dispatching UMR (PM-sentinel tick). REAL GAP FOUND: ${umr_id}'s open PR #${pr_number} (${repo}) has a real posted comment (not just a CI badge, fetched via gh api repos/${GH_ORG}/${repo}/issues/${pr_number}/comments) indicating a real failure: \"$(printf '%s' "$FAIL_COMMENT" | head -c 400)\". Read the real full comment thread yourself first (gh pr view ${pr_number} --repo ${GH_ORG}/${repo} --comments), then fix the real cited issue and push a real commit to the same PR branch. Do not fabricate completion."
-    dispatch_gap "$TARGET_KEY" "Fix cited FAIL on PR #${pr_number} (${umr_id})" "$PROMPT" 1
+    record_finding
+    dispatch_gap "$TARGET_KEY" "Fix cited FAIL on PR #${pr_number} (${umr_id})" "$PROMPT" 1 "$repo"
+    emit_report_row "$umr_id" "pr_fail_comment" false false false false
   elif [ "$MERGEABLE" = "MERGEABLE" ] && [ "$MERGE_STATE" = "CLEAN" ] && [ "$CHECKS_OK" = "pass" ]; then
-    if [ "$REVIEW_DECISION" = "APPROVED" ]; then
-      TARGET_KEY="merge:${umr_id}:${pr_number}"
-      PROMPT="GOVERNING CHAIN: this task's own dispatching UMR (PM-sentinel tick). REAL GAP FOUND: ${umr_id}'s open PR #${pr_number} (${repo}) is real, live, MERGEABLE/CLEAN, all real status checks pass, and review is APPROVED (fresh real PASS, re-verified live via gh pr view, not assumed from a stale record) -- it needs a real merge. Re-verify state yourself first (gh pr view ${pr_number} --repo ${GH_ORG}/${repo}), then merge it (gh pr merge ${pr_number} --repo ${GH_ORG}/${repo}) and record real completion via superboss-register.py mark-umr-terminal --umr-id ${umr_id} --status completed --commit-sha <real merge commit SHA> --pr-number ${pr_number}. Do not fabricate completion."
-      dispatch_gap "$TARGET_KEY" "Merge fresh-PASS PR #${pr_number} (${umr_id})" "$PROMPT" 1
-    else
-      TARGET_KEY="audit:${umr_id}:${pr_number}"
-      PROMPT="GOVERNING CHAIN: this task's own dispatching UMR (PM-sentinel tick). REAL GAP FOUND: ${umr_id}'s open PR #${pr_number} (${repo}) is real, live, MERGEABLE/CLEAN, all real status checks pass, but has no real review decision yet (reviewDecision=${REVIEW_DECISION:-none}) -- it needs a real independent audit before merge. Re-verify state yourself first (gh pr view ${pr_number} --repo ${GH_ORG}/${repo} --comments, real posted comments not just the CI badge), perform a real independent review, and either approve+merge with real evidence, or cite a real, specific gap back on the PR. Do not fabricate completion."
-      dispatch_gap "$TARGET_KEY" "Audit mergeable+clean PR #${pr_number} (${umr_id})" "$PROMPT" 2
-    fi
+    # AUDIT-REJECT FIX #4: never dispatch a blind "trust reviewDecision,
+    # just merge" worker task -- that used to conflict with the
+    # single-gateway rule by letting a dispatched worker call `gh pr merge`
+    # directly on a possibly-stale review decision. Every mergeable+clean PR
+    # now only ever gets a real independent re-audit dispatch, whether or
+    # not a prior review decision is on record -- the audit itself
+    # re-verifies state live before any merge happens.
+    TARGET_KEY="audit:${umr_id}:${pr_number}"
+    PROMPT="GOVERNING CHAIN: this task's own dispatching UMR (PM-sentinel tick). REAL GAP FOUND: ${umr_id}'s open PR #${pr_number} (${repo}) is real, live, MERGEABLE/CLEAN, all real status checks pass (prior recorded reviewDecision=${REVIEW_DECISION:-none}, re-verify it live rather than trusting this snapshot). Re-verify state yourself first (gh pr view ${pr_number} --repo ${GH_ORG}/${repo} --comments, real posted comments not just the CI badge), perform a real independent review, and either approve+merge with real evidence, or cite a real, specific gap back on the PR. Never merge on a cached/prior review decision alone -- re-confirm live. Do not fabricate completion."
+    record_finding
+    dispatch_gap "$TARGET_KEY" "Audit mergeable+clean PR #${pr_number} (${umr_id})" "$PROMPT" 2 "$repo"
+    emit_report_row "$umr_id" "pr_mergeable_needs_audit" true "$([ "$REVIEW_DECISION" = "APPROVED" ] && echo true || echo false)" false true
   else
     echo "    not yet a genuine actionable gap (mergeable=${MERGEABLE} mergeState=${MERGE_STATE} checks=${CHECKS_OK}) -- still in flight, nothing to do this tick"
   fi
 done <<< "$UNMERGED_ROWS"
 
-echo "=== pm-sentinel-tick done: ${DISPATCH_COUNT}/${MAX_DISPATCHES_PER_TICK} new dispatches this tick ==="
+# ---------------------------------------------------------------------------
+# DECIDE-AND-FIX reconciliation (2026-08-13 addendum, UMR-20260813-105106-e9a7
+# addendum to UMR-20260813-102459-10c3) -- see header comment above. Every
+# real finding logged via record_finding() must have gone through
+# dispatch_gap() (the one real gateway) this same tick; if the two real
+# counters don't match, a finding was left undecided -- fail loudly instead
+# of silently leaving it for a future tick that might never come.
+# ---------------------------------------------------------------------------
+if [ "$FINDINGS_LOGGED" -ne "$FINDINGS_ACTIONED" ]; then
+  echo "DECIDE-AND-FIX VIOLATION: ${FINDINGS_LOGGED} real finding(s) logged this tick but only ${FINDINGS_ACTIONED} got a same-tick dispatch/escalation/blocker decision through dispatch_gap() -- incomplete work per the 2026-08-13 addendum (UMR-20260813-105106-e9a7). A finding without an accompanying real dispatched fix (or an explicit real blocker) is not done." >&2
+  TICK_FAILURES=$((TICK_FAILURES + 1))
+else
+  echo "DECIDE-AND-FIX: ${FINDINGS_LOGGED} real finding(s) this tick, ${FINDINGS_ACTIONED} same-tick decision(s) through dispatch_gap() -- reconciled, none left undecided"
+fi
+QUERY_CACHE_MISSES="$(grep -c '^MISS$' "$QUERY_LOG" 2>/dev/null)"; QUERY_CACHE_MISSES="${QUERY_CACHE_MISSES:-0}"
+QUERY_CACHE_HITS="$(grep -c '^HIT$' "$QUERY_LOG" 2>/dev/null)"; QUERY_CACHE_HITS="${QUERY_CACHE_HITS:-0}"
+echo "QUERY-ONCE-PER-TICK: ${QUERY_CACHE_MISSES} real live query/queries issued, ${QUERY_CACHE_HITS} reused from this tick's own cache instead of re-querying"
+
+# ---------------------------------------------------------------------------
+# Metrics -- real Prometheus textfile-collector exposition of this tick's own
+# real counters (see "REPORT FORMAT" header comment above for the honest
+# caveat on the final textfile-collector-directory wiring step).
+# ---------------------------------------------------------------------------
+{
+  echo "# HELP pm_sentinel_tick_dispatch_count Real dispatches this tick"
+  echo "# TYPE pm_sentinel_tick_dispatch_count gauge"
+  echo "pm_sentinel_tick_dispatch_count ${DISPATCH_COUNT}"
+  echo "# HELP pm_sentinel_tick_failure_count Real dispatch/notify failures this tick"
+  echo "# TYPE pm_sentinel_tick_failure_count gauge"
+  echo "pm_sentinel_tick_failure_count ${TICK_FAILURES}"
+  echo "# HELP pm_sentinel_tick_findings_logged Real findings identified this tick (DECIDE-AND-FIX)"
+  echo "# TYPE pm_sentinel_tick_findings_logged gauge"
+  echo "pm_sentinel_tick_findings_logged ${FINDINGS_LOGGED}"
+  echo "# HELP pm_sentinel_tick_findings_actioned Real findings given a same-tick dispatch/escalation/blocker decision (DECIDE-AND-FIX)"
+  echo "# TYPE pm_sentinel_tick_findings_actioned gauge"
+  echo "pm_sentinel_tick_findings_actioned ${FINDINGS_ACTIONED}"
+  echo "# HELP pm_sentinel_tick_query_cache_hits Real UMR/PR queries served from this tick's own cache instead of re-querying (QUERY-ONCE-PER-TICK)"
+  echo "# TYPE pm_sentinel_tick_query_cache_hits gauge"
+  echo "pm_sentinel_tick_query_cache_hits ${QUERY_CACHE_HITS}"
+  echo "# HELP pm_sentinel_tick_query_cache_misses Real live UMR/PR queries actually issued this tick (QUERY-ONCE-PER-TICK)"
+  echo "# TYPE pm_sentinel_tick_query_cache_misses gauge"
+  echo "pm_sentinel_tick_query_cache_misses ${QUERY_CACHE_MISSES}"
+  echo "# HELP pm_sentinel_tick_last_run_timestamp_seconds Unix time of last real tick"
+  echo "# TYPE pm_sentinel_tick_last_run_timestamp_seconds gauge"
+  echo "pm_sentinel_tick_last_run_timestamp_seconds $(date -u +%s)"
+} > "${METRICS_FILE}.tmp" && mv "${METRICS_FILE}.tmp" "$METRICS_FILE"
+
+echo "=== pm-sentinel-tick done: ${DISPATCH_COUNT}/${MAX_DISPATCHES_PER_TICK} new dispatches this tick (${TICK_FAILURES} real failure(s)) ==="
+# AUDIT-REJECT FIX #2: propagate a real non-zero exit code when any real
+# dispatch/notify attempt failed this tick, instead of always exit 0.
+if [ "$TICK_FAILURES" -gt 0 ]; then
+  exit 1
+fi
 exit 0

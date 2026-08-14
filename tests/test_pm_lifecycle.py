@@ -245,13 +245,79 @@ def test_needs_independent_audit_true_only_for_open_pr_with_no_verdict():
 
 def test_decide_next_action_full_matrix():
     mod = _load_module()
-    assert mod.decide_next_action(_evidence("AUDIT: PASS", stale=False), 0, 2) == "proceed"
-    assert mod.decide_next_action(_evidence("AUDIT: FAIL", stale=False), 0, 2) == "dispatch_fix"
-    assert mod.decide_next_action(_evidence("AUDIT: FAIL", stale=False), 2, 2) == "stop"  # cap hit
-    assert mod.decide_next_action(_evidence_no_audit(), 0, 2) == "dispatch_audit"
-    assert mod.decide_next_action(_evidence_no_audit(), 2, 2) == "stop"  # cap hit
-    assert mod.decide_next_action(_evidence("AUDIT: FAIL", stale=True), 0, 2) == "stop"  # stale, ambiguous
+    assert mod.decide_next_action(_evidence("AUDIT: PASS", stale=False), 0, 0, 2) == "proceed"
+    assert mod.decide_next_action(_evidence("AUDIT: FAIL", stale=False), 0, 0, 2) == "dispatch_fix"
+    assert mod.decide_next_action(_evidence("AUDIT: FAIL", stale=False), 2, 0, 2) == "stop"  # fix cap hit
+    assert mod.decide_next_action(_evidence_no_audit(), 0, 0, 2) == "dispatch_audit"
+    assert mod.decide_next_action(_evidence_no_audit(), 0, 2, 2) == "stop"  # audit cap hit
+    assert mod.decide_next_action(_evidence("AUDIT: FAIL", stale=True), 0, 0, 2) == "stop"  # stale, ambiguous
     print("PASS: test_decide_next_action_full_matrix")
+
+
+def test_decide_next_action_fix_and_audit_retry_caps_are_independent():
+    """Real fix (this task's own SPEC, secondary finding): a dispatch_audit
+    round must never eat into the SAME cap a later real dispatch_fix
+    redispatch needs, and vice versa -- each is capped independently."""
+    mod = _load_module()
+    fail_ev = _evidence("AUDIT: FAIL", stale=False)
+    no_audit_ev = _evidence_no_audit()
+    # fix cap already exhausted, but audit_retry_count is still 0 -- an
+    # audit-needed evidence must still dispatch_audit, unaffected by the
+    # fix counter being maxed out.
+    assert mod.decide_next_action(no_audit_ev, 2, 0, 2) == "dispatch_audit"
+    # audit cap already exhausted, but fix_retry_count is still 0 -- a
+    # fresh AUDIT:FAIL must still dispatch_fix, unaffected by the audit
+    # counter being maxed out.
+    assert mod.decide_next_action(fail_ev, 0, 2, 2) == "dispatch_fix"
+    print("PASS: test_decide_next_action_fix_and_audit_retry_caps_are_independent")
+
+
+def test_verify_with_retries_tracks_fix_and_audit_retries_independently():
+    """End-to-end: one real dispatch_audit round (no audit posted yet) is
+    followed by two real dispatch_fix rounds (fresh AUDIT:FAIL each time)
+    before a fresh AUDIT:PASS lands -- with max_fix_retries=2, this must
+    NOT stop early just because 3 total dispatches happened; fix_retries
+    (2) and audit_retries (1) are each within their own cap."""
+    mod = _load_module()
+    evidences = [
+        _evidence_no_audit(),
+        _evidence("AUDIT: FAIL", stale=False),
+        _evidence("AUDIT: FAIL", stale=False),
+        _evidence("AUDIT: PASS", stale=False),
+    ]
+    verify_calls = []
+
+    def fake_verify(row, rodl):
+        verify_calls.append(row)
+        return evidences[len(verify_calls) - 1]
+
+    audit_calls = []
+    fix_calls = []
+
+    def fake_dispatch_audit(evidence, tier, medium, repo, no_relay=False):
+        audit_calls.append(evidence)
+        return {"outcome": "dispatched", "umr_id": f"UMR-audit-{len(audit_calls)}"}
+
+    def fake_dispatch_fix(evidence, tier, medium, repo, no_relay=False):
+        fix_calls.append(evidence)
+        return {"outcome": "dispatched", "umr_id": f"UMR-fix-{len(fix_calls)}"}
+
+    result = mod.verify_with_retries(
+        row={"umr_id": "UMR-orig", "status": "completed_unmerged"}, umr_id="UMR-orig",
+        rodl=None, tier=4, medium="claude_code_cli", repo="veridian-scripts", no_relay=False,
+        poll_interval=1, poll_timeout=10, max_fix_retries=2,
+        verify_fn=fake_verify, dispatch_fix_fn=fake_dispatch_fix, dispatch_audit_fn=fake_dispatch_audit,
+        poll_fn=lambda *a, **k: {"row": {"umr_id": "UMR-orig", "status": "completed_unmerged"}, "timed_out": False, "samples": []},
+        query_fn=lambda umr_id: ({"umr_id": umr_id, "status": "completed_unmerged"}, None),
+    )
+
+    assert len(audit_calls) == 1
+    assert len(fix_calls) == 2
+    assert result["audit_retries"] == 1
+    assert result["fix_retries"] == 2
+    assert result["retries"] == 3
+    assert mod.fresh_audit_pass(result["verify_evidence"]) is True
+    print("PASS: test_verify_with_retries_tracks_fix_and_audit_retries_independently")
 
 
 def test_verify_with_retries_dispatches_independent_audit_when_none_posted_yet():
@@ -316,6 +382,183 @@ def test_verify_with_retries_stops_immediately_when_dispatch_is_refused():
     assert len(dispatch_calls) == 1
     assert result["retries"] == 1
     print("PASS: test_verify_with_retries_stops_immediately_when_dispatch_is_refused")
+
+
+# ---------------------------------------------------------------------------
+# Step 7: classify_merge_tier / merge_and_reverify -- the real safety-critical
+# tier2 human-sign-off gate (PR #389's own AUDIT:FAIL finding, this task's
+# own SPEC)
+# ---------------------------------------------------------------------------
+
+def _merge_evidence(repo="veridian-scripts", pr_number=42, branch="b1", state="OPEN"):
+    return {"repo": repo, "pr_match": {"number": pr_number, "headRefName": branch, "state": state}}
+
+
+def test_classify_merge_tier_real_tier2_path_pattern():
+    """A real fixture PR touching a migrations/ file must classify as
+    tier2 -- reuses policy_decision.classify_risk_tier() directly (same
+    TIER2_PATH_PATTERNS risk-tier.py itself uses), fed from a fake
+    `gh pr view --json files` response (no real gh/subprocess call)."""
+    mod = _load_module()
+
+    def fake_run_json(cmd, timeout=60):
+        assert cmd[:3] == ["gh", "pr", "view"]
+        return 0, {"files": [{"path": "migrations/0042_add_col.sql", "additions": 10, "deletions": 0}]}, ""
+
+    result = mod.classify_merge_tier(_merge_evidence(), run_json_fn=fake_run_json)
+    assert result["tier"] == "tier2"
+    print("PASS: test_classify_merge_tier_real_tier2_path_pattern")
+
+
+def test_classify_merge_tier_real_tier1_for_ordinary_files():
+    mod = _load_module()
+
+    def fake_run_json(cmd, timeout=60):
+        return 0, {"files": [{"path": "README.md", "additions": 3, "deletions": 1}]}, ""
+
+    result = mod.classify_merge_tier(_merge_evidence(), run_json_fn=fake_run_json)
+    assert result["tier"] == "tier1"
+    print("PASS: test_classify_merge_tier_real_tier1_for_ordinary_files")
+
+
+def test_classify_merge_tier_fails_closed_on_unclassifiable_diff():
+    """Real safety posture: a gh error/timeout must never be treated as
+    tier1-safe-to-merge -- fails closed to tier2."""
+    mod = _load_module()
+
+    def fake_run_json(cmd, timeout=60):
+        return 1, None, "gh: real API error"
+
+    result = mod.classify_merge_tier(_merge_evidence(), run_json_fn=fake_run_json)
+    assert result["tier"] == "tier2"
+    print("PASS: test_classify_merge_tier_fails_closed_on_unclassifiable_diff")
+
+
+class _ModAttrPatch:
+    """Real module-attribute monkeypatch/restore, same convention
+    tests/test_reconcile_owner_dispatch_status.py already uses for _run/
+    _run_json seams that this task's own new merge_and_reverify() code
+    doesn't (yet) take as injectable params."""
+    def __init__(self, mod, name, value):
+        self.mod, self.name, self.value = mod, name, value
+
+    def __enter__(self):
+        self.orig = getattr(self.mod, self.name)
+        setattr(self.mod, self.name, self.value)
+        return self
+
+    def __exit__(self, *exc):
+        setattr(self.mod, self.name, self.orig)
+
+
+def test_merge_and_reverify_holds_real_tier2_pr_never_calls_gh_merge():
+    """THE real regression test for PR #389's own AUDIT:FAIL finding: a
+    real tier2-classified fixture PR must be held (hold_for_owner_signoff),
+    and `gh pr merge` must NEVER be invoked for it -- asserted by making
+    the real module-level _run raise if it's ever called with a merge
+    subcommand."""
+    mod = _load_module()
+
+    def refuse_merge_call(cmd, timeout=60, **kw):
+        if "merge" in cmd:
+            raise AssertionError("must never call `gh pr merge` on a real tier2 PR")
+        return 0, "", ""
+
+    with _ModAttrPatch(mod, "_run", refuse_merge_call):
+        result = mod.merge_and_reverify(
+            _merge_evidence(), classify_tier_fn=lambda ev: {"tier": "tier2", "reasons": ["security/: x.py"]},
+        )
+
+    assert result["merged"] is False
+    assert result["hold_for_owner_signoff"] is True
+    assert result["tier_classification"]["tier"] == "tier2"
+    print("PASS: test_merge_and_reverify_holds_real_tier2_pr_never_calls_gh_merge")
+
+
+def test_merge_and_reverify_merges_real_tier1_pr_with_passing_checks():
+    mod = _load_module()
+    calls = []
+
+    def fake_run(cmd, timeout=60, **kw):
+        calls.append(cmd)
+        return 0, "", ""
+
+    def fake_run_json(cmd, timeout=60):
+        if "statusCheckRollup" in cmd and "state,mergedAt,mergeCommit,statusCheckRollup" not in cmd:
+            return 0, {"statusCheckRollup": [{"name": "ci", "conclusion": "SUCCESS"}]}, ""
+        return 0, {"state": "MERGED", "mergedAt": "2026-08-14T12:00:00Z",
+                    "mergeCommit": {"oid": "deadbeef"},
+                    "statusCheckRollup": [{"name": "ci", "conclusion": "SUCCESS"}]}, ""
+
+    with _ModAttrPatch(mod, "_run", fake_run), _ModAttrPatch(mod, "_run_json", fake_run_json):
+        result = mod.merge_and_reverify(
+            _merge_evidence(), classify_tier_fn=lambda ev: {"tier": "tier1", "reasons": []},
+        )
+
+    assert result["merged"] is True
+    assert any("merge" in c for c in calls)
+    print("PASS: test_merge_and_reverify_merges_real_tier1_pr_with_passing_checks")
+
+
+def test_merge_and_reverify_never_merges_tier1_pr_with_failing_checks():
+    """Secondary finding (this task's own SPEC): the merge itself must be
+    hard-gated on real passing required checks, not just recorded after
+    the fact -- a real FAILURE conclusion must block `gh pr merge`."""
+    mod = _load_module()
+
+    def refuse_merge_call(cmd, timeout=60, **kw):
+        if "merge" in cmd:
+            raise AssertionError("must never call `gh pr merge` with a real failing check")
+        return 0, "", ""
+
+    def fake_run_json(cmd, timeout=60):
+        return 0, {"statusCheckRollup": [{"name": "ci", "conclusion": "FAILURE"}]}, ""
+
+    with _ModAttrPatch(mod, "_run", refuse_merge_call), _ModAttrPatch(mod, "_run_json", fake_run_json):
+        result = mod.merge_and_reverify(
+            _merge_evidence(), classify_tier_fn=lambda ev: {"tier": "tier1", "reasons": []},
+        )
+
+    assert result["merged"] is False
+    assert result["checks_not_passing"] is True
+    print("PASS: test_merge_and_reverify_never_merges_tier1_pr_with_failing_checks")
+
+
+def test_merge_and_reverify_skips_tier_and_checks_gate_for_already_merged_pr():
+    """A real ALREADY-MERGED PR must skip tier classification and the
+    checks gate entirely -- nothing left to hold, and re-classifying an
+    already-merged PR's diff is pointless real work."""
+    mod = _load_module()
+    classify_calls = []
+
+    def fake_run_json(cmd, timeout=60):
+        return 0, {"state": "MERGED", "mergedAt": "2026-08-14T12:00:00Z",
+                    "mergeCommit": {"oid": "deadbeef"}, "statusCheckRollup": []}, ""
+
+    def refuse_classify(ev):
+        classify_calls.append(ev)
+        raise AssertionError("must never classify an already-merged PR")
+
+    with _ModAttrPatch(mod, "_run_json", fake_run_json):
+        result = mod.merge_and_reverify(
+            _merge_evidence(state="MERGED"), classify_tier_fn=refuse_classify,
+        )
+
+    assert classify_calls == []
+    assert result["merged"] is True
+    assert result["already_merged_by_platform"] is True
+    print("PASS: test_merge_and_reverify_skips_tier_and_checks_gate_for_already_merged_pr")
+
+
+def test_checks_evidence_treats_real_pending_check_as_not_tested():
+    """Secondary finding (this task's own SPEC): a real pending check
+    (conclusion=None, still running) must NOT be silently treated as
+    passing just because it hasn't failed yet."""
+    mod = _load_module()
+    view = {"statusCheckRollup": [{"name": "ci", "conclusion": None, "state": "IN_PROGRESS"}]}
+    result = mod.checks_evidence(view)
+    assert result["tested"] is False
+    print("PASS: test_checks_evidence_treats_real_pending_check_as_not_tested")
 
 
 # ---------------------------------------------------------------------------

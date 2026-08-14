@@ -410,7 +410,7 @@ def needs_independent_audit(evidence):
     return bool(pr) and pr.get("state") == "OPEN" and not verdict
 
 
-def decide_next_action(evidence, retry_count, max_retries):
+def decide_next_action(evidence, fix_retry_count, audit_retry_count, max_retries):
     """Pure decision function (no I/O) driving the real step 5/6 loop --
     separated out so this task's own required regression test can cover
     "the ... audit-fail-retry logic" (and the sibling "no audit posted yet"
@@ -418,15 +418,25 @@ def decide_next_action(evidence, retry_count, max_retries):
     of "proceed" (fresh AUDIT:PASS -- go merge), "dispatch_fix" (fresh
     AUDIT:FAIL -- redispatch a real fix), "dispatch_audit" (real OPEN PR,
     no audit posted yet -- redispatch a real independent reviewer), or
-    "stop" (retry cap hit, or state is ambiguous/stale -- surface to the
-    PM rather than guessing)."""
+    "stop" (retry cap hit for whichever action would fire, or state is
+    ambiguous/stale -- surface to the PM rather than guessing).
+
+    Real fix (this task's own SPEC, secondary finding): fix_retry_count and
+    audit_retry_count are two REAL, independent counters, each capped
+    against max_retries separately -- previously a single shared counter
+    meant a dispatch_audit_trigger round (no audit posted yet) burned the
+    exact same cap a later real dispatch_fix redispatch needed, so a fix
+    retry loop could hit "stop" after as few as 2 total dispatches instead
+    of 2 real fix attempts."""
     if fresh_audit_pass(evidence):
         return "proceed"
-    if retry_count >= max_retries:
-        return "stop"
     if fresh_audit_fail(evidence):
+        if fix_retry_count >= max_retries:
+            return "stop"
         return "dispatch_fix"
     if needs_independent_audit(evidence):
+        if audit_retry_count >= max_retries:
+            return "stop"
         return "dispatch_audit"
     return "stop"
 
@@ -435,8 +445,11 @@ def should_retry_fix(evidence, retry_count, max_retries):
     """Real, narrower predicate over decide_next_action() -- kept as its
     own function (rather than folded away) because this task's own SPEC
     explicitly calls out "the ... audit-fail-retry logic" as its own
-    regression-test target, distinct from the "no audit yet" case."""
-    return decide_next_action(evidence, retry_count, max_retries) == "dispatch_fix"
+    regression-test target, distinct from the "no audit yet" case.
+    audit_retry_count is irrelevant here (fresh_audit_fail short-circuits
+    before the needs_independent_audit branch is ever reached), so 0 is a
+    real, inert placeholder, never a guess that could change the result."""
+    return decide_next_action(evidence, retry_count, 0, max_retries) == "dispatch_fix"
 
 
 def verify_with_retries(row, umr_id, rodl, tier, medium, repo, no_relay,
@@ -448,27 +461,39 @@ def verify_with_retries(row, umr_id, rodl, tier, medium, repo, no_relay,
     retry logic" deterministically (fake verify_fn/dispatch_fix_fn/
     dispatch_audit_fn/poll_fn/query_fn, no real gh/dispatch/subprocess
     calls) -- exercised by run_full_cycle() with the real functions as
-    defaults. Returns {"verify_evidence": ..., "retries": int,
-    "fix_history": [...], "row": ...} -- `row` is re-read after each real
-    fix/audit dispatch lands (same PR, new commit or new comment on the
-    same branch), never re-derived from the dispatch's own umr_id."""
+    defaults. Returns {"verify_evidence": ..., "retries": int (total,
+    fix+audit), "fix_retries": int, "audit_retries": int, "fix_history":
+    [...], "row": ...} -- `row` is re-read after each real fix/audit
+    dispatch lands (same PR, new commit or new comment on the same
+    branch), never re-derived from the dispatch's own umr_id.
+    fix_retries and audit_retries are tracked and capped independently --
+    see decide_next_action()'s own docstring for the real gap this
+    closes (a dispatch_audit round no longer eats into the same cap a
+    later dispatch_fix redispatch needs)."""
     verify_fn = verify_fn or independent_verify
     dispatch_fix_fn = dispatch_fix_fn or dispatch_audit_fix
     dispatch_audit_fn = dispatch_audit_fn or dispatch_independent_audit
     poll_fn = poll_fn or poll_until_terminal
     query_fn = query_fn or query_umr
 
-    retries = 0
+    fix_retries = 0
+    audit_retries = 0
     verify_evidence = verify_fn(row, rodl)
     fix_history = []
     while True:
-        action = decide_next_action(verify_evidence, retries, max_fix_retries)
+        action = decide_next_action(verify_evidence, fix_retries, audit_retries, max_fix_retries)
         if action in ("proceed", "stop"):
             break
         dispatch_fn = dispatch_fix_fn if action == "dispatch_fix" else dispatch_audit_fn
         dispatch_result = dispatch_fn(verify_evidence, tier, medium, repo, no_relay=no_relay)
-        fix_history.append({"retry": retries, "action": action, "dispatch": dispatch_result})
-        retries += 1
+        fix_history.append({
+            "retry": fix_retries if action == "dispatch_fix" else audit_retries,
+            "action": action, "dispatch": dispatch_result,
+        })
+        if action == "dispatch_fix":
+            fix_retries += 1
+        else:
+            audit_retries += 1
         if dispatch_result["outcome"] not in ("dispatched", "registered_only"):
             break
         dispatched_umr_id = dispatch_result["umr_id"]
@@ -478,7 +503,11 @@ def verify_with_retries(row, umr_id, rodl, tier, medium, repo, no_relay,
             break
         row, _ = query_fn(umr_id)  # re-read the ORIGINAL row (same PR, new commit/comment on same branch)
         verify_evidence = verify_fn(row, rodl)
-    return {"verify_evidence": verify_evidence, "retries": retries, "fix_history": fix_history, "row": row}
+    return {
+        "verify_evidence": verify_evidence, "retries": fix_retries + audit_retries,
+        "fix_retries": fix_retries, "audit_retries": audit_retries,
+        "fix_history": fix_history, "row": row,
+    }
 
 
 def dispatch_audit_fix(evidence, tier, medium, repo, no_relay=False):
@@ -545,10 +574,59 @@ def dispatch_independent_audit(evidence, tier, medium, repo, no_relay=False):
 
 
 # ---------------------------------------------------------------------------
-# Step 7: merge + re-verify
+# Step 7: tier gate + merge + re-verify
 # ---------------------------------------------------------------------------
 
-def merge_and_reverify(evidence):
+def classify_merge_tier(evidence, run_json_fn=None):
+    """Real tier classification, run BEFORE merge_and_reverify() is ever
+    allowed to call `gh pr merge`. Reuses policy_decision.classify_risk_tier()
+    directly -- the exact same function risk-tier.py's own CLI wraps and
+    supervisor-entrypoint.sh's `TIER=$(python3 risk-tier.py "$WORKSPACE"
+    "origin/$DEFAULT_BRANCH")` call resolves to (see risk-tier.py's own
+    module docstring: "classification itself now lives in
+    policy_decision.classify_risk_tier()") -- never a second, re-typed copy
+    of its TIER2_PATH_PATTERNS/heavy-deletion heuristics.
+
+    Real difference from supervisor-entrypoint.sh's own call: that script
+    always runs inside a real local checkout of the ONE PR it is reviewing
+    (task.yaml's own `workspace` field), so it can run a literal `git diff
+    --numstat` against it. This orchestrator verifies/merges arbitrary real
+    open PRs across repos with no guarantee a matching local checkout of
+    that exact branch exists on this host -- so the real per-file
+    additions/deletions/path triple (the exact same three fields
+    classify_risk_tier()'s own numstat parsing needs) is sourced from
+    `gh pr view --json files` instead of a local git diff. Same real
+    heuristics either way; only the file-list transport differs.
+
+    Fails CLOSED (returns tier2, never tier1) on any real classification
+    error -- an unclassifiable diff is never treated as safe to
+    auto-merge, same fail-closed posture this codebase's own
+    find_root_walk_guard.py convention already uses for an unclassifiable
+    command."""
+    run_json_fn = run_json_fn or _run_json
+    pr = evidence.get("pr_match") or {}
+    repo = evidence.get("repo")
+    number = pr.get("number")
+    if not (repo and number):
+        return {"tier": "tier2", "reasons": ["no real repo/PR number to classify -- fail closed to a hold"]}
+
+    rc, data, err = run_json_fn(
+        ["gh", "pr", "view", str(number), "--repo", f"{GH_ORG}/{repo}", "--json", "files"],
+        timeout=30,
+    )
+    if data is None or "files" not in data:
+        return {"tier": "tier2", "reasons": [f"could not classify real diff via gh -- fail closed to a hold (rc={rc}, err={err!r})"]}
+
+    file_rows = data.get("files") or []
+    files = [f["path"] for f in file_rows if f.get("path")]
+    numstat = [f"{f.get('additions', 0)}\t{f.get('deletions', 0)}\t{f['path']}"
+               for f in file_rows if f.get("path")]
+
+    policy_decision = _load_module("policy_decision.py", "pm_lifecycle_policy_decision")
+    return policy_decision.classify_risk_tier(files, numstat)
+
+
+def merge_and_reverify(evidence, classify_tier_fn=None):
     """Real merge + re-verify. Skips the actual `gh pr merge` call (never
     a second, racing merge attempt) if the PR is ALREADY MERGED -- real,
     live gap: for a tier-0/1/2 dispatch, veridian-task.py's own
@@ -560,12 +638,67 @@ def merge_and_reverify(evidence):
     the tier-3/4 headless path where no such automatic reviewer exists).
     By the time this function runs, that merge may already be real and
     done -- still returns merged=True with real post-merge evidence in
-    that case, it just doesn't call `gh pr merge` a second time."""
+    that case, it just doesn't call `gh pr merge` a second time.
+
+    Real safety-critical gate (found by an independent audit on PR #389,
+    this task's own SPEC): a fresh AUDIT:PASS verdict alone is NEVER
+    sufficient to auto-merge a real tier2 (schema/migration/auth/
+    permission/payment/billing/security-sensitive, or heavy-deletion)
+    PR through this path -- classify_merge_tier() runs first, and
+    anything other than a real tier1 classification is held for explicit
+    human/Owner sign-off, matching supervisor-entrypoint.sh's own
+    HOLD_FOR_OWNER_SIGNOFF convention (a real `hold_for_owner_signoff=True`
+    outcome, never a silent merge). Only a real, already-MERGED PR skips
+    tier classification entirely -- there is nothing left to hold."""
+    classify_tier_fn = classify_tier_fn or classify_merge_tier
     pr = evidence.get("pr_match") or {}
     repo = evidence.get("repo")
     number = pr.get("number")
     if not (repo and number):
         return {"merged": False, "reason": "no real repo/PR number to merge"}
+
+    tier_classification = None
+    if pr.get("state") != "MERGED":
+        tier_classification = classify_tier_fn(evidence)
+        if tier_classification.get("tier") != "tier1":
+            return {
+                "merged": False, "hold_for_owner_signoff": True,
+                "tier_classification": tier_classification,
+                "reason": (
+                    f"real tier classification is {tier_classification.get('tier')!r} "
+                    "(not tier1) -- held for explicit human/Owner sign-off and merge, "
+                    "never auto-merged through this path regardless of audit verdict "
+                    "(matches supervisor-entrypoint.sh's own HOLD_FOR_OWNER_SIGNOFF "
+                    "convention)."
+                ),
+            }
+
+    pre_merge_checks = None
+    if pr.get("state") != "MERGED":
+        # Real hard gate: never call `gh pr merge` against a PR with real
+        # failing/pending required checks just because branch protection
+        # didn't already block it -- checks_evidence() is the same real
+        # boolean this function's own caller later records into the
+        # TESTED column; checking it BEFORE merge (not just recording it
+        # after) is what actually prevents the merge, not just the report.
+        rc0, pre_view, err0 = _run_json(
+            ["gh", "pr", "view", str(number), "--repo", f"{GH_ORG}/{repo}",
+             "--json", "statusCheckRollup"],
+            timeout=30,
+        )
+        pre_merge_checks = checks_evidence(pre_view)
+        if pre_merge_checks["rollup"] and not pre_merge_checks["tested"]:
+            return {
+                "merged": False, "hold_for_owner_signoff": False,
+                "checks_not_passing": True, "pre_merge_checks": pre_merge_checks,
+                "tier_classification": tier_classification,
+                "reason": (
+                    "real required checks are not all passing (failing or still "
+                    f"pending: {[c.get('name') for c in pre_merge_checks['failing']]}) "
+                    "-- never merged with a real non-passing check regardless of "
+                    "audit verdict."
+                ),
+            }
 
     merge_call = None
     if pr.get("state") != "MERGED":
@@ -583,18 +716,24 @@ def merge_and_reverify(evidence):
     merged = bool(view and view.get("state") == "MERGED" and view.get("mergedAt"))
     return {
         "merged": merged, "already_merged_by_platform": merge_call is None,
-        "merge_call": merge_call,
+        "merge_call": merge_call, "tier_classification": tier_classification,
+        "pre_merge_checks": pre_merge_checks,
         "post_merge_view": view, "post_merge_view_error": err2,
     }
 
 
 def checks_evidence(view):
+    """`tested` is a real hard gate on required checks having actually
+    PASSED -- a pending check (conclusion=None, still running) is NOT the
+    same as a passed one and must not be silently treated as fine just
+    because it hasn't failed YET. Only a conclusion of SUCCESS/NEUTRAL/
+    SKIPPED (a real terminal, non-blocking outcome) counts as passing;
+    everything else (FAILURE, CANCELLED, TIMED_OUT, ACTION_REQUIRED, or
+    still-pending/no conclusion yet) is real, un-passed evidence."""
     rollup = (view or {}).get("statusCheckRollup") or []
     if not rollup:
         return {"tested": False, "reason": "no real CI status checks configured/found for this PR", "rollup": []}
-    bad = [c for c in rollup
-           if c.get("conclusion") not in ("SUCCESS", "NEUTRAL", "SKIPPED", None)
-           and c.get("state") not in ("SUCCESS",)]
+    bad = [c for c in rollup if c.get("conclusion") not in ("SUCCESS", "NEUTRAL", "SKIPPED")]
     return {"tested": not bad, "rollup": rollup, "failing": bad}
 
 
@@ -774,6 +913,10 @@ def run_full_cycle(args):
     merge_result = merge_and_reverify(verify_evidence)
     report["merge_result"] = merge_result
     checks_result = checks_evidence(merge_result.get("post_merge_view"))
+    if merge_result.get("hold_for_owner_signoff") or merge_result.get("checks_not_passing"):
+        # Real, honest non-certified terminal outcome -- never a fake
+        # CERTIFIED for a PR this orchestrator deliberately did not merge.
+        report["reason"] = merge_result.get("reason")
 
     # Step 8
     six_columns = compute_six_columns(row, verify_evidence, merge_result, checks_result)

@@ -61,22 +61,57 @@ for every task deserves its own dedicated, reviewed task).
       branch so `pm_lifecycle.py` + `tests/test_pm_lifecycle.py` exist in a
       real committed diff here (commit dc6c4ce).
 
+- [x] Added `classify_merge_tier()` -- reuses `policy_decision.classify_risk_tier()`
+      directly (the exact function `risk-tier.py`'s own CLI wraps, and what
+      `supervisor-entrypoint.sh`'s `TIER=$(python3 risk-tier.py ...)` call
+      resolves to), fed from `gh pr view --json files` (real
+      additions/deletions/path per file) instead of a local `git diff
+      --numstat` -- this orchestrator has no guaranteed local checkout of
+      an arbitrary PR's branch, unlike supervisor-entrypoint.sh. Fails
+      CLOSED to tier2 on any real classification error.
+- [x] Gated `merge_and_reverify()` on tier: real tier1 merges as before;
+      anything else returns `{"merged": False, "hold_for_owner_signoff":
+      True, "tier_classification": {...}}` instead of ever calling
+      `gh pr merge` -- verified via a test that makes `gh pr merge`
+      raise if invoked on a tier2 fixture.
+- [x] `run_full_cycle()` now surfaces `report["reason"]` for both the
+      tier2 hold and the checks-not-passing hold -- `compute_six_columns()`
+      already produced an honest non-certified outcome unchanged (no
+      fake CERTIFIED path existed to begin with).
+- [x] Regression test added:
+      `test_merge_and_reverify_holds_real_tier2_pr_never_calls_gh_merge`
+      (THE required test) + 3 more `classify_merge_tier` tests + 2 more
+      `merge_and_reverify` tests (tier1 merges, already-merged skips the
+      gate).
+- [x] Secondary fix done (was quick): hard-gated the merge itself on real
+      passing required checks -- `merge_and_reverify()` now fetches a
+      pre-merge `statusCheckRollup` and refuses to call `gh pr merge` if
+      any real check isn't SUCCESS/NEUTRAL/SKIPPED (was previously only
+      recorded into TESTED *after* merging). Also fixed `checks_evidence()`
+      itself: a real pending check (conclusion=None) was being silently
+      exempted from "bad" -- now only a real terminal
+      SUCCESS/NEUTRAL/SKIPPED counts as passing.
+- [x] Secondary fix done (was quick): separated `dispatch_fix` and
+      `dispatch_audit_trigger` retry counters (`fix_retries`/
+      `audit_retries` in `verify_with_retries()`, `decide_next_action()`
+      now takes both and caps each independently) -- previously a shared
+      counter meant an audit-trigger dispatch could exhaust the cap a
+      subsequent real fix retry needed.
+- [x] Full real test suite run: `pytest tests/test_pm_lifecycle.py` --
+      25/25 passed (15 pre-existing + 10 new). `python3 -m py_compile`
+      clean on both changed files. Sanity-checked `test_decision_service.py`
+      (the only other real consumer of `policy_decision.classify_risk_tier()`)
+      still passes unchanged (9/9).
+- [x] Committed + pushed.
+
 ## Remaining
-- [ ] Add `classify_merge_tier()` (reuses `risk-tier.py` via subprocess,
-      same invocation shape `supervisor-entrypoint.sh` itself uses -- no
-      reimplementation of the classifier).
-- [ ] Gate `merge_and_reverify()` on tier: tier0/1 merge as before; tier2+
-      returns a real `tier2_hold` outcome (`merged=False`,
-      `hold_for_owner_signoff=True`) instead of calling `gh pr merge`.
-- [ ] Update `compute_six_columns()`/`run_full_cycle()` to surface the hold
-      as an honest non-certified terminal outcome (never a fake CERTIFIED).
-- [ ] Add regression test: tier2-classified fixture PR is held, not merged.
-- [ ] If quick: hard-gate the merge itself on real passing required checks
-      (currently only recorded into TESTED *after* merging, not enforced
-      before).
-- [ ] If quick: separate retry counters for `dispatch_fix` vs
-      `dispatch_audit_trigger` in `verify_with_retries()`/`decide_next_action()`.
-- [ ] Run the real test suite (`tests/test_pm_lifecycle.py`) and confirm pass.
-- [ ] Commit + push. Do NOT self-certify -- leave for a fresh independent
-      AUDIT:PASS against the new head before any merge.
 - [ ] `agent_work_briefing.py record-completion --umr-id UMR-20260814-193636-1e67`
+      (after this commit is pushed).
+- [ ] Do NOT self-certify -- this needs a fresh independent AUDIT:PASS
+      against the new head before any merge (not performed by this task;
+      leaving for the standard audit pipeline / a follow-up
+      audit-trigger task, per this task's own SPEC).
+- [ ] Separate, out-of-scope, real finding logged above (not fixed here):
+      `supervisor-entrypoint.sh`'s own tier2 auto-merge bypass cites a
+      fabricated "AGENTS.md Rule 12" that does not exist anywhere in this
+      repo's real history -- worth a dedicated follow-up task.

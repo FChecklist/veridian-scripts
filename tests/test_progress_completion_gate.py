@@ -529,9 +529,21 @@ class TestCrossRepoPrEvidence(unittest.TestCase):
     (claude-control). Covers the three required cases: code changed on the
     task branch (accept, via TestCompletionGateRejectsDocOnlyDiff above), no
     code changed anywhere (reject), and no code on the task branch but a
-    real PR with code in another repo (accept)."""
+    real PR with code in another repo (accept).
+
+    Also covers the real corrective fix from the AUDIT: FAIL on PR #360
+    (task-20260814-071422): owner/repo must be in this org's own known
+    set, task_id correlation must be via headRefName (not the
+    live-editable body), that PR must really have been created at/after
+    this task's own dispatch time, and its real files must actually match
+    the objective's own named file(s) -- not merely carry any code file."""
 
     TASK_ID = "task-20260814-060148-close-two-superseded-duplicate-guard-bra"
+    # This TASK_ID's own embedded timestamp is 2026-08-14T06:01:48Z --
+    # anything "created" before that in these fixtures is, by this task_id's
+    # own real shape, necessarily NOT a PR this task could have opened.
+    BEFORE_DISPATCH = "2026-08-14T05:00:00Z"
+    AFTER_DISPATCH = "2026-08-14T06:10:43Z"
 
     def _make_task(self, tmp, prompt_text, result_text=None):
         task_dir = os.path.join(tmp, self.TASK_ID)
@@ -596,12 +608,34 @@ class TestCrossRepoPrEvidence(unittest.TestCase):
                 ok, reason = gate.check_completion(task_dir, ws, "main")
             self.assertFalse(ok, reason)
 
+    def test_pr_from_untrusted_owner_repo_is_never_even_queried(self):
+        """A PR URL pointing outside this org's own known repo set (see
+        resource_governor.py's GH_ORG/ALL_KNOWN_REPOS) must never even
+        reach `gh pr view` -- real fix for the AUDIT: FAIL finding that the
+        original version placed no restriction on which owner/repo it
+        would shell out to."""
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = self._make_task(
+                tmp, self.PROMPT,
+                result_text=(
+                    "Real fix landed: "
+                    "https://github.com/some-other-org/unrelated-repo/pull/1 "
+                    f"-- Governing task: {self.TASK_ID}."
+                ),
+            )
+            ws = self._make_workspace(tmp)
+
+            with mock.patch.object(gate, "_gh_pr_view") as mocked:
+                ok, reason = gate.check_completion(task_dir, ws, "main")
+            self.assertFalse(ok, reason)
+            mocked.assert_not_called()
+
     def test_real_pr_not_correlated_to_this_task_is_rejected(self):
-        """`gh` confirms the PR really exists and carries real code, but
-        neither its body nor its branch name mentions THIS task_id -- e.g.
-        the task's summary merely cited someone else's unrelated PR. Must
-        still reject: correlation to this task is real evidence, a bare
-        citation is not."""
+        """`gh` confirms the PR really exists, is in a trusted repo, and
+        carries real code, but its branch name does not mention THIS
+        task_id -- e.g. the task's summary merely cited someone else's
+        unrelated PR. Must still reject: correlation to this task is real
+        evidence, a bare citation is not."""
         with tempfile.TemporaryDirectory() as tmp:
             task_dir = self._make_task(
                 tmp, self.PROMPT,
@@ -619,16 +653,83 @@ class TestCrossRepoPrEvidence(unittest.TestCase):
                 "headRefName": "fix/unrelated-cleanup",
                 "url": "https://github.com/FChecklist/veridian-scripts/pull/356",
                 "files": [{"path": "resource_governor.py"}],
+                "createdAt": self.AFTER_DISPATCH,
             }
             with mock.patch.object(gate, "_gh_pr_view", return_value=fake_pr):
                 ok, reason = gate.check_completion(task_dir, ws, "main")
             self.assertFalse(ok, reason)
 
-    def test_real_correlated_pr_with_no_code_files_is_rejected(self):
-        """`gh` confirms the PR really exists and is really this task's own
-        (task_id in its body), but its own real `files` list contains only
-        doc/progress artifacts -- no real code landed anywhere. Must still
-        reject."""
+    def test_task_id_only_in_editable_body_not_branch_name_is_rejected(self):
+        """Real fix for the AUDIT: FAIL finding that body-based correlation
+        is retroactively editable: a PR whose BODY cites this task_id but
+        whose real, PR-creation-time headRefName does not, must be
+        rejected -- body text alone is never sufficient correlation."""
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = self._make_task(
+                tmp, self.PROMPT,
+                result_text=(
+                    "Opened https://github.com/FChecklist/veridian-scripts/pull/356 "
+                    f"-- Governing task: {self.TASK_ID}."
+                ),
+            )
+            ws = self._make_workspace(tmp)
+
+            fake_pr = {
+                "number": 356,
+                "state": "OPEN",
+                "body": f"Governing task: {self.TASK_ID}.",  # editable after the fact
+                "headRefName": "fix/some-unrelated-branch-name",
+                "url": "https://github.com/FChecklist/veridian-scripts/pull/356",
+                "files": [
+                    {"path": "tests/test_duplicate_guard_over_broad_false_positives.py"},
+                ],
+                "createdAt": self.AFTER_DISPATCH,
+            }
+            with mock.patch.object(gate, "_gh_pr_view", return_value=fake_pr):
+                ok, reason = gate.check_completion(task_dir, ws, "main")
+            self.assertFalse(ok, reason)
+
+    def test_pr_created_before_task_dispatch_is_rejected(self):
+        """Real fix for the retroactive-citation bypass: a PR whose branch
+        name DOES contain this task_id and whose files DO match the named
+        objective, but whose real createdAt predates this task_id's own
+        embedded dispatch timestamp, cannot genuinely be this task's own
+        output -- reject even though every text-based signal looks right."""
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = self._make_task(
+                tmp, self.PROMPT,
+                result_text=(
+                    "Real fix landed: "
+                    "https://github.com/FChecklist/veridian-scripts/pull/356 "
+                    f"-- Governing task: {self.TASK_ID}."
+                ),
+            )
+            ws = self._make_workspace(tmp)
+
+            fake_pr = {
+                "number": 356,
+                "state": "OPEN",
+                "body": f"Governing task: {self.TASK_ID}.",
+                "headRefName": f"worker/{self.TASK_ID}",
+                "url": "https://github.com/FChecklist/veridian-scripts/pull/356",
+                "files": [
+                    {"path": "tests/test_duplicate_guard_over_broad_false_positives.py"},
+                ],
+                "createdAt": self.BEFORE_DISPATCH,  # predates this task_id's own timestamp
+            }
+            with mock.patch.object(gate, "_gh_pr_view", return_value=fake_pr):
+                ok, reason = gate.check_completion(task_dir, ws, "main")
+            self.assertFalse(ok, reason)
+
+    def test_real_correlated_pr_with_no_matching_named_file_is_rejected(self):
+        """Real fix for the primary AUDIT: FAIL finding: `gh` confirms the
+        PR really exists, is in a trusted repo, is really this task's own
+        (task_id in its branch name), created after dispatch -- but its
+        real `files` list carries only UNRELATED code (not the objective's
+        own named file). Must still reject -- this is exactly the bypass
+        the original version's own accepted-path test proved: a
+        task_id-correlated PR with ANY code file is not evidence that the
+        task's REAL objective was done."""
         with tempfile.TemporaryDirectory() as tmp:
             task_dir = self._make_task(
                 tmp, self.PROMPT,
@@ -643,9 +744,41 @@ class TestCrossRepoPrEvidence(unittest.TestCase):
                 "number": 356,
                 "state": "OPEN",
                 "body": f"Governing task: {self.TASK_ID}.",
-                "headRefName": "fix/stage6-citation-only",
+                "headRefName": f"worker/{self.TASK_ID}",
+                "url": "https://github.com/FChecklist/veridian-scripts/pull/356",
+                "files": [
+                    {"path": "resource_governor.py"},
+                    {"path": "tests/test_dupguard_overbroad_scope_fix.py"},
+                ],
+                "createdAt": self.AFTER_DISPATCH,
+            }
+            with mock.patch.object(gate, "_gh_pr_view", return_value=fake_pr):
+                ok, reason = gate.check_completion(task_dir, ws, "main")
+            self.assertFalse(ok, reason)
+
+    def test_real_correlated_pr_with_no_code_files_is_rejected(self):
+        """`gh` confirms the PR really exists and is really this task's own
+        (task_id in its branch name), but its own real `files` list
+        contains only doc/progress artifacts -- no real code landed
+        anywhere. Must still reject."""
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = self._make_task(
+                tmp, self.PROMPT,
+                result_text=(
+                    "Opened https://github.com/FChecklist/veridian-scripts/pull/356 "
+                    f"-- Governing task: {self.TASK_ID}."
+                ),
+            )
+            ws = self._make_workspace(tmp)
+
+            fake_pr = {
+                "number": 356,
+                "state": "OPEN",
+                "body": f"Governing task: {self.TASK_ID}.",
+                "headRefName": f"worker/{self.TASK_ID}",
                 "url": "https://github.com/FChecklist/veridian-scripts/pull/356",
                 "files": [{"path": "PROGRESS.md"}, {"path": "progress/notes.md"}],
+                "createdAt": self.AFTER_DISPATCH,
             }
             with mock.patch.object(gate, "_gh_pr_view", return_value=fake_pr):
                 ok, reason = gate.check_completion(task_dir, ws, "main")
@@ -655,14 +788,15 @@ class TestCrossRepoPrEvidence(unittest.TestCase):
         """The real victim shape: task branch (claude-control) never touches
         the named file, but a real, gh-confirmed PR in a DIFFERENT repo
         (veridian-scripts), really opened by this task (task_id in its
-        body), really carries a non-progress code file. Must accept."""
+        real branch name, created after this task's own dispatch time),
+        really carries the objective's own named file. Must accept."""
         with tempfile.TemporaryDirectory() as tmp:
             task_dir = self._make_task(
                 tmp, self.PROMPT,
                 result_text=(
                     "Follow-up PR opened: "
                     "[veridian-scripts#356](https://github.com/FChecklist/veridian-scripts/pull/356) "
-                    "-- carries only that helper, its Stage 6 wiring, and two "
+                    "-- carries the real fix, its wiring, and two "
                     "dedicated regression tests (8/8 pass). "
                     f"Governing task: {self.TASK_ID}."
                 ),
@@ -673,12 +807,13 @@ class TestCrossRepoPrEvidence(unittest.TestCase):
                 "number": 356,
                 "state": "OPEN",
                 "body": f"Small follow-up.\n\nGoverning task: {self.TASK_ID}.",
-                "headRefName": "fix/stage6-citation-only-query-title-umr-20260814-060148",
+                "headRefName": f"worker/{self.TASK_ID}",
                 "url": "https://github.com/FChecklist/veridian-scripts/pull/356",
                 "files": [
                     {"path": "resource_governor.py"},
-                    {"path": "tests/test_dupguard_overbroad_scope_fix.py"},
+                    {"path": "tests/test_duplicate_guard_over_broad_false_positives.py"},
                 ],
+                "createdAt": self.AFTER_DISPATCH,
             }
             with mock.patch.object(gate, "_gh_pr_view", return_value=fake_pr) as mocked:
                 ok, reason = gate.check_completion(task_dir, ws, "main")
@@ -710,6 +845,42 @@ class TestCrossRepoPrEvidence(unittest.TestCase):
                 ("FChecklist", "claude-control", 203),
             ],
         )
+
+
+class TestCrossRepoEvidenceHelpers(unittest.TestCase):
+    """Direct unit coverage for the small real helpers the AUDIT: FAIL
+    corrective fix (task-20260814-071422) added to
+    find_cross_repo_pr_evidence()."""
+
+    def test_matched_named_files_by_exact_path_and_basename(self):
+        named = ["tests/test_foo.py", "resource_governor.py"]
+        self.assertEqual(
+            gate._matched_named_files(named, ["tests/test_foo.py", "other.py"]),
+            ["tests/test_foo.py"],
+        )
+        # basename match: same file, different real path than the prompt's own.
+        self.assertEqual(
+            gate._matched_named_files(named, ["scripts/resource_governor.py"]),
+            ["resource_governor.py"],
+        )
+        self.assertEqual(gate._matched_named_files(named, ["unrelated.py"]), [])
+
+    def test_task_dispatch_timestamp_decodes_real_task_id_shape(self):
+        ts = gate._task_dispatch_timestamp(
+            "task-20260814-060148-close-two-superseded-duplicate-guard-bra"
+        )
+        self.assertIsNotNone(ts)
+        self.assertEqual(ts.isoformat(), "2026-08-14T06:01:48+00:00")
+
+    def test_task_dispatch_timestamp_none_for_non_standard_id(self):
+        self.assertIsNone(gate._task_dispatch_timestamp("not-a-real-task-id"))
+
+    def test_parse_gh_timestamp_round_trips_real_gh_shape(self):
+        dt = gate._parse_gh_timestamp("2026-08-14T06:10:43Z")
+        self.assertIsNotNone(dt)
+        self.assertEqual(dt.isoformat(), "2026-08-14T06:10:43+00:00")
+        self.assertIsNone(gate._parse_gh_timestamp(None))
+        self.assertIsNone(gate._parse_gh_timestamp("not-a-timestamp"))
 
 
 class TestRollupIsDeterministicAndGenerated(unittest.TestCase):

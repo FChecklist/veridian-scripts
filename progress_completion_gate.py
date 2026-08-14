@@ -68,15 +68,42 @@ checked against a real, `gh`-confirmed PR in another repo, but only when
 ALL of the following are true, mechanically, not by trusting a self-
 declared claim in result.json's prose:
   (a) a real PR URL is present in this task's own result.json,
-  (b) `gh pr view` confirms that PR really exists and returns its real
-      body/headRefName/files,
-  (c) this exact task_id string is really present in that PR's own body or
-      branch name (proves the PR was opened by THIS task, not just
-      mentioned in passing), and
-  (d) that PR's own real `files` list (from `gh`, not from result.json)
-      contains at least one real, non-progress code-extension file.
-A PR reference that fails any of (b)/(c)/(d) is not evidence and falls
+  (b) that PR's owner/repo is in this org's own real, known repo set
+      (resource_governor.py's GH_ORG/ALL_KNOWN_REPOS) -- never shells out
+      to `gh pr view` for an arbitrary owner/repo pulled from free text,
+  (c) `gh pr view` confirms that PR really exists and returns its real
+      body/headRefName/files/createdAt,
+  (d) this exact task_id string is really present in that PR's own
+      headRefName (branch name -- set at PR-creation time by the worker
+      that opened it, not editable after the fact the way body text is)
+      AND that PR's real createdAt is not earlier than this task's own
+      dispatch time (decoded from task_id's own embedded
+      task-YYYYMMDD-HHMMSS timestamp) -- together these prove the PR was
+      genuinely opened BY this task, not an unrelated pre-existing PR
+      whose body was edited after the fact to retroactively cite this
+      task_id, and
+  (e) that PR's own real `files` list (from `gh`, not from result.json)
+      contains at least one file that actually matches one of the
+      objective's own `named` file(s) -- the same basename/path match
+      check_completion() already requires of the task branch's own diff,
+      not merely "some code file, any code file" (a PR with only
+      unrelated code changes plus a task_id-correlated branch name is not
+      evidence that THIS objective was really done).
+A PR reference that fails any of (b)/(c)/(d)/(e) is not evidence and falls
 through to the original reject path.
+
+REAL FIX (2026-08-14, UMR-20260814-071422, AUDIT: FAIL on PR #360):
+independent Tier-1 audit found the FIRST version of this cross-repo path
+accepted ANY real, non-progress code file in a gh-confirmed,
+task_id-correlated (body-OR-branch, live-editable) PR from ANY owner/repo
+-- demonstrated by that version's own accepted-path test, which took a PR
+whose real files were resource_governor.py + an unrelated test file
+against a prompt naming a completely different file, and still accepted
+it. (b)/(d)/(e) above are the real corrective fix: owner/repo allowlisted
+against this org's own known set, task_id correlation tightened to the
+non-retroactively-editable branch name plus a real creation-time check,
+and the named-file match now mirrors the task-branch diff's own real
+matching rule instead of accepting any unrelated code file.
 """
 import argparse
 import json
@@ -84,6 +111,10 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from resource_governor import ALL_KNOWN_REPOS, GH_ORG  # noqa: E402
 
 # Extensions that count as "a specific source file or script" for the
 # completion gate. Deliberately excludes .md/.txt/.json/.yaml doc/config
@@ -363,7 +394,7 @@ def _gh_pr_view(owner, repo, number):
             [
                 "gh", "pr", "view", str(number),
                 "--repo", f"{owner}/{repo}",
-                "--json", "number,state,body,headRefName,files,url",
+                "--json", "number,state,body,headRefName,files,url,createdAt",
             ],
             capture_output=True, text=True,
             timeout=GH_PR_CHECK_TIMEOUT_SECONDS,
@@ -378,7 +409,55 @@ def _gh_pr_view(owner, repo, number):
         return None
 
 
-def find_cross_repo_pr_evidence(task_id, task_dir):
+def _matched_named_files(named, files):
+    """The subset of `named` (objective files extracted from prompt.txt)
+    that is really present in `files` (a real file-path list -- either the
+    task branch's own git diff, or a cross-repo PR's real `files` list),
+    matched by exact path or by basename -- the one real matching rule this
+    module uses everywhere, so a task branch diff and a cross-repo PR's
+    diff are held to the identical standard."""
+    basenames = {f.rsplit("/", 1)[-1] for f in files}
+    return [n for n in named if n in files or n.rsplit("/", 1)[-1] in basenames]
+
+
+# task-YYYYMMDD-HHMMSS-<slug> -- the one real task_id shape this repo's
+# dispatch tooling uses everywhere (same convention as
+# generate_pm_report_v3.py's own TASK_IDENTITY_RE).
+_TASK_ID_TS_RE = re.compile(r"^task-(\d{8})-(\d{6})-")
+
+
+def _task_dispatch_timestamp(task_id):
+    """The real UTC moment this task_id's own embedded timestamp encodes
+    (when the dispatcher created this task), or None if task_id doesn't
+    match the standard shape. Real anti-replay signal: a PR genuinely
+    opened FOR this task cannot have been created before the task itself
+    was dispatched -- an already-existing, unrelated PR whose body/branch
+    happens to contain this task_id string necessarily predates it."""
+    m = _TASK_ID_TS_RE.match(task_id)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(
+            m.group(1) + m.group(2), "%Y%m%d%H%M%S"
+        ).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _parse_gh_timestamp(value):
+    """Parse `gh`'s own ISO-8601 'Z'-suffixed timestamp shape (e.g.
+    '2026-08-14T06:10:43Z') into an aware UTC datetime, or None."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return None
+
+
+def find_cross_repo_pr_evidence(task_id, task_dir, named):
     """Real, mechanical evidence that this task's genuine code fix landed as
     a PR in a DIFFERENT repository than the task branch's own repo --
     concretely the task-20260814-060148 shape: real code + 8 passing tests
@@ -387,35 +466,50 @@ def find_cross_repo_pr_evidence(task_id, task_dir):
 
     Never trusts a bare mention / self-declared claim. A PR URL found in
     this task's own result.json is only real evidence once ALL of these are
-    true, each checked against `gh`'s own live answer, not our own prose:
-      (a) `gh pr view` confirms the PR really exists,
-      (b) this exact task_id string is really present in that PR's own
-          body or headRefName (proves THIS task opened it -- not merely
-          that this task's summary happens to cite someone else's PR), and
-      (c) that PR's own real `files` list contains at least one real,
-          non-progress code-extension file.
+    true, each checked against `gh`'s own live answer, not our own prose --
+    see this module's own top docstring for why each check exists:
+      (a) owner/repo is really in this org's own known repo set
+          (GH_ORG/ALL_KNOWN_REPOS) -- never queries an arbitrary owner/repo,
+      (b) `gh pr view` confirms the PR really exists,
+      (c) this exact task_id string is really present in that PR's own
+          headRefName (branch name, set at PR-creation time -- not the
+          body, which is editable after creation by anyone with write
+          access and so can be made to cite any task_id retroactively),
+      (d) that PR's real createdAt is not earlier than this task's own
+          real dispatch time (decoded from task_id itself) -- a PR that
+          predates this task cannot genuinely be its output, however its
+          branch name reads, and
+      (e) that PR's own real `files` list contains at least one file that
+          actually matches one of the objective's own `named` file(s) --
+          not merely any unrelated code file.
 
     Returns (True, description) on real evidence, else (False, None).
     """
+    task_ts = _task_dispatch_timestamp(task_id)
     for owner, repo, number in extract_pr_references(_read_result_text(task_dir)):
+        if owner != GH_ORG or repo not in ALL_KNOWN_REPOS:
+            continue
         pr = _gh_pr_view(owner, repo, number)
         if not pr:
             continue
-        body = pr.get("body") or ""
         head_ref = pr.get("headRefName") or ""
-        if task_id not in body and task_id not in head_ref:
+        if task_id not in head_ref:
             continue
+        if task_ts is not None:
+            pr_created = _parse_gh_timestamp(pr.get("createdAt"))
+            if pr_created is None or pr_created < task_ts:
+                continue
         pr_files = [
             f.get("path", "") for f in (pr.get("files") or []) if isinstance(f, dict)
         ]
-        code_files = sorted(
-            p for p in pr_files if FILENAME_RE.search(p) and not is_progress_artifact(p)
-        )
-        if code_files:
+        matched = _matched_named_files(named, pr_files)
+        if matched:
             return True, (
                 f"real code change landed cross-repo as {owner}/{repo}#{number} "
                 f"({pr.get('url', '')}), confirmed by gh: task_id present in its "
-                f"body/branch, real code file(s) in its diff: {code_files}"
+                f"branch name, created at {pr.get('createdAt')} (at/after this "
+                f"task's own dispatch), objective-named file(s) present in its "
+                f"real diff: {matched}"
             )
     return False, None
 
@@ -448,16 +542,12 @@ def check_completion(task_dir, workspace, default_branch):
     if not diff_files:
         return True, "empty diff -- handled by the separate no-op path, not this gate"
 
-    diff_basenames = {f.rsplit("/", 1)[-1] for f in diff_files}
-    matched = [
-        n for n in named
-        if n in diff_files or n.rsplit("/", 1)[-1] in diff_basenames
-    ]
+    matched = _matched_named_files(named, diff_files)
     if matched:
         return True, f"objective-named file(s) present in diff: {matched}"
 
     task_id = os.path.basename(os.path.normpath(task_dir))
-    cross_repo_ok, cross_repo_desc = find_cross_repo_pr_evidence(task_id, task_dir)
+    cross_repo_ok, cross_repo_desc = find_cross_repo_pr_evidence(task_id, task_dir, named)
     if cross_repo_ok:
         return True, (
             f"objective-named file(s) {named} not in the task branch diff, "

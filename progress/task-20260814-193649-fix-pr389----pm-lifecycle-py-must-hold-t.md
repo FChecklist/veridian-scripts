@@ -104,9 +104,13 @@ for every task deserves its own dedicated, reviewed task).
       still passes unchanged (9/9).
 - [x] Committed + pushed.
 
+- [x] Opened PR #397 (base `main`) --
+      https://github.com/FChecklist/veridian-scripts/pull/397 -- diff
+      confirmed to include `pm_lifecycle.py` and
+      `tests/test_pm_lifecycle.py`.
+- [x] `agent_work_briefing.py record-completion --umr-id UMR-20260814-193636-1e67` done.
+
 ## Remaining
-- [ ] `agent_work_briefing.py record-completion --umr-id UMR-20260814-193636-1e67`
-      (after this commit is pushed).
 - [ ] Do NOT self-certify -- this needs a fresh independent AUDIT:PASS
       against the new head before any merge (not performed by this task;
       leaving for the standard audit pipeline / a follow-up

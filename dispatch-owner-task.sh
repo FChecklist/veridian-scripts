@@ -27,7 +27,7 @@
 #                          preflight-guard.py -> tight_task_validation.py's
 #                          validate_tight_task()
 #
-# Usage: dispatch-owner-task.sh "<short title>" "<full prompt text>" [tier] [medium] [repo] [--no-relay]
+# Usage: dispatch-owner-task.sh "<short title>" "<full prompt text>" [tier] [medium] [repo] [--no-relay] [--attach <path>]
 #   tier       - resource_governor.py tier, 0 (highest) .. 4 (lowest); default 2
 #   medium     - "claude_code_cli" (default, laptop-relayed) or "ssh_session"
 #                (Owner running this directly by hand)
@@ -35,6 +35,17 @@
 #   --no-relay - register only, do not deliver into the tmux session (e.g. for
 #                pure background-worker dispatch with no interactive session
 #                involvement). Omit this and relay happens by default.
+#   --attach <path> - task-20260814-180459 (real file-attachment intake): one
+#                real local file (text/markdown/PDF/image). Passed straight
+#                through to task-gateway.py submit's own --attach (step 2
+#                below), which hashes/extracts it and folds the result into
+#                the SAME text that goes through the OWNER_ENGINE gate and
+#                dedup/search -- never a second, parallel path. If step 2
+#                succeeds, this script also folds the attachment content into
+#                its OWN $PROMPT for the rest of this dispatch (queue spec,
+#                tmux relay) -- see step 2's own comment -- so the real
+#                worker that eventually picks this up sees it too, not only
+#                the classification step.
 #
 # UMR-20260806-115423-500d (real narrowing of UMR-20260806-085144-9c63 /
 # PR #150, read this before touching the relay block below): a successful
@@ -111,18 +122,34 @@ mkdir -p "$LOCKS_DIR"
 TMUX_RELAY_LOCK="$LOCKS_DIR/dispatch-owner-task-tmux-relay-${TMUX_SESSION}.lock"
 
 RELAY=1
+# task-20260814-180459 (real file-attachment intake): --attach <path> is a
+# real local file (text/markdown/PDF/image) passed straight through to
+# task-gateway.py submit's own --attach (added there in this same task) --
+# extraction/hashing/OWNER_ENGINE-gating happens exactly once, in that one
+# real place, never re-implemented here in bash.
+ATTACH=""
 ARGS=()
+_next_is_attach=0
 for a in "$@"; do
-  if [ "$a" = "--no-relay" ]; then
+  if [ "$_next_is_attach" -eq 1 ]; then
+    ATTACH="$a"
+    _next_is_attach=0
+  elif [ "$a" = "--no-relay" ]; then
     RELAY=0
+  elif [ "$a" = "--attach" ]; then
+    _next_is_attach=1
   else
     ARGS+=("$a")
   fi
 done
+if [ "$_next_is_attach" -eq 1 ]; then
+  echo "Usage: dispatch-owner-task.sh ... --attach <path> -- --attach requires a real file path argument" >&2
+  exit 1
+fi
 set -- "${ARGS[@]}"
 
-TITLE="${1:?Usage: dispatch-owner-task.sh \"<title>\" \"<prompt>\" [tier] [medium] [repo] [--no-relay]}"
-PROMPT="${2:?Usage: dispatch-owner-task.sh \"<title>\" \"<prompt>\" [tier] [medium] [repo] [--no-relay]}"
+TITLE="${1:?Usage: dispatch-owner-task.sh \"<title>\" \"<prompt>\" [tier] [medium] [repo] [--no-relay] [--attach <path>]}"
+PROMPT="${2:?Usage: dispatch-owner-task.sh \"<title>\" \"<prompt>\" [tier] [medium] [repo] [--no-relay] [--attach <path>]}"
 TIER="${3:-2}"
 MEDIUM="${4:-claude_code_cli}"
 REPO="${5:-compliance-tracker}"
@@ -276,7 +303,14 @@ fi
 #    submit's classification machinery has a bad moment.
 SESSION_ID="dispatch-owner-task.sh:${MEDIUM}:$$"
 SUBMIT_CLASSIFY_ERR="$(mktemp)"
-if SUBMIT_CLASSIFY_JSON=$(python3 task-gateway.py submit --text "$PROMPT" --source owner --session-id "$SESSION_ID" --tier "$TIER" 2>"$SUBMIT_CLASSIFY_ERR"); then
+# task-20260814-180459: real --attach passthrough. Empty when no --attach
+# was given, so the submit call below is byte-identical to before this task
+# for every existing caller that doesn't use it.
+ATTACH_SUBMIT_ARGS=()
+if [ -n "$ATTACH" ]; then
+  ATTACH_SUBMIT_ARGS=(--attach "$ATTACH")
+fi
+if SUBMIT_CLASSIFY_JSON=$(python3 task-gateway.py submit --text "$PROMPT" --source owner --session-id "$SESSION_ID" --tier "$TIER" "${ATTACH_SUBMIT_ARGS[@]}" 2>"$SUBMIT_CLASSIFY_ERR"); then
   INSTRUCTION_ID=$(echo "$SUBMIT_CLASSIFY_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['instruction_id'])")
   # task-20260814-131322 / UMR-20260814-131248-baed: task-gateway.py submit
   # is the one real single-source-of-truth for tier -> execution settings
@@ -290,11 +324,51 @@ if SUBMIT_CLASSIFY_JSON=$(python3 task-gateway.py submit --text "$PROMPT" --sour
     EXEC_SETTINGS_JSON="$GATEWAY_EXEC_SETTINGS"
     EXECUTION_PATH=$(echo "$EXEC_SETTINGS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['execution_path'])")
   fi
+  # task-20260814-180459: the real attachment record task-gateway.py submit
+  # just computed (hash/path/mimetype, plus real extracted text or an
+  # honestly-disclosed non-extraction note) is reused here -- via
+  # attachment_intake.render_attachment_block(), the SAME real formatting
+  # code submit itself used, never a second, separately-worded
+  # implementation -- to fold the same attachment content into THIS
+  # script's own $PROMPT for the rest of the dispatch (queue spec below,
+  # tmux/headless-CLI relay), so the real worker that eventually picks this
+  # up sees it too, not only the classification step above.
+  if [ -n "$ATTACH" ]; then
+    ATTACH_BLOCK=$(echo "$SUBMIT_CLASSIFY_JSON" | python3 -c "
+import json, sys
+sys.path.insert(0, '$SCRIPT_DIR')
+import attachment_intake
+rec = json.load(sys.stdin).get('attachment')
+print(attachment_intake.render_attachment_block(rec) if rec else '')
+")
+    if [ -n "$ATTACH_BLOCK" ]; then
+      PROMPT="${PROMPT}
+
+${ATTACH_BLOCK}"
+    fi
+  fi
   rm -f "$SUBMIT_CLASSIFY_ERR"
 else
   echo "WARNING: task-gateway.py submit (real software-first classification) failed -- falling back to direct log-instruction so this real dispatch is not blocked by a classification-step hiccup. Failure detail:" >&2
   cat "$SUBMIT_CLASSIFY_ERR" >&2 2>/dev/null || true
   rm -f "$SUBMIT_CLASSIFY_ERR"
+  # task-20260814-180459: same real attachment intake, computed directly
+  # (attachment_intake.py, the one real place this logic lives) since the
+  # classification-step fallback above means task-gateway.py submit never
+  # ran to compute it this time -- this fail-open branch must not silently
+  # drop a real attachment just because the classification step hiccuped.
+  if [ -n "$ATTACH" ]; then
+    ATTACH_BLOCK=$(python3 -c "
+import sys
+sys.path.insert(0, '$SCRIPT_DIR')
+import attachment_intake
+rec = attachment_intake.build_attachment_record(sys.argv[1])
+print(attachment_intake.render_attachment_block(rec))
+" "$ATTACH")
+    PROMPT="${PROMPT}
+
+${ATTACH_BLOCK}"
+  fi
   INS_JSON=$(python3 superboss-register.py log-instruction --text "$PROMPT" --source owner --medium "$MEDIUM")
   INSTRUCTION_ID=$(echo "$INS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['instruction_id'])")
 fi

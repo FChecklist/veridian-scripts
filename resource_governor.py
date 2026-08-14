@@ -2761,6 +2761,43 @@ _DISCLOSURE_CITATION_RE = re.compile(
 )
 
 
+def _title_pr_reference_is_citation_only(text, pr_num):
+    """UMR-20260814-060148 (follow-up to UMR-20260814-015201/PR #345, real
+    unique-value delta salvaged from superseded veridian-scripts PR #342
+    before closing it -- see that task's own progress doc for the diff that
+    established this piece was NOT already covered by #345): the
+    mirror-image check to _DISCLOSURE_CITATION_RE above, applied to THIS
+    task's own title instead of a candidate PR's.
+
+    #345's hint_repo-scoping fix (see find_pr_for_task_identity()'s Stage 6
+    docstring below) closes the specific reported incident
+    (UMR-20260814-010152-7981 vs claude-control#185) because that collision
+    was cross-repo -- hint_repo-scoping alone kills any bare-number match
+    against a different repo. It does NOT close the narrower same-repo case:
+    a task whose own title cites a PR number only as a parenthetical aside
+    (e.g. "...every audited merged fix (incl PR 322) is NOT running" --
+    mentioning PR 322 as one example among several, never claiming it as
+    THIS task's own target/subject), where that number happens to belong to
+    a real PR in the SAME repo as hint_repo, and that candidate PR's title
+    carries no _DISCLOSURE_CITATION_RE disclaimer language -- unlike the
+    real #58/#64/#65/#66 shape Stage 6 exists to catch ("Resolve fresh
+    conflict on PR #58", "Fix PR #58 conflict"), where the number IS the
+    sentence's stated subject, never inside a parenthetical.
+
+    Returns True when `pr_num`'s reference in `text` falls strictly inside a
+    parenthetical span, i.e. between an unmatched '(' before it and a ')'
+    after it -- real, deterministic phrasing this repo's own titles actually
+    use for "citing", never a semantic/ML judgment call. False (not a
+    citation -- a real target reference) for every other placement,
+    including when `text` or `pr_num` is falsy."""
+    if not text or not pr_num:
+        return False
+    for m in re.finditer(r"\(([^()]*)\)", text):
+        if re.search(r"\bPR\s*#?\s*0*" + re.escape(pr_num) + r"\b", m.group(1), re.IGNORECASE):
+            return True
+    return False
+
+
 def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None, title=None):
     """Stage 4 (2026-07-29) duplicate-PR guard -- real, exact --head branch
     match against GitHub, ported from owner_backlog_orchestrator.py's
@@ -2853,7 +2890,9 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
     number; (None, None) if none found (including on any failure -- fail
     open, see above). A same-numbered PR in a DIFFERENT repo is never a
     match -- PR numbers are per-repo sequences, so cross-repo number
-    collisions are coincidence, not evidence of duplication."""
+    collisions are coincidence, not evidence of duplication. Nor is a bare
+    number this task's own title only cites parenthetically (see
+    _title_pr_reference_is_citation_only())."""
     if not task_identity:
         return None, None
     candidate_idents = [task_identity] + [t for t in (extra_task_ids or []) if t and t != task_identity]
@@ -2936,6 +2975,17 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
     # in by the caller) -- never an arbitrary scan across every configured
     # repo. If neither a qualified repo nor a hint_repo is available, Stage 6
     # is skipped entirely rather than guessing.
+    #
+    # UMR-20260814-060148 real fix (follow-up to UMR-20260814-015201/PR #345,
+    # salvaged as the one piece of unique value out of superseded PR #342):
+    # the scoping above closes the specific cross-repo incident that
+    # motivated it, but a bare "PR NNN" reference that resolves against
+    # hint_repo can still coincidentally be a SAME-repo PR this task's own
+    # title only cited parenthetically (e.g. "...(incl PR 322)...") rather
+    # than claimed as its own target -- see
+    # _title_pr_reference_is_citation_only()'s own docstring for the real
+    # incident shape this closes. Drop the reference entirely (pr_num=None,
+    # no gh call at all) when it is such a citation.
     qualified_repo, qualified_num = _repo_qualified_pr_ref(title, known_repos=repos)
     if qualified_repo and qualified_num:
         pr_num = qualified_num
@@ -2946,6 +2996,8 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
     else:
         pr_num = None
         title_check_repos = []
+    if pr_num and _title_pr_reference_is_citation_only(title, pr_num):
+        pr_num, title_check_repos = None, []
     if pr_num:
         for repo in title_check_repos:
             try:

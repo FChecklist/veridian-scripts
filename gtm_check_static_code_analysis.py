@@ -46,13 +46,13 @@ REPO_URL = "https://github.com/FChecklist/compliance-tracker.git"
 CATEGORY_INDEX = 2
 
 
-def sh(cmd, cwd=None, timeout=600):
+def sh(cmd, cwd=None, timeout=600, env=None):
     """Run cmd (list), return (exit_code, stdout, stderr). Never raises on
     nonzero exit -- a nonzero exit from a tool under test is real evidence,
     not a Python-level error."""
     try:
         p = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout
+            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env
         )
         return p.returncode, p.stdout, p.stderr
     except FileNotFoundError as e:
@@ -147,7 +147,21 @@ def main():
                 pass  # counts stay None; raw exit code still recorded honestly below
 
         # tsc --noEmit (count "error TS" occurrences in output)
-        rc_tsc, out_tsc, err_tsc = sh(["bunx", "tsc", "--noEmit"], cwd=clone_dir, timeout=600)
+        # Real bug found and fixed 2026-08-14 (task-20260814-125658): tsc
+        # was OOM-crashing on this host's default Node heap ceiling (~1GB,
+        # this sandbox's cgroup-derived default, not a real type error --
+        # exit code -6/SIGABRT with "JavaScript heap out of memory") against
+        # compliance-tracker's real ~2000-file tree, which produced a
+        # FALSE fail for category 2 (the check never actually finished
+        # type-checking). Raising Node's old-space ceiling for this one
+        # subprocess only (never a blanket env change) lets the real tsc
+        # run complete; verified locally this exact repo's HEAD then exits
+        # 0 with zero real type errors. Does not touch compliance-tracker's
+        # own tsconfig/build config -- purely gives the checker itself
+        # enough memory to genuinely finish the check it already runs.
+        tsc_env = dict(os.environ)
+        tsc_env["NODE_OPTIONS"] = (tsc_env.get("NODE_OPTIONS", "") + " --max-old-space-size=6144").strip()
+        rc_tsc, out_tsc, err_tsc = sh(["bunx", "tsc", "--noEmit"], cwd=clone_dir, timeout=600, env=tsc_env)
         tsc_combined = (out_tsc or "") + (err_tsc or "")
         tsc_error_count = len(re.findall(r"error TS\d+", tsc_combined))
 

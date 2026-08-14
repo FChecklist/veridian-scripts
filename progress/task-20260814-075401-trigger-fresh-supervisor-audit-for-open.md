@@ -30,13 +30,30 @@ comment, and merge if it's a real PASS.
       (`test_resource_governor_queue_management.py`,
       `test_resource_governor_owner_priority_advance.py`,
       `test_resource_governor_telemetry_retention.py`,
-      `tests/test_resource_governor_stuck_task_scope.py`) for regressions
-      (in progress in background, results pending below).
+      `tests/test_resource_governor_stuck_task_scope.py`): 1 failure
+      (`QueueManagementTest::test_move_down_never_crosses_a_tier_boundary`)
+      -- reproduced it identically against `origin/main` HEAD with this PR's
+      diff fully reverted, confirming it's pre-existing/unrelated, not a
+      regression this PR introduces.
+- [x] Posted the real structured `AUDIT: PASS` comment to PR #356:
+      https://github.com/FChecklist/veridian-scripts/pull/356#issuecomment-5290972874
+      (verdict pass, tier1, noted one non-blocking theoretical edge case in
+      the new helper -- same-number cited both as real target and as a
+      parenthetical elsewhere in one title -- not covered by tests, but
+      consistent with the guard's documented fail-open posture, so not
+      blocking).
+- [x] Merged PR #356 (tier1 + approve). Confirmed independently via fresh
+      `gh pr view`: state=MERGED, mergeCommit=6485d1d49583d50a9ac189272f31583e6ec1790d,
+      mergedAt=2026-08-14T08:00:25Z. Deleted the now-merged branch
+      (best-effort, succeeded on retry after one transient gh 401).
+
+- [x] record-completion write-back to agent_work_briefing (UMR-20260814-073220-e363)
+      -> AGENT-20260814-073220-e363
 
 ## Remaining
-- [ ] Confirm broader regression run is clean (no failures introduced)
-- [ ] Post the real structured `AUDIT: PASS`/`FAIL` comment to PR #356
-      based on the actual verdict
-- [ ] If PASS: merge PR #356 (tier1); if FAIL: report cited issues instead
-- [ ] record-completion write-back to agent_work_briefing (UMR-20260814-073220-e363)
-- [ ] final commit + push of this progress file
+- [ ] final commit + push of this progress file (this commit)
+
+## Outcome
+Real AUDIT: PASS. veridian-scripts PR #356 merged (tier1, autonomous per
+Owner's full-approval-autonomy directive). Merge commit:
+6485d1d49583d50a9ac189272f31583e6ec1790d.

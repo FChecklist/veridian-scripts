@@ -60,6 +60,45 @@ class TestExtractNamedCodeFiles(unittest.TestCase):
         text = "docs: re-verify UMR-20260813-155201-da76 self-block claim"
         self.assertEqual(gate.extract_named_code_files(text), [])
 
+    def test_excludes_bare_boilerplate_tool_names(self):
+        """Real fix (RCA of UMR-20260813-060311-6eea): pm-sentinel-tick.sh's
+        own Check 2a RCA template cites resource_governor.py/
+        superboss-register.py as CLI tools to run in essentially every
+        killed-row RCA prompt it generates -- these bare mentions are never
+        a real, distinguishing objective file."""
+        text = (
+            "REAL GAP FOUND: resource_governor.py --query-umr --umr-id "
+            "UMR-X shows status=killed. This needs a real RCA: read the "
+            "row's full real outputs_json/reason (query resource_governor.py "
+            "--query-umr --umr-id UMR-X yourself first), determine the real "
+            "root cause, and either fix + redispatch the real remaining "
+            "scope, or record a real, honest terminal outcome via "
+            "superboss-register.py mark-umr-terminal citing real evidence."
+        )
+        self.assertEqual(gate.extract_named_code_files(text), [])
+
+    def test_path_prefixed_boilerplate_tool_name_still_counts(self):
+        """A genuinely path-prefixed mention (e.g. naming the file's own
+        code inside scripts/) is a real, distinguishing reference -- NOT
+        excluded, unlike the bare-name boilerplate citation above."""
+        text = "Fix the --query-umr filter in scripts/resource_governor.py"
+        self.assertEqual(
+            gate.extract_named_code_files(text), ["scripts/resource_governor.py"]
+        )
+
+    def test_mixed_boilerplate_and_real_objective(self):
+        """A prompt that cites the tools in boilerplate form AND names a
+        real, different objective file keeps only the real objective."""
+        text = (
+            "GOVERNING CHAIN: query resource_governor.py --query-umr "
+            "yourself first. REAL GAP FOUND in pm-sentinel-tick.sh Check 2a: "
+            "fix + redispatch, or record via superboss-register.py "
+            "mark-umr-terminal."
+        )
+        self.assertEqual(
+            gate.extract_named_code_files(text), ["pm-sentinel-tick.sh"]
+        )
+
 
 class TestCompletionGateConcurrentProgressFiles(unittest.TestCase):
     """(a) two simulated workers, two branches, two progress/<task_id>.md
@@ -261,6 +300,37 @@ class TestCompletionGateRejectsDocOnlyDiff(unittest.TestCase):
                 f.write("## Completed\n- [x] re-verified\n## Remaining\n")
             run(ws, "add", "-A")
             run(ws, "commit", "-q", "-m", "docs-only change")
+
+            ok, reason = gate.check_completion(task_dir, ws, "main")
+            self.assertTrue(ok, reason)
+
+    def test_rca_prompt_citing_only_boilerplate_tools_docs_only_diff_accepted(self):
+        """Real regression, RCA of UMR-20260813-060311-6eea
+        (UMR-20260814-013850-fd7f): pm-sentinel-tick.sh Check 2a's own RCA
+        prompt template cites resource_governor.py/superboss-register.py in
+        every killed-row RCA it dispatches. Before this fix, a genuinely
+        cross-repo or no-code-needed RCA disposition (a doc-only diff) was
+        wrongly REJECTED here purely because the prompt cites those two
+        tool names -- this is exactly that scenario, and it must now be
+        accepted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = self._make_task(
+                tmp,
+                "GOVERNING CHAIN: this task's own dispatching UMR (PM-sentinel "
+                "tick). REAL GAP FOUND: resource_governor.py --query-umr "
+                "--umr-id UMR-X shows status=killed. This needs a real RCA: "
+                "read the row's full real outputs_json/reason (query "
+                "resource_governor.py --query-umr --umr-id UMR-X yourself "
+                "first), determine the real root cause, and either fix + "
+                "redispatch the real remaining scope, or record a real, "
+                "honest terminal outcome via superboss-register.py "
+                "mark-umr-terminal citing real evidence.",
+            )
+            ws = self._make_workspace(tmp)
+            with open(os.path.join(ws, "PROGRESS.md"), "w") as f:
+                f.write("## Completed\n- [x] RCA'd, already resolved by a prior session\n## Remaining\n")
+            run(ws, "add", "-A")
+            run(ws, "commit", "-q", "-m", "docs-only RCA disposition")
 
             ok, reason = gate.check_completion(task_dir, ws, "main")
             self.assertTrue(ok, reason)

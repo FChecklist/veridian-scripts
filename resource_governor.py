@@ -3339,7 +3339,21 @@ def target_pr_already_resolved(title, hint_repo=None):
     OPEN PR (even DIRTY/conflicted -- see UMR-20260813-111352-6973 above,
     where the real right answer was "dispatch a fresh rebase+audit", not a
     self-reject) is deliberately NOT blocked here: only a real, confirmed
-    MERGED or CLOSED state means the queue-time premise itself is dead.
+    MERGED state means the queue-time premise itself is dead.
+
+    UMR-20260814-132703-a1f9 real fix (self-rejection false positive): this
+    used to also block on a bare CLOSED state, treating "closed without
+    merge" the same as "already handled". Real incident:
+    UMR-20260814-125933-3377 ("Merge real veridian-scripts PR#298") was
+    itself submitted to fix an outstanding gap -- PR#298 real, CLOSED,
+    mergedAt=null, 696 real lines of diff never landed -- and this guard
+    self-rejected that very row as a duplicate because it saw the same
+    CLOSED state its own title already named as the problem. CLOSED without
+    a merge means the opposite of "resolved": the work is still a real,
+    open gap (abandoned/rejected PR, not landed), so it must NOT be
+    silently skipped here. Only MERGED means the queue-time premise is
+    actually dead; CLOSED-without-merge now falls through to the same
+    "not resolved, dispatch proceeds" path as OPEN.
 
     UMR-20260813-165620-aac7 (addendum to P1 UMR-20260806-171945-5767) real
     fix: this used to resolve a BARE "PR NNN" title reference by scanning
@@ -3416,13 +3430,12 @@ def target_pr_already_resolved(title, hint_repo=None):
         if state == "MERGED":
             return True, {"repo": repo, "number": pr.get("number"), "state": state,
                            "merged_at": pr.get("mergedAt"), "url": pr.get("url")}
-        if state == "CLOSED":
-            return True, {"repo": repo, "number": pr.get("number"), "state": state,
-                           "closed_at": pr.get("closedAt"), "url": pr.get("url")}
-        # A real PR number resolved in this repo but its state is OPEN (or
-        # anything else) -- not resolved yet, and PR numbers are per-repo, so
-        # the search stops here rather than risking a same-number collision
-        # in a different repo.
+        # A real PR number resolved in this repo but its state is OPEN or
+        # CLOSED-without-merge (or anything else) -- not a resolved
+        # duplicate (see UMR-20260814-132703-a1f9 fix note in the docstring
+        # above: CLOSED-without-merge is a real open gap, not "handled").
+        # PR numbers are per-repo, so the search stops here rather than
+        # risking a same-number collision in a different repo.
         return False, None
     return False, None
 

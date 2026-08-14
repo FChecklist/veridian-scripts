@@ -39,13 +39,18 @@
 ## Completed
 - [x] Verified real gap independently (see above)
 
-## Remaining
-- [ ] task-gateway.py: count_tokens_real(), lookup_instruction_raw_text(),
+## Completed (cont.)
+- [x] task-gateway.py: count_tokens_real(), lookup_instruction_raw_text(),
       cmd_start instrumentation + --metadata token_usage on log-work
-- [ ] superboss-register.py: query_work_item_token_usage()
-- [ ] resource_governor.py: --query-token-usage CLI mode
-- [ ] Unit tests (real tiktoken counts, real isolated scratch DB, same
+- [x] superboss-register.py: query_work_item_token_usage()
+- [x] resource_governor.py: --query-token-usage CLI mode
+- [x] Unit tests (real tiktoken counts, real isolated scratch DB, same
       convention as test_task_gateway_zoekt_search.py / test_task_start_gate.py)
+      -- tests/test_token_usage_measurement.py, 12/12 passing, including a
+      full cmd_start integration test (run()-monkeypatch, no real systemd
+      spawn) proving cmd_start itself computes + persists real token_usage.
+
+## Remaining
 - [ ] 3 real test dispatch rows written into the REAL production DB
       (/opt/veridian/ai-os/memory/superboss-register.sqlite) via the real
       superboss-register.py log-instruction/log-work CLI + the real

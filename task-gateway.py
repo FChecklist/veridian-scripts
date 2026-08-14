@@ -105,6 +105,31 @@ STOPWORDS = {
 }
 
 
+def count_tokens_real(text):
+    """task-20260814-180958 / UMR-20260814-180929-cbdd: the one real,
+    single-source-of-truth token counter for the real per-dispatch
+    before/after measurement cmd_start records below. Uses tiktoken's
+    cl100k_base BPE tokenizer (already installed in this environment,
+    confirmed working offline) for a real, reproducible token count --
+    the same class of tokenizer real LLM APIs use, not a word-count guess.
+    Only falls back to the existing mechanical word-count heuristic this
+    codebase already uses elsewhere (prompt_gateway/engine/prompt_engine.py's
+    PromptConverter.estimate_token_reduction, words*1.3) if tiktoken is
+    unavailable or its encode call fails for any reason -- a missing/broken
+    optional dependency must degrade a real dispatch, never crash it.
+    Returns (token_count, method) so callers/records can tell which path
+    produced the number, never silently mixing the two."""
+    if not text:
+        return 0, "tiktoken_cl100k_base"
+    try:
+        import tiktoken
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text, disallowed_special=())), "tiktoken_cl100k_base"
+    except Exception:
+        words = len(re.findall(r"\S+", text))
+        return int(words * 1.3), "mechanical_word_estimate_fallback"
+
+
 def fail(message, **extra):
     payload = {"error": message}
     payload.update(extra)
@@ -280,6 +305,33 @@ def lookup_work_item(task_id):
     ).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def lookup_instruction_raw_text(instruction_id):
+    """Read-only lookup of instructions.raw_text for a given instruction_id
+    -- same real, direct-sqlite-read exception lookup_work_item() above
+    documents (used to derive a value for a later call, not a substitute
+    for any wrapped script). cmd_start's real per-dispatch token-usage
+    measurement (task-20260814-180958 / UMR-20260814-180929-cbdd) uses this
+    to get the real 'before dedup/search/tightening' text: the raw text
+    cmd_submit's log-instruction call persisted verbatim for the
+    --instruction-id this dispatch names, before check-duplicate/search/
+    query-knowledge or tight_task_validation.py ever touched it. Deliberately
+    NOT the OWNER_ENGINE-gated effective_text (a separate, narrower
+    pre-processing step scoped to --source owner only, see
+    run_owner_engine_gate()) -- raw_text is the one real value that exists
+    for every instruction regardless of source. Returns None if no row is
+    found -- callers must handle that, not assume it."""
+    if instruction_id is None or not os.path.isfile(DB_PATH):
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT raw_text FROM instructions WHERE instruction_id = ?",
+        (instruction_id,),
+    ).fetchone()
+    conn.close()
+    return row["raw_text"] if row else None
 
 
 def run_zoekt_search(query, limit=10):
@@ -851,6 +903,43 @@ def cmd_start(args):
     is_active_proc = run(["systemctl", "--user", "is-active", service])
     systemd_active = is_active_proc.stdout.strip() == "active"
 
+    # Real per-dispatch token-usage measurement (task-20260814-180958 /
+    # UMR-20260814-180929-cbdd): no real recorded measurement previously
+    # existed comparing token cost before vs after the dedup/search/
+    # tightening pipeline this dispatch just went through (cmd_submit's
+    # check-duplicate/search/query-knowledge steps, plus this function's own
+    # tight_task_validation.py call above) -- "before" is the raw
+    # instruction text this dispatch's own --instruction-id links back to
+    # (see lookup_instruction_raw_text()); "after" is `text` itself, this
+    # function's own real prompt_file content -- the exact text about to be
+    # (and already was, above) passed to veridian-task.py create, i.e. what
+    # the AI worker actually receives, post-tightening. Both counted with
+    # the same real count_tokens_real() so the two numbers are directly
+    # comparable. A stated "at least 50% reduction" goal was never
+    # independently measured before this -- this real record is what makes
+    # that measurable, not an assumption either way.
+    raw_prompt_text = lookup_instruction_raw_text(args.instruction_id)
+    if raw_prompt_text is not None:
+        raw_prompt_tokens, raw_prompt_token_method = count_tokens_real(raw_prompt_text)
+    else:
+        raw_prompt_tokens, raw_prompt_token_method = None, None
+    final_prompt_tokens, final_prompt_token_method = count_tokens_real(text)
+    token_usage = {
+        "raw_prompt_tokens": raw_prompt_tokens,
+        "raw_prompt_token_method": raw_prompt_token_method,
+        "final_prompt_tokens": final_prompt_tokens,
+        "final_prompt_token_method": final_prompt_token_method,
+        "reduction_pct": (
+            round((1 - final_prompt_tokens / raw_prompt_tokens) * 100, 2)
+            if raw_prompt_tokens else None
+        ),
+    }
+
+    # Recorded onto the work_items row itself (metadata_json.token_usage) --
+    # reuses the existing table/column log-work already writes into, no new
+    # table (real SCOPE constraint). resource_governor.py's --query-token-usage
+    # (see its own docstring) is the real query mode that reads this back and
+    # computes a real average across the last N real dispatches.
     work_result = run_json(
         ["python3", SUPERBOSS, "log-work",
          "--instruction-id", args.instruction_id,
@@ -858,7 +947,8 @@ def cmd_start(args):
          "--source", "ai_agent", "--medium", "task_gateway",
          "--content", f"task_start:{args.title[:60]}",
          "--term", "task_gateway,start",
-         "--status", "open"],
+         "--status", "open",
+         "--metadata", json.dumps({"token_usage": token_usage})],
         "log-work",
     )
 
@@ -867,6 +957,7 @@ def cmd_start(args):
         "task_id": task_id,
         "systemd_active": systemd_active,
         "work_item_id": work_result.get("work_item_id"),
+        "token_usage": token_usage,
         "credit_accountant_propose": propose_result,
     }, indent=2, default=str))
 

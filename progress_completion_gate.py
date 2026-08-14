@@ -79,6 +79,29 @@ _PROGRESS_ARTIFACT_RES = (
     re.compile(r"^RCA.*\.md$", re.IGNORECASE),
 )
 
+# Real fix (RCA of UMR-20260813-060311-6eea, UMR-20260814-013850-fd7f): same
+# false-positive class already fixed same-day in superboss-register.py's
+# extract_target_identifiers() (commit 29947ca,
+# _TARGET_ID_SCRIPT_NAME_BOILERPLATE_EXCLUDED) -- resource_governor.py and
+# superboss-register.py are cited as the real, standing query/mutation front
+# doors in essentially every dispatch prompt pm-sentinel-tick.sh's own RCA
+# template generates (e.g. Check 2a: "query resource_governor.py --query-umr
+# ... yourself first ... record ... via superboss-register.py mark-umr-
+# terminal"). Every such RCA task's own prompt.txt therefore names these two
+# files as CLI tools to *run*, not as objective files inside the task's own
+# --workspace repo -- and for a genuinely cross-repo RCA (the real fix
+# belongs in veridian-scripts, not the task's own compliance-tracker
+# workspace) or a genuinely no-code-needed disposition ("already correctly
+# resolved, re-confirming is redundant"), this gate would reject an honest,
+# real completion as if it fabricated a doc-only diff. A bare mention of
+# either name is never a real, distinguishing objective the way a nested
+# path (e.g. "scripts/resource_governor.py") or another script's own name
+# is -- a task that genuinely targets either file's own code inside this
+# workspace is still caught by FILENAME_RE's path-prefixed form, so this is
+# a narrowing of one specific false-positive-prone signal, not a removal of
+# real coverage.
+_BOILERPLATE_TOOL_NAME_EXCLUDED = {"resource_governor.py", "superboss-register.py"}
+
 
 def is_progress_artifact(path):
     base = path.rsplit("/", 1)[-1]
@@ -89,11 +112,19 @@ def extract_named_code_files(text):
     """Real source/script filenames referenced in a task's own spec text
     (prompt.txt). Order-preserving de-dup; progress/doc artifacts excluded
     even though their extension (.md) is not in CODE_EXTENSIONS anyway --
-    kept explicit so the exclusion is provable, not incidental."""
+    kept explicit so the exclusion is provable, not incidental.
+
+    Bare (no path prefix) mentions of _BOILERPLATE_TOOL_NAME_EXCLUDED are
+    also excluded -- see that set's own comment. A path-prefixed mention
+    (e.g. "scripts/resource_governor.py") is NOT excluded: that is a real,
+    distinguishing reference to the file's own code, not a generic
+    boilerplate tool citation."""
     seen = []
     for m in FILENAME_RE.finditer(text or ""):
         candidate = m.group(0)
         if is_progress_artifact(candidate):
+            continue
+        if candidate in _BOILERPLATE_TOOL_NAME_EXCLUDED:
             continue
         if candidate not in seen:
             seen.append(candidate)

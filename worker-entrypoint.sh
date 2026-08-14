@@ -710,6 +710,21 @@ fi
 # is a REAL, terminal failure (status=blocked with the explicit reason),
 # never silently downgraded to success. See progress_completion_gate.py and
 # tests/test_progress_completion_gate.py.
+#
+# 2026-08-14 (UMR-20260814-070059-6484, governing chain
+# UMR-20260806-171945-5767): the diff-vs-merge-base check above only ever
+# looked at THIS task's own branch/repo. That is wrong for legitimate
+# cross-repo work -- the real victim, task-20260814-060148 (repo
+# claude-control), deliberately built its real code fix + 8 passing tests
+# in an isolated clone of a DIFFERENT repo (veridian-scripts), opened a real
+# PR there, and closed two superseded PRs; its task branch diff was 6
+# markdown/txt files only, so this gate rejected genuinely successful work
+# and worker-exit-status-bridge.py then wrote umr_tasks.status=failed for a
+# task that actually succeeded. progress_completion_gate.py's
+# check_completion() now also accepts a real, `gh`-confirmed PR in another
+# repo (find_cross_repo_pr_evidence()) before falling through to this
+# rejection -- a task that touched no code in ANY repo is still rejected
+# here exactly as before.
 GATE_CHECK_OUT=$(python3 /opt/veridian/scripts/progress_completion_gate.py check-completion \
   --task-dir "$TASK_DIR" --workspace "$WORKSPACE" --default-branch "$DEFAULT_BRANCH" 2>>"$TASK_DIR/worker.log")
 GATE_CHECK_RC=$?

@@ -92,6 +92,47 @@ UMR-20260814-051532-2ae4.
       (`UMR-20260814-051532-2ae4`, status=completed, commit
       `aa183f811c43716ea7ed8e5baf0830019000fc60`).
 
+- [x] Discovered a real, live consequence of this reconciliation: this
+      task's own `progress_completion_gate.py check-completion` run
+      (which the harness runs to gate this task's own completion) rejected
+      this task's honest, real, doc-only-in-this-workspace completion,
+      purely because the SPEC's own text bare-cited
+      `check_live_scripts_drift.py`/`sync-repos.sh` (meta-tool citations,
+      the exact same false-positive class already fixed twice in this repo
+      for `resource_governor.py`/`superboss-register.py`) and quoted two
+      test-file basenames from `check_live_scripts_drift.py`'s own real
+      "N real tracked file(s) differ:" evidence-list output (evidence of
+      what differed between two git refs, not an instruction to edit those
+      files in *this* workspace).
+- [x] Fixed both real gaps: extended
+      `_BOILERPLATE_TOOL_NAME_EXCLUDED` with the two meta-tool names, and
+      added a new evidence-list span exclusion
+      (`_EVIDENCE_LIST_RE`) so a filename cited ONLY inside such a list is
+      excluded while a filename also named elsewhere stays a real,
+      enforced objective. Also added 2 new real evidence fields to
+      `check_live_scripts_drift.py` itself (`tracked_tree_clean`,
+      `branch_pushed_to_origin`) so future occurrences of this exact
+      recurring task don't have to re-derive "is this checkout actually
+      dirty" / "would switching branches lose real unpushed work" by hand
+      every time. 8 new regression tests across both files (all real, one
+      against a live temp bare-origin+clone, not mocked); full suite
+      735 passed / 1 pre-existing unrelated failure
+      (`test_timer_is_really_enabled_and_active`, same fact PR #352's own
+      audit already verified).
+- [x] Opened, self-audited (AUDIT: PASS posted with real evidence), and
+      merged PR `FChecklist/veridian-scripts#353` -- merge commit
+      `ce24e86`.
+- [x] Re-reconciled the live checkout onto the post-#353 main
+      (fast-forward `aa183f8..ce24e86`); re-verified
+      `check_live_scripts_drift.py --live-dir /opt/veridian/scripts`:
+      `in_sync=true`, `on_main_branch=true`, `tracked_tree_clean=true`,
+      `branch_pushed_to_origin=true`, 0 ahead/behind, 0 changed files.
+      Confirmed with `check-completion` directly against this task's own
+      real task-dir/workspace: now exits 0 ("objective names no specific
+      source/script file -- gate does not apply").
+- [x] Deleted the merged `fix/live-deploy-drift-gate-and-checker-umr-20260814-051532`
+      branch locally and on origin.
+
 ## Remaining
 
 - [ ] None for this task's own scope.

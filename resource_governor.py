@@ -419,6 +419,85 @@ def _superboss_register():
     return _sbr
 
 
+# ---------------------------------------------------------------------------
+# credit-accountant.py plan seeding for the mechanical veridian_task_create
+# spawn path -- real fix, UMR-20260814-045316 (P0 fleet-wide report-approval
+# gate deadlock). Root cause, confirmed live against real blocked task
+# directories dated 2026-08-14 03:34-04:21 UTC: task-gateway.py's own
+# cmd_task_start (the "start" subcommand, its direct/synchronous spawn path)
+# was already fixed 2026-07-26 to call `credit-accountant.py propose` for
+# increment 1 immediately after minting task_id (see its own comment at that
+# call site) -- but THIS function, _perform_spawn(), is a wholly separate,
+# real spawn path: the one resource_governor.py's own mechanical
+# next_queued_task()/dispatch_one() tick uses for every queued
+# task_kind='veridian_task_create' row, regardless of submitter
+# (dispatch-owner-task.sh's owner_dispatch_gateway, dispatch-tick.py,
+# directive_engine.py, gtm_check_ai_testing.py -- see task-gateway.py's own
+# UMR171945-0001 docstring enumerating these as real, direct
+# `resource_governor.py --submit` callers). It never got the equivalent fix.
+# Every task_id minted here therefore had ZERO credit_increments row for
+# increment 1 -- so worker-entrypoint.sh's own unconditional `credit-
+# accountant.py report --increment 1` checkpoint call always hit
+# cmd_report()'s real, correctly-implemented `row is None` branch and
+# rejected with "no matching approved plan for this task_id/increment",
+# blocking the worker before it could ever commit or open a PR. The
+# task_id/increment MATCHING logic in credit-accountant.py itself
+# (cmd_report's `WHERE task_id = ? AND increment_number = ?` lookup) is
+# correct and unchanged -- the defect was that nothing ever inserted the row
+# for this dispatch path, not that the lookup failed to find a row that
+# existed.
+#
+# Same real bridge as task-gateway.py's fix, not a second implementation:
+# reuses task-gateway.py's own extract_section()/extract_keywords_mechanical()
+# via the same in-process importlib pattern _superboss_register() above
+# already establishes for this file (hyphen/dash-named scripts can't be
+# plain `import`ed). Fail-open on any error here, deliberately -- a rejected
+# or unseeded plan row is not fatal to the spawn itself; credit-
+# accountant.py's own report-time check remains the real enforcement point,
+# exactly as task-gateway.py's own call site already documents.
+# ---------------------------------------------------------------------------
+
+_tg = None
+
+
+def _task_gateway():
+    global _tg
+    if _tg is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "task_gateway_governor", os.path.join(SCRIPTS, "task-gateway.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _tg = _mod
+    return _tg
+
+
+def _seed_credit_accountant_plan(task_id, inputs):
+    """Best-effort: propose increment 1 for `task_id` so the worker's own
+    later `credit-accountant.py report --increment 1` finds a real row
+    instead of nothing. Returns the parsed propose JSON (or an error dict)
+    for outputs_json -- never raises."""
+    try:
+        tg = _task_gateway()
+        plan_text = (tg.extract_section(inputs["prompt"], "OBJECTIVE") or inputs["title"])[:500]
+        search_terms = " ".join(tg.extract_keywords_mechanical(inputs["prompt"])) or inputs["title"]
+    except Exception:
+        plan_text = inputs["title"][:500]
+        search_terms = inputs["title"]
+    propose_cmd = [
+        "python3", os.path.join(SCRIPTS, "credit-accountant.py"), "propose",
+        "--task-id", task_id, "--plan", plan_text,
+        "--search-terms", search_terms, "--repo", inputs.get("repo", "claude-control"),
+    ]
+    r = _run(propose_cmd)
+    try:
+        return json.loads(r.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return {"approved": False,
+                "reason": "credit-accountant.py propose did not return parseable JSON",
+                "stdout": (r.stdout or "")[-500:], "stderr": (r.stderr or "")[-500:]}
+
+
 def _safe_superboss_register(context):
     """Real fix (independent review round 2, PR #20): centralizes the
     fail-open wrapper around _superboss_register() in ONE place, so every
@@ -2501,6 +2580,17 @@ def _perform_spawn(row):
             r = _run(cmd)
             m = re.search(r"^CREATED: (\S+)", r.stdout, re.MULTILINE)
             new_task_id = m.group(1) if m else None
+            # Real fix, UMR-20260814-045316: seed credit-accountant.py's
+            # increment-1 plan row BEFORE starting the unit (same ordering
+            # task-gateway.py's cmd_task_start already uses -- propose
+            # requires a real --task-id, which exists now) so the worker's
+            # own checkpoint-loop `report --increment 1` call finds a real
+            # row instead of "no matching approved plan". See
+            # _seed_credit_accountant_plan()'s own module-level comment for
+            # the full root-cause writeup. Not fatal if rejected/unreachable
+            # -- credit-accountant.py's report-time check remains the real
+            # enforcement point.
+            credit_accountant_propose = _seed_credit_accountant_plan(new_task_id, inputs) if new_task_id else None
             unit_name = f"veridian-worker@{new_task_id}.service" if new_task_id else None
             if unit_name:
                 _run(["systemctl", "--user", "start", unit_name])
@@ -2518,7 +2608,8 @@ def _perform_spawn(row):
                 reason = f"veridian-task.py create exited {r.returncode} with no CREATED: line -- {cause[:500]}"
             return {"status": status, "unit_name": unit_name,
                     "outputs": {"new_task_id": new_task_id, "returncode": r.returncode,
-                                "stdout": stdout_tail, "stderr": stderr_tail},
+                                "stdout": stdout_tail, "stderr": stderr_tail,
+                                "credit_accountant_propose": credit_accountant_propose},
                     "reason": reason}
 
         reason = f"unknown task_kind {task_kind!r}"

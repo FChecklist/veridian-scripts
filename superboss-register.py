@@ -1313,6 +1313,98 @@ _TARGET_ID_SCRIPT_NAME_RE = re.compile(r'(?<![\w/.-])([A-Za-z0-9_-]+\.(?:py|sh))
 # duplicate-PR guard).
 _TARGET_ID_SCRIPT_NAME_BOILERPLATE_EXCLUDED = {"resource_governor.py", "superboss-register.py"}
 
+# UMR-20260814-034424-ded4 real fix (PM Sentinel first-hand reproduction,
+# 2026-08-14T03:38-03:42Z UTC): three consecutive real refusals of
+# legitimate, non-duplicate P0 dispatches, all racked up against the SAME
+# already-running duplicate_umr_id (a disk-fix task). extract_target_
+# identifiers() scanned the entire title+prompt as one undifferentiated
+# blob, with no way to distinguish an identifier that names the dispatch's
+# real work TARGET from one merely CITED AS EVIDENCE or explicitly marked
+# OUT OF SCOPE / PRIOR CONTEXT:
+#   1. a live-checkout-drift dispatch was refused because its prompt cited
+#      the disk-fix UMR id purely to say the disk cause was already owned
+#      elsewhere;
+#   2. the same dispatch, with that UMR id removed, was refused AGAIN --
+#      this time on the shared worker task-directory name both prompts
+#      referenced only as the location of evidence files;
+#   3. an invocation-accounting dispatch was refused because it named the
+#      worker entrypoint script, which the disk-fix prompt had mentioned
+#      only as the file a line number of evidence lived in (the disk task
+#      never modifies that script at all).
+# Each was worked around only by deleting true, useful evidence from the
+# prompt until the matcher stopped firing -- training dispatchers toward
+# vaguer, less verifiable prompts, exactly backwards from the intent.
+#
+# Two real, additive mechanisms fix this without weakening genuine
+# same-target detection (the guard's whole reason for existing: two PM
+# tiers really did dispatch colliding work against the same PR branches on
+# 2026-08-13 -- see the module comment above, none of those real prompts
+# used any of this structure, so the fallback path below leaves them
+# caught exactly as before):
+#
+#   (a) Explicit TARGET:/SCOPE: section. A prompt that declares one is
+#       stating its own exhaustive target list -- extraction is then
+#       restricted to that section (plus the title, always scanned in
+#       full, since the title *is* the field that names the work). Any
+#       other prose in the prompt -- including a long evidentiary
+#       appendix citing other UMRs/paths/scripts -- is excluded even
+#       without any additional marking. This is the direct fix for
+#       scenario 2 above (a shared evidence-file path cited outside the
+#       declared TARGET: section never counts).
+#   (b) Fallback for prompts with no such section (this is the "at
+#       minimum" bar): a whole section explicitly headed OUT OF SCOPE: /
+#       PRIOR CONTEXT: / EVIDENCE: / NOT-A-TARGET: is stripped before
+#       extraction (fixes scenario 1 -- a disk-fix UMR id cited only to
+#       say its cause is owned elsewhere), and the explicit, machine-
+#       readable inline escape hatch `[NOT-A-TARGET: ...]` /
+#       `[EVIDENCE-ONLY: ...]` (etc.) lets a dispatcher neutralize one
+#       specific citation without restructuring the whole prompt (fixes
+#       scenario 3 -- a script name cited only for a line number of
+#       evidence). The escape hatch is stripped unconditionally, in both
+#       modes, since it is always an explicit dispatcher statement that
+#       "this identifier is evidence, not my target."
+_TARGET_ID_ESCAPE_HATCH_RE = re.compile(
+    r'\[\s*(?:NOT-A-TARGET|NOT-TARGET|EVIDENCE-ONLY|EVIDENCE|OUT-OF-SCOPE|PRIOR-CONTEXT)'
+    r'\s*:[^\]]*\]',
+    re.IGNORECASE,
+)
+_TARGET_ID_SECTION_HEADER_RE = re.compile(
+    r'(?im)^[ \t]*(TARGET(?:[ -]IDENTIFIERS?)?|SCOPE|OUT[ -]OF[ -]SCOPE|PRIOR[ -]CONTEXT|'
+    r'EVIDENCE(?:[ -]ONLY)?|NOT[ -](?:A[ -])?TARGET)[ \t]*:'
+)
+_TARGET_ID_SECTION_LABELS = {"TARGET", "TARGET IDENTIFIER", "TARGET IDENTIFIERS", "SCOPE"}
+_TARGET_ID_EXCLUDED_SECTION_LABELS = {
+    "OUT OF SCOPE", "PRIOR CONTEXT", "EVIDENCE", "EVIDENCE ONLY",
+    "NOT TARGET", "NOT A TARGET",
+}
+
+
+def _split_labeled_sections(text):
+    """Split `text` at recognized start-of-line `LABEL:` headers
+    (TARGET:/SCOPE:/OUT OF SCOPE:/PRIOR CONTEXT:/EVIDENCE(-ONLY):/
+    NOT-(A-)TARGET:, case-insensitive, hyphen/space-insensitive) into a
+    list of (label, content) pairs. `label` is None for any text before
+    the first recognized header (a prompt's normal opening prose, which
+    counts under the no-section fallback but is excluded once an explicit
+    TARGET:/SCOPE: section exists elsewhere in the same text -- see
+    extract_target_identifiers()). A section's content runs from right
+    after its own `LABEL:` to the start of the next recognized header (or
+    end of text), so `LABEL: inline content on the same line` works
+    exactly like a `LABEL:` header followed by content on subsequent
+    lines."""
+    matches = list(_TARGET_ID_SECTION_HEADER_RE.finditer(text))
+    if not matches:
+        return [(None, text)]
+    segments = []
+    if matches[0].start() > 0:
+        segments.append((None, text[:matches[0].start()]))
+    for i, m in enumerate(matches):
+        label = re.sub(r'[\s-]+', ' ', m.group(1).strip()).upper()
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        segments.append((label, text[start:end]))
+    return segments
+
 
 def extract_target_identifiers(text, default_repo=None):
     """Real, deterministic (regex, no fuzziness) extraction of "target
@@ -1341,9 +1433,34 @@ def extract_target_identifiers(text, default_repo=None):
     dispatch text names the target purely by UMR id, with no PR number, no
     file path -- extract_target_identifiers() returned an empty set for
     them and find_target_identifier_duplicate() never even got a chance to
-    compare. Extracting `umr:<id>` here closes that."""
+    compare. Extracting `umr:<id>` here closes that.
+
+    UMR-20260814-034424-ded4 real fix (scope-aware matching, see the
+    _TARGET_ID_ESCAPE_HATCH_RE / _TARGET_ID_SECTION_HEADER_RE module
+    comment above for the real incident): before scanning, (1) any
+    `[NOT-A-TARGET: ...]`/`[EVIDENCE-ONLY: ...]` (etc.) inline escape
+    hatch is stripped unconditionally, then (2) if the text declares an
+    explicit TARGET:/SCOPE: section, extraction is restricted to that
+    section's content only (everything else -- including a long
+    evidentiary appendix citing unrelated UMRs/paths/scripts -- is
+    ignored); otherwise every OUT OF SCOPE:/PRIOR CONTEXT:/EVIDENCE(-
+    ONLY):/NOT-(A-)TARGET: section is stripped and the remaining text is
+    scanned in full, exactly as before this fix (the real 2026-08-13
+    same-PR-branch collisions this guard exists for used none of this
+    structure and are unaffected)."""
     ids = set()
     text = text or ""
+
+    text = _TARGET_ID_ESCAPE_HATCH_RE.sub(" ", text)
+    segments = _split_labeled_sections(text)
+    if any(label in _TARGET_ID_SECTION_LABELS for label, _ in segments):
+        scan_text = " ".join(
+            content for label, content in segments if label in _TARGET_ID_SECTION_LABELS)
+    else:
+        scan_text = " ".join(
+            content for label, content in segments
+            if label not in _TARGET_ID_EXCLUDED_SECTION_LABELS)
+    text = scan_text
 
     for m in _UMR_ID_RE.finditer(text):
         ids.add(f"umr:{m.group(0)}")
@@ -1368,6 +1485,24 @@ def extract_target_identifiers(text, default_repo=None):
     return sorted(ids)
 
 
+def _target_identifiers_for_title_and_prompt(title, prompt, default_repo=None):
+    """UMR-20260814-034424-ded4 real fix: title and prompt are extracted
+    SEPARATELY and unioned, not concatenated into one blob first. The
+    title is always the field that declares the dispatch's real work
+    target (e.g. "Fix PR #131"), so it is always scanned in full; the
+    prompt is scanned via extract_target_identifiers()'s scope-aware
+    logic (an explicit TARGET:/SCOPE: section, if present, restricts
+    extraction to just that section; otherwise OUT OF SCOPE:/PRIOR
+    CONTEXT:/EVIDENCE:-labeled spans and `[NOT-A-TARGET: ...]`-style
+    inline escape hatches are excluded). Concatenating first (the
+    original shape) would let a TARGET:/SCOPE: section anywhere in the
+    prompt silently swallow the title too, since prose before the first
+    header is dropped in that mode -- title identifiers must never be at
+    the mercy of how the prompt happens to be structured."""
+    return (set(extract_target_identifiers(title or "", default_repo=default_repo))
+            | set(extract_target_identifiers(prompt or "", default_repo=default_repo)))
+
+
 def find_target_identifier_duplicate(conn, title, prompt, repo=None, window_hours=4, limit=30):
     """The real check itself: pulls query_umr_tasks(conn, limit=limit) --
     deliberately no status filter, newest-first, exactly the shape this
@@ -1377,7 +1512,7 @@ def find_target_identifier_duplicate(conn, title, prompt, repo=None, window_hour
     (title, prompt), and whose status is still 'queued' or 'running' (a row
     that already finished/failed/was rejected is not a live duplicate to
     skip against). Returns None if there is no real match."""
-    my_ids = set(extract_target_identifiers(f"{title or ''} {prompt or ''}", default_repo=repo))
+    my_ids = _target_identifiers_for_title_and_prompt(title, prompt, default_repo=repo)
     if not my_ids:
         return None
 
@@ -1417,8 +1552,8 @@ def find_target_identifier_duplicate(conn, title, prompt, repo=None, window_hour
             except (TypeError, ValueError):
                 inputs = {}
         row_repo = inputs.get("repo") or repo
-        row_text = f"{inputs.get('title', '')} {inputs.get('prompt', '')}"
-        row_ids = set(extract_target_identifiers(row_text, default_repo=row_repo))
+        row_ids = _target_identifiers_for_title_and_prompt(
+            inputs.get("title", ""), inputs.get("prompt", ""), default_repo=row_repo)
         if my_ids & row_ids:
             return row
 

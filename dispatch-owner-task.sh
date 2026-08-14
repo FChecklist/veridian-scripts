@@ -145,12 +145,30 @@ fi
 #     the real check itself (pulls --query-umr-equivalent query_umr_tasks
 #     with limit=30, NO status filter, newest first -- never --search
 #     alone).
+#
+#     UMR-20260814-034424-ded4 real fix (PM Sentinel first-hand
+#     reproduction, 2026-08-14T03:38-03:42Z UTC, three consecutive false
+#     refusals of legitimate P0 dispatches whose prompts CITED another
+#     UMR/path/script purely as evidence or prior context, not as their
+#     own target -- see superboss-register.py's own module comment above
+#     extract_target_identifiers() for the full incident): the check
+#     below is now scope-aware. If $PROMPT declares an explicit
+#     `TARGET:`/`SCOPE:` section, only identifiers inside it (plus the
+#     title) count -- everything else, including a long evidentiary
+#     appendix, is ignored. Otherwise, a whole `OUT OF SCOPE:`/
+#     `PRIOR CONTEXT:`/`EVIDENCE(-ONLY):`/`NOT-(A-)TARGET:`-labeled
+#     section is excluded, and any inline `[NOT-A-TARGET: ...]` /
+#     `[EVIDENCE-ONLY: ...]` span is always stripped regardless of mode --
+#     the explicit, machine-readable way to mark one specific citation
+#     ("this identifier is evidence, not my target") without
+#     restructuring the whole prompt. A genuinely well-evidenced prompt no
+#     longer has to be degraded (evidence deleted) just to dispatch.
 TIDUP_JSON=$(python3 superboss-register.py check-target-identifier-duplicate \
   --title "$TITLE" --prompt "$PROMPT" --repo "$REPO" --window-hours 4 --limit 30)
 TIDUP_FOUND=$(echo "$TIDUP_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['target_identifier_duplicate_found'])")
 if [ "$TIDUP_FOUND" = "True" ]; then
   echo "$TIDUP_JSON"
-  echo "REFUSED: a queued/running dispatch within the last 4h already targets the exact same UMR/PR/file/script (see duplicate_umr_id above). Re-run once that target is no longer live if this is genuinely new work." >&2
+  echo "REFUSED: a queued/running dispatch within the last 4h already targets the exact same UMR/PR/file/script (see duplicate_umr_id above). If this citation is evidence/prior-context, not your real target, mark it inline as [EVIDENCE-ONLY: ...] or [NOT-A-TARGET: ...] (or declare your real target in an explicit TARGET:/SCOPE: section) and re-run; otherwise re-run once that target is no longer live." >&2
   exit 1
 fi
 

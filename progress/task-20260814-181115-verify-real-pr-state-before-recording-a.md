@@ -30,6 +30,7 @@ claim, instead of trusting a worker's self-report at face value.
       zero-PR/zero-files self-report) asserting both get downgraded.
 - [x] Ran the new test for real, output captured below.
 - [x] Committed and pushed.
+- [x] Opened PR: https://github.com/FChecklist/veridian-scripts/pull/384
 
 ## Remaining
 - [ ] none

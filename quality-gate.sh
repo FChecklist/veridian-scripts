@@ -139,10 +139,10 @@ PYEOF
 # bug. Gating on the actual diff is general, verifiable from the commits
 # themselves, and does not trust anything the task claims about itself.
 #
-# DOCS_ONLY is deliberately conservative: any changed path with a
-# code-relevant extension (including bare .json, since that also matches
-# package.json/tsconfig.json/lockfile-adjacent config) keeps the full gate
-# suite running. A false negative here (running gates on a genuinely
+# DOCS_ONLY is deliberately conservative: it must fail CLOSED (gates run) on
+# anything it doesn't explicitly recognize as docs-only, never fail open
+# (gates skipped) on anything it doesn't explicitly recognize as
+# code-relevant. A false negative here (running gates on a genuinely
 # doc-only diff) just costs the same wasted build time this fix targets; a
 # false positive (skipping gates on a diff that touched real code) would
 # let a real defect reach pending_review unchecked, which is the one
@@ -151,7 +151,25 @@ DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@
 DEFAULT_BRANCH="${DEFAULT_BRANCH:-master}"
 CHANGED_FILES=$(git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" 2>/dev/null || true)
 DOCS_ONLY=0
-if [ -n "$CHANGED_FILES" ] && ! echo "$CHANGED_FILES" | grep -qE '\.(ts|tsx|js|jsx|mjs|cjs|vue|svelte|css|scss|less|py|go|rs|java|rb|php|sql|sh|json)$'; then
+# AUDIT:FAIL on this PR's own first head (b315ae9) caught a real
+# detection-precision bug: the original check was a code-relevant-extension
+# BLOCKLIST (\.(ts|js|py|...)$ etc.), so anything not on that list -- .txt,
+# .toml, .yml/.yaml, or any extensionless build filename at first, then a
+# fresh audit on the very next head (a63def8e) proved setup.cfg, tox.ini,
+# pytest.ini, yarn.lock, Cargo.lock, poetry.lock STILL slipped through --
+# was wrongly classified DOCS_ONLY=1 and gates got skipped. A blocklist can
+# only ever cover extensions someone remembered to add; it can never close
+# against an extension nobody has thought of yet. Inverted here to a small,
+# closed docs-only ALLOWLIST instead: prose (*.md, *.rst), anything under a
+# docs/ directory, LICENSE (with or without a suffix/extension), and common
+# image formats. Anything that does NOT match this allowlist -- including
+# every case above, plus any future unrecognized extension or extensionless
+# filename -- now fails closed to code-relevant (gates run), the one
+# direction this check is allowed to get wrong.
+DOCS_ONLY_EXT_PATTERN='\.(md|rst|png|jpe?g|gif|svg|ico|webp|bmp|tiff?|avif)$'
+DOCS_ONLY_NAME_PATTERN='(^|/)(docs/.*|LICENSE([.][A-Za-z0-9]+)?)$'
+if [ -n "$CHANGED_FILES" ] \
+   && ! echo "$CHANGED_FILES" | grep -qvE "${DOCS_ONLY_EXT_PATTERN}|${DOCS_ONLY_NAME_PATTERN}"; then
   DOCS_ONLY=1
 fi
 
@@ -307,9 +325,15 @@ PYEOF
     # so it survives the requeue) falls back to one real long wait (the
     # original 700s) on the 4th consecutive loss, to guarantee eventual
     # forward progress and prevent starvation.
-    BUILD_LOCK_FILE="/tmp/veridian-quality-gate-build.lock"
-    BUILD_LOCK_SHORT_WAIT_SECONDS=20
-    BUILD_LOCK_LONG_WAIT_SECONDS=700
+    # Configurable (same precedent as GATE_STEP_TIMEOUT_SECONDS/
+    # BUILD_MAX_OLD_SPACE_MB above): default unchanged for every existing
+    # caller. Overrides exist so tests/test_build_lock_untracked_task_long_wait.py
+    # can exercise the real short-wait/long-wait/timeout code paths against
+    # an isolated lock file in bounded real time, instead of the shared
+    # production lock path and the real 700s wait.
+    BUILD_LOCK_FILE="${BUILD_LOCK_FILE:-/tmp/veridian-quality-gate-build.lock}"
+    BUILD_LOCK_SHORT_WAIT_SECONDS="${BUILD_LOCK_SHORT_WAIT_SECONDS:-20}"
+    BUILD_LOCK_LONG_WAIT_SECONDS="${BUILD_LOCK_LONG_WAIT_SECONDS:-700}"
     BUILD_LOCK_LOSS_COUNT_FILE="$TASK_DIR/.build-lock-loss-count"
 
     # Returns 0 with the lock held open on fd 9 (caller runs the build, then

@@ -172,7 +172,54 @@ trap 'kill $CHECKPOINT_PID 2>/dev/null' EXIT
 
 cd "$WORKSPACE"
 
-PROGRESS_INSTRUCTION="PROTOCOL: maintain PROGRESS.md (## Completed / ## Remaining, markdown checkboxes), update after each step. commit+push after each meaningful unit, not only at the end. on a 2nd consecutive failure of the identical approach: STOP, do not attempt a 3rd time -- this is enforced by a circuit breaker on the next invocation regardless, so stopping yourself first saves a wasted restart."
+# --- GITLINK GUARD (2026-08-13, UMR-20260813-235552-dc9a) ---
+# Real incident: a worker whose workspace was checked out from the WRONG
+# repo improvised a nested `git clone` of the correct repo to do its real
+# work (observed directory names `veridian-scripts-work`,
+# `veridian-scripts-clean`), and every checkpoint commit below used to do a
+# blind `git add -A` that swept that nested .git directory in as a bare
+# submodule gitlink (mode 160000) -- which then got pushed and, via
+# supervisor-entrypoint.sh's `gh pr create`, shipped as a real PR containing
+# nothing but that one gitlink entry (claude-control PRs #146, #170, #191:
+# diff stat 1 file changed, 1 insertion(+), zero real content). Use this in
+# place of a bare `git -C "$WORKSPACE" add -A` at every checkpoint site
+# below: it stages everything exactly like before, then unstages (never
+# deletes -- the nested checkout's real work stays on disk, just untracked)
+# any newly-introduced gitlink that isn't a genuine, pre-existing, declared
+# submodule of this repo. Deliberately non-fatal (these checkpoints are
+# best-effort safety nets, several on hard-stop paths that must never fail)
+# -- it just keeps the poisonous entry out of the commit; every other real
+# change still gets staged and committed normally. See gitlink_guard.py.
+safe_stage_all() {
+  git -C "$WORKSPACE" add -A
+  local violations
+  violations=$(python3 /opt/veridian/scripts/gitlink_guard.py "$WORKSPACE" HEAD --staged 2>>"$TASK_DIR/worker.log")
+  if [ -n "$violations" ]; then
+    echo "GITLINK GUARD tripped -- unstaging illegitimate gitlink(s) before commit: $(echo "$violations" | tr '\n' ' ')" >> "$TASK_DIR/worker.log"
+    while IFS= read -r gpath; do
+      [ -n "$gpath" ] && git -C "$WORKSPACE" reset -- "$gpath" >> "$TASK_DIR/worker.log" 2>&1
+    done <<< "$violations"
+  fi
+}
+
+# 2026-08-13 (UMR-20260813-195922-f548, real defect confirmed live against
+# FChecklist/veridian-scripts PRs #315/#317/#321): every worker used to
+# "maintain PROGRESS.md" -- ONE shared file, same path on every branch. Two
+# compounding failures resulted: (a) a worker could satisfy this literal
+# instruction by only ever editing PROGRESS.md, so 3 separate "fixes" for
+# real dispatch defects shipped as prose with the named source file
+# untouched, and got recorded as real completed work; (b) every long-lived
+# branch that touched PROGRESS.md conflicted with every OTHER branch that
+# also touched it, regardless of whether their real code overlapped at all
+# -- 17 of 25 parseable open/DIRTY PRs on veridian-scripts were
+# PROGRESS.md-only diffs stuck CONFLICTING for exactly this reason. Fix:
+# each task now owns a PER-TASK progress file (progress/<task_id>.md) -- a
+# new path per branch, so two branches never touch the same line and never
+# conflict on merge. A rolled-up view (if wanted) is generated
+# deterministically from every progress/*.md file by
+# progress_completion_gate.py's own `rollup` subcommand, never hand-edited.
+PROGRESS_FILE="progress/${TASK_ID}.md"
+PROGRESS_INSTRUCTION="PROTOCOL: maintain $PROGRESS_FILE (## Completed / ## Remaining, markdown checkboxes), update after each step. This is YOUR OWN per-task file, not a shared PROGRESS.md -- do not edit any other task's progress/*.md, and do not recreate a shared PROGRESS.md. commit+push after each meaningful unit, not only at the end. COMPLETION GATE: if your task's objective names a specific source file or script, that file MUST be present in your real committed diff -- a diff containing only progress/doc artifacts for a code-named objective will be rejected as a real failure (not marked complete), see progress_completion_gate.py check-completion. on a 2nd consecutive failure of the identical approach: STOP, do not attempt a 3rd time -- this is enforced by a circuit breaker on the next invocation regardless, so stopping yourself first saves a wasted restart."
 
 # --- Deterministic pre-work briefing (2026-08-06, direct correction/extension
 # to UMR-20260806-121332-6ba4, see scripts/agent_work_briefing.py) --------
@@ -243,7 +290,7 @@ fi
 if [ "$IS_RESUME" -eq 1 ]; then
   RESUME_CONTEXT=$(python3 /opt/veridian/scripts/veridian-task.py resume-context "$TASK_ID")
   PROMPT="RESUME task=$TASK_ID invocation=$NEW_COUNT/$MAX_LIFETIME_INVOCATIONS
-DO_NOT restart from scratch. run: git status && git log --oneline -10 && read PROGRESS.md.
+DO_NOT restart from scratch. run: git status && git log --oneline -10 && read $PROGRESS_FILE (your own per-task progress file, not a shared PROGRESS.md).
 LAST_CHECKPOINT:
 $RESUME_CONTEXT
 SPEC: full task spec is prompt.txt in cwd (provided once already, not restated here -- read it only if you need it).
@@ -371,7 +418,7 @@ except Exception:
     print('no detail (could not parse $MAIN_OUT)')
 ")
   python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status blocked --note "ACCOUNT-WIDE RATE/USAGE LIMIT HARD STOP (api_error_status=429): $RATE_LIMIT_TEXT -- 0 tokens consumed, the model was never reached. Stopping rather than retrying -- this is account-wide quota exhaustion, not a per-task problem, and will reproduce identically until the quota window resets. Needs human/scheduler re-enable AFTER the reset time above, not an automatic retry."
-  git -C "$WORKSPACE" add -A
+  safe_stage_all
   git -C "$WORKSPACE" commit -m "Worker $TASK_ID: automated checkpoint commit (account-wide rate/usage limit, 429)" >> "$TASK_DIR/worker.log" 2>&1 || true
   git -C "$WORKSPACE" push -u origin "$BRANCH" >> "$TASK_DIR/worker.log" 2>&1 || true
   systemctl --user disable "veridian-worker@${TASK_ID}.service" >> "$TASK_DIR/worker.log" 2>&1 || true
@@ -408,7 +455,7 @@ except Exception:
 ")
 if [ "$CLI_HIT_BUDGET_CAP" = "1" ]; then
   python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status blocked --note "CLI HARD STOP (max_budget_usd): this invocation's own self-reported cost hit the \$$WORKER_BUDGET_CAP_USD per-task cap ($MAIN_OUT). Stopping rather than retrying -- a retry will very likely spend another \$$WORKER_BUDGET_CAP_USD hitting the identical wall. Needs human review: either the task is too large for one invocation (split it) or it is genuinely stuck/looping."
-  git -C "$WORKSPACE" add -A
+  safe_stage_all
   git -C "$WORKSPACE" commit -m "Worker $TASK_ID: automated checkpoint commit (CLI hit its own max-budget-usd cap)" >> "$TASK_DIR/worker.log" 2>&1 || true
   git -C "$WORKSPACE" push -u origin "$BRANCH" >> "$TASK_DIR/worker.log" 2>&1 || true
   systemctl --user disable "veridian-worker@${TASK_ID}.service" >> "$TASK_DIR/worker.log" 2>&1 || true
@@ -511,7 +558,7 @@ if [ "$EXIT_CODE" -ne 0 ]; then
   record_failure_signature
   FAIL_COST=$(real_invocation_cost_usd "$MAIN_START_EPOCH")
   python3 /opt/veridian/scripts/credit-accountant.py report --task-id "$TASK_ID" --increment 1 --actual-spend-usd "$FAIL_COST" --outcome "main invocation FAILED, exit code $EXIT_CODE, real cost \$$FAIL_COST -- see worker.log" >> "$TASK_DIR/worker.log" 2>&1 || true
-  git -C "$WORKSPACE" add -A
+  safe_stage_all
   git -C "$WORKSPACE" commit -m "Worker $TASK_ID: checkpoint commit (invocation failed, exit $EXIT_CODE)" >> "$TASK_DIR/worker.log" 2>&1 || true
   git -C "$WORKSPACE" push -u origin "$BRANCH" >> "$TASK_DIR/worker.log" 2>&1 || true
   python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status failed --note "worker exited with code $EXIT_CODE; failure signature recorded for circuit breaker; pushed whatever progress existed; systemd will retry up to the burst limit"
@@ -522,7 +569,7 @@ MAIN_COST=$(real_invocation_cost_usd "$MAIN_START_EPOCH")
 python3 /opt/veridian/scripts/credit-accountant.py report --task-id "$TASK_ID" --increment 1 --actual-spend-usd "$MAIN_COST" --outcome "main invocation completed, exit 0, real cost \$$MAIN_COST" >> "$TASK_DIR/worker.log" 2>&1 || true
 if [ "$(budget_exceeded "$MAIN_COST")" = "1" ]; then
   python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status blocked --note "PREVENTION CAP HIT: this invocation's REAL OpenRouter/GLM-5.2 cost was \$$MAIN_COST, at/above the \$$WORKER_BUDGET_CAP_USD budget cap -- stopped rather than continuing unbounded. Needs human review before further retries (likely a stuck/looping task, not ordinary progress)."
-  git -C "$WORKSPACE" add -A
+  safe_stage_all
   git -C "$WORKSPACE" commit -m "Worker $TASK_ID: automated checkpoint commit (budget cap hit)" >> "$TASK_DIR/worker.log" 2>&1 || true
   git -C "$WORKSPACE" push -u origin "$BRANCH" >> "$TASK_DIR/worker.log" 2>&1 || true
   systemctl --user disable "veridian-worker@${TASK_ID}.service" >> "$TASK_DIR/worker.log" 2>&1 || true
@@ -589,6 +636,31 @@ if git -C "$WORKSPACE" diff --quiet && git -C "$WORKSPACE" diff --cached --quiet
   echo "clean working tree but $AHEAD_COUNT commit(s) ahead of $DEFAULT_BRANCH (worker self-committed) -- routing through quality gates + pending_review instead of a direct completed shortcut" >> "$TASK_DIR/worker.log"
 fi
 # --- NOOP-COMPLETION-BLOCK-END ---
+
+# --- COMPLETION-GATE-BLOCK-START (2026-08-13, UMR-20260813-195922-f548) ---
+# Real gate, not a prompt instruction: if this task's own prompt.txt names a
+# specific source/script file as its objective, that file must be present
+# in the REAL diff (committed + staged + unstaged, vs the merge-base with
+# origin/$DEFAULT_BRANCH) before this is allowed anywhere near
+# pending_review/completed. This is what actually closes the PROGRESS.md-only-
+# fix hole the PROGRESS_INSTRUCTION rewrite above only discourages by
+# convention -- a worker could still ignore the instruction, so the diff
+# itself is checked here, mechanically, every single run. A rejection here
+# is a REAL, terminal failure (status=blocked with the explicit reason),
+# never silently downgraded to success. See progress_completion_gate.py and
+# tests/test_progress_completion_gate.py.
+GATE_CHECK_OUT=$(python3 /opt/veridian/scripts/progress_completion_gate.py check-completion \
+  --task-dir "$TASK_DIR" --workspace "$WORKSPACE" --default-branch "$DEFAULT_BRANCH" 2>>"$TASK_DIR/worker.log")
+GATE_CHECK_RC=$?
+if [ "$GATE_CHECK_RC" -ne 0 ]; then
+  python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status blocked --note "COMPLETION GATE REJECTED: $GATE_CHECK_OUT -- real failure, not success; a human must either supply the named file's real change or correct the task's stated objective"
+  safe_stage_all
+  git -C "$WORKSPACE" commit -m "Worker $TASK_ID: automated checkpoint commit (completion gate rejected: objective named a code file the diff never touches)" >> "$TASK_DIR/worker.log" 2>&1 || true
+  git -C "$WORKSPACE" push -u origin "$BRANCH" >> "$TASK_DIR/worker.log" 2>&1 || true
+  systemctl --user disable "veridian-worker@${TASK_ID}.service" >> "$TASK_DIR/worker.log" 2>&1 || true
+  exit 0
+fi
+# --- COMPLETION-GATE-BLOCK-END ---
 
 # Quality gates: up to 2 auto-fix attempts (same conversation via --continue)
 # before giving up and marking blocked for human review.
@@ -667,7 +739,7 @@ $PROGRESS_INSTRUCTION"
   echo "$FIX_PROPOSE_OUT" >> "$TASK_DIR/worker.log"
   if [ "$FIX_PROPOSE_RC" -ne 0 ]; then
     python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status blocked --note "credit accountant rejected auto-fix attempt $GATE_ATTEMPT, no further metered spend without human review: $FIX_PROPOSE_OUT"
-    git -C "$WORKSPACE" add -A
+    safe_stage_all
     git -C "$WORKSPACE" commit -m "Worker $TASK_ID: automated checkpoint commit (credit accountant rejected auto-fix)" >> "$TASK_DIR/worker.log" 2>&1 || true
     git -C "$WORKSPACE" push -u origin "$BRANCH" >> "$TASK_DIR/worker.log" 2>&1 || true
     systemctl --user disable "veridian-worker@${TASK_ID}.service" >> "$TASK_DIR/worker.log" 2>&1 || true
@@ -683,7 +755,7 @@ $PROGRESS_INSTRUCTION"
   python3 /opt/veridian/scripts/credit-accountant.py report --task-id "$TASK_ID" --increment "$FIX_INCREMENT" --actual-spend-usd "$FIX_COST" --outcome "auto-fix attempt $GATE_ATTEMPT/2 completed, real cost \$$FIX_COST" >> "$TASK_DIR/worker.log" 2>&1 || true
   if [ "$(budget_exceeded "$FIX_COST")" = "1" ]; then
     python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status blocked --note "PREVENTION CAP HIT: auto-fix attempt $GATE_ATTEMPT real cost \$$FIX_COST, at/above the \$$WORKER_BUDGET_CAP_USD budget cap. Stopping auto-fix loop for human review rather than continuing unbounded."
-    git -C "$WORKSPACE" add -A
+    safe_stage_all
     git -C "$WORKSPACE" commit -m "Worker $TASK_ID: automated checkpoint commit (budget cap hit during auto-fix)" >> "$TASK_DIR/worker.log" 2>&1 || true
     git -C "$WORKSPACE" push -u origin "$BRANCH" >> "$TASK_DIR/worker.log" 2>&1 || true
     systemctl --user disable "veridian-worker@${TASK_ID}.service" >> "$TASK_DIR/worker.log" 2>&1 || true
@@ -691,7 +763,7 @@ $PROGRESS_INSTRUCTION"
   fi
 done
 
-git -C "$WORKSPACE" add -A
+safe_stage_all
 git -C "$WORKSPACE" commit -m "Worker $TASK_ID: automated checkpoint commit" >> "$TASK_DIR/worker.log" 2>&1 || true
 
 if [ "$GATE_PASSED" -eq 1 ]; then

@@ -151,6 +151,56 @@ def _atomic_save_json(path, doc):
 
 
 # ---------------------------------------------------------------------------
+# Stale-swap-ratchet override, applied to every real has_free_slot() call
+# site in this script (task-20260813-205525-close-fake-progress-md-only-prs-
+# 317-321, closing PR #317's real gap -- that PR itself shipped no code,
+# see PROGRESS.md-only history on the closed PR).
+#
+# Real gap: dispatch_core.has_free_slot()'s swap_backoff check
+# (dispatch_core.py, frozen under the narrow 2026-08-08 stop-work order, see
+# resource_governor.py's own SWAP_ACTIVITY_* comment) is a STATIC
+# SwapFree/SwapTotal occupancy ratio -- Linux never proactively reclaims
+# swap pages once written, so a single past spike can latch that gate closed
+# forever, even with abundant real MemAvailable and zero ongoing swap I/O
+# (real evidence: UMR-20260813-155201-da76, SwapFree byte-frozen at 775980kB
+# across 5 samples over 15s while MemAvailable held ~11.3GB free and real
+# `vmstat` showed no steady-state swap activity). resource_governor.py
+# already carries the real, narrow, activity-based override
+# (_override_stale_swap_backoff()) that re-checks real swap I/O (vmstat
+# pswpin/pswpout delta over a real elapsed window) and real MemAvailable
+# headroom on every call, and re-opens automatically the moment either
+# condition changes -- but it was only ever wired into
+# resource_governor.dispatch_one()'s own umr_tasks queue (#309/#314). This
+# script's own 3 real spawn call sites below (supervisor_sweep_tick,
+# gap_queue_tick, module_queue_tick) each called dispatch_core.has_free_slot()
+# directly and never went through that override, so a stale swap ratchet
+# could still permanently wedge these 3 dispatch paths even after
+# resource_governor.py's own fix landed -- exactly the still-open half of
+# the gap PR #317 claimed (with zero code) to have fixed. Reusing
+# resource_governor's existing, already-tested override here (never
+# reimplementing swap-activity/headroom logic a second time) closes it for
+# real, for every dispatch path on the box, not just the umr_tasks queue.
+def has_free_slot_with_stale_swap_override(cap=None):
+    """True if a real spawn is currently allowed -- dispatch_core's normal
+    two-gate has_free_slot_detail() check (fixed concurrency cap + real
+    memory/swap/load headroom veto), with
+    resource_governor._override_stale_swap_backoff() applied to a
+    swap_backoff-specific block before it's honored. Every other
+    slot_detail["check"] value (cap_exhausted, mem_backoff,
+    swap_hard_ceiling, mem_headroom_budget, load1_backoff, load1_unreadable,
+    or already-ok) passes through completely unchanged -- see that
+    function's own docstring for the exact two real, freshly-live-read
+    conditions ("real MemAvailable headroom below the backoff ceiling still
+    fits one more worker's own memory budget" AND "real, confirmed-quiet
+    swap I/O over a real, trustworthy elapsed window") required before a
+    swap_backoff block can ever be overridden, and for why the 0.99
+    swap_hard_ceiling and every other real gate are never touched."""
+    slot_ok, slot_detail = dispatch_core.has_free_slot_detail(cap=cap)
+    slot_ok, _ = resource_governor._override_stale_swap_backoff(slot_ok, slot_detail)
+    return slot_ok
+
+
+# ---------------------------------------------------------------------------
 # 1. supervisor-sweep discovery (was supervisor-sweep.sh)
 # ---------------------------------------------------------------------------
 
@@ -160,7 +210,7 @@ def supervisor_sweep_tick(tasks):
         if doc.get("status") != "pending_review" or doc["_has_review_json"]:
             continue
         with dispatch_core.acquire_dispatch_lock():
-            if not dispatch_core.has_free_slot():
+            if not has_free_slot_with_stale_swap_override():
                 print(f"SKIP supervisor start (cap reached): {task_id}")
                 skipped_cap.append(task_id)
                 continue
@@ -1218,7 +1268,7 @@ def gap_queue_tick(tasks):
                 changed = True
                 continue
             with dispatch_core.acquire_dispatch_lock():
-                if not dispatch_core.has_free_slot():
+                if not has_free_slot_with_stale_swap_override():
                     print(f"SKIP (cap reached): {item['id']}")
                     break
                 print(f"Dispatching: {item['id']}")
@@ -1354,7 +1404,7 @@ def module_queue_tick(tasks):
         dispatched_ids = []
         for path, doc, item in candidates:
             with dispatch_core.acquire_dispatch_lock():
-                if not dispatch_core.has_free_slot():
+                if not has_free_slot_with_stale_swap_override():
                     print(f"SKIP (cap reached): {item['id']}")
                     break
                 print(f"Dispatching: {item['id']} (module: {doc['module']})")

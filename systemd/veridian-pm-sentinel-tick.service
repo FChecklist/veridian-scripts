@@ -26,9 +26,6 @@
 [Unit]
 Description=VERIDIAN PM sentinel tick: server-native hourly PM oversight of tracked UMR chains (addendum to P1 UMR-20260806-171945-5767) -- RCA/audit/merge/fix-cited dispatch via the real dispatch-owner-task.sh front door, capped at 5 new dispatches/tick
 ConditionPathExists=!/opt/veridian/ai-os/locks/resource-governor-EMERGENCY_STOP
-
 [Service]
 Type=oneshot
-ExecStart=/opt/veridian/scripts/run-logged.sh "pm-sentinel-tick" /opt/veridian/scripts/pm-sentinel-tick.sh
-StandardOutput=append:/opt/veridian/ai-os/logs/pm-sentinel-tick-cron.log
-StandardError=append:/opt/veridian/ai-os/logs/pm-sentinel-tick-cron.log
+... more files changed

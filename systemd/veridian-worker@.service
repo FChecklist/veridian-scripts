@@ -10,6 +10,49 @@ Type=simple
 WorkingDirectory=/opt/veridian/ai-os/tasks/%i
 EnvironmentFile=/opt/veridian/shared/.env
 ExecStart=/opt/veridian/scripts/worker-entrypoint.sh %i
+# 2026-08-07 RCA fix (task-20260807-052027-platform-integrity--worker-units-exit-0):
+# real root cause of 32 confirmed rows stuck at umr_tasks.status='running' forever
+# (ages 0.9h-5.3h, unit inactive, ExecMainStatus=0, Result=success) was that every
+# "give up, no more retries" exit path in worker-entrypoint.sh only ever calls
+# `veridian-task.py checkpoint` (writes task.yaml/CONTROLLER.yaml + an audit-log row)
+# and NEVER `superboss-register.py mark-umr-terminal` -- umr_tasks.status is set once
+# at dispatch and never written again by anything in the worker's own lifecycle.
+# ExecStopPost runs on EVERY stop of this unit -- clean exit, non-zero exit,
+# TimeoutStopSec, SIGKILL, OOM-kill -- unlike worker-entrypoint.sh's own
+# `trap ... EXIT`, which cannot fire at all once the shell is SIGKILLed. See
+# worker-exit-status-bridge.py's own docstring for the exact, deliberately
+# conservative decision rule (never writes completed/completed_unmerged from exit
+# code alone; only bridges a definitive, already-self-reported negative outcome).
+#
+# 2026-08-13 RCA fix (task-20260813-131054-stop-fleet-wide-worker-crash-loop--missi,
+# addendum to UMR-20260806-171945-5767 / PR #249 above): worker-exit-status-bridge.py
+# already deliberately always exits 0 itself (its own docstring point 5) specifically
+# so a failing ExecStopPost can never contaminate this unit's Result -- but that
+# guarantee lives INSIDE the python process. It cannot protect against the process
+# never starting at all. Confirmed live 2026-08-13T10:39-13:11 UTC: PR #249 merged but
+# was never deployed to /opt/veridian/scripts/worker-exit-status-bridge.py, so every
+# stop of every worker unit hit `Control process exited, code=exited, status=203/EXEC`
+# at the exec() syscall -- before a single line of the script's own code (including its
+# own exit-0 guarantee) ever ran. systemd's Restart=on-failure decision is driven by the
+# unit's overall Result, which a failing CONTROL process sets to 'exit-code' regardless
+# of ExecMainStatus -- so workers that had already finished (ExecMainStatus=0) were
+# restarted from ExecStart, re-running already-completed work, up to StartLimitBurst=3
+# times, then permanently failed ("Start request repeated too quickly"). Confirmed live
+# on task-20260813-104547 (10:45:50/10:53:45/10:55:11) and task-20260813-123933
+# (12:39:37/13:07:35/13:08:57/13:10:13), the latter caught mid-loop at this fix's own
+# start time. Deploying the missing file closes the immediate incident, but the same
+# exec()-level failure (deleted file, bad permissions, broken interpreter, syntax error
+# at parse time -- none of which the script's own try/except can catch, since the
+# process never starts) can recur for any future ExecStopPost hook.
+# RestartPreventExitStatus=/SuccessExitStatus= only classify ExecMainStatus and cannot
+# help here, since the failure is in the control process, not the main one. Wrapping the
+# invocation in a shell that unconditionally exits 0 is the minimal real mechanism that
+# structurally guarantees an ExecStopPost failure of ANY kind -- including 203/EXEC --
+# can never again flip this unit's Result and trigger Restart=on-failure against
+# already-completed work. The real failure is still visible: stderr goes to this unit's
+# own StandardError=append:.../systemd.log below, and the wrapped script's own internal
+# logging (worker.log) still runs whenever the process manages to start at all.
+ExecStopPost=/bin/sh -c '/opt/veridian/scripts/worker-exit-status-bridge.py "$1"; ec=$?; if [ "$ec" -ne 0 ]; then echo "[ExecStopPost wrapper] worker-exit-status-bridge.py exited $ec for task $1 -- swallowed so a post-stop hook failure can never re-run completed work via Restart=on-failure" >&2; fi; exit 0' _ %i
 Restart=on-failure
 RestartSec=30
 StandardOutput=append:/opt/veridian/ai-os/tasks/%i/systemd.log

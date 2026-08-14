@@ -23,11 +23,14 @@ allowed to reach it.
 import argparse
 import contextlib
 import fcntl
+import gzip
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import threading
 import time
 import yaml
 from datetime import datetime, timedelta, timezone
@@ -45,10 +48,123 @@ EMERGENCY_STATE_PATH = os.environ.get(
 EMERGENCY_STOP_PATH = os.environ.get(
     "VERIDIAN_GOVERNOR_EMERGENCY_STOP", f"{LOCKS_DIR}/resource-governor-EMERGENCY_STOP")
 
+# UMR-20260813-125836-5809 (addendum to Priority-1 UMR-20260806-171945-5767):
+# real, bounded retention for the append-only TELEMETRY tables in
+# superboss-register.sqlite. Real dbstat evidence gathered 2026-08-13
+# against the live 4,091,764,736-byte file (see this UMR's PR for the full
+# breakdown): pm_report_snapshots alone was 1,805,238,272 bytes (44%),
+# growing ~130-275 rows/day (~1.5MB/row average -> ~150-410MB/day real,
+# matches the PRIOR KNOWLEDGE "~200MiB/day" claim this UMR was told to
+# re-verify, not assume -- CONFIRMED still roughly holds). umr_tasks was
+# separately found to be 2,132,381,696 bytes (52%) -- NOT "byte-static" as
+# earlier, smaller-DB-size analysis claimed; its own metadata_json column
+# average grew from ~55KB/row in 2026-07 to ~262KB/row in 2026-08. That
+# growth is real but explicitly OUT OF SCOPE here: umr_tasks is the single
+# source of truth and Scope F of this UMR forbids deleting, altering, or
+# losing any umr_tasks row -- it is intentionally never a key of
+# TELEMETRY_RETENTION_TABLES below and no code path in this section ever
+# opens a write cursor against it. Flagged for a separate follow-up UMR.
+# Both paths below are resolved PER-CONNECTION (see
+# _telemetry_retention_state_path()/_telemetry_retention_archive_dir()),
+# co-located next to whichever real sqlite file `conn` is actually open
+# against (via `PRAGMA database_list`), not a single fixed global path --
+# real fix for a real bug caught while building this: a pre-existing test
+# (test_resource_governor_owner_priority_advance.py) already calls
+# run_tick() against its own temporary sqlite3.backup() COPY of the live
+# DB; with a single fixed global state/archive path, that test's run would
+# have silently written into the REAL production lock-state file and the
+# REAL production archive directory even though its own DELETEs correctly
+# stayed scoped to its own temp copy -- confirmed live (caught and cleaned
+# up manually before the real production run in this UMR's own PR). These
+# two env vars, when set, still force an absolute override (e.g. for the
+# production default / ops runbooks); otherwise each is derived from the
+# real DB path in use.
+TELEMETRY_RETENTION_STATE_ENV = "VERIDIAN_GOVERNOR_TELEMETRY_RETENTION_STATE"
+TELEMETRY_RETENTION_ARCHIVE_DIR_ENV = "VERIDIAN_GOVERNOR_TELEMETRY_RETENTION_ARCHIVE_DIR"
+# Recurring enforcement (wired into _orchestrator_tick_maintenance() below,
+# the same once-per-tick step 12 VACUUM already runs from) self-gates to at
+# most once per this many real seconds, so the archive-then-delete pass
+# never runs on every ~5-10min dispatch-tick -- same "conditional, not
+# unconditional" reasoning step 12's own VACUUM already documents, and it
+# matches credit-accountant.py's real `prune --keep-days 30` cron cadence
+# (once/day, see veridian-cron-credit-ledger-prune.service) rather than
+# inventing a new cadence.
+TELEMETRY_RETENTION_MIN_INTERVAL_SECONDS = float(os.environ.get(
+    "VERIDIAN_GOVERNOR_TELEMETRY_RETENTION_MIN_INTERVAL_SECONDS", str(24 * 3600)))
+
+# table -> (timestamp_column, retention_days). Every table here was
+# verified (2026-08-13, UMR-20260813-125836-5809) to be:
+#  (a) genuinely append-only event/telemetry data, never UPDATEd in place
+#      after insert (status-mutable tables like pm_decisions_pending,
+#      master_issue_tracker, audit_findings, and anything owner-priority-
+#      or umr_tasks-adjacent were deliberately excluded);
+#  (b) NOT read by the deterministic pipeline -- grep-verified zero
+#      `FROM <table>` hits in resource_governor.py / dispatch_core.py /
+#      dispatch-tick.py;
+#  (c) read elsewhere, if at all, only via a bounded `ORDER BY ... DESC
+#      LIMIT <=10` recency query (e.g. generate_pm_report_v3.py's own
+#      TREND_WINDOW_SIZE=10 / get_recent_snapshots(), pm_cycle_precheck.py's
+#      get_prior_snapshot()), never a full historical scan -- so any
+#      retention window longer than a few hours cannot break a real reader.
+# Retention windows below are deliberately generous relative to (c) (days,
+# not hours) to preserve real incident-investigation lookback; nothing is
+# destroyed regardless -- see _telemetry_retention_archive_table()'s real
+# archive-before-delete contract.
+TELEMETRY_RETENTION_TABLES = {
+    "pm_report_snapshots":            ("ts", 3),
+    "log_index":                      ("ts", 14),
+    "directive_compliance_runs":      ("ts", 14),
+    "ocid_compliance_audit_log":      ("audit_timestamp", 30),
+    "ocid_master_standard_audit_log": ("recorded_at", 30),
+    "governance_cycle_log":           ("ts", 30),
+    "audit_events":                   ("ts", 30),
+    "audit_runs":                     ("ts", 30),
+    "audit_master_reports":           ("ts", 90),
+    "audit_orchestration_runs":       ("ts", 90),
+    "capability_graduation_log":      ("ts", 90),
+    "execution_log":                  ("ts", 30),
+    "task_audits":                    ("ts", 30),
+    "intent_unmatched_log":           ("ts", 30),
+    "learning_reflections":           ("ts", 90),
+    "route_replay":                   ("ts", 90),
+    "orchestrator_executions":        ("ts", 30),
+}
+
 PROC_STAT_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_STAT", "/proc/stat")
 PROC_MEMINFO_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_MEMINFO", "/proc/meminfo")
 PROC_DISKSTATS_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_DISKSTATS", "/proc/diskstats")
 PROC_NETDEV_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_NETDEV", "/proc/net/dev")
+PROC_VMSTAT_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_VMSTAT", "/proc/vmstat")
+
+# Real, additive stale-swap-ratchet override (UMR-20260813-155201-da76,
+# addendum to P1 UMR-20260806-171945-5767 / UMR-20260813-163237 spec "unwedge
+# dispatch -- stale swap ratchet blocked"). Real evidence this closes, live
+# 2026-08-13: dispatch_core.py's swap_backoff gate is a STATIC occupancy
+# ratio (1 - SwapFree/SwapTotal from /proc/meminfo) -- Linux never
+# proactively reclaims swap pages once written, so a single past spike (this
+# box's own known ~2GB-per-register-CLI-call working set) can leave that
+# ratio permanently >= BACKOFF_UTILIZATION_PCT (0.80) even with abundant real
+# MemAvailable and ZERO ongoing swap I/O. 5 real /proc/meminfo samples over
+# 15s that tick showed SwapFree byte-frozen at exactly 775980 kB every
+# sample (swap_used_pct=0.8149) while MemAvailable held ~11.3GB of 15.6GB
+# genuinely free, and real `vmstat 2 5` showed so=1079,0,0,0,0 / si tapering
+# to near-zero -- no steady-state swap activity, i.e. the gate was blocking
+# on a stale ratchet, not real pressure. See
+# swap_activity_quiet_detail()/_override_stale_swap_backoff() below for the
+# real mechanism -- this stays in resource_governor.py (exempt from the
+# narrow 2026-08-08 stop-work order) and wraps dispatch_core.py's own
+# has_free_slot_detail() result; dispatch_core.py itself is left unmodified.
+SWAP_ACTIVITY_STATE_PATH = os.environ.get(
+    "VERIDIAN_GOVERNOR_SWAP_ACTIVITY_STATE", f"{LOCKS_DIR}/resource-governor-swap-activity-state.json")
+# A real elapsed window is required before a "quiet" verdict can be trusted
+# -- two samples taken within the same fraction of a second would look
+# "quiet" from pure sampling luck, not because swap I/O is actually idle.
+SWAP_ACTIVITY_MIN_INTERVAL_SECONDS = float(
+    os.environ.get("VERIDIAN_GOVERNOR_SWAP_ACTIVITY_MIN_INTERVAL_S", "5"))
+# Small, real allowance for isolated single-page noise (e.g. one cold page
+# swapped in by an unrelated process) -- NOT a real sustained swap-out.
+# Default 0: only a byte-for-byte-zero pswpin/pswpout delta counts as quiet.
+SWAP_ACTIVITY_NOISE_PAGES = int(os.environ.get("VERIDIAN_GOVERNOR_SWAP_ACTIVITY_NOISE_PAGES", "0"))
 
 # The one hard cap this whole module exists to enforce, independently per
 # metric -- any ONE of the four hitting this freezes the queue (SCOPE
@@ -76,6 +192,34 @@ MAX_TASK_IDENTITY_LEN = 500
 # Anti-starvation aging (design doc "Dynamic realignment"): a queued item's
 # effective priority is max(0, tier - age_seconds // this interval).
 AGING_PROMOTION_INTERVAL_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_AGING_INTERVAL_S", str(15 * 60)))
+
+# UMR-20260813-125756-9221 (addendum to Priority-1 UMR-20260806-171945-5767):
+# real hard guard at this CLI's own entry point. Real incident this closes,
+# measured by the PM desktop sentinel 2026-08-13 12:52-12:56 UTC: a single
+# `--query-umr --status killed --limit 200` invocation (PID 1685324) sat in
+# state D (wchan=mem_cgroup_handle_over_high) for 51-55+ minutes, RSS
+# ~2.04-2.09GB, while the box's swap was fully exhausted (free -g: swap
+# free=0/3) and /proc/pressure/memory sat at ~30-39% full-stall for the
+# whole window -- a steady state, not a spike. earlyoom (active the whole
+# time) never reaped it: see install_cli_resource_guard()'s own docstring
+# and PROGRESS.md/RCA for why. No Python-level guard, and no external
+# daemon, can un-wedge a process already stuck in D state (SIGKILL itself
+# cannot preempt TASK_UNINTERRUPTIBLE) -- the real fix is closing off the
+# ability to balloon to a multi-GB working set in the first place (the
+# SELECT-column and index fixes elsewhere in this task) PLUS this guard,
+# which catches every OTHER real way a future invocation could still run
+# long/heavy (a bad --search pattern, a future code path that regresses the
+# LIMIT pushdown, etc.) before it ever reaches that unrecoverable state.
+# Both values are generous relative to a healthy --query-umr (real,
+# post-fix measurement: sub-second, tens of MB) or a normal --tick pass
+# (this module's own docs: expected to complete well inside the 30s
+# dispatch-loop interval), but decisively below the 51-minute/2GB incident,
+# and overridable per-invocation for real, deliberately-long operations
+# (e.g. a large --reconcile-stale --execute sweep) without weakening the
+# default for every other caller.
+CLI_GUARD_WALL_CLOCK_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_CLI_WALL_CLOCK_S", "180"))
+CLI_GUARD_RSS_CEILING_MB = int(os.environ.get("VERIDIAN_GOVERNOR_CLI_RSS_CEILING_MB", "1024"))
+CLI_GUARD_POLL_INTERVAL_SECONDS = 0.1
 
 # Stuck-task protocol: timeout -> SIGTERM -> grace period -> SIGKILL.
 STUCK_TASK_TIMEOUT_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_STUCK_TIMEOUT_S", str(60 * 60)))
@@ -136,9 +280,26 @@ METRIC_NAMES = ("cpu", "ram", "disk_io", "network")
 # submission while the FIRST is still active (queued/dispatched/running); it
 # cannot see a prior run that already finished and already has a PR.
 GH_ORG = os.environ.get("VERIDIAN_GH_ORG", "FChecklist")
+# UMR-20260813-165620-aac7 (addendum to P1 UMR-20260806-171945-5767,
+# targeting the dispatch-time target-PR re-check introduced under
+# UMR-20260813-135626): the live default here used to be ONLY
+# "compliance-tracker,projexa" -- veridian-scripts and claude-control, the
+# two repos where essentially all real infrastructure work actually lands,
+# were absent. Combined with target_pr_already_resolved()'s old
+# arbitrary-repo-order bare-PR-number scan, this caused 3+ real confirmed
+# Tier-1 audit dispatches targeting veridian-scripts PRs (#297/#300/#301,
+# all MERGEABLE+CLEAN+zero-audit) to be wrongly rejected on a same-number
+# collision against an unrelated, month-old compliance-tracker PR that
+# happened to resolve first. See target_pr_already_resolved()'s own
+# docstring for the real fix (repo-qualified resolution, no more
+# arbitrary-order scanning for bare "PR NNN" references) -- this default
+# fix is the second, independent half of closing that same real gap: even
+# with a correct resolver, a repo missing from this list can never be
+# checked at all. Env-var override preserved for tests/future repos.
 GH_PR_CHECK_REPOS = tuple(
-    r.strip() for r in os.environ.get("VERIDIAN_GOVERNOR_GH_PR_CHECK_REPOS",
-                                       "compliance-tracker,projexa").split(",") if r.strip()
+    r.strip() for r in os.environ.get(
+        "VERIDIAN_GOVERNOR_GH_PR_CHECK_REPOS",
+        "compliance-tracker,projexa,veridian-scripts,claude-control").split(",") if r.strip()
 )
 GH_PR_CHECK_TIMEOUT_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_GH_PR_CHECK_TIMEOUT_S", "8"))
 
@@ -213,6 +374,20 @@ STOP_WORK_ORDER_GIT_FETCH_RETRY_DELAY_SECONDS = float(
 
 def _run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+# Real fix (UMR-20260813-165729, addendum to P1 UMR-20260806-171945-5767):
+# _perform_spawn()'s veridian_task_create branch used to persist only
+# r.stderr[:500] into outputs_json. Real, live-reproduced root cause: the
+# child (veridian-task.py cmd_create) writes its own real error text via
+# plain `print(...)` -- STDOUT, not stderr -- before every one of its
+# `sys.exit(1)` calls (e.g. "ERROR: repo not found at ..."), so a real,
+# diagnosable failure reason existed on disk the whole time, on the one
+# stream this code never looked at. Persisting a bounded tail of BOTH
+# streams (never unbounded -- these rows are already read back whole into
+# umr_tasks.outputs_json) closes that gap for every future failure, not
+# just this one specific cause.
+_SPAWN_OUTPUT_TAIL_CHARS = 4000
 
 
 def _utcnow():
@@ -557,6 +732,178 @@ def sample_metrics(now=None):
 def over_threshold_metrics(metrics, threshold=None):
     threshold = METRIC_THRESHOLD_PERCENT if threshold is None else threshold
     return [name for name in METRIC_NAMES if metrics.get(name, 0.0) >= threshold]
+
+
+# ---------------------------------------------------------------------------
+# Stale-swap-ratchet override (UMR-20260813-155201-da76) -- see the
+# SWAP_ACTIVITY_* constants' own comment above for the full real incident.
+# Two real, independent pieces: (1) read real MemAvailable headroom directly
+# (this module's own PROC_MEMINFO_PATH, same convention as read_mem_percent()
+# above -- never dispatch_core.py's private helper, so this stays fully
+# testable via the existing env-override convention), and (2) a real,
+# delta-based swap-activity check against /proc/vmstat's cumulative
+# pswpin/pswpout counters, persisted across calls the same way
+# sample_metrics() above persists cpu/disk/net state -- never a blocking
+# `vmstat N M` subprocess call inside this 30s-cadence dispatch hot path.
+# ---------------------------------------------------------------------------
+
+def read_swap_page_counters(path=None):
+    """Real, cumulative since-boot pswpin/pswpout page counts from
+    /proc/vmstat -- the same real kernel counters `vmstat`'s own si/so
+    columns are derived from (vmstat itself just reports the per-interval
+    DELTA of these two counters). Reading the raw cumulative values lets a
+    delta be taken between two real, timestamped governor samples instead
+    of shelling out to `vmstat N M`, which blocks for N*M wall-clock
+    seconds -- unacceptable inside dispatch_one()'s real per-tick path."""
+    path = path or PROC_VMSTAT_PATH
+    pswpin = pswpout = 0
+    with open(path) as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) != 2:
+                continue
+            if parts[0] == "pswpin":
+                pswpin = int(parts[1])
+            elif parts[0] == "pswpout":
+                pswpout = int(parts[1])
+    return pswpin, pswpout
+
+
+def swap_activity_quiet_detail(now=None):
+    """(quiet, detail): real, delta-based check of whether swap is ACTIVELY
+    being written/read right now, independent of the static SwapFree/
+    SwapTotal occupancy ratio dispatch_core.py's swap_backoff check uses.
+    Same persisted-state-file delta pattern sample_metrics() above already
+    uses for cpu/disk/net (a separate state file -- SWAP_ACTIVITY_STATE_PATH
+    -- so this never contends with or corrupts that one).
+
+    quiet is True only when ALL of the following real conditions hold:
+      - a PRIOR sample exists (not this process's first-ever call/cold
+        start against SWAP_ACTIVITY_STATE_PATH),
+      - at least SWAP_ACTIVITY_MIN_INTERVAL_SECONDS of real wall-clock time
+        has elapsed since it (guards against a too-close-together pair of
+        calls looking "quiet" purely from too short a window to measure
+        across), and
+      - both the real pswpin and pswpout deltas over that window are at/
+        under SWAP_ACTIVITY_NOISE_PAGES.
+    Every other case (cold start, too-short interval, or a real nonzero-
+    beyond-noise delta) returns quiet=False -- fails open to the ORIGINAL
+    swap_backoff block; this function only ever narrows when dispatch backs
+    off, it never widens uncertainty into an override."""
+    now = now or _utcnow()
+    curr_in, curr_out = read_swap_page_counters()
+    curr_ts = now.timestamp()
+
+    with _state_file_lock(SWAP_ACTIVITY_STATE_PATH):
+        prev = _load_json(SWAP_ACTIVITY_STATE_PATH)
+        _save_json(SWAP_ACTIVITY_STATE_PATH, {"ts": curr_ts, "pswpin": curr_in, "pswpout": curr_out})
+
+    if prev is None:
+        return False, {"check": "swap_activity_cold_start"}
+
+    dt = curr_ts - prev.get("ts", curr_ts)
+    if dt < SWAP_ACTIVITY_MIN_INTERVAL_SECONDS:
+        return False, {"check": "swap_activity_interval_too_short", "dt_seconds": dt,
+                        "min_interval_seconds": SWAP_ACTIVITY_MIN_INTERVAL_SECONDS}
+
+    in_delta = max(0, curr_in - prev.get("pswpin", curr_in))
+    out_delta = max(0, curr_out - prev.get("pswpout", curr_out))
+    quiet = in_delta <= SWAP_ACTIVITY_NOISE_PAGES and out_delta <= SWAP_ACTIVITY_NOISE_PAGES
+    return quiet, {
+        "check": "swap_activity_quiet" if quiet else "swap_activity_sustained",
+        "pswpin_delta": in_delta, "pswpout_delta": out_delta, "dt_seconds": dt,
+        "noise_allowance_pages": SWAP_ACTIVITY_NOISE_PAGES,
+    }
+
+
+def _real_mem_headroom_bytes(path=None):
+    """Real MemAvailable headroom (bytes) below dispatch_core.py's own
+    BACKOFF_UTILIZATION_PCT ceiling on memory -- the identical math
+    dispatch_core.has_resource_headroom_detail()'s mem_headroom_budget check
+    already does, independently re-derived here from this module's own
+    PROC_MEMINFO_PATH (never dispatch_core.py's private helper) so this stays
+    testable via the existing env-override convention. Returns None if
+    MemTotal is unreadable/zero -- callers must treat that as "cannot
+    confirm headroom", never as "abundant"."""
+    path = path or PROC_MEMINFO_PATH
+    vals = {}
+    with open(path) as f:
+        for line in f:
+            key, _, rest = line.partition(":")
+            if key in ("MemTotal", "MemAvailable"):
+                parts = rest.strip().split()
+                if parts:
+                    vals[key] = int(parts[0]) * 1024
+    mem_total = vals.get("MemTotal", 0)
+    if not mem_total:
+        return None
+    mem_available = vals.get("MemAvailable", mem_total)
+    mem_used_bytes = mem_total - mem_available
+    dc = _dispatch_core()
+    return (mem_total * dc.BACKOFF_UTILIZATION_PCT) - mem_used_bytes
+
+
+def _override_stale_swap_backoff(slot_ok, slot_detail, now=None):
+    """Real, narrow override of dispatch_core.has_free_slot_detail()'s
+    "swap_backoff" veto specifically -- see the SWAP_ACTIVITY_* constants'
+    own comment above for the real evidence this closes.
+
+    Deliberately narrow: only ever overrides slot_detail["check"] ==
+    "swap_backoff" (the SOFT 0.80 BACKOFF_UTILIZATION_PCT threshold
+    dispatch_core.py's own module comment documents as "meaningfully below
+    the hard ceiling... a build/compile spike... still has real room before
+    0.99"). NEVER overrides "swap_hard_ceiling" (the Owner's own 0.99
+    number, "never cross" per that same module comment), "mem_backoff",
+    "mem_hard_ceiling", "mem_headroom_budget", "load1_backoff",
+    "load1_unreadable", or "cap_exhausted" -- none of those are the stale
+    ratchet this UMR's real evidence found; overriding any of them would be
+    exactly the kind of invented exemption this task's own spec forbids.
+    Passing through slot_ok/slot_detail completely unchanged (including
+    slot_ok=True, i.e. no block to override) is the correct behavior for
+    every one of those other cases.
+
+    Both of the following real, freshly-live-read conditions must hold, or
+    the original (slot_ok, slot_detail) is returned unchanged:
+      1. _real_mem_headroom_bytes() confirms at least one more worker's own
+         PER_WORKER_MEMORY_BUDGET_BYTES of real headroom below the backoff
+         ceiling -- memory itself must be genuinely abundant, not just
+         "not yet over its own threshold".
+      2. swap_activity_quiet_detail() confirms zero-or-noise real
+         pswpin/pswpout activity over a real, trustworthy elapsed window.
+
+    Returns (ok, detail) in the exact same shape dispatch_core.py's own
+    has_free_slot_detail() uses. When it overrides, detail carries
+    check="swap_backoff_override_stale_ratchet" plus every real number both
+    conditions were computed from, so this is fully diagnosable from the
+    tick log / veridian-dispatch-decision journal alone, same as every
+    other real check in this module."""
+    if slot_ok or not slot_detail or slot_detail.get("check") != "swap_backoff":
+        return slot_ok, slot_detail
+
+    dc = _dispatch_core()
+    try:
+        mem_headroom_bytes = _real_mem_headroom_bytes()
+    except (OSError, ValueError):
+        return slot_ok, slot_detail  # real /proc/meminfo unreadable -- fail open to the original block
+    if mem_headroom_bytes is None or mem_headroom_bytes < dc.PER_WORKER_MEMORY_BUDGET_BYTES:
+        return slot_ok, slot_detail  # real memory headroom is NOT independently confirmed abundant
+
+    try:
+        quiet, activity_detail = swap_activity_quiet_detail(now=now)
+    except (OSError, ValueError):
+        return slot_ok, slot_detail  # real /proc/vmstat unreadable -- fail open to the original block
+    if not quiet:
+        return slot_ok, slot_detail  # real swap I/O is active, or not yet confirmed quiet
+
+    return True, {
+        "check": "swap_backoff_override_stale_ratchet",
+        "original_check": "swap_backoff",
+        "swap_used_pct": slot_detail.get("swap_used_pct"),
+        "threshold_pct": slot_detail.get("threshold_pct"),
+        "mem_headroom_bytes": mem_headroom_bytes,
+        "required_bytes": dc.PER_WORKER_MEMORY_BUDGET_BYTES,
+        "swap_activity": activity_detail,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1759,6 +2106,142 @@ def _orchestrator_ocid_governance_check(sbr, conn, ocid_number):
     return evidence
 
 
+def _telemetry_retention_cutoff(now, retention_days):
+    return (now - timedelta(days=retention_days)).isoformat()
+
+
+def telemetry_retention_plan(conn, now=None, tables=None):
+    """Real, read-only dry run (UMR-20260813-125836-5809 Scope D): for every
+    configured telemetry table, counts real rows strictly older than that
+    table's own retention window. Never fetches row content, never writes,
+    never deletes -- safe to call against the live register at any time."""
+    now = now or datetime.now(timezone.utc)
+    tables = tables or TELEMETRY_RETENTION_TABLES
+    report = {"generated_at": now.isoformat(), "dry_run": True, "tables": {}}
+    for table, (ts_col, days) in tables.items():
+        cutoff = _telemetry_retention_cutoff(now, days)
+        try:
+            row = conn.execute(
+                f"SELECT COUNT(*), MIN({ts_col}), MAX({ts_col}) FROM {table} WHERE {ts_col} < ?",
+                (cutoff,),
+            ).fetchone()
+            report["tables"][table] = {
+                "ts_column": ts_col,
+                "retention_days": days,
+                "cutoff": cutoff,
+                "rows_would_remove": row[0],
+                "oldest_row_ts": row[1],
+                "newest_row_ts_being_removed": row[2],
+            }
+        except Exception as e:
+            report["tables"][table] = {"error": str(e)}
+    return report
+
+
+def _telemetry_retention_db_path(conn):
+    """The real, absolute path of the sqlite file `conn` is actually open
+    against, straight from sqlite's own PRAGMA database_list -- never
+    assumed/hardcoded, so archive/state paths derived from it are always
+    correct for whatever DB this connection really points at (the live
+    register, a test's temp copy, anything)."""
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        return row[2] if row and row[2] else None
+    except Exception:
+        return None
+
+
+def _telemetry_retention_archive_dir(conn):
+    env = os.environ.get(TELEMETRY_RETENTION_ARCHIVE_DIR_ENV)
+    if env:
+        return env
+    db_path = _telemetry_retention_db_path(conn)
+    if db_path:
+        return os.path.join(os.path.dirname(db_path), "backups", "register_retention_archive")
+    return f"{AI_OS}/memory/backups/register_retention_archive"
+
+
+def _telemetry_retention_state_path(conn):
+    env = os.environ.get(TELEMETRY_RETENTION_STATE_ENV)
+    if env:
+        return env
+    db_path = _telemetry_retention_db_path(conn)
+    if db_path:
+        return db_path + ".telemetry-retention-state.json"
+    return f"{LOCKS_DIR}/resource-governor-telemetry-retention-state.json"
+
+
+def _telemetry_retention_archive_table(conn, table, ts_col, cutoff, now):
+    """Streams every real row strictly older than `cutoff` out to a real,
+    gzip-compressed JSONL archive file under _telemetry_retention_archive_dir(conn)
+    BEFORE any DELETE runs -- write to a .tmp path, fsync, then os.replace()
+    into the final name, same atomic-rename convention this module's own
+    _save_json() already uses, so a crash mid-write can never leave a
+    half-written file at the real archive path. Iterates the cursor directly
+    (never fetchall()) so Python-side memory stays bounded to one row at a
+    time regardless of table size -- the real, evidenced reason this UMR
+    exists: UMR-20260813-125756-9221 found a single *bounded* read of this
+    same DB needed ~2.09GB RSS and wedged this box in D-state for 55 minutes
+    under real memory pressure (0 free RAM, swap exhausted). Returns
+    (archive_path_or_None, row_count); archive_path is None (and no file is
+    left behind) when there is nothing to archive."""
+    table_dir = os.path.join(_telemetry_retention_archive_dir(conn), table)
+    os.makedirs(table_dir, exist_ok=True)
+    stamp = now.strftime("%Y%m%dT%H%M%SZ")
+    final_path = os.path.join(table_dir, f"{table}.{stamp}.jsonl.gz")
+    tmp_path = final_path + ".tmp"
+    cur = conn.execute(f"SELECT * FROM {table} WHERE {ts_col} < ? ORDER BY {ts_col}", (cutoff,))
+    n = 0
+    with gzip.open(tmp_path, "wt", encoding="utf-8") as f:
+        for row in cur:
+            f.write(json.dumps(dict(row), default=str))
+            f.write("\n")
+            n += 1
+    if n == 0:
+        os.remove(tmp_path)
+        return None, 0
+    with open(tmp_path, "rb") as fchk:
+        os.fsync(fchk.fileno())
+    os.replace(tmp_path, final_path)
+    return final_path, n
+
+
+def telemetry_retention_execute(conn, now=None, tables=None):
+    """Real archive-then-delete retention enforcement (UMR-20260813-125836-5809
+    Scope C/D). For every configured telemetry table: archives every row
+    older than that table's own retention window to a real file FIRST
+    (fsynced, atomically renamed into place -- see
+    _telemetry_retention_archive_table()), THEN deletes exactly those same
+    rows and commits. If archiving raises for a table, that table's DELETE
+    never runs and the exception is caught per-table (fail-closed: nothing
+    is destroyed without a real, already-on-disk archive first; one table's
+    failure never blocks another's). umr_tasks is never a key of
+    TELEMETRY_RETENTION_TABLES and no code path here opens a DELETE/UPDATE
+    cursor against it -- see that dict's own docstring for the absolute
+    constraint this enforces."""
+    now = now or datetime.now(timezone.utc)
+    tables = tables or TELEMETRY_RETENTION_TABLES
+    report = {"generated_at": now.isoformat(), "dry_run": False, "tables": {}}
+    for table, (ts_col, days) in tables.items():
+        cutoff = _telemetry_retention_cutoff(now, days)
+        entry = {"ts_column": ts_col, "retention_days": days, "cutoff": cutoff}
+        try:
+            archive_path, n = _telemetry_retention_archive_table(conn, table, ts_col, cutoff, now)
+            entry["archived_rows"] = n
+            entry["archive_path"] = archive_path
+            if n > 0:
+                cur = conn.execute(f"DELETE FROM {table} WHERE {ts_col} < ?", (cutoff,))
+                conn.commit()
+                entry["rows_deleted"] = cur.rowcount
+            else:
+                entry["rows_deleted"] = 0
+        except Exception as e:
+            conn.rollback()
+            entry["error"] = str(e)
+        report["tables"][table] = entry
+    return report
+
+
 def _orchestrator_tick_maintenance(sbr, now=None):
     """Real, once-per-tick (never once-per-row) additions -- deliberately
     kept OUTSIDE the dispatch_core lock and outside any per-row hot path,
@@ -1785,6 +2268,19 @@ def _orchestrator_tick_maintenance(sbr, now=None):
     exception to "never raw sqlite3.connect": it reuses sbr._connect() (the
     real, already-trusted connection helper) rather than opening a second,
     independently-hardcoded raw connection.
+    Step 13 (UMR-20260813-125836-5809, addendum to Priority-1
+    UMR-20260806-171945-5767): real telemetry-table retention enforcement
+    -- calls telemetry_retention_execute() (archive-then-delete, real
+    writes) against TELEMETRY_RETENTION_TABLES, self-gated by a real state
+    file (see _telemetry_retention_state_path()) to run at most once per
+    TELEMETRY_RETENTION_MIN_INTERVAL_SECONDS (default 24h) so the real
+    archive+DELETE pass never runs on every ~5-10min dispatch-tick. This is
+    what makes the retention policy recurring and deterministic through the
+    real existing scheduling path (veridian-cron-dispatch-tick.timer ->
+    dispatch-tick.py -> run_tick() -> here) rather than a new ad-hoc
+    mechanism or a 19th/20th systemd unit (see
+    ~/.config/systemd/user/README.md's closed-set STANDING RULE). umr_tasks
+    is never touched -- see TELEMETRY_RETENTION_TABLES's own docstring.
 
     Returns a dict of real evidence for this tick; never raises."""
     now = now or _utcnow()
@@ -1860,6 +2356,40 @@ def _orchestrator_tick_maintenance(sbr, now=None):
     except Exception as e:
         report["pragma_maintenance_error"] = str(e)
 
+    try:
+        conn = sbr._connect()
+        try:
+            # State path is derived from THIS connection's own real DB file
+            # (see _telemetry_retention_state_path()'s docstring for why --
+            # a fixed global path here would let any test/tool that points
+            # sbr at a different DB file silently gate/pollute the real
+            # production state).
+            state_path = _telemetry_retention_state_path(conn)
+            with _state_file_lock(state_path):
+                state = _load_json(state_path) or {}
+                last_run = state.get("last_run_ts")
+                should_run = True
+                if last_run:
+                    try:
+                        last_run_dt = datetime.fromisoformat(last_run)
+                        should_run = (now - last_run_dt).total_seconds() >= TELEMETRY_RETENTION_MIN_INTERVAL_SECONDS
+                    except ValueError:
+                        should_run = True
+                if should_run:
+                    report["telemetry_retention"] = telemetry_retention_execute(conn, now=now)
+                    state["last_run_ts"] = now.isoformat()
+                    _save_json(state_path, state)
+                else:
+                    report["telemetry_retention"] = {
+                        "skipped": True,
+                        "reason": f"last real run {last_run} was under "
+                                  f"{TELEMETRY_RETENTION_MIN_INTERVAL_SECONDS}s ago",
+                    }
+        finally:
+            conn.close()
+    except Exception as e:
+        report["telemetry_retention_error"] = str(e)
+
     return report
 
 
@@ -1910,8 +2440,9 @@ def _perform_spawn(row):
         inputs = row.get("inputs_json")
         inputs = json.loads(inputs) if isinstance(inputs, str) else (inputs or {})
         if not isinstance(inputs, dict):
+            reason = f"malformed inputs: expected object, got {type(inputs).__name__}"
             return {"status": "failed", "unit_name": row.get("unit_name"),
-                    "outputs": {"error": f"malformed inputs: expected object, got {type(inputs).__name__}"}}
+                    "outputs": {"error": reason}, "reason": reason}
 
         if task_kind == "systemctl_action":
             unit = row["unit_name"]
@@ -1924,12 +2455,21 @@ def _perform_spawn(row):
             else:
                 r = _run(["systemctl", "--user", "start", unit])
             status = "running" if r.returncode == 0 else "failed"
-            return {"status": status, "unit_name": unit, "outputs": {"returncode": r.returncode, "stderr": r.stderr[:500]}}
+            stdout_tail = (r.stdout or "")[-_SPAWN_OUTPUT_TAIL_CHARS:]
+            stderr_tail = (r.stderr or "")[-_SPAWN_OUTPUT_TAIL_CHARS:]
+            reason = None
+            if status == "failed":
+                cause = stderr_tail.strip() or stdout_tail.strip() or "no output on either stream"
+                reason = f"systemctl {action} {unit} exited {r.returncode}: {cause[:500]}"
+            return {"status": status, "unit_name": unit,
+                    "outputs": {"returncode": r.returncode, "stdout": stdout_tail, "stderr": stderr_tail},
+                    "reason": reason}
 
         if task_kind == "veridian_task_create":
             if "title" not in inputs or "prompt" not in inputs:
+                reason = "veridian_task_create requires inputs.title and inputs.prompt"
                 return {"status": "failed", "unit_name": row.get("unit_name"),
-                        "outputs": {"error": "veridian_task_create requires inputs.title and inputs.prompt"}}
+                        "outputs": {"error": reason}, "reason": reason}
             cmd = ["python3", os.path.join(SCRIPTS, "veridian-task.py"), "create",
                    "--title", inputs["title"], "--repo", inputs.get("repo", "claude-control"),
                    "--prompt", inputs["prompt"]]
@@ -1940,13 +2480,29 @@ def _perform_spawn(row):
             if unit_name:
                 _run(["systemctl", "--user", "start", unit_name])
             status = "running" if new_task_id else "failed"
+            # Bounded tails of BOTH real streams -- see _SPAWN_OUTPUT_TAIL_CHARS's
+            # module-level comment for why stdout must be captured here too,
+            # not just stderr: veridian-task.py's own real error text (e.g.
+            # "ERROR: repo not found at ...") is written via print(), which
+            # goes to stdout.
+            stdout_tail = (r.stdout or "")[-_SPAWN_OUTPUT_TAIL_CHARS:]
+            stderr_tail = (r.stderr or "")[-_SPAWN_OUTPUT_TAIL_CHARS:]
+            reason = None
+            if status == "failed":
+                cause = stderr_tail.strip() or stdout_tail.strip() or "no output on either stream"
+                reason = f"veridian-task.py create exited {r.returncode} with no CREATED: line -- {cause[:500]}"
             return {"status": status, "unit_name": unit_name,
-                    "outputs": {"new_task_id": new_task_id, "returncode": r.returncode, "stderr": r.stderr[:500]}}
+                    "outputs": {"new_task_id": new_task_id, "returncode": r.returncode,
+                                "stdout": stdout_tail, "stderr": stderr_tail},
+                    "reason": reason}
 
-        return {"status": "failed", "unit_name": row.get("unit_name"), "outputs": {"error": f"unknown task_kind {task_kind!r}"}}
-    except Exception as e:
+        reason = f"unknown task_kind {task_kind!r}"
         return {"status": "failed", "unit_name": row.get("unit_name"),
-                "outputs": {"error": f"_perform_spawn crashed: {type(e).__name__}: {e}"}}
+                "outputs": {"error": reason}, "reason": reason}
+    except Exception as e:
+        reason = f"_perform_spawn crashed: {type(e).__name__}: {e}"
+        return {"status": "failed", "unit_name": row.get("unit_name"),
+                "outputs": {"error": reason}, "reason": reason}
 
 
 def _recorded_new_task_ids_for_identity(task_identity, exclude_umr_id=None, limit=2):
@@ -2014,6 +2570,79 @@ def _referenced_pr_number(text):
         return None
     m = re.search(r"\bPR\s*#?\s*(\d+)\b", text, re.IGNORECASE)
     return m.group(1) if m else None
+
+
+def _repo_qualified_pr_ref(text, known_repos=None):
+    """UMR-20260813-165620-aac7 (addendum to P1 UMR-20260806-171945-5767,
+    targeting target_pr_already_resolved()'s dispatch-time re-check): extract
+    a REPO-QUALIFIED PR reference from `text` -- i.e. one that names both a
+    repo and a PR number, so the caller never has to guess which repo to
+    check. Three real, deterministic forms are matched, most-specific first:
+
+      1. A full GitHub PR URL: '.../github.com/OWNER/REPO/pull/NNN'. OWNER
+         is unambiguous by construction, so this always matches.
+      2. 'owner/repo#NNN' (e.g. 'FChecklist/veridian-scripts#297'). Also
+         unambiguous -- has an explicit owner segment.
+      3. 'repo#NNN' (e.g. 'veridian-scripts#297') or the real dispatch-title
+         convention this UMR's own governing SPEC evidence rows actually use,
+         '<repo> PR #NNN' / '<repo> PR NNN' (e.g. 'audit of veridian-scripts
+         PR 297 ...' -- see UMR-20260813-135121-9da6/-135059-3b92/-135034-fef1,
+         the 3 real rows wrongly rejected by the old arbitrary-repo-order
+         scan). Both of these bare, no-owner forms are ONLY trusted when the
+         captured name matches a repo from `known_repos` (default
+         GH_PR_CHECK_REPOS) -- never an arbitrary preceding word. This is
+         load-bearing: target_pr_already_resolved()'s own docstring records a
+         real title, '...audit-approved PR 136' (UMR-20260813-111352-6973),
+         where the word immediately before 'PR' is NOT a repo name at all; a
+         naive "word before PR" match would misparse that title and treat
+         'audit-approved' as a repo, exactly the class of guess this
+         function exists to refuse to make.
+
+    Returns (repo, pr_number) -- both strings -- or (None, None) if no
+    repo-qualified reference is present. A bare 'PR NNN' with no repo
+    anywhere in `text` deliberately returns (None, None) here; callers fall
+    back to _referenced_pr_number() + a real, single hint_repo (never a
+    scan) for that case. Never raises, same fail-open-shape convention as
+    _referenced_pr_number()."""
+    if not text:
+        return None, None
+    repos = known_repos if known_repos is not None else GH_PR_CHECK_REPOS
+
+    m = re.search(r"github\.com/[\w.-]+/([\w.-]+)/pull/(\d+)", text, re.IGNORECASE)
+    if m:
+        return m.group(1), m.group(2)
+
+    m = re.search(r"\b[\w.-]+/([\w.-]+)#(\d+)\b", text)
+    if m:
+        return m.group(1), m.group(2)
+
+    if not repos:
+        return None, None
+    repo_alt = "|".join(re.escape(r) for r in repos)
+
+    m = re.search(r"\b(" + repo_alt + r")#(\d+)\b", text, re.IGNORECASE)
+    if not m:
+        m = re.search(r"\b(" + repo_alt + r")\s+PR\s*#?\s*(\d+)\b", text, re.IGNORECASE)
+    if m:
+        matched = m.group(1)
+        canonical = next((r for r in repos if r.lower() == matched.lower()), matched)
+        return canonical, m.group(2)
+
+    return None, None
+
+
+# UMR-20260813-172606-101a: real, deterministic phrasing this repo's own
+# disclosure-PR convention actually uses to state "this cites another PR's
+# number but is NOT duplicating its work" (see find_pr_for_task_identity()'s
+# Stage 6, and claude-control#142's real title: "...(already covered by PR
+# 141, not re-implemented)"). A title matching this is excluded from Stage
+# 6's duplicate-PR match -- it is evidence of non-duplication, not evidence
+# of it.
+_DISCLOSURE_CITATION_RE = re.compile(
+    r"\balready\s+covered\b|\bnot\s+re-?implemented\b|\bnot\s+a\s+duplicate\b|"
+    r"\bnot\s+duplicat(?:ed|ing)\b|\bsuperseded\s+by\b|\bsupersedes\b",
+    re.IGNORECASE,
+)
 
 
 def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None, title=None):
@@ -2143,6 +2772,28 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
     # PR #64/#65/#66 evidence this closes -- a task_identity-fragmented
     # duplicate (different task_identity string, same real PR referenced in
     # the title) that no branch-name-based check above can ever catch.
+    #
+    # UMR-20260813-172606-101a real fix: Stage 6's own docstring assumption
+    # ("unrelated PRs essentially never reference the exact same 'PR #NNN'
+    # substring by coincidence") is false for a DISCLOSURE citation -- a PR
+    # whose title explicitly states it is NOT duplicating the referenced
+    # PR's work, only citing it as already-covering evidence. Real incident:
+    # UMR-20260813-145418-3f98, title "Merge audit-passed PR 141
+    # (server-native PM integration)" (pr_num='141'), was wrongly rejected
+    # as a duplicate of claude-control#142, whose own title is "docs: real
+    # dedup finding for UMR-20260813-092654-326b (already covered by PR 141,
+    # not re-implemented)" -- #142 is real, unrelated work (a docs-only PR
+    # about a different UMR/objective) that happens to cite "PR 141" only to
+    # disclose it is deliberately NOT re-implementing it. The match key
+    # itself (the literal target PR number extracted by
+    # _referenced_pr_number()) was already correct; the gap is that a title
+    # merely CITING that number is treated identically to a title that is
+    # ITSELF new/duplicate work targeting it. _DISCLOSURE_CITATION_RE above
+    # recognizes the real, deterministic phrasing this class of disclosure
+    # PR actually uses (this repo's own convention, see #142's title/body)
+    # and excludes those titles from counting as a duplicate -- the #64/#65/
+    # #66 shape this stage was built for used no such disclosure language,
+    # so that real incident is still caught unchanged.
     pr_num = _referenced_pr_number(title)
     if pr_num:
         for repo in repos:
@@ -2166,9 +2817,139 @@ def find_pr_for_task_identity(task_identity, hint_repo=None, extra_task_ids=None
             except (json.JSONDecodeError, ValueError):
                 prs = []
             for pr in prs:
-                if _referenced_pr_number(pr.get("title") or "") == pr_num:
-                    return pr["number"], repo
+                candidate_title = pr.get("title") or ""
+                if _referenced_pr_number(candidate_title) != pr_num:
+                    continue
+                if _DISCLOSURE_CITATION_RE.search(candidate_title):
+                    continue  # real citation-not-duplicate disclosure -- not a match
+                return pr["number"], repo
     return None, None
+
+
+def target_pr_already_resolved(title, hint_repo=None):
+    """UMR-20260813-135626 (reconcile-stale-queued-rows-whose-target,
+    addendum to P1 UMR-20260806-171945-5767): real, dispatch-time re-check
+    of a queued row's own TARGET PR state -- the specific gap the governing
+    SPEC's own evidence gathering found live: 3 real queued rows each named
+    a real PR in their own title that GitHub had already resolved (merged
+    or, for the conflict case, moved past mergeable) before/shortly after
+    the row was even queued --
+      - UMR-20260813-111356-3677 ("...existing PR 249..."): veridian-scripts
+        PR #249 MERGED 2026-08-13T10:39:54Z, 34 real minutes BEFORE this row
+        queued at 11:13:56.
+      - UMR-20260813-101609-9a69 ("Resolve PR 135 conflict..."):
+        claude-control PR #135 MERGED 10:40:46Z -- no conflict was left to
+        resolve.
+      - UMR-20260813-111352-6973 ("...audit-approved PR 136"): PR #136 was
+        real, current DIRTY/mergeable=false at dispatch time, not the
+        UNKNOWN/"still computing" state the row was queued against.
+
+    Every existing guard above this one (Stage 4/5/6 duplicate-PR,
+    OCID-evidence supersession, reuse_verdict_engine) checks whether THIS
+    task_identity already produced a PR, or whether an OCID named in the
+    title has newer registry evidence -- none of them re-check the actual
+    live state of a PR the task's own title explicitly names as its work
+    target. This closes that specific gap: re-derive the target PR number
+    from the row's own title by reusing _referenced_pr_number() (the same
+    real Stage-6 extractor already proven against this exact "PR #NNN in a
+    title" shape, not a new parser), then ask GitHub directly for that PR's
+    REAL CURRENT state -- computed at the moment of dispatch, not the
+    queue-time snapshot the task's own prompt was written against.
+
+    Same fail-open philosophy and the same bounded GH_PR_CHECK_TIMEOUT_SECONDS
+    as every other real `gh` call in this module (see
+    find_pr_for_task_identity()'s own docstring, point 3): a GitHub outage,
+    rate-limit, or an unresolvable PR number/repo must degrade to "old
+    behavior, no guard, dispatch proceeds", never to a wedged queue. An
+    OPEN PR (even DIRTY/conflicted -- see UMR-20260813-111352-6973 above,
+    where the real right answer was "dispatch a fresh rebase+audit", not a
+    self-reject) is deliberately NOT blocked here: only a real, confirmed
+    MERGED or CLOSED state means the queue-time premise itself is dead.
+
+    UMR-20260813-165620-aac7 (addendum to P1 UMR-20260806-171945-5767) real
+    fix: this used to resolve a BARE "PR NNN" title reference by scanning
+    ALL of GH_PR_CHECK_REPOS in a fixed, arbitrary order and blocking on the
+    FIRST repo where that bare number happened to resolve to MERGED/CLOSED
+    -- even though PR numbers are per-repo and the OPEN branch two
+    paragraphs above already explicitly acknowledges that same fact ("the
+    search stops here rather than risking a same-number collision in a
+    different repo"). Live evidence this actually caused, all confirmed via
+    --query-umr the same day: 3 real Tier-1 audit dispatches naming
+    veridian-scripts PR #297/#300/#301 (each real, MERGEABLE+CLEAN, zero
+    posted audit verdict) were wrongly rejected because the SAME bare
+    number resolved first against an unrelated, month-old, already-MERGED
+    compliance-tracker PR -- compliance-tracker's low PR numbers are almost
+    always occupied (200 open PRs at the time), so this collision was
+    effectively guaranteed for any veridian-scripts audit dispatch, and
+    with nothing ever auditable nothing could ever merge.
+
+    Real fix, two-tiered:
+      1. Prefer a REPO-QUALIFIED reference (_repo_qualified_pr_ref() --
+         'veridian-scripts#297', 'FChecklist/veridian-scripts#297', a full
+         github.com PR URL, or the real dispatch-title convention '<repo>
+         PR #NNN' the 3 evidence rows above actually use) and resolve
+         against THAT repo ONLY -- never any other, regardless of
+         hint_repo.
+      2. Otherwise fall back to a bare _referenced_pr_number() match, but
+         ONLY resolve it against hint_repo (a single, real, caller-supplied
+         repo -- never a scan). If hint_repo is also absent/unusable, fail
+         OPEN immediately (no gh call at all) rather than guess a repo by
+         scanning GH_PR_CHECK_REPOS in arbitrary order -- the exact
+         guessing this real incident closes.
+
+    Returns (blocked: bool, evidence: dict|None). evidence, when blocked,
+    always carries repo/number/state/url plus mergedAt (MERGED) or
+    closedAt (CLOSED) -- real, structured evidence for the row's own
+    outputs_json/reason, never bare prose."""
+    qualified_repo, qualified_pr_num = _repo_qualified_pr_ref(title)
+    if qualified_pr_num:
+        pr_num = qualified_pr_num
+        repos = [qualified_repo]
+    else:
+        pr_num = _referenced_pr_number(title)
+        if not pr_num:
+            return False, None
+        if not hint_repo:
+            # Bare "PR NNN" with no repo anywhere in the title and no
+            # usable hint_repo -- do NOT guess by scanning GH_PR_CHECK_REPOS
+            # in arbitrary order (see docstring above for the real
+            # #297/#300/#301 collisions that caused). Fail open: no gh
+            # call, dispatch proceeds as if this guard did not run.
+            return False, None
+        repos = [hint_repo]
+    for repo in repos:
+        try:
+            r = _run(
+                ["gh", "pr", "view", pr_num, "--repo", f"{GH_ORG}/{repo}",
+                 "--json", "number,state,mergedAt,closedAt,url"],
+                timeout=GH_PR_CHECK_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            _append_attention(
+                f"WARNING: target-PR dispatch-time re-check timed out checking "
+                f"{GH_ORG}/{repo}#{pr_num} (>{GH_PR_CHECK_TIMEOUT_SECONDS}s) -- failing open, "
+                f"dispatch proceeding WITHOUT this check against this repo for this row."
+            )
+            continue
+        if r.returncode != 0:
+            continue  # not this PR number's repo (or a transient gh error) -- fail open, try next repo
+        try:
+            pr = json.loads(r.stdout)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        state = pr.get("state")
+        if state == "MERGED":
+            return True, {"repo": repo, "number": pr.get("number"), "state": state,
+                           "merged_at": pr.get("mergedAt"), "url": pr.get("url")}
+        if state == "CLOSED":
+            return True, {"repo": repo, "number": pr.get("number"), "state": state,
+                           "closed_at": pr.get("closedAt"), "url": pr.get("url")}
+        # A real PR number resolved in this repo but its state is OPEN (or
+        # anything else) -- not resolved yet, and PR numbers are per-repo, so
+        # the search stops here rather than risking a same-number collision
+        # in a different repo.
+        return False, None
+    return False, None
 
 
 # OCID-068 seven-rule guardrails addendum, Rule 2 (UMR-20260804-180711-7f96,
@@ -2203,6 +2984,11 @@ RULE2_OUTCOME_MAP = {
     # the same real gate and is blocked again for as long as the order
     # remains open.
     "blocked_stop_work_order": "rejected",
+    # UMR-20260813-135626: target_pr_already_resolved()'s real dispatch-time
+    # re-check -- same real "rejected" outcome as the other evidence-based
+    # skips above (the row is written terminal by the same gate; a fresh
+    # resubmission naming the same already-resolved PR is rejected again).
+    "rejected_target_pr_already_resolved": "rejected",
 }
 
 
@@ -2237,7 +3023,8 @@ def classify_dispatch_outcome(dispatch_result):
         # real outputs.error/outputs.stderr -- never an empty/silent failure
         # (see its own docstring's "no exception ever escapes" contract).
         outputs = spawn_result.get("outputs") or {}
-        root_cause = outputs.get("error") or outputs.get("stderr") or "unknown spawn failure (no error detail captured)"
+        root_cause = (spawn_result.get("reason") or outputs.get("error") or outputs.get("stderr")
+                      or outputs.get("stdout") or "unknown spawn failure (no error detail captured)")
         return {
             "outcome": "failed",
             "error_id": f"DISPATCH-FAILED-{umr_id}" if umr_id else "DISPATCH-FAILED-UNKNOWN-UMR",
@@ -2339,6 +3126,27 @@ def _dispatch_one_inner(dry_run=False, now=None):
             return {"action": "idle", "detail": "queue empty", "metrics": metrics}
 
         slot_ok, slot_detail = dc.has_free_slot_detail()
+
+        # UMR-20260813-155201-da76 (unwedge dispatch -- stale swap ratchet
+        # blocked dispatch, addendum to P1 UMR-20260806-171945-5767): a
+        # "swap_backoff" slot_detail specifically can be a STALE ratchet
+        # (static SwapFree/SwapTotal occupancy that Linux never proactively
+        # reclaims) rather than real, current pressure -- see
+        # _override_stale_swap_backoff()'s own docstring for the real,
+        # narrow conditions (abundant real MemAvailable headroom AND
+        # confirmed-quiet real swap I/O) required before this can ever
+        # override, and for why every other real gate (including the 0.99
+        # swap_hard_ceiling) is left completely untouched. Passes through
+        # unchanged in every other case.
+        slot_overridden = slot_ok is False and (slot_detail or {}).get("check") == "swap_backoff"
+        slot_ok, slot_detail = _override_stale_swap_backoff(slot_ok, slot_detail, now=now)
+        if slot_overridden and slot_ok:
+            _append_attention(
+                f"INFO: dispatch_one() overrode a stale swap_backoff ratchet for "
+                f"umr_id={row['umr_id']!r} -- real MemAvailable headroom confirmed abundant and "
+                f"real swap I/O confirmed quiet, see slot_detail: {slot_detail}"
+            )
+
         if not slot_ok:
             conn.close()
             # Real fix (UMR-20260806-101839-688e): the old fixed detail
@@ -2395,6 +3203,53 @@ def _dispatch_one_inner(dry_run=False, now=None):
                 )
                 return {"action": "blocked_stop_work_order", "umr_id": row["umr_id"],
                          "detail": stop_work_block_reason, "metrics": metrics}
+
+        # UMR-20260813-135626 (reconcile-stale-queued-rows-whose-target,
+        # addendum to P1 UMR-20260806-171945-5767): real dispatch-time
+        # re-check of this row's own TARGET PR state -- see
+        # target_pr_already_resolved()'s own docstring for the 3 real queued
+        # rows (UMR-20260813-111356-3677/-101609-9a69/-111352-6973) this
+        # closes. Runs first among the PR/OCID-evidence guards below since
+        # it is the cheapest real check (one `gh pr view` by number, no
+        # branch-name guessing) and the most direct match for the root
+        # cause the governing SPEC's own evidence gathering found: a row can
+        # sit queued long enough that the real PR it names as its work
+        # target gets merged or closed out from under it before dispatch.
+        if row["task_kind"] == "veridian_task_create":
+            raw_inputs_for_target_pr = row.get("inputs_json")
+            row_inputs_for_target_pr = (
+                json.loads(raw_inputs_for_target_pr) if isinstance(raw_inputs_for_target_pr, str)
+                else (raw_inputs_for_target_pr or {})
+            )
+            target_pr_blocked, target_pr_evidence = target_pr_already_resolved(
+                row_inputs_for_target_pr.get("title"), row_inputs_for_target_pr.get("repo"))
+            if target_pr_blocked:
+                when = (f"mergedAt={target_pr_evidence.get('merged_at')}"
+                        if target_pr_evidence["state"] == "MERGED"
+                        else f"closedAt={target_pr_evidence.get('closed_at')}")
+                reason = (
+                    f"target-PR dispatch-time re-check: {GH_ORG}/{target_pr_evidence['repo']}"
+                    f"#{target_pr_evidence['number']} (this row's own title names it as its work "
+                    f"target) is real, current state={target_pr_evidence['state']!r} ({when}), "
+                    f"{target_pr_evidence.get('url')} -- the queue-time premise no longer holds, "
+                    f"redispatch skipped, not spawned"
+                )
+                with sbr._write_lock():
+                    sbr.update_umr_task(
+                        conn, row["umr_id"], status="rejected_duplicate",
+                        ts_completed=_now_iso(), reason=reason,
+                        outputs=_orchestrator_output_contract(
+                            sbr, row["umr_id"], "rejected_duplicate", reason,
+                            {"target_pr": target_pr_evidence}),
+                    )
+                    conn.commit()
+                conn.close()
+                _append_attention(
+                    f"INFO: dispatch_one() skipped a real veridian_task_create spawn for "
+                    f"umr_id={row['umr_id']!r} (task_identity={row['task_identity']!r}): {reason}"
+                )
+                return {"action": "rejected_target_pr_already_resolved", "umr_id": row["umr_id"],
+                         "detail": reason, "pr": target_pr_evidence, "metrics": metrics}
 
         # Real root-cause fix (UMR-20260804-213847-4b56, citing
         # UMR-20260804-180711-7f96): dispatch-owner-task.sh's own real,
@@ -2534,14 +3389,28 @@ def _dispatch_one_inner(dry_run=False, now=None):
                      "detail": reason, "reuse_verdict": verdict_result, "metrics": metrics}
 
         result = _perform_spawn(row)
+        # Real fix (UMR-20260813-165729, addendum to P1 UMR-20260806-171945-5767):
+        # this call used to always pass reason=None into both update_umr_task()
+        # and the output contract, so a row's reason column was left at its
+        # submit-time value ("queued") FOREVER, even once the row reached a
+        # real terminal status="failed" -- update_umr_task() only touches
+        # columns actually passed as kwargs, so reason=None here was itself
+        # the bug, not a no-op. _perform_spawn() now always returns a real
+        # "reason" string alongside a failed/rejected status (None for
+        # "running", which is not terminal and correctly left untouched).
+        spawn_reason = result.get("reason")
+        update_kwargs = {}
+        if result["status"] != "running":
+            update_kwargs["reason"] = spawn_reason or f"veridian_task_create dispatch resolved to status={result['status']!r} with no captured reason"
         with sbr._write_lock():
             sbr.update_umr_task(
                 conn, row["umr_id"], status=result["status"],
                 unit_name=result.get("unit_name") or row["unit_name"],
                 ts_dispatched=_now_iso(),
                 outputs=_orchestrator_output_contract(
-                    sbr, row["umr_id"], result["status"], None, result.get("outputs", {})),
+                    sbr, row["umr_id"], result["status"], update_kwargs.get("reason"), result.get("outputs", {})),
                 metric_snapshot=metrics,
+                **update_kwargs,
             )
             conn.commit()
         if result["status"] == "running":
@@ -2747,6 +3616,13 @@ def run_tick(max_dispatches=None, now=None):
     while max_dispatches is None or len(results["dispatches"]) < max_dispatches:
         r = dispatch_one(now=now)
         results["dispatches"].append(r)
+        # UMR-20260813-120054-4e66: real, per-tick journal instrumentation --
+        # see dispatch_core.log_dispatch_decision()'s own docstring for the
+        # full real gap this closes (journalctl showed nothing useful about
+        # WHY a tick dispatched nothing, even on the real unit that owns
+        # this real dispatch loop). Best-effort/fail-open inside that
+        # function itself -- never allowed to break a real tick.
+        _dispatch_core().log_dispatch_decision(r)
         if r["action"] not in ROW_RESOLVED_NON_DISPATCH_ACTIONS:
             break
     return results
@@ -2780,34 +3656,32 @@ def scan_stuck_tasks(now=None):
     Returns the list of actions actually taken this call (empty if nothing
     was stuck).
 
-    RCA fix (2026-08-13, UMR-20260813-231624-82d9, real incident
-    UMR-20260808-150937-43d0): task_kind='systemctl_action' rows are
-    deliberately EXCLUDED from this scan. _perform_spawn() already runs the
-    systemctl start/restart/reset-failed call to completion (blocking)
-    before this row is ever written status='running' -- there is no further
-    in-progress phase for this row to still be "stuck" in, unlike a
-    task_kind='veridian_task_create' row whose worker unit's uptime genuinely
-    tracks real work still executing. Before this fix, a systemctl_action
-    row's elapsed-time anchor was still `_unit_active_enter_timestamp(unit)`
-    -- the TARGET UNIT's own real uptime, not this row's own dispatch time.
-    For a persistent, always-on singleton daemon (Restart=on-failure/always,
-    e.g. veridian-superboss-gateway.service) that was already active well
-    past STUCK_TASK_TIMEOUT_SECONDS by the time a later "start" action on it
-    was dispatched (a real no-op: `systemctl start` on an already-active unit
-    returns 0 immediately), that stale anchor made the very next scan see a
-    healthy, intentionally-long-running daemon as instantly "stuck" and
-    SIGTERM/SIGKILL it within ~90s of dispatch -- confirmed live:
-    UMR-20260808-150937-43d0 (action=start, unit=
-    veridian-superboss-gateway.service, a singleton daemon created the day
-    before per its own unit file, Restart=on-failure) shows
-    ts_dispatched=15:09:45, ts_sigterm=15:10:16 (31s later, the very next
-    tick), ts_completed=15:11:18 (62s after SIGTERM, i.e. exactly
-    SIGTERM_TO_SIGKILL_GRACE_SECONDS later) -- no process ever actually hung;
-    the anchor timestamp itself was simply wrong for this task_kind. Same
-    task_kind-based carve-out already established for the same reason at
-    _stop_work_order_block_reason()'s own docstring above ("systemctl_action
-    rows ... do neither and are unaffected") -- this closes the equivalent
-    gap in the stuck-task scanner itself."""
+    Real fix (RCA, UMR-20260813-101757-f13c, live-reproduced incident,
+    UMR-20260808-150937-43d0): scoped to task_kind='veridian_task_create'
+    only. This whole SIGTERM/SIGKILL protocol assumes "running" means "an
+    ephemeral task unit that is expected to exit on its own within
+    STUCK_TASK_TIMEOUT_SECONDS of ITS OWN start" -- true for
+    veridian-worker@<task_id>.service units (Type=oneshot-ish, one task,
+    then exit), false for task_kind='systemctl_action' rows, whose
+    unit_name is often a persistent, always-on singleton daemon
+    (Restart=always/on-failure, WantedBy=default.target -- e.g.
+    veridian-superboss-gateway.service, veridian-glm-proxy.service,
+    veridian-governor-tick.service) that is SUPPOSED to keep running
+    forever. _perform_spawn() marks a systemctl_action row status="running"
+    the instant `systemctl start` returns 0 -- including when the unit was
+    ALREADY active, in which case _unit_active_enter_timestamp() reports
+    the timestamp of whenever it first started, which can trivially be
+    older than STUCK_TASK_TIMEOUT_SECONDS. That made this scan wrongly
+    conclude the row was "stuck" on its very next tick and SIGTERM/SIGKILL
+    (and, at line ~2565 below, disable) the real, healthy, always-on
+    gateway daemon -- confirmed live: UMR-20260808-150937-43d0 (a
+    registration-only "start veridian-superboss-gateway.service" row) was
+    SIGTERM'd 31s after dispatch and SIGKILL'd+disabled 60s after that, and
+    the real unit was still disabled/inactive 5 days later when this RCA
+    ran. systemctl_action rows have no "must exit" contract to police --
+    _perform_spawn() already resolves their real outcome synchronously
+    (status="running"/"failed" from the `systemctl start` returncode
+    itself) -- so they must never enter this ephemeral-task reaper at all."""
     now = now or _utcnow()
     # Real fix (independent review round 2, PR #20): see
     # _safe_superboss_register()'s own docstring. A broken/unavailable
@@ -2826,7 +3700,7 @@ def scan_stuck_tasks(now=None):
 
     running = conn.execute(
         "SELECT * FROM umr_tasks WHERE status='running' AND unit_name IS NOT NULL "
-        "AND task_kind != 'systemctl_action'"
+        "AND task_kind='veridian_task_create'"
     ).fetchall()
     for row in running:
         row = dict(row)
@@ -3937,8 +4811,138 @@ def clear_emergency_stop():
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# CLI resource guard (UMR-20260813-125756-9221)
 # ---------------------------------------------------------------------------
+
+class CliGuardTimeout(Exception):
+    """Raised in the main thread by _cli_guard_alarm_handler() when this CLI
+    invocation's own wall-clock ceiling (CLI_GUARD_WALL_CLOCK_SECONDS) is
+    exceeded. Caught only at the top level (main()'s own caller, below) so
+    every command gets the same real, loud failure -- never a silent hang."""
+
+
+def _cli_guard_alarm_handler(signum, frame):
+    raise CliGuardTimeout(
+        f"resource_governor.py CLI invocation exceeded its {CLI_GUARD_WALL_CLOCK_SECONDS}s "
+        "wall-clock ceiling (VERIDIAN_GOVERNOR_CLI_WALL_CLOCK_S) -- aborted rather than left "
+        "to hang. See PROGRESS.md / RCA for the 2026-08-13 PID 1685324 incident this guard "
+        "closes."
+    )
+
+
+def _read_self_rss_mb():
+    """Real resident set size of THIS process, in MB, read straight from
+    /proc/self/status VmRSS -- the same real metric (RSS, not VSZ) the PM
+    desktop sentinel's ps -o rss measurement used to characterize the
+    original incident, so the guard's ceiling is directly comparable to that
+    real evidence. Returns None if /proc/self/status is unreadable (e.g. a
+    non-Linux dev box) -- the RSS half of the guard degrades to a no-op in
+    that case, but the wall-clock half (signal.alarm) still applies."""
+    try:
+        with open("/proc/self/status", "r") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    kb = int(line.split()[1])
+                    return kb / 1024.0
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _cli_guard_rss_watchdog(stop_event, ceiling_mb):
+    """Background daemon thread: polls this process's own real RSS and, on
+    breach, fails loudly and HARD (os._exit, not sys.exit/an exception) --
+    deliberate, not an oversight. A Python exception raised from a
+    background thread does not propagate into the main thread; the only
+    reliable way for a watchdog thread to stop a main thread that is
+    ballooning memory (e.g. deep inside a C-level sqlite3 fetch) is to kill
+    the whole process itself. This mirrors the real, measured mechanism of
+    the incident this closes: sqlite3's C extension releases the GIL around
+    its own blocking C calls (sqlite3_step et al), which is exactly why this
+    thread can still run and observe real RSS growth while the main thread
+    is deep inside a large query -- confirmed against CPython's own
+    Modules/_sqlite/cursor.c (Py_BEGIN_ALLOW_THREADS around sqlite3_step()).
+    os._exit() (not sys.exit()) is deliberate too: it skips Python's normal
+    interpreter teardown/atexit machinery, which itself could allocate and
+    make a bad memory situation worse.
+
+    Real bug found and fixed while building this task's own before/after
+    benchmark harness: `while not stop_event.wait(interval): check()` waits
+    out the FULL interval before its very first check, so a fast, healthy
+    invocation that finishes inside one poll interval never gets checked at
+    all (confirmed: a deliberately absurd 1MB test ceiling did not fire
+    against a real, ~28MB, ~0.25s --query-umr run because the process had
+    already exited and set stop_event before the first wait() returned).
+    Checking once immediately, THEN entering the wait loop, closes that
+    race -- every real invocation, however short, gets at least one real
+    RSS sample."""
+    first = True
+    while first or not stop_event.wait(CLI_GUARD_POLL_INTERVAL_SECONDS):
+        first = False
+        rss_mb = _read_self_rss_mb()
+        if rss_mb is not None and rss_mb > ceiling_mb:
+            sys.stderr.write(json.dumps({
+                "error": (
+                    f"resource_governor.py CLI invocation exceeded its {ceiling_mb}MB resident "
+                    "memory ceiling (VERIDIAN_GOVERNOR_CLI_RSS_CEILING_MB) -- killed rather than "
+                    "left to balloon further. See PROGRESS.md / RCA for the 2026-08-13 PID "
+                    "1685324 incident this guard closes."
+                ),
+                "measured_rss_mb": round(rss_mb, 1),
+                "ceiling_mb": ceiling_mb,
+            }) + "\n")
+            sys.stderr.flush()
+            os._exit(137)  # 128 + SIGKILL(9), same convention as a real OOM kill exit code
+
+
+@contextlib.contextmanager
+def install_cli_resource_guard(wall_clock_seconds=None, rss_ceiling_mb=None):
+    """Real hard guard at the CLI entry point (main(), below), covering
+    EVERY resource_governor.py invocation, not only --query-umr -- the
+    incident class (a single CLI invocation ballooning memory and wedging
+    the box) is not specific to one flag, even though --query-umr is the
+    one real, measured instance found this run. Two independent real
+    mechanisms, because they catch different failure shapes:
+
+    1. Wall-clock (signal.alarm/SIGALRM, main-thread only): catches a
+       command that is simply taking too long, whether or not it is also
+       consuming excess memory (e.g. blocked on a lock, a slow disk).
+    2. Resident-memory ceiling (background thread polling real
+       /proc/self/status VmRSS): catches unbounded memory growth even
+       within the wall-clock budget -- see _cli_guard_rss_watchdog()'s own
+       docstring for why this can observe growth in the main thread and why
+       it hard-exits rather than raising.
+
+    Neither mechanism can un-wedge a process ALREADY stuck in kernel-side
+    memcg reclaim (D state) -- nothing at the Python level can (see this
+    guard's own module-level comment above CLI_GUARD_WALL_CLOCK_SECONDS).
+    Both are real, tested prevention: they fire well before RSS/wall-clock
+    reach that unrecoverable regime, using ceilings far above real healthy
+    usage but decisively below the incident's measured ~2GB/51+ minutes."""
+    wall_clock_seconds = CLI_GUARD_WALL_CLOCK_SECONDS if wall_clock_seconds is None else wall_clock_seconds
+    rss_ceiling_mb = CLI_GUARD_RSS_CEILING_MB if rss_ceiling_mb is None else rss_ceiling_mb
+
+    old_handler = None
+    stop_event = threading.Event()
+    watchdog = None
+    if wall_clock_seconds and hasattr(signal, "SIGALRM"):
+        old_handler = signal.signal(signal.SIGALRM, _cli_guard_alarm_handler)
+        signal.alarm(wall_clock_seconds)
+    if rss_ceiling_mb:
+        watchdog = threading.Thread(
+            target=_cli_guard_rss_watchdog, args=(stop_event, rss_ceiling_mb), daemon=True,
+            name="cli-resource-guard-rss-watchdog",
+        )
+        watchdog.start()
+    try:
+        yield
+    finally:
+        if wall_clock_seconds and hasattr(signal, "SIGALRM"):
+            signal.alarm(0)
+            if old_handler is not None:
+                signal.signal(signal.SIGALRM, old_handler)
+        stop_event.set()
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
@@ -3982,6 +4986,11 @@ def main():
     ap.add_argument("--status", default=None)
     ap.add_argument("--search", default=None, help="free-text FTS5 query over task_identity/source_trigger/logs_ref")
     ap.add_argument("--task-identity", dest="task_identity", default=None)
+    ap.add_argument("--full", action="store_true",
+                     help="UMR-20260813-125756-9221: include the large inputs_json/outputs_json/"
+                          "metadata_json/metric_snapshot_json blob columns in --query-umr's output "
+                          "(default: excluded -- see query_umr_tasks()'s own docstring in "
+                          "superboss-register.py for the real measured row sizes this default avoids)")
     ap.add_argument("--clear-emergency-stop", action="store_true")
     ap.add_argument("--check-task-start-gate", action="store_true",
                      help="UMR-20260808-121334-e122 (Option B): real, shared stop-work-order + "
@@ -4019,11 +5028,35 @@ def main():
     ap.add_argument("--move-down", dest="move_down", action="store_true",
                      help="swap a queued row (--umr-id) with its same-tier neighbor ranked "
                           "immediately below it")
+    ap.add_argument("--telemetry-retention", dest="telemetry_retention", action="store_true",
+                     help="UMR-20260813-125836-5809: real, bounded retention for the append-only "
+                          "TELEMETRY tables in superboss-register.sqlite (see "
+                          "TELEMETRY_RETENTION_TABLES -- umr_tasks is never touched). Dry run by "
+                          "default (reports real counts of what would be archived+removed, writes "
+                          "nothing); pass --execute to apply the real archive-then-delete. This same "
+                          "logic also runs automatically, at most once/24h, as Step 13 of "
+                          "_orchestrator_tick_maintenance() every real dispatch tick.")
     args = ap.parse_args()
 
     if args.clear_emergency_stop:
         clear_emergency_stop()
         print(json.dumps({"ok": True, "cleared": True}))
+        return
+
+    if args.telemetry_retention:
+        sbr, error = _safe_superboss_register("--telemetry-retention")
+        if error:
+            print(json.dumps({"error": error}))
+            sys.exit(1)
+        conn = sbr._connect()
+        try:
+            if args.execute:
+                result = telemetry_retention_execute(conn)
+            else:
+                result = telemetry_retention_plan(conn)
+        finally:
+            conn.close()
+        print(json.dumps(result, indent=2, default=str))
         return
 
     if args.check_task_start_gate:
@@ -4054,7 +5087,7 @@ def main():
         sbr._ensure_umr_table(conn)
         rows = sbr.query_umr_tasks(conn, limit=args.limit, status=args.status,
                                     task_identity=args.task_identity, query_text=args.search,
-                                    umr_id=args.umr_id)
+                                    umr_id=args.umr_id, full=args.full)
         # Point 2 (task-gateway.py audit-24-points, UMR-20260808-145030-f3d1):
         # this IS the other canonical query path (alongside task-gateway.py
         # status) -- log it. Best-effort: a broken log write must never break
@@ -4199,4 +5232,17 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # UMR-20260813-125756-9221: real hard guard wraps EVERY CLI invocation
+    # of this module -- see install_cli_resource_guard()'s own docstring for
+    # why (wall-clock + RSS ceiling, two independent real mechanisms) and
+    # the module-level comment above CLI_GUARD_WALL_CLOCK_SECONDS for the
+    # real incident evidence this closes. CliGuardTimeout is the one real
+    # exception type this guard can raise into the main thread (the RSS
+    # watchdog's own breach path hard-exits itself, see
+    # _cli_guard_rss_watchdog()'s own docstring, so it never reaches here).
+    try:
+        with install_cli_resource_guard():
+            main()
+    except CliGuardTimeout as exc:
+        print(json.dumps({"error": str(exc)}))
+        sys.exit(124)  # matches the real `timeout(1)` convention for "killed for timing out"

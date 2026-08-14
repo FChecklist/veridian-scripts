@@ -1,0 +1,43 @@
+# =============================================================================
+# Version-controlled reference copy of the LIVE, already-installed unit
+# (~/.config/systemd/user/veridian-cron-sync-repos.service) -- tracked here
+# for the first time under task-20260814-095433-make-both-live-checkouts-
+# auto-sync-after (UMR-20260814-095405-2b53), same "not yet tracked" gap
+# PR #175 already closed for unit #19 (prune-memory-backups). Same "no
+# automated deploy step for this directory" convention as every other file
+# here -- see systemd/README.md; a change here must still be copied to
+# ~/.config/systemd/user/<name> by hand, followed by
+# `systemctl --user daemon-reload`.
+#
+# This is unit #1 of the closed set (~/.config/systemd/user/README.md) --
+# NOT a new unit. Only the paired .timer's cadence changed (see that
+# file's own header); this .service's real content is unchanged from what
+# was already live. The live unit also carries a separately-managed
+# ~/.config/systemd/user/veridian-cron-sync-repos.service.d/override.conf
+# MemoryHigh=384M/MemoryMax=512M drop-in, intentionally NOT tracked here,
+# matching every other unit in this directory (see this directory's own
+# README.md STANDING RULE -- none of them track their own drop-in
+# overrides either).
+# =============================================================================
+[Unit]
+Description=VERIDIAN cron-replacement: Pull latest commits for all mirrored repos + the two live-running checkouts (claude-control, veridian-scripts)
+# 2026-07-29 cron-consolidation-phase6 (task-20260729, follows task-20260726-
+# 210339's dispatch/status consolidation). Root cause this migration fixes:
+# CRONTAB_BACKUP_BEFORE_OOM_PAUSE_2026-07-26.txt had ~19 jobs nearly all
+# aligned on minute-0 cron boundaries with no jitter and no shared
+# concurrency cap -- the real trigger of the 2026-07-26 OOM-kill/800% CPU
+# incident. This unit keeps run-logged.sh's existing instrumentation
+# unchanged (same job_name, same log path) -- only the scheduler changed.
+# ConditionPathExists below is the primary safety net requested for this
+# migration: resource_governor.py's own always-running tick loop
+# (veridian-governor-tick.service) writes this sentinel file and
+# load-sheds independently; this unit additionally refuses to even START
+# while the sentinel is present, which is stronger than dispatch-tick.py's
+# in-process check alone (no process spawn happens at all).
+ConditionPathExists=!/opt/veridian/ai-os/locks/resource-governor-EMERGENCY_STOP
+
+[Service]
+Type=oneshot
+ExecStart=/opt/veridian/scripts/run-logged.sh "sync-repos" /opt/veridian/scripts/sync-repos.sh
+StandardOutput=journal
+StandardError=journal

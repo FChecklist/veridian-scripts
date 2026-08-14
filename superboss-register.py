@@ -1283,6 +1283,36 @@ _TARGET_ID_SCRIPT_NAME_RE = re.compile(r'(?<![\w/.-])([A-Za-z0-9_-]+\.(?:py|sh))
 # resolution, above) already matches PR bodies against -- one real regex for
 # "what does a UMR id look like", not two independently-drifting ones.
 
+# UMR-20260814-010802-b566 real fix (live-deploy-drift-p0 reconciliation):
+# real incident, live 2026-08-14T01:16:15Z tick, veridian-pm-sentinel-tick-
+# cron.log -- this task's OWN dispatch row (a long, real evidence-dump
+# prompt that, like nearly every prompt this whole pipeline generates,
+# instructs the worker to "query resource_governor.py --query-umr ...
+# yourself first") was still `status=running` inside find_target_identifier_
+# duplicate()'s 4h/limit=30 window. Because _TARGET_ID_SCRIPT_NAME_RE
+# matches ANY bare `word.py`/`word.sh` token anywhere in free text with no
+# regard for whether it names the dispatch's real work TARGET or is just
+# instructional boilerplate citing this repo's own standing tooling, three
+# unrelated same-tick dispatches (the tick's own deploy-drift self-dispatch,
+# plus two independent compliance-tracker RCA dispatches that also cite
+# "resource_governor.py --query-umr" per pm-sentinel-tick.sh's own template)
+# were wrongly REFUSED as "duplicates" of this task, purely because both
+# sides' prompts happened to mention the same meta-tooling script name.
+# resource_governor.py and superboss-register.py are cited as the real,
+# standing query/mutation front doors in essentially every dispatch prompt
+# this codebase's own dispatch-owner-task.sh/pm-sentinel-tick.sh/dispatch-
+# tick.py pipeline generates (see e.g. pm-sentinel-tick.sh's own RCA
+# template) -- on their own, bare mentions of either name are never a real,
+# distinguishing work target the way a PR number, a real nested file path,
+# or another script's name is; a dispatch that genuinely targets one of
+# these two files' own code is still caught by _TARGET_ID_FILE_PATH_RE
+# (e.g. "scripts/resource_governor.py") or a cited PR number, so this is a
+# narrowing of one specific false-positive-prone signal, not a removal of
+# real coverage. Same "narrow, evidenced, real-incident-driven exclusion"
+# precedent already established by _DISCLOSURE_CITATION_RE above (Stage 6's
+# duplicate-PR guard).
+_TARGET_ID_SCRIPT_NAME_BOILERPLATE_EXCLUDED = {"resource_governor.py", "superboss-register.py"}
+
 
 def extract_target_identifiers(text, default_repo=None):
     """Real, deterministic (regex, no fuzziness) extraction of "target
@@ -1330,7 +1360,10 @@ def extract_target_identifiers(text, default_repo=None):
         ids.add(f"path:{m.group(0)}")
 
     for m in _TARGET_ID_SCRIPT_NAME_RE.finditer(text):
-        ids.add(f"script:{m.group(1)}")
+        name = m.group(1)
+        if name in _TARGET_ID_SCRIPT_NAME_BOILERPLATE_EXCLUDED:
+            continue
+        ids.add(f"script:{name}")
 
     return sorted(ids)
 

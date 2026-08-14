@@ -146,6 +146,45 @@ def test_extract_target_identifiers_umr_id():
     assert sbr.extract_target_identifiers("no umr id in this text") == []
 
 
+def test_extract_target_identifiers_excludes_boilerplate_meta_script_names():
+    """UMR-20260814-010802-b566 real fix (live-deploy-drift-p0
+    reconciliation): real incident, live 2026-08-14T01:16:15Z tick
+    (veridian-pm-sentinel-tick-cron.log) -- resource_governor.py and
+    superboss-register.py are cited as instructional tooling ("query
+    resource_governor.py --query-umr ... yourself first") in essentially
+    every prompt pm-sentinel-tick.sh/dispatch-tick.py generate, not as a
+    dispatch's own real work target. Before this fix, a bare mention of
+    either name anywhere in free text counted as a real "script:" target
+    identifier, so any two unrelated dispatches that both cited one of
+    these two names (nearly all of them) collided and the second was
+    wrongly REFUSED as a duplicate -- confirmed live: this task's own
+    long evidence-dump dispatch prompt (still status=running, well inside
+    find_target_identifier_duplicate()'s 4h/limit=30 window) caused THREE
+    unrelated same-tick dispatches (the tick's own deploy-drift self-check,
+    plus two independent compliance-tracker RCA dispatches) to be wrongly
+    refused this way in the same real tick."""
+    sbr = _load_sbr()
+    a = sbr.extract_target_identifiers(
+        "RCA: UMR-20260807-101603-d1bc killed. Read resource_governor.py "
+        "--query-umr --umr-id UMR-20260807-101603-d1bc yourself first, then "
+        "record a real outcome via superboss-register.py mark-umr-terminal.")
+    b = sbr.extract_target_identifiers(
+        "Reconcile live deploy drift. Read resource_governor.py --query-umr "
+        "yourself first, then record a real outcome via superboss-register.py "
+        "mark-umr-terminal.")
+    assert "script:resource_governor.py" not in a
+    assert "script:superboss-register.py" not in a
+    assert not (set(a) & set(b)), (a, b)
+
+    # Not over-broad: a real, distinguishing script name mentioned alongside
+    # these two meta-tools is still extracted -- only the two boilerplate
+    # names themselves are excluded, not script-name extraction as a whole.
+    ids = sbr.extract_target_identifiers(
+        "fix pm-sentinel-tick.sh's own bug, per resource_governor.py --query-umr")
+    assert "script:pm-sentinel-tick.sh" in ids
+    assert "script:resource_governor.py" not in ids
+
+
 def test_find_target_identifier_duplicate_pure_function(scratch_db):
     sbr = _seed_full_schema(scratch_db)
     _insert_row(scratch_db, "UMR-TEST-10c3-a248", status="running",

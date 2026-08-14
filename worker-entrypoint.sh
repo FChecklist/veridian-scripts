@@ -38,16 +38,49 @@ PROXY_URL="http://127.0.0.1:8787"  # proxy left running for its own balance-chec
 
 WORKER_BUDGET_CAP_USD="${VERIDIAN_WORKER_BUDGET_CAP_USD:-10}"
 
+# --- Lifetime invocation budget (2026-08-14 RCA fix, UMR-20260814-034225-3392) ---
+# INVARIANT: this counter must reflect REAL model invocations only. It used to be
+# incremented right here, at the very top of the script, before ANY preflight check
+# ran -- so a purely infrastructural preflight rejection (disk_low, memory_low,
+# worktree contention, ...) that never calls the model still permanently burned one
+# of these MAX_LIFETIME_INVOCATIONS slots, and systemd's Restart=on-failure retried
+# up to StartLimitBurst=3 times, each one charging another slot for zero work done.
+# Confirmed live 2026-08-14 (PM Sentinel): a host-level full-volume event rejected 11
+# tasks on guard reason disk_low; one of them
+# (task-20260718-171007-commercial--subscription---pricing-model) was already at
+# 18/20 lifetime invocations despite having NEVER actually executed a single model
+# call -- two more infra hiccups away from being permanently, silently unrunnable for
+# a condition the task itself had zero power to affect.
+#
+# Fix: the increment now happens ONLY once preflight has passed and a real model
+# call ($claude -p, below) is imminent -- see the LIFETIME-INVOCATION-CHARGE-BLOCK
+# right after PREFLIGHT-GUARD-BLOCK-END. The cap check here is unchanged in effect
+# (PRIOR_COUNT >= MAX is equivalent to the old NEW_COUNT > MAX), it just no longer
+# writes the file itself. Infrastructure rejections are now bounded on their OWN,
+# separate counter -- see MAX_INFRA_REJECTIONS/INFRA_REJECTION_COUNT_FILE below and
+# the transient branch inside PREFLIGHT-GUARD-BLOCK -- so a broken host still cannot
+# spin this task forever; it just no longer does so by draining the real
+# model-invocation budget to do it.
 MAX_LIFETIME_INVOCATIONS="${VERIDIAN_MAX_LIFETIME_INVOCATIONS:-20}"
 INVOCATION_COUNT_FILE="$TASK_DIR/.invocation_count"
 PRIOR_COUNT=$(cat "$INVOCATION_COUNT_FILE" 2>/dev/null || echo 0)
-NEW_COUNT=$((PRIOR_COUNT + 1))
-echo "$NEW_COUNT" > "$INVOCATION_COUNT_FILE"
-if [ "$NEW_COUNT" -gt "$MAX_LIFETIME_INVOCATIONS" ]; then
-  python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status blocked --note "PREVENTION CAP HIT: this task has been started/restarted $NEW_COUNT times (lifetime max $MAX_LIFETIME_INVOCATIONS) -- stopping to prevent an unbounded slow-drip retry loop across restarts, the same shape as the 2026-07-18 incident. Needs human review, not an automatic retry."
+if [ "$PRIOR_COUNT" -ge "$MAX_LIFETIME_INVOCATIONS" ]; then
+  python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status blocked --note "PREVENTION CAP HIT: this task has already made $PRIOR_COUNT real model invocations (lifetime max $MAX_LIFETIME_INVOCATIONS) -- stopping to prevent an unbounded slow-drip retry loop across restarts, the same shape as the 2026-07-18 incident. Needs human review, not an automatic retry."
   systemctl --user disable "veridian-worker@${TASK_ID}.service" >> "$TASK_DIR/worker.log" 2>&1 || true
   exit 0
 fi
+
+# --- Infrastructure-rejection budget (2026-08-14, separate from the above) ---
+# Bounds purely infrastructural preflight rejections (the transient branch inside
+# PREFLIGHT-GUARD-BLOCK below) on their OWN counter/cap/backoff, so a genuinely
+# broken host still cannot spin this task forever -- without that protection ever
+# again borrowing from the real model-invocation budget above. Deliberately a much
+# smaller cap than MAX_LIFETIME_INVOCATIONS: an infra rejection costs ~0 (no model
+# call), so there is no reason to give it 20 chances -- it exists only to stop a
+# genuinely wedged host from restart-storming this unit forever between systemd's
+# StartLimitBurst windows.
+MAX_INFRA_REJECTIONS="${VERIDIAN_MAX_INFRA_REJECTIONS:-5}"
+INFRA_REJECTION_COUNT_FILE="$TASK_DIR/.infra_rejection_count"
 
 WORKSPACE=$(python3 -c "import yaml; print(yaml.safe_load(open('$TASK_DIR/task.yaml'))['workspace'])")
 BRANCH=$(python3 -c "import yaml; print(yaml.safe_load(open('$TASK_DIR/task.yaml'))['branch'])")
@@ -120,14 +153,42 @@ if [ "$GUARD_EXIT" -ne 0 ]; then
     systemctl --user disable "veridian-worker@${TASK_ID}.service" >> "$TASK_DIR/worker.log" 2>&1 || true
     exit 0
   else
-    # Transient (disk/mem/proxy/worktree) -- let systemd's normal
-    # Restart=on-failure retry after RestartSec, still counted against the
-    # lifetime invocation cap above.
-    python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status failed --note "PRE-FLIGHT REJECTED ($GUARD_REASON, transient): $GUARD_DETAIL -- no model call made, no cost incurred"
+    # Transient (disk/mem/proxy/worktree) -- purely infrastructural, no model call
+    # was ever made. 2026-08-14 fix: bounded by its OWN counter/cap
+    # (MAX_INFRA_REJECTIONS above), NOT the lifetime model-invocation cap -- see the
+    # header comment on that counter. Backoff grows with the infra-rejection count so
+    # a persistently-broken host still can't hot-loop inside systemd's
+    # StartLimitBurst window even while under its own cap.
+    INFRA_PRIOR_COUNT=$(cat "$INFRA_REJECTION_COUNT_FILE" 2>/dev/null || echo 0)
+    INFRA_NEW_COUNT=$((INFRA_PRIOR_COUNT + 1))
+    echo "$INFRA_NEW_COUNT" > "$INFRA_REJECTION_COUNT_FILE"
+    if [ "$INFRA_NEW_COUNT" -gt "$MAX_INFRA_REJECTIONS" ]; then
+      # Same shape as the hard-stop branch above: stop letting systemd retry this,
+      # a human needs to look at host health. Lifetime model-invocation counter is
+      # still untouched -- this task's real MAX_LIFETIME_INVOCATIONS budget is
+      # exactly as fresh as it was before the host ever had a problem.
+      python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status blocked --note "INFRASTRUCTURE-REJECTION CAP HIT ($GUARD_REASON): $GUARD_DETAIL -- rejected $INFRA_NEW_COUNT times on purely infrastructural grounds (infra cap $MAX_INFRA_REJECTIONS); lifetime model-invocation counter is UNCHANGED, still $PRIOR_COUNT/$MAX_LIFETIME_INVOCATIONS, since no model call has ever been made by this rejection path. Stopping to prevent an unbounded infra-retry loop against a broken host. Needs human review of host health (or a raised VERIDIAN_MAX_INFRA_REJECTIONS override), not an automatic retry."
+      systemctl --user disable "veridian-worker@${TASK_ID}.service" >> "$TASK_DIR/worker.log" 2>&1 || true
+      exit 0
+    fi
+    # Let systemd's normal Restart=on-failure retry after RestartSec -- counted
+    # against the infra-rejection cap above ONLY, never the lifetime
+    # model-invocation cap (that is charged below, only once preflight passes).
+    python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status failed --note "PRE-FLIGHT REJECTED ($GUARD_REASON, transient, infra-rejection $INFRA_NEW_COUNT/$MAX_INFRA_REJECTIONS): $GUARD_DETAIL -- no model call made, no cost incurred, lifetime invocation counter NOT charged (still $PRIOR_COUNT/$MAX_LIFETIME_INVOCATIONS)"
+    sleep "$((INFRA_NEW_COUNT * 5))"
     exit 1
   fi
 fi
 # --- PREFLIGHT-GUARD-BLOCK-END
+
+# --- LIFETIME-INVOCATION-CHARGE-BLOCK-START (tests/preflight_guard_hardstop_test.sh
+# extracts this too, alongside PREFLIGHT-GUARD-BLOCK, to prove the charge only
+# happens on this path) -- preflight has passed, a real model call is now imminent.
+# THIS is the one and only place the lifetime invocation counter is written; see the
+# 2026-08-14 header comment above MAX_LIFETIME_INVOCATIONS for why.
+NEW_COUNT=$((PRIOR_COUNT + 1))
+echo "$NEW_COUNT" > "$INVOCATION_COUNT_FILE"
+# --- LIFETIME-INVOCATION-CHARGE-BLOCK-END
 
 python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status in_progress --note "worker started (resume=$IS_RESUME, lifetime invocation $NEW_COUNT/$MAX_LIFETIME_INVOCATIONS, pre-flight passed)"
 

@@ -124,10 +124,18 @@ Query shape `find_target_identifier_duplicate()` actually issues
   idx_umr_tasks_ts` -- direct index walk in the exact order needed, stops at
   30 rows, no temp b-tree, only 1 of 4 blob columns touched per row.
 
+Full repo suite result: `727 passed, 2 failed` in 175.88s. Both failures are
+pre-existing and unrelated (confirmed via `git stash` + re-run against the
+unmodified branch, same 2 failures, same error): `test_build_lock_liveness_
+guard_deployment.py::test_timer_is_really_enabled_and_active` (real systemd
+timer state on this box) and `test_stop_work_order_gate.py::test_dispatch_
+one_defense_in_depth_blocks_preexisting_queued_row` (live worker-cap
+contention: `running_worker_count: 5, cap: 5` on this box at test time).
+Zero regressions from this change.
+
 ## Remaining
 
-- [ ] Confirm full repo test suite result (running in background at time of
-      writing; will update this line with pass/fail once it returns).
-- [ ] Record completion via `agent_work_briefing.py record-completion`
-      once the above is confirmed clean.
+- [x] Confirm full repo test suite result -- done, see above (2 pre-existing
+      unrelated failures, 0 regressions).
+- [ ] Record completion via `agent_work_briefing.py record-completion`.
 - [ ] Commit + push.

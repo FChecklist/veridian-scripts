@@ -41,13 +41,75 @@ Supersedes: UMR-20260814-125933-3377 (self-rejected as rejected_duplicate; real 
   -> queue-submit -> execute -> validate pipeline order (documentation
   only, no mechanism change).
 
+## MAJOR FINDING (2026-08-14): the SPEC's ITEM 1 "redo the diff" premise is FALSE
+Checked PR#298's own close comment + timeline (not just state/mergedAt) --
+something the SPEC evidently did not do:
+  `gh api repos/FChecklist/veridian-scripts/issues/298/timeline`
+PR#298's real close comment (2026-08-13T14:09:29Z, by FChecklist):
+"Superseded by #299, which now carries this PR's full content forward as a
+strict superset (script + tests + these systemd units, verified
+byte-identical via diff -- commit 5e3eeeb on #299 restored the two systemd
+files this PR added that #299's earlier squash had dropped) ... Real
+verification before closing: fresh clone of #299's branch, full
+test_pm_sentinel_tick.py suite, 6/6 passed."
+Confirmed independently: PR#299 is real, MERGED 2026-08-13T18:49:15Z
+(commit ae48cf0), contains exactly pm-sentinel-tick.sh + systemd unit +
+timer + test_pm_sentinel_tick.py, and IS on origin/main (`git log
+origin/main -- pm-sentinel-tick.sh` shows ae48cf0, plus 2 further already-
+merged fix commits since: 7dac937 #323, f9b4101 #341). The 696-line diff
+did NOT "never land" -- it landed via #299, and has been maintained since.
+A prior, unrelated task chain (UMR-20260813-145511-5aca /
+UMR-20260813-170956-5385, commit b22bf55, 2026-08-14T00:20:52+05:30)
+already independently found and documented this same "SPEC premise false,
+real fix on PR#299" conclusion in PROGRESS.md, BEFORE UMR-20260814-125933-
+3377 was even created -- that finding was evidently missed/not searched
+for by whoever wrote today's SPEC/UMR-20260814-125933-3377's prompt text.
+
+Consequence: reopening PR#298 or redoing its diff on a fresh branch would
+be pure duplicate, wasted work. NOT done, on purpose, with this evidence
+recorded here. Per this task's own DONE CRITERIA wording -- "PR#298's real
+state changes ... (or a real successor merged in its place)" -- PR#299 IS
+that real successor, already merged, already satisfying this criterion.
+
+This also means the item-1 heuristic fix needed one more real refinement
+beyond the SPEC's literal ask (which itself assumed CLOSED-unmerged always
+means "real open gap" -- also not universally true): CLOSED-without-merge
+must NOT block by itself, UNLESS the PR's own close comment names a real,
+MERGED successor (exactly PR#298's real case) -- see
+_closed_pr_superseded_by_merged_pr() added to resource_governor.py, with
+6 new/revised tests (18/18 pass in tests/test_target_pr_dispatch_time_recheck.py).
+
+## Completed (continued)
+- [x] Corrected the stale register row: UMR-20260813-102459-10c3 was
+  status=completed_unmerged citing PR#298 (open, not merged) -- corrected
+  via `superboss-register.py mark-umr-terminal --status completed
+  --commit-sha ae48cf005e522e7b3be4f1ab7bedb87620c357c4 --pr-number 299`,
+  now reflects the real merged state.
+- [x] Enhanced the target_pr_already_resolved() fix with
+  _closed_pr_superseded_by_merged_pr(): a CLOSED PR whose own close
+  comment cites a real MERGED successor still blocks (correctly, for the
+  real reason) -- prevents the narrow CLOSED-unblock fix from itself
+  becoming a false-non-rejection for exactly PR#298's real shape. 6 new/
+  revised tests, 18/18 total pass.
+- [x] Ran test_pm_sentinel_tick.py against current origin/main HEAD to
+  attempt a fresh, real AUDIT:PASS artifact for PR#299 (no AUDIT:PASS
+  comment exists on record for #299 -- only an AUDIT:FAIL at an earlier
+  head SHA b6fbed3, before 3 more already-merged fix commits landed on
+  top). Result: see next progress update (run was in progress at last
+  save).
+
 ## Remaining
-- [ ] Determine why PR#298 was closed (close comment / CI / review) and
-  either reopen+rebase or redo the 696-line diff on a fresh branch.
-- [ ] Get fresh AUDIT:PASS matching head, merge.
-- [ ] Update superboss-register row(s) for UMR-20260813-102459-10c3 (real
-  merged PR, not completed_unmerged) and UMR-20260814-125933-3377.
-- [ ] Commit + push this heuristic fix (resource_governor.py +
-  tests/test_target_pr_dispatch_time_recheck.py) as a first meaningful unit.
+- [ ] Post a real audit comment (PASS or accurately whatever the real
+  result is -- do not fabricate) on PR#299 citing current origin/main
+  HEAD, with real test-execution evidence, to close the "fresh AUDIT:PASS
+  matching head" done-criterion for real.
+- [ ] UMR-20260814-125933-3377 itself is already terminal
+  (status=rejected_duplicate) -- mark-umr-terminal only accepts
+  {completed,completed_unmerged,failed,killed}, so its row is not
+  rewritten (it was a correct real-world auto-rejection, just for an
+  incomplete reason at the time); this task's own commits/progress file
+  are the citation that supersedes it, per the SPEC's own instruction.
 - [ ] record-completion write-back to agent_work_briefing.py for
   UMR-20260814-132703-a1f9.
+- [ ] Final commit + push of any remaining changes (register corrections
+  are DB writes, not repo diffs -- no commit needed for those).

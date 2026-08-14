@@ -42,11 +42,12 @@
       `gh pr view 360` -- state OPEN, real files: progress_completion_gate.py,
       worker-entrypoint.sh, tests/test_progress_completion_gate.py, plus this
       progress doc.
-- [ ] Record completion via agent_work_briefing.py record-completion for
-      UMR-20260814-070059-6484.
+- [x] Recorded completion via agent_work_briefing.py record-completion for
+      UMR-20260814-070059-6484 (AGENT-20260814-070059-6484).
 
 ## Remaining
-- [ ] Await Tier-1 audit of PR #360 (no self-certification).
+- [ ] Await Tier-1 audit of PR #360 (no self-certification -- per SPEC, a separate
+      audit will verify).
 
 ## Real test output (python3 -m pytest tests/test_progress_completion_gate.py -v)
 

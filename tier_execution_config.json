@@ -1,0 +1,34 @@
+{
+  "_comment": "task-20260814-135001 / UMR-20260814-131248-baed (real fix for PR #374's AUDIT:FAIL policy-conflict finding, superseding task-20260814-131322's original aider-chat+litellm+OpenRouter/GLM-5.2 design): the ONE real, single-source-of-truth tier -> execution-backend config, read by both task-gateway.py's execution_path_for_tier()/tier_execution_settings() and dispatch-owner-task.sh's own local fallback. This file exists so the system stays AI-model-agnostic BY DESIGN -- the tier->model mapping is data here, never hardcoded in a caller -- even though, per Owner directive (live chat, 2026-08-14), the ONLY real execution_path allowed to run on this server right now is a claude_code_cli variant (via the existing Claude Code CLI subscription). OpenRouter/GLM-5.2 caused a real credit-exhaustion outage (SUPERBOSS_DISPATCH_PROMPT.md's 2026-07-18 CRITICAL FIX: 'Claude Code CLI via the subscription plan is the sole execution engine for every worker/supervisor/superboss role on this server -- no other AI model, per Owner directive 2026-07-18'). Do not add a non-claude_code_cli* execution_path here, and do not add OPENROUTER_API_KEY/ANTHROPIC_BASE_URL/a raw Anthropic API key to any caller of this config, without a fresh Owner confirmation.",
+  "default_execution_path": "claude_code_cli",
+  "tiers": {
+    "0": {
+      "execution_path": "claude_code_cli",
+      "_note": "unchanged -- interactive tmux relay to a live claude_code_cli session, see dispatch-owner-task.sh step 5a"
+    },
+    "1": {
+      "execution_path": "claude_code_cli",
+      "_note": "unchanged -- interactive tmux relay to a live claude_code_cli session, see dispatch-owner-task.sh step 5a"
+    },
+    "2": {
+      "execution_path": "claude_code_cli",
+      "_note": "unchanged -- interactive tmux relay to a live claude_code_cli session, see dispatch-owner-task.sh step 5a"
+    },
+    "3": {
+      "execution_path": "claude_code_cli_headless",
+      "_note": "cheaper/faster path: a single non-interactive 'claude -p ... --output-format json' invocation (dispatch-owner-task.sh step 5b), never aider/litellm/OpenRouter. model is the real Claude Code CLI --model value (full model id, not an alias, so a caller never has to guess which alias the CLI build on this box resolves) -- same subscription, just a cheaper/faster model tier than tier 0-2's default.",
+      "model": "claude-haiku-4-5-20251001",
+      "effort": "low",
+      "timeout_seconds": 900,
+      "max_budget_usd": 1.5
+    },
+    "4": {
+      "execution_path": "claude_code_cli_headless",
+      "_note": "cheaper/faster path: a single non-interactive 'claude -p ... --output-format json' invocation (dispatch-owner-task.sh step 5b), never aider/litellm/OpenRouter. model is the real Claude Code CLI --model value (full model id, not an alias, so a caller never has to guess which alias the CLI build on this box resolves) -- same subscription, just a cheaper/faster model tier than tier 0-2's default.",
+      "model": "claude-haiku-4-5-20251001",
+      "effort": "low",
+      "timeout_seconds": 900,
+      "max_budget_usd": 1.5
+    }
+  }
+}

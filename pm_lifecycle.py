@@ -687,10 +687,24 @@ def run_full_cycle(args):
         print(json.dumps(report, indent=2, default=str))
         return 0
 
-    if classify.get("duplicate_found"):
-        report["refused"] = "duplicate_found -- see classify.duplicate_evidence"
-        print(json.dumps(report, indent=2, default=str))
-        return 1
+    # Real fix (found live-running this exact command, task-20260814-183228):
+    # task-gateway.py submit's own "duplicate_found" is a *reuse-candidate*
+    # signal (superboss-register.py check-duplicate searches system_index/
+    # wiring_registry/knowledge_engine/capability_registry for an existing
+    # MECHANISM that might already do this -- see that function's own
+    # docstring, "search ... BEFORE building something new") -- it is
+    # advisory, not an ask-level duplicate guard, and is true for nearly
+    # every real, well-scoped task in this densely-registered codebase (any
+    # task that cites existing files/scripts by name, as a well-informed
+    # task should). dispatch-owner-task.sh itself never gates on this field
+    # either -- it has its own two, narrower, real duplicate guards
+    # (check-content-duplicate: byte-identical text within 6h;
+    # check-target-identifier-duplicate: same UMR/PR/file/script target
+    # within 4h), both already enforced inside dispatch_task() below (a real
+    # "REFUSED" in its stdout surfaces as outcome="refused"). This
+    # orchestrator surfaces classify's reuse candidates in the report for a
+    # PM to see, but never refuses dispatch on them alone.
+    report["reuse_candidates_found"] = bool(classify.get("duplicate_found"))
 
     # Step 3
     prompt = build_tightened_prompt(

@@ -80,5 +80,11 @@
       reported as measured, not adjusted to hit the target.
 
 ## Remaining
-- [ ] Final commit + push
-- [ ] record-completion call to agent_work_briefing.py
+- [x] Final commit + push
+- [x] Opened PR #385 (FChecklist/veridian-scripts,
+      worker/task-20260814-180958-measure-real-token-usage-before-after-di -> main)
+- [x] record-completion call to agent_work_briefing.py -- ai_agent_registry
+      entry written; umr_tasks status left untouched (interim call, per
+      record-completion's own documented behavior) since commit 33735a7 is
+      not yet an ancestor of origin/main (PR #385 still open) -- will
+      re-run with --umr-status completed once merged.

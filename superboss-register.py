@@ -82,6 +82,7 @@ import fcntl
 import hashlib
 import json
 import os
+import random
 import re
 import secrets
 import sqlite3
@@ -295,9 +296,76 @@ def _new_id(prefix):
     return f"{prefix}-{ts}-{rand}"
 
 
+# 2026-08-14 (real fix, addendum to P1 UMR-20260806-171945-5767 / owner-approved,
+# OWNER_DECISIONS_NEEDED_2026-07-23.yaml id=crontab-drift-approved-2026-08-14): the
+# `PRAGMA busy_timeout=30000` below already makes SQLite itself retry lock acquisition
+# for up to 30s per attempt, but a real stuck process was found earlier holding the
+# write lock for 17+ minutes -- far past that 30s budget -- which crashed dispatch
+# attempts outright with "database is locked" instead of retrying. RetryConnection
+# wraps every write operation (execute/executemany/executescript/commit) that goes
+# through this script's one real `_connect()` choke point (see the CANONICAL SCRIPT
+# note at the top of this file) with real retry-with-backoff on top of the PRAGMA
+# busy_timeout, so a long lock hold degrades to a slow retry instead of a crashed
+# dispatch attempt. Only "database is locked"/"database is busy" OperationalErrors
+# are retried -- any other error (schema error, constraint violation, etc.) still
+# raises immediately, unretried.
+_SQLITE_LOCKED_RETRY_MAX_TOTAL_WAIT = 1200.0  # seconds (20 min) -- real incident held
+# the lock 17+ minutes; this ceiling is set to comfortably exceed that, not just the
+# observed case. Bounded, not infinite: once the total wait budget is exhausted the
+# real OperationalError is raised (a stuck lock is a real incident to surface, not to
+# retry forever).
+_SQLITE_LOCKED_RETRY_BASE_DELAY = 0.5   # seconds, first backoff delay
+_SQLITE_LOCKED_RETRY_MAX_DELAY = 20.0   # seconds, backoff cap per attempt
+
+
+def _is_locked_error(exc):
+    msg = str(exc).lower()
+    return "database is locked" in msg or "database is busy" in msg
+
+
+def _retry_on_locked(fn, *args, **kwargs):
+    start = time.monotonic()
+    attempt = 0
+    while True:
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.OperationalError as e:
+            elapsed = time.monotonic() - start
+            if not _is_locked_error(e) or elapsed >= _SQLITE_LOCKED_RETRY_MAX_TOTAL_WAIT:
+                raise
+            delay = min(
+                _SQLITE_LOCKED_RETRY_MAX_DELAY,
+                _SQLITE_LOCKED_RETRY_BASE_DELAY * (2 ** attempt),
+            ) + random.uniform(0, _SQLITE_LOCKED_RETRY_BASE_DELAY)
+            delay = min(delay, max(0.0, _SQLITE_LOCKED_RETRY_MAX_TOTAL_WAIT - elapsed))
+            if delay <= 0:
+                raise
+            time.sleep(delay)
+            attempt += 1
+
+
+class RetryConnection(sqlite3.Connection):
+    """sqlite3.Connection whose write-shaped methods retry-with-backoff on a real
+    'database is locked'/'database is busy' OperationalError, on top of (not instead
+    of) the PRAGMA busy_timeout set on every connection this script opens. See the
+    2026-08-14 note above _connect() for why this exists."""
+
+    def execute(self, *args, **kwargs):
+        return _retry_on_locked(super().execute, *args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        return _retry_on_locked(super().executemany, *args, **kwargs)
+
+    def executescript(self, *args, **kwargs):
+        return _retry_on_locked(super().executescript, *args, **kwargs)
+
+    def commit(self, *args, **kwargs):
+        return _retry_on_locked(super().commit, *args, **kwargs)
+
+
 def _connect():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = sqlite3.connect(DB_PATH, timeout=30, factory=RetryConnection)
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row

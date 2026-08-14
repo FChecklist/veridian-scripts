@@ -16,11 +16,13 @@ Every test uses a real, isolated, temp-dir git repository -- never the live
 production workspace, same convention as this repo's other git-backed
 tests.
 """
+import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, SCRIPTS_DIR)
@@ -517,6 +519,197 @@ class TestCompletionGateRejectsDocOnlyDiff(unittest.TestCase):
 
             ok, reason = gate.check_completion(task_dir, ws, "main")
             self.assertTrue(ok, reason)
+
+
+class TestCrossRepoPrEvidence(unittest.TestCase):
+    """Real regression coverage for UMR-20260814-070059-6484 -- the real
+    victim, task-20260814-060148, was rejected by this gate even though it
+    genuinely succeeded: its real code fix + 8 passing tests landed as a PR
+    in a DIFFERENT repo (veridian-scripts) than its own task branch's repo
+    (claude-control). Covers the three required cases: code changed on the
+    task branch (accept, via TestCompletionGateRejectsDocOnlyDiff above), no
+    code changed anywhere (reject), and no code on the task branch but a
+    real PR with code in another repo (accept)."""
+
+    TASK_ID = "task-20260814-060148-close-two-superseded-duplicate-guard-bra"
+
+    def _make_task(self, tmp, prompt_text, result_text=None):
+        task_dir = os.path.join(tmp, self.TASK_ID)
+        os.makedirs(task_dir, exist_ok=True)
+        with open(os.path.join(task_dir, "prompt.txt"), "w") as f:
+            f.write(prompt_text)
+        if result_text is not None:
+            with open(os.path.join(task_dir, "result.json"), "w") as f:
+                json.dump({"result": result_text}, f)
+        return task_dir
+
+    def _make_workspace(self, tmp):
+        """A task-branch workspace that never touches the named file --
+        exactly task-20260814-060148's real shape (only progress/doc
+        artifacts committed on its own claude-control branch)."""
+        ws = os.path.join(tmp, "ws")
+        init_repo(ws)
+        with open(os.path.join(ws, "PROGRESS.md"), "w") as f:
+            f.write("## Completed\n## Remaining\n")
+        run(ws, "add", "-A")
+        run(ws, "commit", "-q", "-m", "seed")
+        run(ws, "update-ref", "refs/remotes/origin/main", "HEAD")
+        run(ws, "checkout", "-q", "-b", f"worker/{self.TASK_ID}")
+        with open(os.path.join(ws, "close_comment_pr342.md"), "w") as f:
+            f.write("closed as redundant, see PR 356\n")
+        run(ws, "add", "-A")
+        run(ws, "commit", "-q", "-m", "close superseded PRs (doc-only on this branch)")
+        return ws
+
+    PROMPT = (
+        "Fix the over-broad guard in "
+        "tests/test_duplicate_guard_over_broad_false_positives.py."
+    )
+
+    def test_no_code_changed_anywhere_is_rejected(self):
+        """No task-branch code, no result.json at all -- nothing to find gh
+        evidence from either -- must reject exactly as before this fix."""
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = self._make_task(tmp, self.PROMPT)
+            ws = self._make_workspace(tmp)
+
+            ok, reason = gate.check_completion(task_dir, ws, "main")
+            self.assertFalse(ok, reason)
+            self.assertIn("test_duplicate_guard_over_broad_false_positives.py", reason)
+
+    def test_self_declared_pr_claim_without_gh_confirmation_is_rejected(self):
+        """A PR URL is cited in result.json's own prose, but `gh pr view`
+        (mocked here to simulate the PR not really existing / gh being
+        unavailable) returns nothing -- a bare mention is never enough."""
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = self._make_task(
+                tmp, self.PROMPT,
+                result_text=(
+                    "Follow-up PR opened: "
+                    "https://github.com/FChecklist/veridian-scripts/pull/356 "
+                    f"for {self.TASK_ID}."
+                ),
+            )
+            ws = self._make_workspace(tmp)
+
+            with mock.patch.object(gate, "_gh_pr_view", return_value=None):
+                ok, reason = gate.check_completion(task_dir, ws, "main")
+            self.assertFalse(ok, reason)
+
+    def test_real_pr_not_correlated_to_this_task_is_rejected(self):
+        """`gh` confirms the PR really exists and carries real code, but
+        neither its body nor its branch name mentions THIS task_id -- e.g.
+        the task's summary merely cited someone else's unrelated PR. Must
+        still reject: correlation to this task is real evidence, a bare
+        citation is not."""
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = self._make_task(
+                tmp, self.PROMPT,
+                result_text=(
+                    "See https://github.com/FChecklist/veridian-scripts/pull/356 "
+                    "for related context."
+                ),
+            )
+            ws = self._make_workspace(tmp)
+
+            fake_pr = {
+                "number": 356,
+                "state": "OPEN",
+                "body": "Unrelated follow-up, no governing task cited.",
+                "headRefName": "fix/unrelated-cleanup",
+                "url": "https://github.com/FChecklist/veridian-scripts/pull/356",
+                "files": [{"path": "resource_governor.py"}],
+            }
+            with mock.patch.object(gate, "_gh_pr_view", return_value=fake_pr):
+                ok, reason = gate.check_completion(task_dir, ws, "main")
+            self.assertFalse(ok, reason)
+
+    def test_real_correlated_pr_with_no_code_files_is_rejected(self):
+        """`gh` confirms the PR really exists and is really this task's own
+        (task_id in its body), but its own real `files` list contains only
+        doc/progress artifacts -- no real code landed anywhere. Must still
+        reject."""
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = self._make_task(
+                tmp, self.PROMPT,
+                result_text=(
+                    "Opened https://github.com/FChecklist/veridian-scripts/pull/356 "
+                    f"-- Governing task: {self.TASK_ID}."
+                ),
+            )
+            ws = self._make_workspace(tmp)
+
+            fake_pr = {
+                "number": 356,
+                "state": "OPEN",
+                "body": f"Governing task: {self.TASK_ID}.",
+                "headRefName": "fix/stage6-citation-only",
+                "url": "https://github.com/FChecklist/veridian-scripts/pull/356",
+                "files": [{"path": "PROGRESS.md"}, {"path": "progress/notes.md"}],
+            }
+            with mock.patch.object(gate, "_gh_pr_view", return_value=fake_pr):
+                ok, reason = gate.check_completion(task_dir, ws, "main")
+            self.assertFalse(ok, reason)
+
+    def test_real_cross_repo_pr_with_code_is_accepted(self):
+        """The real victim shape: task branch (claude-control) never touches
+        the named file, but a real, gh-confirmed PR in a DIFFERENT repo
+        (veridian-scripts), really opened by this task (task_id in its
+        body), really carries a non-progress code file. Must accept."""
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = self._make_task(
+                tmp, self.PROMPT,
+                result_text=(
+                    "Follow-up PR opened: "
+                    "[veridian-scripts#356](https://github.com/FChecklist/veridian-scripts/pull/356) "
+                    "-- carries only that helper, its Stage 6 wiring, and two "
+                    "dedicated regression tests (8/8 pass). "
+                    f"Governing task: {self.TASK_ID}."
+                ),
+            )
+            ws = self._make_workspace(tmp)
+
+            fake_pr = {
+                "number": 356,
+                "state": "OPEN",
+                "body": f"Small follow-up.\n\nGoverning task: {self.TASK_ID}.",
+                "headRefName": "fix/stage6-citation-only-query-title-umr-20260814-060148",
+                "url": "https://github.com/FChecklist/veridian-scripts/pull/356",
+                "files": [
+                    {"path": "resource_governor.py"},
+                    {"path": "tests/test_dupguard_overbroad_scope_fix.py"},
+                ],
+            }
+            with mock.patch.object(gate, "_gh_pr_view", return_value=fake_pr) as mocked:
+                ok, reason = gate.check_completion(task_dir, ws, "main")
+            self.assertTrue(ok, reason)
+            self.assertIn("veridian-scripts#356", reason)
+            mocked.assert_called_once_with("FChecklist", "veridian-scripts", 356)
+
+            with mock.patch.object(gate, "_gh_pr_view", return_value=fake_pr):
+                rc = gate.main([
+                    "check-completion",
+                    "--task-dir", task_dir,
+                    "--workspace", ws,
+                    "--default-branch", "main",
+                ])
+            self.assertEqual(rc, 0)
+
+    def test_extract_pr_references_dedupes_and_ignores_bare_numbers(self):
+        text = (
+            "See https://github.com/FChecklist/veridian-scripts/pull/356 "
+            "and again https://github.com/FChecklist/veridian-scripts/pull/356, "
+            "also PR 342 (bare, no URL) and "
+            "https://github.com/FChecklist/claude-control/pull/203."
+        )
+        refs = gate.extract_pr_references(text)
+        self.assertEqual(
+            refs,
+            [
+                ("FChecklist", "veridian-scripts", 356),
+                ("FChecklist", "claude-control", 203),
+            ],
+        )
 
 
 class TestRollupIsDeterministicAndGenerated(unittest.TestCase):

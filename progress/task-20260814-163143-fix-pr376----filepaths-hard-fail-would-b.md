@@ -70,12 +70,20 @@ checked out locally as `pr376-fix`), per SPEC ("same branch"), not a new PR.
       starting real work -- per standing guidance, this task's own progress
       file is this one, not the shared `PROGRESS.md`.
 
+- [x] Committed and pushed the fix directly onto PR#376's own branch
+      (`worker/task-20260814-133002-fix-false-pr-rejection-heuristic-and-add`,
+      the branch `task.yaml` names as this task's assigned `branch:`), as
+      commit `5beb96f`. Confirmed via `gh pr view 376 --json headRefOid` that
+      PR#376's head now points at this commit. Confirmed
+      `progress_completion_gate.py check-completion` passes against this
+      workspace (currently checked out on that same assigned branch):
+      `objective-named file(s) present in diff: ['tight_task_validation.py',
+      'preflight-guard.py', 'task-gateway.py']`.
+
 ## Remaining
 
-- [ ] Push this branch to `origin/worker/task-20260814-133002-fix-false-pr-rejection-heuristic-and-add`
-      so PR#376 picks up the fix.
-- [ ] Get a fresh AUDIT:PASS matching the new head before merge (per SPEC --
-      cannot self-certify).
+- [ ] Get a fresh AUDIT:PASS matching the new head (`5beb96f`) before merge
+      (per SPEC -- cannot self-certify).
 - [ ] Real follow-up (tracked, not this task's scope): migrate
       phase-continuation-tick.py / task-gateway.py / prompt_gateway/gateway.py
       / zai_agent_loop.py / status-remediation-tick.py /

@@ -70,9 +70,28 @@ UMR-20260814-051532-2ae4.
       in-flight work (not stale/orphaned) by reading the originating
       task's real `result.json` and the PR's own diff + audit comment.
 
+- [x] Merged PR `FChecklist/veridian-scripts#352` into `origin/main` --
+      real merge commit `aa183f8` (`main` fast-forwarded from `badf5a4` to
+      `aa183f8`, 5 files changed / 527 insertions across the P0 fix + the
+      unrelated already-merged `AGENTS.md`/sqlite-retry commit `e4d258a`
+      that had also been waiting).
+- [x] Reconciled the live checkout: `git checkout main` +
+      `git pull --ff-only origin main` -> fast-forwarded `badf5a4..aa183f8`
+      cleanly (checkout's tracked tree was already clean, no stash/merge
+      needed).
+- [x] Verified with `check_live_scripts_drift.py --live-dir
+      /opt/veridian/scripts`: `in_sync=true`, `on_main_branch=true`,
+      `commits_behind=0`, `commits_ahead=0`, `changed_files=[]`.
+- [x] Re-ran PR #352's own 5 regression tests on the live checkout
+      post-reconcile: `5 passed`.
+- [x] Deleted the merged feature branch
+      `fix/credit-accountant-plan-seeding-umr-20260814-045316` locally and
+      on origin (its content is fully preserved in main via the merge
+      commit).
+- [x] Recorded completion via `agent_work_briefing.py record-completion`
+      (`UMR-20260814-051532-2ae4`, status=completed, commit
+      `aa183f811c43716ea7ed8e5baf0830019000fc60`).
+
 ## Remaining
 
-- [ ] Merge PR #352.
-- [ ] Reconcile live checkout onto post-merge main.
-- [ ] Verify in_sync via check_live_scripts_drift.py.
-- [ ] Record completion via agent_work_briefing.py.
+- [ ] None for this task's own scope.

@@ -380,6 +380,8 @@ RESOURCE_GOVERNOR_PATH = os.environ.get(
     "VERIDIAN_RESOURCE_GOVERNOR_PY", f"{SCRIPTS}/resource_governor.py")
 DISPATCH_CORE_PATH = os.environ.get(
     "VERIDIAN_DISPATCH_CORE_PY", f"{SCRIPTS}/dispatch_core.py")
+WIRING_HEALTH_CHECK_PATH = os.environ.get(
+    "VERIDIAN_WIRING_HEALTH_CHECK_PY", f"{SCRIPTS}/wiring_health_check.py")
 TEST_SCRIPT_BUILD_CHECK_PATH = os.environ.get(
     "VERIDIAN_GTM_TEST_SCRIPT_BUILD_CHECK_PY", f"{SCRIPTS}/gtm_test_script_build_check.py")
 
@@ -2353,6 +2355,32 @@ def get_wiring_registry_health_section(sbr):
 
 
 # ---------------------------------------------------------------------------
+# Section 16 (Owner directive, 2026-08-06: "build a real, standing,
+# deterministic wiring health check ... write its real pass or fail result
+# into a real new section of that same report, never a separate file"):
+# wiring_health_check.py actually EXERCISES the critical integration seams
+# (gateway pickup path, registries reachable, own report freshness,
+# external-agent-dispatch reachable) rather than just inventorying that the
+# code exists -- see that script's own module docstring for the full real
+# detail, including two documented corrections to the SPEC's literal
+# wording. NOT called from build_report() itself (build_report() must stay a
+# fast, pure computation -- this is a real subprocess-driving, DB-write-
+# capable check on the order of seconds, not milliseconds) -- wired in by
+# main() instead, after build_report() returns, exactly like
+# write_snapshot_row()'s own separate --no-db-write gating below. A single
+# real failing test writes its own real pm_decisions_pending row immediately
+# (deduped against an already-open entry) -- this call site never does that
+# itself, it only renders whatever wiring_health_check.py already decided.
+# ---------------------------------------------------------------------------
+def get_wiring_health_check_section(sbr, record_pm_decisions=True):
+    try:
+        whc = load_module_from_path("wiring_health_check", WIRING_HEALTH_CHECK_PATH)
+        return whc.run_all_checks(sbr=sbr, record_pm_decisions=record_pm_decisions)
+    except Exception as e:
+        return {"error": f"wiring_health_check.py raised: {type(e).__name__}: {e}"}
+
+
+# ---------------------------------------------------------------------------
 # Assembly + rendering
 # ---------------------------------------------------------------------------
 def build_report(sbr):
@@ -2768,6 +2796,24 @@ def render_report_text(report):
         for e in escalations:
             lines.append(f"  [{e['opened_ts']}] id={e['id']} {e['related_umr']}: {e['title']}")
 
+    h("16. WIRING HEALTH CHECK (real, standing, deterministic -- actually exercises the gateway "
+      "pickup path, registries, own report freshness, and external-agent-dispatch, see "
+      "wiring_health_check.py's own module docstring)")
+    whc = report.get("wiring_health_check_section")
+    if whc is None:
+        lines.append("NOT RUN this invocation (see --skip-wiring-health-check).")
+    elif whc.get("error"):
+        lines.append(f"ERROR running wiring_health_check.py: {whc['error']}")
+    else:
+        lines.append(f"generated_at={whc['generated_at']} overall="
+                      f"{'PASS' if whc['overall_pass'] else 'FAIL'}")
+        for t in whc["tests"]:
+            lines.append(f"  [{'PASS' if t['passed'] else 'FAIL'}] {t['name']}")
+            if not t["passed"]:
+                lines.append(f"        {json.dumps(t['detail'], default=str)[:500]}")
+        for d in whc.get("recorded_decisions", []):
+            lines.append(f"  pm_decisions_pending: {d}")
+
     lines.append("")
     h("16. WIRING REGISTRY HEALTH (proactive, real wiring_registry.verification_status "
       "surfaced from generate_wiring_registry.py's own live cron-refreshed data -- "
@@ -2847,11 +2893,17 @@ def main(argv=None):
     parser.add_argument("--no-db-write", action="store_true",
                          help="Skip pm_report_snapshots INSERT and report file writes (still prints report).")
     parser.add_argument("--json-out", default=None, help="Also write the full report as JSON to this path.")
+    parser.add_argument("--skip-wiring-health-check", action="store_true",
+                         help="Skip Section 16's real wiring_health_check.py run (diagnostic/manual use "
+                              "only -- the real ~10-minute timer invocation must never pass this).")
     args = parser.parse_args(argv)
 
     sbr = load_module_from_path("superboss_register", SBR_PATH)
 
     report = build_report(sbr)
+    if not args.skip_wiring_health_check:
+        report["wiring_health_check_section"] = get_wiring_health_check_section(
+            sbr, record_pm_decisions=not args.no_db_write)
     text = render_report_text(report)
     print(text)
 

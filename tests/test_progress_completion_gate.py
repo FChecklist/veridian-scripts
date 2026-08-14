@@ -86,6 +86,53 @@ class TestExtractNamedCodeFiles(unittest.TestCase):
             gate.extract_named_code_files(text), ["scripts/resource_governor.py"]
         )
 
+    def test_excludes_bare_live_deploy_drift_tool_names(self):
+        """Real fix (UMR-20260814-051532-2ae4): the recurring "reconcile
+        live deploy drift" task's own dispatch prompt cites
+        check_live_scripts_drift.py (the tool to run) and sync-repos.sh
+        (the script whose dirty/non-main-skip behavior to read) by bare
+        name in essentially every occurrence -- same boilerplate-citation
+        shape as resource_governor.py/superboss-register.py above, not a
+        real, distinguishing objective inside the task's own workspace."""
+        text = (
+            "REAL GAP FOUND: the real live checkout at /opt/veridian/scripts "
+            "is NOT in sync with origin/main, verified live this tick via "
+            "check_live_scripts_drift.py --live-dir /opt/veridian/scripts -- "
+            "branch=fix/foo real HEAD=abc vs real origin/main=def, 3 real "
+            "tracked file(s) differ: AGENTS.md, resource_governor.py, "
+            "superboss-register.py. Determine why the live checkout is "
+            "stuck off-main / dirty (sync-repos.sh deliberately refuses to "
+            "force-overwrite a dirty or non-main checkout -- see its own "
+            "comments)."
+        )
+        self.assertEqual(gate.extract_named_code_files(text), [])
+
+    def test_excludes_evidence_list_only_filenames(self):
+        """Real fix (UMR-20260814-051532-2ae4): a filename cited ONLY inside
+        check_live_scripts_drift.py's own "N real tracked file(s) differ:"
+        evidence list is not a real objective -- it's evidence of what
+        differs between two git refs, quoted verbatim into the dispatch
+        prompt, not an instruction to edit that file in this workspace."""
+        text = (
+            "verified live this tick via check_live_scripts_drift.py -- "
+            "5 real tracked file(s) differ: AGENTS.md, resource_governor.py, "
+            "superboss-register.py, tests/test_credit_accountant_report_approval.py, "
+            "tests/test_perform_spawn_seeds_credit_accountant_plan.py. "
+            "This is a confirmed root cause of prior false RCAs."
+        )
+        self.assertEqual(gate.extract_named_code_files(text), [])
+
+    def test_evidence_list_filename_also_named_elsewhere_still_counts(self):
+        """A filename cited in the evidence list AND named again elsewhere
+        as a real, distinguishing objective is NOT excluded -- only a
+        mention that appears exclusively inside the evidence list is."""
+        text = (
+            "5 real tracked file(s) differ: AGENTS.md, resource_governor.py, "
+            "dispatch_core.py. The real fix belongs in dispatch_core.py's "
+            "swap gate -- fix it there."
+        )
+        self.assertEqual(gate.extract_named_code_files(text), ["dispatch_core.py"])
+
     def test_mixed_boilerplate_and_real_objective(self):
         """A prompt that cites the tools in boilerplate form AND names a
         real, different objective file keeps only the real objective."""
@@ -331,6 +378,45 @@ class TestCompletionGateRejectsDocOnlyDiff(unittest.TestCase):
                 f.write("## Completed\n- [x] RCA'd, already resolved by a prior session\n## Remaining\n")
             run(ws, "add", "-A")
             run(ws, "commit", "-q", "-m", "docs-only RCA disposition")
+
+            ok, reason = gate.check_completion(task_dir, ws, "main")
+            self.assertTrue(ok, reason)
+
+    def test_live_deploy_drift_reconcile_prompt_docs_only_diff_accepted(self):
+        """Real regression, UMR-20260814-051532-2ae4: this task's own real
+        SPEC text cites check_live_scripts_drift.py and sync-repos.sh by
+        bare name (the diagnostic tool to run / the script whose behavior
+        to read), plus the two file basenames from a drift-check's own
+        "N real tracked file(s) differ:" evidence list. The task's real
+        completion was landing an already-open, already-audited PR by
+        merging it directly and fast-forwarding the live checkout -- a
+        genuinely no-new-code-in-this-workspace disposition. Before this
+        fix, this was wrongly REJECTED purely because the prompt cites
+        those meta-tool names; it must now be accepted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = self._make_task(
+                tmp,
+                "REAL GAP FOUND: the real live checkout at "
+                "/opt/veridian/scripts is NOT in sync with origin/main, "
+                "verified live this tick via check_live_scripts_drift.py "
+                "--live-dir /opt/veridian/scripts -- real HEAD=abc vs real "
+                "origin/main=def, 2 real tracked file(s) differ: "
+                "resource_governor.py, superboss-register.py. Determine why "
+                "the live checkout is stuck off-main / dirty (sync-repos.sh "
+                "deliberately refuses to force-overwrite a dirty or "
+                "non-main checkout -- see its own comments), and either "
+                "safely reconcile it onto origin/main or record a real, "
+                "honest terminal outcome.",
+            )
+            ws = self._make_workspace(tmp)
+            with open(os.path.join(ws, "PROGRESS.md"), "w") as f:
+                f.write(
+                    "## Completed\n- [x] merged the already-open, "
+                    "already-audited PR carrying the real fix and "
+                    "fast-forwarded the live checkout onto it\n## Remaining\n"
+                )
+            run(ws, "add", "-A")
+            run(ws, "commit", "-q", "-m", "docs-only reconcile disposition")
 
             ok, reason = gate.check_completion(task_dir, ws, "main")
             self.assertTrue(ok, reason)

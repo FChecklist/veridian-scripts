@@ -25,7 +25,7 @@ by the other two never sees). Claude Code runs every hook for a matching
 event and applies the most restrictive decision, so this adds a
 strictly-narrowing check without touching the existing gates.
 
-WHAT THIS DOES, three real, mechanical checks:
+WHAT THIS DOES, five real, mechanical checks:
 
   1. Blocks a `git commit`/`git push` (Bash tool) whose EFFECTIVE target repo
      (resolved through any `git -C <path>` / `git --git-dir=... -C` flag, or
@@ -33,25 +33,51 @@ WHAT THIS DOES, three real, mechanical checks:
      worker's own assigned workspace, or whose current branch (or, for
      `push`, target branch) is not that worker's own assigned branch. Also
      blocks a `Write`/`Edit`/`NotebookEdit` tool call whose target file path
-     resolves outside that same assigned workspace.
+     resolves outside that same assigned workspace. A git global flag that
+     takes a separate value argument (e.g. `--git-dir /other/path`, `-c
+     x=y`, `--work-tree <dir>`) has that value token consumed along with the
+     flag itself, so it is never mistaken for the subcommand -- see
+     `_git_invocation`'s own docstring for the exact bypass this used to
+     allow.
 
-  2. Blocks a raw `tmux ... send-keys` invocation (Bash tool) from inside a
+  2. Extends that same outside-workspace-write block to real Bash-based
+     file-write patterns beyond git/Write/Edit -- shell redirection (`>`,
+     `>>`) and `curl -o`/`wget -O` -- so `curl https://... -o
+     /other/path/file` or `echo x > /other/path/file` are caught too, not
+     just the tool-call-shaped writes. See `check_bash_file_write`.
+
+  3. Blocks a raw `tmux ... send-keys` invocation (Bash tool) from inside a
      worker session -- the real, documented dispatch relay is
      dispatch-owner-task.sh; a worker itself issuing send-keys is
      impersonating that relay, not performing its own assigned work (see
      dispatch-owner-task.sh's own header: "there is no separate 'raw tmux
      send-keys' step left to accidentally use instead of this script").
      Also blocks direct invocation of a small, explicit set of
-     queue-owning/frozen scripts (_BLOCKED_SCRIPT_BASENAMES below) and a
-     direct `systemctl ... start|enable|restart veridian-worker@...` --
-     the only real, mechanical spawn path is resource_governor.py's
+     queue-owning/frozen scripts (_BLOCKED_SCRIPT_BASENAMES below) -- through
+     a plain interpreter (`python3`/`python`/`bash`/`sh`) or through
+     `env`/`xargs`/`nohup`/`setsid` wrapping one of those, in any
+     combination (e.g. `env python3 dispatch_core.py`) -- and a direct
+     `systemctl ... start|enable|restart veridian-worker@...` -- the only
+     real, mechanical spawn path is resource_governor.py's
      `_perform_spawn()`, which already holds `dispatch_core.acquire_dispatch_lock()`
      and respects CONCURRENCY_CAP; a worker calling systemctl on another
      worker unit directly bypasses both (see systemd/veridian-worker@.service's
      own 2026-08-01 comment: 24 units launched this way at once OOM-killed
      the box).
 
-  3. Appends EVERY tool call this hook observes -- allowed or denied -- to a
+  4. Blocks a worker session's Bash `cp`/`mv`/`install`/`tee`/`rsync`/`dd`/
+     `sed` invocation that names the shared Claude Code settings file
+     (`~/.claude/settings.json` -- the very file this hook is itself wired
+     into) as a source or destination. This exists because this hook's own
+     initial rollout (task-20260814-132651) wrote that file directly, mid
+     task, before its diff was ever reviewed or merged -- a real,
+     unauthorized-live-deployment incident (UMR-20260814-131747-420e's
+     PR#375 audit finding #4). Changing what's wired into it must land as a
+     reviewed, merged, separately-dispatched deploy step from here on, never
+     a worker self-deploying mid-task. (Redirection/curl writes to that same
+     path are already caught by check 2, which is path-generic.)
+
+  5. Appends EVERY tool call this hook observes -- allowed or denied -- to a
      queryable sqlite audit log (see AUDIT_DB below), independent of the
      allow/deny decision. Logging failures never block a real tool call
      (best-effort, fail-open on the logging path only -- the enforcement
@@ -125,6 +151,44 @@ _WRITE_TOOL_PATH_KEYS = {
 }
 
 _GIT_WRITE_SUBCOMMANDS = {"commit", "push"}
+
+# git global flags that take a SEPARATE value token (space-separated form,
+# as opposed to `--flag=value`). Each of these must consume its value token
+# too, or that value gets mistaken for the git subcommand -- see
+# `_git_invocation`'s own docstring for the exact real bypass this caused
+# (PR#375 audit finding #1): `git --git-dir /other/path commit` used to
+# treat "/other/path" as the subcommand, miss "commit" entirely, and fall
+# through check_git_write's `subcommand not in _GIT_WRITE_SUBCOMMANDS` guard
+# to an unconditional allow -- completely skipping repo/branch enforcement.
+_GIT_FLAGS_WITH_SEPARATE_VALUE = {"-C", "--git-dir", "--work-tree", "--namespace", "-c", "--exec-path"}
+# Same flags' `--flag=value` / `-C=value` form (no separate token to skip).
+_GIT_FLAG_EQUALS_PREFIXES = tuple(f + "=" for f in _GIT_FLAGS_WITH_SEPARATE_VALUE)
+
+# Bash-level "wrapper" commands that can precede the real interpreter/script
+# invocation without changing what actually runs -- e.g. `env python3
+# dispatch_core.py`, `nohup python3 dispatch_core.py &`, `xargs -I{} python3
+# dispatch_core.py`. See `_blocked_script_invocation` (PR#375 audit finding
+# #3: the old allowed-wrapper set {python3, python, bash, sh} missed these,
+# so `env python3 dispatch_core.py` bypassed the queue-bypass block).
+_INTERPRETER_WRAPPERS = {"python3", "python", "bash", "sh"}
+_ENV_STYLE_WRAPPERS = {"env", "xargs", "nohup", "setsid"}
+_ALL_WRAPPER_COMMANDS = _INTERPRETER_WRAPPERS | _ENV_STYLE_WRAPPERS
+
+# Bash file-mutation commands (beyond redirection/curl/wget, which are
+# path-generic -- see check_bash_file_write) that name a target path
+# directly as an argument rather than via `>`/`-o`. Used only by the
+# protected-shared-settings guard (check_shared_settings_write) below.
+_FILE_MUTATION_COMMANDS = {"cp", "mv", "install", "tee", "rsync", "dd", "truncate", "sed"}
+
+# The one real, shared file this hook itself is wired into -- see check
+# 4 in the module docstring / check_shared_settings_write.
+_PROTECTED_SHARED_PATHS = {os.path.normpath(os.path.expanduser("~/.claude/settings.json"))}
+_CLAUDE_SETTINGS_SUFFIX_RE = re.compile(r"(?:^|/)\.claude/settings\.json$")
+
+_REDIRECT_OPS = {">", ">>"}
+_CURL_OUTPUT_FLAGS = {"-o", "--output"}
+_WGET_OUTPUT_FLAGS = {"-O", "--output-document"}
+_BENIGN_WRITE_TARGETS = {"/dev/null", "/dev/stdout", "/dev/stderr", "/dev/tty"}
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +312,21 @@ def _cmd_name(token):
 def _git_invocation(segment):
     """If `segment` invokes `git` (optionally through `python3`/`env`-style
     var assignments), returns (repo_override_or_None, subcommand_or_None,
-    rest_argv). Returns None if this segment does not invoke git at all."""
+    rest_argv). Returns None if this segment does not invoke git at all.
+
+    PR#375 audit finding #1 (fixed here): a git global flag that takes a
+    SEPARATE value token -- `--git-dir /other/path`, `-c x=y`, `--work-tree
+    <dir>`, etc, as opposed to the `--flag=value` form -- must consume that
+    value token along with the flag itself. The old version only did this
+    for `-C`, so e.g. `git --git-dir /other/path commit` walked past
+    `--git-dir` (matched the generic `tok.startswith("-")` skip, `j += 1`)
+    but left `/other/path` unconsumed; the next loop iteration then read
+    `/other/path` as `subcommand`, which doesn't match 'commit'/'push', so
+    check_git_write's `subcommand not in _GIT_WRITE_SUBCOMMANDS` guard
+    returned ('allow', None) immediately -- a real `git --git-dir
+    /other/path commit` was never even inspected, let alone scope-checked.
+    See test_git_dash_git_dir_space_form_value_not_mistaken_for_subcommand
+    for the exact regression case from the audit."""
     i, n = 0, len(segment)
     while i < n and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", segment[i]):
         i += 1
@@ -260,12 +338,21 @@ def _git_invocation(segment):
     subcommand = None
     while j < len(argv):
         tok = argv[j]
-        if tok == "-C" and j + 1 < len(argv):
+        if tok in ("-C", "--git-dir") and j + 1 < len(argv):
             repo_override = argv[j + 1]
             j += 2
             continue
         if tok.startswith("--git-dir=") or tok.startswith("-C="):
             repo_override = tok.split("=", 1)[1]
+            j += 1
+            continue
+        if tok in _GIT_FLAGS_WITH_SEPARATE_VALUE and j + 1 < len(argv):
+            # Value-taking flag we don't otherwise care about (-c, --work-tree,
+            # --namespace, --exec-path) -- still must consume its value token
+            # so it is never mistaken for the subcommand.
+            j += 2
+            continue
+        if tok.startswith(_GIT_FLAG_EQUALS_PREFIXES):
             j += 1
             continue
         if tok.startswith("-"):
@@ -377,18 +464,111 @@ def check_write_tool_scope(tool_name, tool_input, cwd, assignment):
 
 
 # ---------------------------------------------------------------------------
+# Check 1b (PR#375 audit finding #2): real Bash-based file-write patterns
+# beyond git commit/push and Write/Edit/NotebookEdit -- shell redirection
+# and curl/wget -o. The module's own motivating scenario ("a worker that
+# 'helpfully' relays..." etc) was never limited to git or the Claude Code
+# write tools; a worker can write a real file to disk with a plain `>` or a
+# `curl -o` just as easily, and neither was inspected at all before this.
+# ---------------------------------------------------------------------------
+def _redirect_target(segment):
+    """Returns the destination path token for a `>` / `>>` shell redirection
+    in `segment`, else None. Best-effort: a fd-duplication target like
+    `2>&1` (destination token starts with `&`) is skipped, not resolved as
+    a file path -- this hook is deliberately simpler than
+    find_root_walk_guard.py's adversarial-hardened parser (see module
+    docstring)."""
+    for i, tok in enumerate(segment):
+        if tok in _REDIRECT_OPS and i + 1 < len(segment):
+            dest = segment[i + 1]
+            if dest.startswith("&"):
+                continue
+            return dest
+    return None
+
+
+def _curl_wget_output_path(segment):
+    """Returns the output-file path if `segment` invokes `curl -o`/
+    `--output <path>` or `wget -O`/`--output-document <path>` (space- or
+    `=`-separated form), else None."""
+    tokens = [t for t in segment if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", t)]
+    if not tokens:
+        return None
+    cmd = _cmd_name(tokens[0])
+    if cmd == "curl":
+        flags = _CURL_OUTPUT_FLAGS
+    elif cmd == "wget":
+        flags = _WGET_OUTPUT_FLAGS
+    else:
+        return None
+    for i, tok in enumerate(tokens):
+        if tok in flags and i + 1 < len(tokens):
+            return tokens[i + 1]
+        for f in flags:
+            if tok.startswith(f + "="):
+                return tok.split("=", 1)[1]
+    return None
+
+
+def check_bash_file_write(segment, cwd, assignment):
+    """Extends the outside-workspace-write block (see check_write_tool_scope)
+    to shell redirection (`>`, `>>`) and `curl -o`/`wget -O` -- so
+    `curl https://... -o /other/path/file` or `echo x > /other/path/file`
+    are caught too (PR#375 audit finding #2), not just git and the Claude
+    Code Write/Edit/NotebookEdit tools."""
+    if assignment is None:
+        return "allow", None
+    if not assignment["readable"]:
+        return "deny", (
+            "this task's own task.yaml could not be read, so its assigned workspace is "
+            "unknown -- fail-closed: this file write is rejected until it can be verified"
+        )
+    for dest in filter(None, (_redirect_target(segment), _curl_wget_output_path(segment))):
+        if dest in _BENIGN_WRITE_TARGETS:
+            continue
+        resolved = os.path.normpath(dest if os.path.isabs(dest) else os.path.join(cwd or "/", dest))
+        if not _under_workspace(resolved, assignment["workspace"]):
+            return "deny", (
+                f"this command writes to {resolved!r}, which is outside this worker's own "
+                f"assigned workspace ({assignment['workspace']!r})"
+            )
+    return "allow", None
+
+
+# ---------------------------------------------------------------------------
 # Check 2: raw tmux send-keys / queue-bypassing script invocation
 # ---------------------------------------------------------------------------
 def _blocked_script_invocation(segment):
     """Returns the matched basename if `segment` directly invokes one of
-    _BLOCKED_SCRIPT_BASENAMES (optionally through `python3`/`python`/`bash`/
-    `sh`/`./`), else None."""
+    _BLOCKED_SCRIPT_BASENAMES, else None. Sees through any chain of
+    interpreter (`python3`/`python`/`bash`/`sh`) and/or `env`/`xargs`/
+    `nohup`/`setsid` wrappers, and each wrapper's own leading flags/
+    `NAME=value` assignments -- e.g. `env python3 dispatch_core.py`,
+    `nohup python3 dispatch_core.py &`, `xargs -I{} python3
+    dispatch_core.py`, `env FOO=bar python3 dispatch_core.py`.
+
+    PR#375 audit finding #3 (fixed here): the old version only skipped a
+    single leading `python3`/`python`/`bash`/`sh` token at index 0, so
+    `env python3 dispatch_core.py` left `env` unrecognized, checked `env`
+    itself (not a blocked basename) against _BLOCKED_SCRIPT_BASENAMES, and
+    allowed it -- a real, working bypass of the queue-owning-script block."""
     tokens = [t for t in segment if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", t)]
     if not tokens:
         return None
     idx = 0
-    if _cmd_name(tokens[0]) in {"python3", "python", "bash", "sh"} and len(tokens) > 1:
-        idx = 1
+    saw_wrapper = True
+    while saw_wrapper and idx < len(tokens):
+        saw_wrapper = False
+        if _cmd_name(tokens[idx]) in _ALL_WRAPPER_COMMANDS and idx + 1 < len(tokens):
+            idx += 1
+            # Skip the wrapper's own flags (e.g. `env -i`, `xargs -I{}`) and
+            # any `NAME=value` assignments (e.g. `env FOO=bar ...`) that
+            # precede the actual wrapped command.
+            while idx < len(tokens) and (
+                tokens[idx].startswith("-") or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*$", tokens[idx])
+            ):
+                idx += 1
+            saw_wrapper = True
     if idx < len(tokens):
         base = _cmd_name(tokens[idx])
         if base in _BLOCKED_SCRIPT_BASENAMES:
@@ -442,9 +622,63 @@ def check_queue_bypass(segment, assignment):
     return "allow", None
 
 
+# ---------------------------------------------------------------------------
+# Check 4: shared ~/.claude/settings.json is off-limits to any worker
+# session's Bash file-mutation commands (PR#375 audit finding #4 -- see
+# module docstring). Redirection/curl writes to this same path are already
+# caught by check_bash_file_write above (path-generic); this covers the
+# commands that name a target path directly instead: cp/mv/install/tee/
+# rsync/dd/sed -i.
+# ---------------------------------------------------------------------------
+def _resolve_maybe_relative(token, cwd):
+    expanded = os.path.expanduser(token)
+    return os.path.normpath(expanded if os.path.isabs(expanded) else os.path.join(cwd or "/", expanded))
+
+
+def _touches_protected_settings_path(segment, cwd):
+    if not segment:
+        return None
+    cmd = _cmd_name(segment[0])
+    if cmd not in _FILE_MUTATION_COMMANDS:
+        return None
+    for tok in segment[1:]:
+        raw = tok
+        if cmd == "dd" and raw.startswith("of="):
+            raw = raw.split("=", 1)[1]
+        if raw.startswith("-"):
+            continue
+        resolved = _resolve_maybe_relative(raw, cwd)
+        if resolved in _PROTECTED_SHARED_PATHS or _CLAUDE_SETTINGS_SUFFIX_RE.search(resolved):
+            return resolved
+    return None
+
+
+def check_shared_settings_write(segment, cwd, assignment):
+    """No dispatched worker task may use cp/mv/install/tee/rsync/dd/sed to
+    touch the shared Claude Code settings file (~/.claude/settings.json --
+    the file this hook is itself wired into), as source or destination.
+    This exists because this hook's own initial rollout wrote that file
+    directly, mid task, before its diff was ever reviewed or merged (a real
+    unauthorized-live-deployment incident, UMR-20260814-131747-420e's
+    PR#375 audit finding #4). Changing what's wired into it must land as a
+    reviewed, merged, separately-dispatched deploy step from here on, never
+    a worker self-deploying mid-task."""
+    if assignment is None:
+        return "allow", None
+    touched = _touches_protected_settings_path(segment, cwd)
+    if touched:
+        return "deny", (
+            f"this command touches the shared Claude Code settings file ({touched!r}) -- no "
+            f"dispatched worker task may write it directly; changes to what's wired into it "
+            f"must land as a reviewed, merged, separately-dispatched deploy step, never a "
+            f"worker self-deploying mid-task (see UMR-20260814-131747-420e)"
+        )
+    return "allow", None
+
+
 def evaluate_bash(command, cwd, assignment):
-    """Runs checks 1 and 2 over every segment of `command`. Returns the
-    first non-'allow' verdict, or ('allow', None)."""
+    """Runs checks 1, 1b, 2, and 4 over every segment of `command`. Returns
+    the first non-'allow' verdict, or ('allow', None)."""
     if not command or not command.strip():
         return "allow", None
     for line in command.split("\n"):
@@ -459,7 +693,13 @@ def evaluate_bash(command, cwd, assignment):
             verdict, reason = check_git_write(segment, cwd, assignment)
             if verdict != "allow":
                 return verdict, reason
+            verdict, reason = check_bash_file_write(segment, cwd, assignment)
+            if verdict != "allow":
+                return verdict, reason
             verdict, reason = check_queue_bypass(segment, assignment)
+            if verdict != "allow":
+                return verdict, reason
+            verdict, reason = check_shared_settings_write(segment, cwd, assignment)
             if verdict != "allow":
                 return verdict, reason
     return "allow", None

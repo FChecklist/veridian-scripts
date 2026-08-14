@@ -289,14 +289,39 @@ $ python3 -m pytest tests/test_query_umr_limit_clamp_and_ensure_table_regression
 $ python3 -m pytest test_full_server_file_registration.py -q
 21 passed in 6.90s
 ```
-  Full-suite run (`python3 -m pytest -q`) launched in background; exact
-  pass/fail counts and command/exit code to be recorded here and in the
-  audit comment once it completes (the full suite takes >500s -- one prior
-  inline attempt with a 500s wrapper timeout self-killed at exit 143;
-  re-run without that wrapper).
+- [x] Full-suite run, `VERIDIAN_SCRIPTS_DIR=$(pwd) python3 -m pytest -q`
+      (real command, real exit code 1 -- pytest's documented "tests
+      collected and ran, some failed" code):
+```
+15 failed, 1320 passed in 878.36s (0:14:38)
+```
+  All 15 failing test names read back from the real log
+  (`/tmp/full_suite_run.log`), then independently checked for
+  diff-causation by running the identical test IDs against `origin/main`
+  (`8544da67`, a disposable `git worktree`, never this branch): all 15
+  reproduce byte-identically on `main`, before this PR's diff, confirming
+  every one is pre-existing/environmental, none caused by this PR:
+  - `test_deploy_live_scripts.py` (5 tests): `deploy-live-scripts.sh` was
+    deleted from the repo by an unrelated, already-merged PR (#294,
+    "delete dead deploy-live-scripts.sh") -- these tests exercise a file
+    that no longer exists in any branch.
+  - `test_owner_priority_sequence.py` (5) + `test_resource_governor_queue_management.py`
+    (1) + `test_triage_owner_umr_24h.py` (2): reproduced identically on
+    `origin/main` in the same worktree run (8 failed, 42 passed, same 8
+    test IDs) -- pre-existing, unrelated to this diff.
+  - `tests/test_build_lock_liveness_guard_deployment.py::test_timer_is_really_enabled_and_active`:
+    real `systemctl --user is-enabled` reports `disabled` in this
+    environment (no active user systemd login session) -- reproduces
+    identically on `main`.
+  - `tests/test_stop_work_order_gate.py::test_dispatch_one_defense_in_depth_blocks_preexisting_queued_row`:
+    reads real live machine state (`load1`/`running_worker_count`) which
+    was above the test's fixed threshold at both run times (load1=6.498 on
+    this branch, running_worker_count=5/cap=5 on `main`) -- reproduces
+    identically on `main`, confirmed real-machine-state-dependent, not
+    diff-caused.
 - [ ] Post a new Tier-1 audit comment on PR #308 citing current head
-      `4380f7f9` explicitly (not the stale `34bb70b6`), once the full suite
-      result above is in.
+      `42a56d3` explicitly (the real head after this addendum's fix commit,
+      not the stale `34bb70b6` nor the pre-fix `4380f7f9`).
 - [ ] Merge PR #308 to `main` -- ONLY if the new audit is a real PASS.
 - [ ] Call `agent_work_briefing.py record-completion` for
       `UMR-20260813-235507-1710` with a real summary of this work.

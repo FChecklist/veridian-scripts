@@ -239,6 +239,63 @@ def _unit_active_state(unit):
     return state or "unknown"
 
 
+MAX_CONSECUTIVE_RESUME_REJECTIONS = 3
+# UMR-20260813-235702 fix: named cap on how many CONSECUTIVE rejected/failed
+# resume_interrupted_workers_tick() attempts a single task_identity gets
+# before it is marked permanently dead / non-resumable (see
+# superboss-register.py's record_resume_outcome()/is_resume_dead()). Real
+# evidence for "small finite number": every one of the 10 real task
+# identities confirmed stuck in this loop as of 2026-08-13T23:52Z had already
+# accumulated 40 consecutive rejected_duplicate rows, so 3 is deliberately
+# far below the real observed floor -- a genuinely still-relevant task would
+# almost never be rejected 3 ticks (~30 real minutes) in a row for the same
+# content-similarity reason and then start being accepted again; if that
+# ever turns out to be wrong for some future task_identity, this constant is
+# the one real place to widen it, not a second, parallel cap somewhere else.
+
+
+def _is_permanently_dead_resume(task_id, sbr_module=None):
+    """Real, read-only pre-check: has task_id already been marked
+    permanently dead by record_resume_outcome()/mark_resume_dead() (see
+    superboss-register.py's resume_dead_letter table)? Runs BEFORE
+    _existing_active_umr() and BEFORE resource_governor.submit() -- a dead
+    task_identity costs nothing here: no umr_tasks row, no
+    reuse_verdict_engine.assess() similarity scan. Same fail-open philosophy
+    as _existing_active_umr() below: an unavailable Superboss Register
+    returns False (cannot confirm dead -> proceed as if alive), never
+    silently skips a real resume just because this check couldn't run."""
+    sbr_module = sbr_module or resource_governor
+    sbr, error = sbr_module._safe_superboss_register("resume_interrupted_workers_tick")
+    if error:
+        return False
+    conn = sbr._connect()
+    try:
+        return sbr.is_resume_dead(conn, task_id)
+    finally:
+        conn.close()
+
+
+def _record_resume_outcome(task_id, accepted, sbr_module=None):
+    """Best-effort write-through to record_resume_outcome() after a real
+    resource_governor.submit() call (or an _existing_active_umr() skip,
+    which counts as neither an accept nor a rejection and does not call this
+    at all -- see resume_interrupted_workers_tick() below). Same fail-open
+    philosophy as every other real _safe_superboss_register() caller in this
+    module: an unavailable Superboss Register is a silent no-op here, never a
+    crash -- the bounded-retry ledger is a real optimization, not a
+    correctness requirement (submit()'s own dedup gate remains the real
+    authority regardless of whether this ledger is ever updated)."""
+    sbr_module = sbr_module or resource_governor
+    sbr, error = sbr_module._safe_superboss_register("resume_interrupted_workers_tick")
+    if error:
+        return False
+    conn = sbr._connect()
+    try:
+        return sbr.record_resume_outcome(conn, task_id, accepted, MAX_CONSECUTIVE_RESUME_REJECTIONS)
+    finally:
+        conn.close()
+
+
 def _existing_active_umr(task_id, sbr_module=None):
     """Real, read-only pre-check (UMR-20260806-103711-bf00): does
     task_identity=task_id already have an active (queued/dispatched/running)
@@ -305,8 +362,27 @@ def resume_interrupted_workers_tick(tasks):
     in the queue, nothing double-dispatched), zero new duplicate rows. The
     gate inside submit() is untouched and still the real authority for any
     genuine race.
+
+    UMR-20260813-235702 fix: _existing_active_umr() above only catches one
+    real rejection mechanism (an ACTIVE umr_tasks row for the same identity).
+    A completely separate mechanism -- resource_governor.submit()'s own
+    reuse_verdict_engine.assess() content-similarity check, which can reject
+    a resubmission as duplication_blocked against a wholly unrelated
+    already-registered entity -- was still unbounded: a task_identity stuck
+    in that state got resubmitted, and rejected, forever, once per tick,
+    each time paying a real umr_tasks row write plus a real 18k+-candidate
+    similarity scan (confirmed live: 10 real task identities each carrying
+    40 consecutive rejected_duplicate rows and still growing as of
+    2026-08-13T23:52Z). _is_permanently_dead_resume() now runs first (before
+    even _existing_active_umr()) and skips a task_identity entirely once it
+    has accumulated MAX_CONSECUTIVE_RESUME_REJECTIONS consecutive rejections
+    -- zero cost, no new umr_tasks row, no similarity scan.
+    _record_resume_outcome() below records every real submit() outcome
+    (accepted or rejected) so that streak stays accurate; a task_identity
+    that starts being accepted again has its streak cleared, so it is never
+    wrongly kept dead by stale history.
     """
-    resumed, skipped_running, skipped_duplicate = [], [], []
+    resumed, skipped_running, skipped_duplicate, skipped_dead = [], [], [], []
     for task_id, doc in tasks.items():
         service = doc.get("service")
         if not service or not service.startswith("veridian-worker@"):
@@ -317,6 +393,13 @@ def resume_interrupted_workers_tick(tasks):
         state = _unit_active_state(service)
         if state in ("active", "activating", "reloading"):
             skipped_running.append(task_id)
+            continue
+
+        if _is_permanently_dead_resume(task_id):
+            skipped_dead.append(task_id)
+            print(f"SKIP resume (permanently dead / non-resumable, "
+                  f"{MAX_CONSECUTIVE_RESUME_REJECTIONS}+ consecutive rejections, "
+                  f"no duplicate row written, no similarity scan run): {task_id}")
             continue
 
         existing = _existing_active_umr(task_id)
@@ -337,14 +420,24 @@ def resume_interrupted_workers_tick(tasks):
             tier=1,  # already-started work outranks brand-new dispatch in priority
             source_trigger="dispatch-tick:resume_interrupted_workers",
         )
+        just_died = _record_resume_outcome(task_id, bool(result["accepted"]))
         if result["accepted"]:
             resumed.append(task_id)
             print(f"RESUME QUEUED: {task_id} (unit was {state!r}, action={action}, umr_id={result['umr_id']})")
         else:
             skipped_duplicate.append(task_id)
             print(f"SKIP resume (already in queue): {task_id} -- {result['reason']}")
+            if just_died:
+                print(f"MARKED PERMANENTLY DEAD: {task_id} -- "
+                      f"{MAX_CONSECUTIVE_RESUME_REJECTIONS} consecutive rejections reached, "
+                      f"will not be resubmitted again")
 
-    return {"resumed": resumed, "skipped_running": skipped_running, "skipped_duplicate": skipped_duplicate}
+    return {
+        "resumed": resumed,
+        "skipped_running": skipped_running,
+        "skipped_duplicate": skipped_duplicate,
+        "skipped_dead": skipped_dead,
+    }
 
 
 # ---------------------------------------------------------------------------

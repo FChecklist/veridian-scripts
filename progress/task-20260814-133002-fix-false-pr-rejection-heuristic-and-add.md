@@ -25,15 +25,23 @@ Supersedes: UMR-20260814-125933-3377 (self-rejected as rejected_duplicate; real 
     (full dispatch_one() e2e, real UMR-20260814-125933-3377 shape).
   - All 15 tests in the file pass.
 
-## Remaining
-- [ ] Add required filePaths field to tight_task_validation.py's
+- [x] Added required filePaths field to tight_task_validation.py's
   validate_tight_task() -- array of real repo-relative paths, validated
   non-empty/non-placeholder using the file's existing check_field()/
-  is_placeholder() helpers, no parallel validator. Add one passing + one
-  failing test case to test_tight_task_validation.py.
-- [ ] Add a short header comment to the outermost dispatch entry script
-  documenting the real submit -> validate -> capability-lookup -> execute
-  pipeline order (documentation only, no mechanism change).
+  is_placeholder() helpers, no parallel validator. FILE_PATHS recognized
+  locally in this module's FIELD_HEADER_RE/key_map (deliberately NOT added
+  to the shared REQUIRED_TASK_SECTIONS in workflow_contract.py -- that also
+  gates task-gateway.py/prompt_gateway/gateway.py, out of this task's
+  scope). Added 1 passing + 2 failing test cases to
+  test_tight_task_validation.py (9/9 tests pass).
+- [x] Added a short header comment to dispatch-owner-task.sh (confirmed via
+  Explore agent to be the real outermost dispatch entry point -- both the
+  human/SSH path and the one live systemd-timer-driven path (pm-sentinel-
+  tick.sh) converge on it) documenting the real submit -> capability-lookup
+  -> queue-submit -> execute -> validate pipeline order (documentation
+  only, no mechanism change).
+
+## Remaining
 - [ ] Determine why PR#298 was closed (close comment / CI / review) and
   either reopen+rebase or redo the 696-line diff on a fresh branch.
 - [ ] Get fresh AUDIT:PASS matching head, merge.

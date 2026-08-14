@@ -1348,7 +1348,18 @@ def find_target_identifier_duplicate(conn, title, prompt, repo=None, window_hour
         return None
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
-    rows = query_umr_tasks(conn, limit=limit)
+    # full=True (real regression fix, live-audit on PR #308 head 4380f7f9,
+    # independently reproduced): query_umr_tasks()'s default light column
+    # set (UMR-20260813-125756-9221) excludes inputs_json, so without this
+    # every row.get("inputs_json") below silently returned None -- inputs
+    # collapsed to {}, row_ids was always empty, and this dedup guard never
+    # matched a real duplicate no matter how exact. limit defaults to 30
+    # (hard-capped at MAX_UMR_QUERY_LIMIT=2000 by query_umr_tasks itself)
+    # and every CLI invocation is already wrapped by
+    # install_cli_resource_guard()'s wall-clock/RSS watchdog, so fetching
+    # the blob columns for this bounded a real duplicate-dispatch check is
+    # safe and necessary -- this function cannot do its one job without them.
+    rows = query_umr_tasks(conn, limit=limit, full=True)
     for row in rows:
         if row.get("status") not in ("queued", "running"):
             continue
@@ -6502,13 +6513,20 @@ def query_umr_tasks(conn, limit=20, status=None, tier=None, task_identity=None, 
     else a plain filtered listing (newest first). Same two-stage resolution
     shape lookup_entity()/lookup_capability() already use.
 
-    `full` (UMR-20260813-125756-9221): when False (every real caller's
-    default), the SELECT excludes the large inputs_json/outputs_json/
-    metadata_json/metric_snapshot_json blob columns -- see
-    UMR_TASKS_LIGHT_COLUMNS's own comment for the real measured sizes this
-    is fixing. Pass full=True to get every column, including those blobs,
-    for the rarer case a caller genuinely needs them (e.g. inspecting one
-    exact --umr-id row's real inputs_json for debugging)."""
+    `full` (UMR-20260813-125756-9221): when False (the default), the SELECT
+    excludes the large inputs_json/outputs_json/metadata_json/
+    metric_snapshot_json blob columns -- see UMR_TASKS_LIGHT_COLUMNS's own
+    comment for the real measured sizes this is fixing. Pass full=True to
+    get every column, including those blobs, whenever a caller's own logic
+    actually reads one of those columns -- e.g. inspecting one exact
+    --umr-id row's inputs_json for debugging, or find_target_identifier_
+    duplicate()'s real per-row inputs_json parse (real regression once
+    fixed here at live-audit time on PR #308: that caller was silently
+    defeated by the light-column default until it started passing
+    full=True). Getting this wrong is silent, not an error -- the excluded
+    columns just come back as missing keys -- so any new caller that reads
+    inputs_json/outputs_json/metadata_json/metric_snapshot_json off these
+    rows MUST pass full=True."""
     limit = min(int(limit), MAX_UMR_QUERY_LIMIT) if limit else limit
     cols = _umr_select_columns(full)
     if umr_id:

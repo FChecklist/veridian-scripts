@@ -95,8 +95,14 @@ def test_query_umr_tasks_limit_is_hard_clamped_regardless_of_caller_limit():
         )
 
         # Same proof through the real CLI entry point every PM tier actually
-        # invokes, not just the Python function.
-        env = dict(os.environ, SUPERBOSS_REGISTER_DB=scratch_db)
+        # invokes, not just the Python function. Real fix (live-audit on PR
+        # #308 head 4380f7f9): without VERIDIAN_SCRIPTS_DIR pinned here,
+        # resource_governor.py's SCRIPTS resolves to VERIDIAN_ROOT/scripts
+        # (the live-deployed copy, not this branch's own code), so the
+        # subprocess silently tested whatever was deployed instead of the
+        # PR's own diff -- same convention as every other subprocess test in
+        # this suite (e.g. tests/test_ocid_artifact_links.py).
+        env = dict(os.environ, SUPERBOSS_REGISTER_DB=scratch_db, VERIDIAN_SCRIPTS_DIR=SCRIPTS_DIR)
         result = subprocess.run(
             [sys.executable, os.path.join(SCRIPTS_DIR, "resource_governor.py"),
              "--query-umr", "--status", "queued", "--limit", "999999"],

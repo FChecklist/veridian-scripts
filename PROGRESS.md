@@ -212,11 +212,94 @@ comment:
       captured during this task for the exact failing test names.
 - [x] Pushed the fix commit (`75c12f2`) to
       `worker/task-20260813-145820-guard-register-cli-invocations--one-quer`.
-- [ ] Merge/rebase `origin/main` into this branch to clear
-      `mergeable=CONFLICTING`/`mergeStateStatus=DIRTY`.
+- [x] Merge/rebase `origin/main` into this branch to clear
+      `mergeable=CONFLICTING`/`mergeStateStatus=DIRTY` -- done as merge commit
+      `4380f7f9` (already on the branch before this continuation started;
+      independently confirmed via `gh api .../pulls/308` -> `mergeable:
+      true, mergeable_state: "clean"`).
 - [ ] Post a fresh AUDIT comment naming the new head SHA.
 - [ ] Merge the PR once re-audit is PASS and `gh pr view` reports
       `MERGEABLE`/`CLEAN`.
+
+## Addendum 2: re-audit continuation (UMR-20260813-235507-1710, 2026-08-14)
+Dispatched after a prior attempt (UMR-20260813-225704-6195, task dir
+`task-20260813-225731-close-the-live-audit-fail-and-conflictin`) did the real
+work above (commit `75c12f2`, pushed straight to this PR's own branch from a
+`/tmp` worktree) but never landed it: its OWN internal reviewer independently
+re-audited the pushed head (`4380f7f9`) and returned **REJECT** (not PASS),
+and separately its supervisor could never resolve a real PR for that task's
+own `claude-control` branch (0 commits -- all real work went straight to this
+`veridian-scripts` branch instead, correctly, but outside the normal
+task-branch/PR flow the supervisor expected), so it died `blocked` on `gh pr`
+plumbing before ever posting/merging anything. Read both `task.yaml` and
+`supervisor.log`/`supervisor-result.json` for that task dir first, per this
+task's own SPEC, before doing anything else.
+
+**Independently re-verified rather than trusted:**
+- The stale `AUDIT:FAIL` (comment 5283739805, head `34bb70b6`) has exactly
+  one actionable finding (the `_ensure_umr_table()` crash); confirmed fixed
+  by `75c12f2` at current head `4380f7f9` -- `test_full_server_file_registration.py`
+  passes (21/21 in this repo's current copy of that file).
+- The prior task's OWN reviewer verdict (`review.json` in its task dir,
+  verdict=`reject`) was real, not fabricated, and still applied at
+  `4380f7f9` at the moment this task started: confirmed directly by reading
+  `query_umr_tasks()`/`find_target_identifier_duplicate()` in
+  `superboss-register.py` and by running
+  `pytest tests/test_target_identifier_dedup.py` myself --
+  **5 failed, 8 passed**, matching the reviewer's own count exactly.
+
+**Real regression (2nd, distinct from the original AUDIT:FAIL's finding):**
+`query_umr_tasks()`'s `full=False` default (added by this same PR) excludes
+`inputs_json` from its SELECT/result dict. `find_target_identifier_duplicate()`
+-- the deterministic duplicate-dispatch guard `dispatch-owner-task.sh` calls
+before every real dispatch -- calls `query_umr_tasks(conn, limit=limit)` with
+no `full=True`, then reads `row.get("inputs_json")` to compare target
+identifiers. With the light-column default, that key is simply absent, so
+`inputs` always collapsed to `{}`, `row_ids` was always empty, and the guard
+could never detect a real duplicate dispatch again -- silently, no crash, no
+warning.
+
+### Completed (addendum 2)
+- [x] Fixed `find_target_identifier_duplicate()` to call
+      `query_umr_tasks(conn, limit=limit, full=True)` -- bounded (`limit`
+      defaults to 30, hard-capped at `MAX_UMR_QUERY_LIMIT=2000` regardless)
+      and every CLI path is already covered by `install_cli_resource_guard()`'s
+      wall-clock/RSS watchdog, so this is safe. Updated `query_umr_tasks()`'s
+      own docstring so the `full=True` contract is no longer described as a
+      rare debug-only case now that a second real caller depends on it.
+- [x] Fixed a real, separate bug this surfaced in
+      `tests/test_query_umr_limit_clamp_and_ensure_table_regression.py`:
+      its CLI-subprocess assertion never set `VERIDIAN_SCRIPTS_DIR` in the
+      subprocess env, so `resource_governor.py --query-umr` silently resolved
+      `SCRIPTS` to the live-deployed `/opt/veridian/scripts` copy instead of
+      this branch's own code (confirmed: that live copy still lacks the
+      `full` kwarg entirely, `TypeError: unexpected keyword argument 'full'`).
+      Fixed to pass `VERIDIAN_SCRIPTS_DIR=SCRIPTS_DIR`, the same convention
+      every other subprocess test in this suite already uses (e.g.
+      `tests/test_ocid_artifact_links.py`).
+- [x] Real test output (pasted verbatim), all run with
+      `VERIDIAN_SCRIPTS_DIR=$(pwd)`:
+```
+$ python3 -m pytest tests/test_target_identifier_dedup.py -q
+13 passed in 13.20s
+
+$ python3 -m pytest tests/test_query_umr_limit_clamp_and_ensure_table_regression.py -q
+2 passed in 0.67s
+
+$ python3 -m pytest test_full_server_file_registration.py -q
+21 passed in 6.90s
+```
+  Full-suite run (`python3 -m pytest -q`) launched in background; exact
+  pass/fail counts and command/exit code to be recorded here and in the
+  audit comment once it completes (the full suite takes >500s -- one prior
+  inline attempt with a 500s wrapper timeout self-killed at exit 143;
+  re-run without that wrapper).
+- [ ] Post a new Tier-1 audit comment on PR #308 citing current head
+      `4380f7f9` explicitly (not the stale `34bb70b6`), once the full suite
+      result above is in.
+- [ ] Merge PR #308 to `main` -- ONLY if the new audit is a real PASS.
+- [ ] Call `agent_work_briefing.py record-completion` for
+      `UMR-20260813-235507-1710` with a real summary of this work.
 
 ---
 

@@ -4949,7 +4949,12 @@ def reconcile_umr_status_against_pr(conn, umr_id, pr_evidence=None, _runner=None
     against real, independently-found PR-merge evidence -- directly targets
     the exact real bug class just found and fixed for
     UMR-20260805-032731-b412 (canonical UMR stuck at 'running'/ts_completed
-    null despite the real underlying work being done and the real PR merged).
+    null despite the real underlying work being done and the real PR merged),
+    and (task-20260814-080739) the identical bug shape for status=
+    'completed_unmerged' -- a real commit that was genuinely still unmerged
+    at write time but whose PR has since merged, with nothing that ever
+    re-checked it (see this function's own stale_statuses comment below for
+    a live-confirmed real instance).
 
     `pr_evidence` may be pre-fetched by the caller (a list of dicts with at
     least "state"/"mergedAt" keys, e.g. gh's own --json output shape) for
@@ -4996,7 +5001,24 @@ def reconcile_umr_status_against_pr(conn, umr_id, pr_evidence=None, _runner=None
     completing_pr = merged_prs_sorted[0]
     merged_at = completing_pr.get("mergedAt")
 
-    stale_statuses = {"queued", "dispatched", "running"}
+    # task-20260814-080739 real fix ("close the completed_unmerged dead end"):
+    # this used to be {"queued", "dispatched", "running"} only, which meant a
+    # row correctly written as completed_unmerged (real commit, genuinely not
+    # yet an ancestor of main/master at write time -- see
+    # validate_umr_terminal_completion_evidence()'s own docstring) NEVER got
+    # re-checked once its PR actually merged: this same function's own
+    # real, independently-found merged-PR evidence was sitting right here on
+    # every subsequent call and nothing ever consulted it for that one
+    # status. Live-confirmed real instance: UMR-20260814-054218-9475, recorded
+    # completed_unmerged at 06:02:44Z citing commit 5e9f6dea (PR #209, not yet
+    # merged at that moment) -- PR #209 merged for real at 07:16:24Z and nothing
+    # ever revisited the row; only this sweep's manual mark-umr-terminal call
+    # closed it. completed_unmerged is included here now so
+    # --apply performs the exact same real promotion (via the same
+    # update_umr_task() write below) that queued/dispatched/running rows
+    # already got -- completed_unmerged stops being a silent dead end and
+    # becomes self-healing the same way every other stale status already is.
+    stale_statuses = {"queued", "dispatched", "running", "completed_unmerged"}
     is_stale = current_status in stale_statuses
 
     result = {

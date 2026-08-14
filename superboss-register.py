@@ -886,6 +886,7 @@ def _migrate_schema(conn):
     _ensure_external_agent_dispatch_table(conn)
     _ensure_master_issue_tracker_table(conn)
     _ensure_governance_cycle_log_table(conn)
+    _ensure_search_cache_table(conn)
 
 
 def _migrate_wiring_registry_content_hash(conn):
@@ -1347,6 +1348,138 @@ def cmd_check_content_duplicate(args):
         "content_duplicate_found": prior_id is not None,
         "duplicate_instruction_id": prior_id,
     }))
+
+
+# ---------------------------------------------------------------------------
+# Short-TTL search-result cache (task-20260814-181008): a real, confirmed gap
+# -- task-gateway.py's cmd_submit re-runs check-duplicate/search/query-
+# knowledge (this file's own FTS5 lookups) AND run_zoekt_search (a live HTTP
+# call to the real Zoekt webserver) on every single dispatch, even when a
+# near-identical query text just ran minutes earlier from a different
+# dispatch (the real, common case: e.g. the Desktop sentinel and an owner-
+# engine-gated chat submitting overlapping instructions within the same
+# short window -- see check_target_identifier_duplicate's own docstring
+# above for a real prior incident of exactly this shape). No caching existed
+# for any of these four calls before this.
+#
+# TTL = 5 minutes (SEARCH_CACHE_TTL_SECONDS, env-overridable like every other
+# TTL constant in this codebase -- see EXTERNAL_AGENT_DISPATCH_TTL_HOURS
+# below / resource_governor.py's HEARTBEAT_STALE_TTL_SECONDS for the same
+# convention). Chosen because: (1) it comfortably covers the real "different
+# dispatch minutes later" overlap window this feature targets -- short-lived
+# duplicate bursts, not hours-old staleness; (2) it stays well under
+# check_content_duplicate's own 24h window and check_target_identifier_
+# duplicate's 4h window above, so this cache is never the reason a genuinely
+# new instruction/knowledge-fragment/capability registered in between two
+# dispatches gets masked for long -- new rows in instructions/
+# knowledge_engine/capability_registry are common on this box, so a longer
+# TTL would risk serving stale search/knowledge/duplicate/zoekt results well
+# past the point they stopped being accurate.
+#
+# Reuses the existing superboss-register.sqlite file (search_cache table,
+# created via _ensure_search_cache_table() below, same idempotent-CREATE-
+# TABLE convention as every other table in this file) -- no new database.
+# Keyed on a normalized, order-insensitive hash of the query text (see
+# _search_cache_key() below) so "foo bar" and "bar foo" -- the same keyword
+# set extracted in a different order by two different dispatches -- hit the
+# same cache entry.
+# ---------------------------------------------------------------------------
+SEARCH_CACHE_TTL_SECONDS = int(os.environ.get("VERIDIAN_SEARCH_CACHE_TTL_S", str(5 * 60)))
+
+
+def _search_cache_key(query_text):
+    """Order-insensitive, case/whitespace-normalized sha256 of query_text --
+    same normalize-then-hash shape as _content_hash_for_text() above, but
+    token-sorted first so re-ordered keyword extraction (e.g. two different
+    dispatches producing "foo bar" vs "bar foo" from the same underlying
+    text) still hits the same cache entry."""
+    normalized = " ".join(sorted(re.sub(r"\s+", " ", (query_text or "")).strip().lower().split()))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _ensure_search_cache_table(conn):
+    """Idempotent CREATE TABLE IF NOT EXISTS, same convention as
+    _ensure_governance_cycle_log_table() below."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS search_cache (
+            cache_key TEXT PRIMARY KEY,
+            query_text TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            created_ts TEXT NOT NULL
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_search_cache_created_ts ON search_cache(created_ts)"
+    )
+
+
+def get_search_cache(query_text, ttl_seconds=None):
+    """Real cache lookup: returns {"hit": bool, "result": <cached dict or
+    None>, "age_seconds": <float or None>, "cache_key": <str>}. A row older
+    than ttl_seconds (default SEARCH_CACHE_TTL_SECONDS) is treated exactly
+    like a miss -- expired rows are left in place (not deleted here); the
+    next put_search_cache() call for the same key overwrites it (INSERT OR
+    REPLACE), so no separate sweep/GC job is needed for this short-TTL,
+    self-healing cache."""
+    ttl = SEARCH_CACHE_TTL_SECONDS if ttl_seconds is None else ttl_seconds
+    init_db_silent()
+    conn = _connect()
+    _ensure_search_cache_table(conn)
+    cache_key = _search_cache_key(query_text)
+    row = conn.execute(
+        "SELECT result_json, created_ts FROM search_cache WHERE cache_key = ?",
+        (cache_key,),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return {"hit": False, "result": None, "age_seconds": None, "cache_key": cache_key, "ttl_seconds": ttl}
+    created = datetime.fromisoformat(row["created_ts"])
+    age_seconds = (datetime.now(timezone.utc) - created).total_seconds()
+    if age_seconds > ttl:
+        return {"hit": False, "result": None, "age_seconds": age_seconds, "cache_key": cache_key, "ttl_seconds": ttl}
+    return {
+        "hit": True,
+        "result": json.loads(row["result_json"]),
+        "age_seconds": age_seconds,
+        "cache_key": cache_key,
+        "ttl_seconds": ttl,
+    }
+
+
+def put_search_cache(query_text, result_obj):
+    """Real INSERT OR REPLACE -- upserts the cache entry for query_text's
+    key, always stamped with the current time (so a stale row that had aged
+    past TTL, then got a fresh live search run behind it, starts a new TTL
+    window from now rather than reusing its old created_ts)."""
+    init_db_silent()
+    conn = _connect()
+    _ensure_search_cache_table(conn)
+    cache_key = _search_cache_key(query_text)
+    with _write_lock():
+        conn.execute(
+            "INSERT OR REPLACE INTO search_cache (cache_key, query_text, result_json, created_ts) "
+            "VALUES (?, ?, ?, ?)",
+            (cache_key, query_text, json.dumps(result_obj, default=str), _now_iso()),
+        )
+        conn.commit()
+    conn.close()
+    return cache_key
+
+
+def cmd_get_search_cache(args):
+    result = get_search_cache(args.query_text, ttl_seconds=args.ttl_seconds)
+    print(json.dumps(result, indent=2, default=str))
+
+
+def cmd_put_search_cache(args):
+    try:
+        result_obj = json.loads(args.result_json)
+    except json.JSONDecodeError as e:
+        print(json.dumps({"error": f"put-search-cache: --result-json is not valid JSON: {e}"}))
+        sys.exit(1)
+        return
+    cache_key = put_search_cache(args.query_text, result_obj)
+    print(json.dumps({"ok": True, "cache_key": cache_key}, indent=2, default=str))
 
 
 # ---------------------------------------------------------------------------
@@ -10356,6 +10489,25 @@ if __name__ == "__main__":
     p_dup.add_argument("query", nargs="?", default="")
     p_dup.add_argument("--category", default="")
 
+    p_getsc = sub.add_parser("get-search-cache",
+                              help="task-20260814-181008: real short-TTL cache lookup for "
+                                   "task-gateway.py cmd_submit's check-duplicate/search/"
+                                   "query-knowledge/zoekt search step -- returns "
+                                   "{hit, result, age_seconds, cache_key}; hit=False on a "
+                                   "miss or an expired (> --ttl-seconds, default "
+                                   "SEARCH_CACHE_TTL_SECONDS) row.")
+    p_getsc.add_argument("--query-text", dest="query_text", required=True)
+    p_getsc.add_argument("--ttl-seconds", dest="ttl_seconds", type=float, default=None)
+
+    p_putsc = sub.add_parser("put-search-cache",
+                              help="task-20260814-181008: real upsert of a search_cache row "
+                                   "-- --result-json is the combined check-duplicate/search/"
+                                   "query-knowledge/zoekt result dict cmd_submit just "
+                                   "computed live, stored verbatim for the next matching "
+                                   "get-search-cache lookup within TTL.")
+    p_putsc.add_argument("--query-text", dest="query_text", required=True)
+    p_putsc.add_argument("--result-json", dest="result_json", required=True)
+
     p_cdup = sub.add_parser("check-content-duplicate", help="Stage 2 (task-20260729): "
                              "content-hash dedup for same-text chat resubmission -- has "
                              "this exact instruction text already been submitted recently.")
@@ -10855,6 +11007,10 @@ if __name__ == "__main__":
             index_add(args)
     elif args.cmd == "check-duplicate":
         check_duplicate(args)
+    elif args.cmd == "get-search-cache":
+        cmd_get_search_cache(args)
+    elif args.cmd == "put-search-cache":
+        cmd_put_search_cache(args)
     elif args.cmd == "check-content-duplicate":
         cmd_check_content_duplicate(args)
     elif args.cmd == "check-target-identifier-duplicate":

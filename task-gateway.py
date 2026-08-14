@@ -363,6 +363,78 @@ def extract_keywords_mechanical(text):
     return keywords
 
 
+TIER_EXECUTION_CONFIG_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "tier_execution_config.json"
+)
+# Fail-closed default, used ONLY if tier_execution_config.json itself is
+# missing/unreadable/malformed -- deliberately shaped identically to that
+# file's own real content so a config-read hiccup degrades to the same
+# claude_code_cli-only behavior, never to any other execution_path.
+_TIER_EXECUTION_CONFIG_FALLBACK = {
+    "default_execution_path": "claude_code_cli",
+    "tiers": {
+        "3": {"execution_path": "claude_code_cli_headless"},
+        "4": {"execution_path": "claude_code_cli_headless"},
+    },
+}
+
+
+def _load_tier_execution_config():
+    """task-20260814-135001 / UMR-20260814-131248-baed (real fix for PR #374's
+    AUDIT:FAIL policy-conflict finding): the tier -> execution-backend/model
+    mapping is data, not code -- lives in tier_execution_config.json
+    (repo root, alongside this file) so it is genuinely config-driven
+    (Owner directive: stay AI-model-agnostic in DESIGN, even though
+    claude_code_cli is the only real backend allowed right now). A read/parse
+    failure here must never crash a real dispatch -- falls back to
+    _TIER_EXECUTION_CONFIG_FALLBACK, which encodes the exact same
+    claude_code_cli-only default this file used before the config existed."""
+    try:
+        with open(TIER_EXECUTION_CONFIG_PATH) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return _TIER_EXECUTION_CONFIG_FALLBACK
+
+
+def tier_execution_settings(tier):
+    """task-20260814-135001 / UMR-20260814-131248-baed: the ONE real,
+    single-source-of-truth tier -> execution settings lookup (supersedes
+    task-20260814-131322's original aider-chat+litellm+OpenRouter/GLM-5.2
+    design, dropped in full per Owner directive after PR #374's AUDIT:FAIL --
+    see tier_execution_config.json's own header comment). resource_governor.py
+    tiers 0/1/2 (highest 3 priority levels) keep the existing claude_code_cli
+    path (registered + relayed into the live interactive tmux session by
+    dispatch-owner-task.sh, unchanged). Tiers 3/4 (the two lowest-priority
+    levels) use a cheaper/faster claude_code_cli_headless path instead -- a
+    single non-interactive `claude -p ... --output-format json` invocation,
+    NEVER OpenRouter/GLM-5.2/a raw Anthropic API key -- so genuinely
+    low-priority work no longer costs a full interactive claude_code_cli
+    session just to get picked up. Returns None for tier=None (caller didn't
+    supply one) -- never guessed. Returns a dict always containing
+    'execution_path', plus whatever other real settings
+    (model/effort/timeout_seconds/max_budget_usd) tier_execution_config.json
+    defines for this tier -- empty for tier 0/1/2, which take no settings
+    from here."""
+    if tier is None:
+        return None
+    cfg = _load_tier_execution_config()
+    tier_cfg = dict(cfg.get("tiers", {}).get(str(tier)) or {})
+    tier_cfg.pop("_note", None)
+    tier_cfg.setdefault(
+        "execution_path", cfg.get("default_execution_path", "claude_code_cli")
+    )
+    return tier_cfg
+
+
+def execution_path_for_tier(tier):
+    """Thin accessor over tier_execution_settings() -- kept as its own
+    function since it's the one field dispatch-owner-task.sh's step 5
+    branches on. See tier_execution_settings() for the real, config-driven
+    lookup."""
+    settings = tier_execution_settings(tier)
+    return settings["execution_path"] if settings else None
+
+
 def cmd_submit(args):
     # OWNER DIRECTIVE 2026-07-25 (KE-20260725-061008-8423) point 2, mandatory
     # default for --source owner: raw text is gated through the OWNER_ENGINE
@@ -507,6 +579,19 @@ def cmd_submit(args):
         "active_collision_task_ids": active_collision_task_ids,
         "keywords_extracted": keywords,
         "keyword_extraction_fallback_used": fallback_used,
+        # task-20260814-131322 / UMR-20260814-131248-baed, real backend fixed
+        # under task-20260814-135001 (PR #374's AUDIT:FAIL): real, single-
+        # source-of-truth execution-backend decision for the tier this
+        # caller supplied (see tier_execution_settings()/
+        # execution_path_for_tier() above, and tier_execution_config.json)
+        # -- None if --tier was omitted. execution_settings carries the full
+        # config-driven settings (model/effort/timeout_seconds/
+        # max_budget_usd) dispatch-owner-task.sh's own tier-3/4 headless
+        # claude_code_cli invocation uses, so that mapping lives in exactly
+        # one place, not re-derived independently by each caller.
+        "tier": args.tier,
+        "execution_path": execution_path_for_tier(args.tier),
+        "execution_settings": tier_execution_settings(args.tier),
     }, indent=2, default=str))
 
 
@@ -1554,6 +1639,16 @@ def build_parser():
     s.add_argument("--source", required=True,
                     choices=["owner", "ai_agent", "trusted_executor", "end_user", "external_integration"])
     s.add_argument("--session-id", dest="session_id", required=True)
+    # task-20260814-131322 / UMR-20260814-131248-baed: optional -- a caller
+    # that already knows resource_governor.py's real tier (0..4, e.g.
+    # dispatch-owner-task.sh, which computes it from its own [tier] CLI arg
+    # before ever calling submit) can pass it here so this response carries
+    # the one real, single-source-of-truth execution_path decision (see
+    # execution_path_for_tier() below) instead of that decision being
+    # re-derived independently in each caller. Omitted (None) by any caller
+    # that doesn't know its tier yet at submit time -- execution_path is
+    # simply omitted from the response in that case, never guessed.
+    s.add_argument("--tier", type=int, default=None, choices=[0, 1, 2, 3, 4])
     s.set_defaults(func=cmd_submit)
 
     st = sub.add_parser("start")

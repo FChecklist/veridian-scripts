@@ -91,18 +91,33 @@ _closed_pr_superseded_by_merged_pr() added to resource_governor.py, with
   real reason) -- prevents the narrow CLOSED-unblock fix from itself
   becoming a false-non-rejection for exactly PR#298's real shape. 6 new/
   revised tests, 18/18 total pass.
-- [x] Ran test_pm_sentinel_tick.py against current origin/main HEAD to
-  attempt a fresh, real AUDIT:PASS artifact for PR#299 (no AUDIT:PASS
+- [x] Attempted test_pm_sentinel_tick.py against current origin/main HEAD
+  to produce a fresh, real audit artifact for PR#299 (no AUDIT:PASS
   comment exists on record for #299 -- only an AUDIT:FAIL at an earlier
   head SHA b6fbed3, before 3 more already-merged fix commits landed on
-  top). Result: see next progress update (run was in progress at last
-  save).
+  top; that same AUDIT:FAIL comment itself notes "only 3 of 8 [test
+  classes] could be safely executed" -- some real test classes appear to
+  need a live systemd/production environment this task workspace does not
+  have). Two attempts (120s foreground timeout, then background) did not
+  complete within this session's remaining time/budget -- honestly
+  reporting this as NOT completed, not fabricating a pass. `bash -n
+  pm-sentinel-tick.sh` syntax check does pass clean, and `python3 -c
+  "import resource_governor"` confirms the resource_governor.py changes
+  themselves import cleanly.
 
 ## Remaining
-- [ ] Post a real audit comment (PASS or accurately whatever the real
-  result is -- do not fabricate) on PR#299 citing current origin/main
-  HEAD, with real test-execution evidence, to close the "fresh AUDIT:PASS
-  matching head" done-criterion for real.
+- [ ] A fresh, complete AUDIT:PASS re-verification of PR#299's current
+  origin/main state was NOT completed in this session (see note above --
+  test_pm_sentinel_tick.py's full suite did not finish within the
+  available time; likely needs a live/production-adjacent environment for
+  some of its 10 test classes). The done-criterion "PR#298's real state
+  changes ... or a real successor merged in its place" IS satisfied by
+  PR#299 (real, merged, already on origin/main) -- what remains open is
+  only a NEW fresh audit comment beyond the evidence already on record
+  (the prior AUDIT:FAIL + the close-comment's own "6/6 test_pm_sentinel_tick.py
+  passed" claim, both pre-dating 2 further already-merged fix commits).
+  A follow-up session with more time/budget (or direct access to a live
+  systemd test environment) should finish this.
 - [ ] UMR-20260814-125933-3377 itself is already terminal
   (status=rejected_duplicate) -- mark-umr-terminal only accepts
   {completed,completed_unmerged,failed,killed}, so its row is not

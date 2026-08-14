@@ -1126,5 +1126,80 @@ class PmSentinelTickLiveDeployDriftInSyncTest(unittest.TestCase):
             self.assertEqual(len(drift_rows), 0, msg=report_rows)
 
 
+class PmSentinelTickTokenZeroGuardTest(unittest.TestCase):
+    """Real test for assert_zero_llm_token_usage() / LLM_INVOCATION_PATTERN --
+    this file's own real, continuous, every-tick enforcement of the
+    "TOKEN USAGE: ZERO calls to any LLM" contract documented in
+    pm-sentinel-tick.sh's own "TOKEN USAGE" header comment (previously only a
+    one-time manual grep claim, never re-checked; now a real regression
+    guard, run first thing every real tick). See PROGRESS.md,
+    "pm-sentinel-tick.sh real measured token delta", for the real
+    before/after this guard's own PASS result is the concrete, continuously
+    re-verified evidence for."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_token_zero_test_")
+        # Empty umr_tasks -- isolates this test to the guard itself, same
+        # convention as PmSentinelTickLiveDeployDriftInSyncTest above.
+        self.copy_path = _seeded_copy(self.tmpdir, [])
+        self.live_dir = _local_drift_fixture(self.tmpdir, extra_origin_commit=False)
+
+        self.state_file = os.path.join(self.tmpdir, "pm-sentinel-inflight.json")
+        self.report_file = os.path.join(self.tmpdir, "report.jsonl")
+        self.metrics_file = os.path.join(self.tmpdir, "metrics.prom")
+        self.env = dict(os.environ)
+        self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
+        self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
+        self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
+        self.env["PM_SENTINEL_REPORT_FILE"] = self.report_file
+        self.env["PM_SENTINEL_METRICS_FILE"] = self.metrics_file
+        self.env["PM_SENTINEL_LIVE_SCRIPTS_DIR"] = self.live_dir
+        self.env["CHECK_LIVE_SCRIPTS_DRIFT_PY"] = os.path.join(HERE, "check_live_scripts_drift.py")
+        # Real dispatch-owner-task.sh is fine here -- an empty umr_tasks
+        # table + in-sync live checkout never dispatches anything, same
+        # reasoning as PmSentinelTickLiveDeployDriftInSyncTest above.
+        self.env["DISPATCH_OWNER_TASK_SH"] = REAL_DISPATCH_OWNER_TASK_SH
+        self.env["VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS"] = ""
+        self.env["DISPATCH_TMUX_SESSION"] = "pm-sentinel-test-throwaway-session"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_real_shipped_script_passes_its_own_token_zero_guard(self):
+        result = subprocess.run(
+            [SENTINEL_SH], cwd=HERE, env=self.env,
+            capture_output=True, text=True, timeout=90,
+        )
+        self.assertIn("TOKEN-ZERO GUARD: PASS", result.stdout, msg=result.stdout + result.stderr)
+        self.assertNotIn("TOKEN-ZERO GUARD: FAIL", result.stdout)
+
+        with open(self.metrics_file) as f:
+            metrics_txt = f.read()
+        self.assertIn("pm_sentinel_tick_llm_invocation_count 0", metrics_txt)
+
+    def test_injected_real_llm_call_site_fails_the_guard_and_the_tick(self):
+        # Real, concrete regression proof this guard is a real detector, not
+        # a tautology: a mutated copy of the real script with one real
+        # LLM-invocation call site appended must be caught -- TOKEN-ZERO
+        # GUARD: FAIL, and a real non-zero exit code (same AUDIT-REJECT FIX
+        # #2 exit-code-propagation convention every other real tick failure
+        # already uses).
+        mutated = os.path.join(self.tmpdir, "pm-sentinel-tick-mutated.sh")
+        with open(SENTINEL_SH) as f:
+            src = f.read()
+        with open(mutated, "w") as f:
+            f.write(src)
+            f.write("\ncurl https://api.anthropic.com/v1/messages -d '{}'\n")
+        os.chmod(mutated, os.stat(mutated).st_mode | stat.S_IEXEC)
+
+        result = subprocess.run(
+            [mutated], cwd=HERE, env=self.env,
+            capture_output=True, text=True, timeout=90,
+        )
+        self.assertIn("TOKEN-ZERO GUARD: FAIL", result.stdout + result.stderr,
+                       msg=result.stdout + result.stderr)
+        self.assertNotEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

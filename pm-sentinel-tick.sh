@@ -213,17 +213,23 @@
 #       today's (already-compliant) behavior.
 #
 # TOKEN USAGE -- this entire tick makes ZERO calls to any LLM (no anthropic/
-# litellm/aider/claude invocation anywhere in this file, verified by grep of
-# this file for those tokens: zero real call sites, only this doc comment).
-# Every decision point below is a real bash/python conditional over real
-# queried state (resource_governor.py --query-umr, systemctl show, gh pr
-# view --json, journalctl, umr_tasks.inputs_json fields) -- never an AI
-# narration of a go/no-go decision. The only tokens this integration's own
-# governing UMR chain has ever spent are the AI-agent WORKER dispatches that
-# build/fix/report on it (see PROGRESS.md for the real measured before/after
-# token comparison) -- unchanged from before, and only for genuine
-# novel-failure/implementation judgment calls, never for the tick's own
-# go/no-go decision.
+# litellm/aider/claude invocation anywhere in this file). Previously only a
+# one-time manual grep claim (never re-checked, so a future edit could
+# silently violate it without this comment ever going stale-looking); now a
+# real, automated, every-tick regression guard --
+# assert_zero_llm_token_usage() below, backed by LLM_INVOCATION_PATTERN, run
+# first thing every real tick and exposed as the real
+# pm_sentinel_tick_llm_invocation_count Prometheus gauge (see "Metrics"
+# near the end of this file). Every decision point below is a real
+# bash/python conditional over real queried state (resource_governor.py
+# --query-umr, systemctl show, gh pr view --json, journalctl,
+# umr_tasks.inputs_json fields) -- never an AI narration of a go/no-go
+# decision. The only tokens this integration's own governing UMR chain has
+# ever spent are the AI-agent WORKER dispatches that build/fix/report on it
+# (see PROGRESS.md, "pm-sentinel-tick.sh real measured token delta", for the
+# real measured before/after comparison) -- unchanged from before, and only
+# for genuine novel-failure/implementation judgment calls, never for the
+# tick's own go/no-go decision.
 #
 # Real testability seams (env overrides, same convention every other real
 # script in this codebase already uses):
@@ -363,11 +369,50 @@ fi
 # Owner-issued policy this implements.
 FINANCIAL_KEYWORDS='(^|[^A-Za-z])(spend(ing)?|payment|invoic(e|ing)|pricing|billing|subscription (cost|fee|upgrade)|refund|purchas(e|ing)|financial commitment|budget approval|credit card|price increase|contract cost)([^A-Za-z]|$)'
 
+# Real, narrow LLM-invocation call-site pattern backing
+# assert_zero_llm_token_usage() below -- see "TOKEN USAGE" header comment
+# above. Deliberately matches real call sites (a binary invocation, an SDK
+# client construction, a completion call, or a direct API endpoint), not the
+# vendor/product *names* themselves -- otherwise this pattern would trip on
+# its own header comment and on this definition line. Same narrow-keyword
+# convention as FINANCIAL_KEYWORDS above.
+LLM_INVOCATION_PATTERN='(^|[^A-Za-z0-9_])(claude[[:space:]]+-p|claude[[:space:]]+--print|anthropic\.(Anthropic|AnthropicBedrock|Client)\(|litellm\.completion\(|openai\.(ChatCompletion|OpenAI)\(|aider[[:space:]]+--|api\.anthropic\.com|api\.openai\.com|generativelanguage\.googleapis\.com)([^A-Za-z0-9_]|$)'
+
+# assert_zero_llm_token_usage -- real, automated, per-tick enforcement of the
+# "TOKEN USAGE: ZERO calls to any LLM" contract documented in this file's own
+# header comment (previously a one-time manual grep claim, never re-checked;
+# this is that same check made real and continuous). Strips comment-only
+# lines (this script's own doc comments legitimately name these vendors/
+# products for documentation) then greps the remaining real code for an
+# actual call-site pattern. A future edit that wires in a real LLM call here
+# makes this fail loudly the very next tick instead of silently drifting the
+# doc comment's claim out of date. See PROGRESS.md ("pm-sentinel-tick.sh
+# real measured token delta") for the real before/after measurement this
+# guard's own PASS result is the concrete, continuously-re-verified evidence
+# for -- not a one-time claim.
+assert_zero_llm_token_usage() {
+  local src="${BASH_SOURCE[0]}"
+  local hits
+  hits="$(grep -v '^[[:space:]]*#' "$src" | grep -Ec "$LLM_INVOCATION_PATTERN")"
+  if [ "${hits:-0}" -gt 0 ]; then
+    echo "TOKEN-ZERO GUARD: FAIL -- ${hits} real LLM-invocation call site(s) found in $src; this script's zero-LLM-token contract has been violated" >&2
+    LLM_INVOCATION_COUNT="$hits"
+    return 1
+  fi
+  echo "TOKEN-ZERO GUARD: PASS -- 0 real LLM-invocation call sites in $src (this tick makes zero LLM API calls, zero LLM tokens spent)"
+  LLM_INVOCATION_COUNT=0
+  return 0
+}
+
 mkdir -p "$(dirname "$STATE_FILE")" "$(dirname "$REPORT_FILE")" "$(dirname "$METRICS_FILE")"
 [ -f "$STATE_FILE" ] || echo '{}' > "$STATE_FILE"
 
 TICK_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "=== pm-sentinel-tick $TICK_TS ==="
+
+if ! assert_zero_llm_token_usage; then
+  TICK_FAILURES=$((TICK_FAILURES + 1))
+fi
 
 # ---------------------------------------------------------------------------
 # small python3 helpers -- same "shell out to python3 -c for JSON" idiom
@@ -1073,6 +1118,9 @@ echo "QUERY-ONCE-PER-TICK: ${QUERY_CACHE_MISSES} real live query/queries issued,
   echo "# HELP pm_sentinel_tick_last_run_timestamp_seconds Unix time of last real tick"
   echo "# TYPE pm_sentinel_tick_last_run_timestamp_seconds gauge"
   echo "pm_sentinel_tick_last_run_timestamp_seconds $(date -u +%s)"
+  echo "# HELP pm_sentinel_tick_llm_invocation_count Real LLM API call sites found in this script's own source this tick (assert_zero_llm_token_usage) -- the real, continuously-measured token-delta baseline: always 0 by contract, this tick spends zero LLM tokens"
+  echo "# TYPE pm_sentinel_tick_llm_invocation_count gauge"
+  echo "pm_sentinel_tick_llm_invocation_count ${LLM_INVOCATION_COUNT:-0}"
 } > "${METRICS_FILE}.tmp" && mv "${METRICS_FILE}.tmp" "$METRICS_FILE"
 
 echo "=== pm-sentinel-tick done: ${DISPATCH_COUNT}/${MAX_DISPATCHES_PER_TICK} new dispatches this tick (${TICK_FAILURES} real failure(s)) ==="

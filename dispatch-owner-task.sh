@@ -110,24 +110,49 @@ TIER="${3:-2}"
 MEDIUM="${4:-claude_code_cli}"
 REPO="${5:-compliance-tracker}"
 
-# task-20260814-131322 / UMR-20260814-131248-baed: real execution-backend
-# selection. Tier 0/1/2 keep the existing behavior below unchanged (register
-# + relay into the live interactive tmux session, which is what eventually
-# gets a claude_code_cli worker to look at this). Tier 3 and 4 (the two
-# lowest-priority tiers) instead execute via aider-chat + litellm against an
-# already-configured, already-priced cheaper provider model
-# (openrouter/z-ai/glm-5.2 -- the same real provider/model pair
-# compliance-tracker's own ai_model_registry already seeds as its sole
-# judgment-tier-eligible entry, drizzle/0231_ai_router_mother_router.sql;
-# consulted here for its schema SHAPE only -- input/output cost-per-token,
-# provider, model -- not its code) instead of ever spinning up an
-# interactive claude_code_cli session for genuinely low-priority work. See
-# the aider_litellm branch below (replaces step 5's tmux relay for this
-# path only) for the real execution itself.
-EXECUTION_PATH="claude_code_cli"
-if [ "$TIER" = "3" ] || [ "$TIER" = "4" ]; then
-  EXECUTION_PATH="aider_litellm"
-fi
+# task-20260814-131322 / UMR-20260814-131248-baed, real execution backend
+# fixed under task-20260814-135001 (PR #374's AUDIT:FAIL, policy-conflict
+# finding): real execution-backend selection. Tier 0/1/2 keep the existing
+# behavior below unchanged (register + relay into the live interactive tmux
+# session, which is what eventually gets a claude_code_cli worker to look at
+# this). Tier 3 and 4 (the two lowest-priority tiers) instead execute via a
+# single, cheaper/faster non-interactive `claude -p` (Claude Code CLI
+# headless/print mode, --output-format json) invocation -- NEVER aider-chat,
+# NEVER litellm, NEVER OpenRouter/GLM-5.2, NEVER a raw Anthropic API key.
+# task-20260814-131322's original design (aider-chat+litellm against
+# openrouter/z-ai/glm-5.2) is dropped in full per Owner directive (live
+# chat, 2026-08-14): SUPERBOSS_DISPATCH_PROMPT.md's 2026-07-18 CRITICAL FIX
+# already establishes that OpenRouter/GLM-5.2 caused a real credit-
+# exhaustion outage and that Claude Code CLI via the existing subscription
+# is the sole execution engine on this server -- there is no supported way
+# to point aider at the Claude Code CLI subscription as its own model
+# backend without an external API key, so aider/litellm are not reused here
+# at all, not even pointed at a fake local endpoint. Which real backend/
+# model/effort/timeout/budget apply to which tier is config-driven (see
+# tier_execution_config.json, read via task-gateway.py's
+# tier_execution_settings()) -- never hardcoded here or in task-gateway.py,
+# so the system stays genuinely AI-model-agnostic in DESIGN even though
+# claude_code_cli/claude_code_cli_headless is the only real backend allowed
+# to run right now. EXEC_SETTINGS_JSON below is this script's own local,
+# config-file-driven fallback (used only if the task-gateway.py submit call
+# in step 2 fails) -- see the real single-source-of-truth override there.
+EXEC_SETTINGS_JSON=$(python3 -c "
+import json, os, sys
+cfg_path = os.path.join(sys.argv[2], 'tier_execution_config.json')
+fallback = {'default_execution_path': 'claude_code_cli',
+            'tiers': {'3': {'execution_path': 'claude_code_cli_headless'},
+                      '4': {'execution_path': 'claude_code_cli_headless'}}}
+try:
+    with open(cfg_path) as f:
+        cfg = json.load(f)
+except (OSError, ValueError):
+    cfg = fallback
+tier_cfg = dict(cfg.get('tiers', {}).get(str(sys.argv[1])) or {})
+tier_cfg.pop('_note', None)
+tier_cfg.setdefault('execution_path', cfg.get('default_execution_path', 'claude_code_cli'))
+print(json.dumps(tier_cfg))
+" "$TIER" "$SCRIPT_DIR")
+EXECUTION_PATH=$(echo "$EXEC_SETTINGS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['execution_path'])")
 
 cd "$SCRIPT_DIR"
 
@@ -237,14 +262,16 @@ SUBMIT_CLASSIFY_ERR="$(mktemp)"
 if SUBMIT_CLASSIFY_JSON=$(python3 task-gateway.py submit --text "$PROMPT" --source owner --session-id "$SESSION_ID" --tier "$TIER" 2>"$SUBMIT_CLASSIFY_ERR"); then
   INSTRUCTION_ID=$(echo "$SUBMIT_CLASSIFY_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['instruction_id'])")
   # task-20260814-131322 / UMR-20260814-131248-baed: task-gateway.py submit
-  # is the one real single-source-of-truth for tier -> execution_path (see
-  # its own execution_path_for_tier()) -- take its answer when this call
-  # succeeded, rather than trusting only this script's own local TIER=3/4
-  # check (computed above, before this call ran, as the real fallback for
-  # the classification-failed branch below).
-  GATEWAY_EXECUTION_PATH=$(echo "$SUBMIT_CLASSIFY_JSON" | python3 -c "import json,sys; v=json.load(sys.stdin).get('execution_path'); print(v or '')")
-  if [ -n "$GATEWAY_EXECUTION_PATH" ]; then
-    EXECUTION_PATH="$GATEWAY_EXECUTION_PATH"
+  # is the one real single-source-of-truth for tier -> execution settings
+  # (see its own tier_execution_settings()/execution_path_for_tier(), both
+  # reading tier_execution_config.json) -- take its answer when this call
+  # succeeded, rather than trusting only this script's own local
+  # config-file read (computed above, before this call ran, as the real
+  # fallback for the classification-failed branch below).
+  GATEWAY_EXEC_SETTINGS=$(echo "$SUBMIT_CLASSIFY_JSON" | python3 -c "import json,sys; v=json.load(sys.stdin).get('execution_settings'); print(json.dumps(v) if v else '')")
+  if [ -n "$GATEWAY_EXEC_SETTINGS" ]; then
+    EXEC_SETTINGS_JSON="$GATEWAY_EXEC_SETTINGS"
+    EXECUTION_PATH=$(echo "$EXEC_SETTINGS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['execution_path'])")
   fi
   rm -f "$SUBMIT_CLASSIFY_ERR"
 else
@@ -281,11 +308,12 @@ fi
 
 # 4. Link instruction -> work item -> the real UMR id (output side). Real
 #    execution_path (task-20260814-131322) is recorded into work_items'
-#    own metadata_json here -- ALWAYS, for every tier, not only the new
-#    aider_litellm branch -- so which backend a task actually used is
-#    queryable later for every real dispatch (superboss-register.py search/
-#    query-knowledge over work_items, or a direct metadata_json read), not
-#    just inferable after the fact from which branch below happened to run.
+#    own metadata_json here -- ALWAYS, for every tier, not only the
+#    claude_code_cli_headless branch -- so which backend a task actually
+#    used is queryable later for every real dispatch (superboss-register.py
+#    search/query-knowledge over work_items, or a direct metadata_json
+#    read), not just inferable after the fact from which branch below
+#    happened to run.
 WORK_METADATA=$(python3 -c "import json,sys; print(json.dumps({'execution_path': sys.argv[1], 'tier': sys.argv[2]}))" "$EXECUTION_PATH" "$TIER")
 WORK_JSON=$(python3 superboss-register.py log-work --instruction-id "$INSTRUCTION_ID" --ai-task-id "$UMR_ID" --source owner --medium "$MEDIUM" --status open --metadata "$WORK_METADATA")
 WORK_ITEM_ID=$(echo "$WORK_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['work_item_id'])")
@@ -294,9 +322,10 @@ echo "DISPATCHED: umr_id=$UMR_ID instruction_id=$INSTRUCTION_ID work_item_id=$WO
 
 # 5. Deliver the work. Tier 0/1/2 (EXECUTION_PATH=claude_code_cli) relay
 #    into the live interactive tmux session exactly as before. Tier 3/4
-#    (EXECUTION_PATH=aider_litellm, task-20260814-131322) instead execute
-#    directly via aider-chat + litellm below -- no tmux, no interactive
-#    session, no claude_code_cli worker involved in that branch at all.
+#    (EXECUTION_PATH=claude_code_cli_headless, task-20260814-131322, real
+#    backend fixed under task-20260814-135001) instead run a single
+#    non-interactive `claude -p` invocation directly below -- no tmux, no
+#    interactive session, no aider/litellm/OpenRouter involved at all.
 if [ "$EXECUTION_PATH" = "claude_code_cli" ]; then
 
 # 5a. Relay into the live interactive tmux session -- same call, no separate
@@ -382,198 +411,234 @@ fi
 
 else
   # 5b. Tier 3/4 real execution backend (task-20260814-131322,
-  # UMR-20260814-131248-baed): aider-chat + litellm against
-  # openrouter/z-ai/glm-5.2, the same already-configured, already-priced
-  # cheap model this box already routes its GLM-5.2 traffic through
-  # (anthropic_openrouter_proxy.py's own PROXY_MODEL default) -- litellm
-  # talks to OpenRouter directly here, so no proxy service needs to be
-  # running for this path (confirmed live: no GLM-5.2-proxy routing unit is
-  # currently loaded server-side). This script drives aider synchronously
-  # to a real terminal outcome and records it itself -- no tmux relay, no
-  # claude_code_cli worker service, for this branch.
+  # UMR-20260814-131248-baed, real backend fixed under task-20260814-135001
+  # closing PR #374's AUDIT:FAIL): a single, non-interactive `claude -p`
+  # (Claude Code CLI headless/print mode) invocation against a real,
+  # disposable git worktree -- NEVER aider-chat, NEVER litellm, NEVER
+  # OpenRouter/GLM-5.2, NEVER a raw Anthropic API key (Owner directive,
+  # live chat 2026-08-14; SUPERBOSS_DISPATCH_PROMPT.md's 2026-07-18
+  # CRITICAL FIX). Model/effort/timeout/budget for this tier come from
+  # EXEC_SETTINGS_JSON (config-driven, see tier_execution_config.json) --
+  # never hardcoded here. This script drives the CLI synchronously to a
+  # real terminal outcome and records it itself -- no tmux relay, no
+  # second interactive claude_code_cli worker service, for this branch.
   #
   # $RELAY (--no-relay) is reused here with the same real meaning it has in
   # the claude_code_cli branch above -- "register only, do not deliver yet"
-  # -- applied to this branch's own delivery mechanism (running aider)
+  # -- applied to this branch's own delivery mechanism (running the CLI)
   # instead of a tmux relay.
   if [ "$RELAY" -eq 0 ]; then
-    echo "REGISTERED ONLY (--no-relay): umr_id=$UMR_ID execution_path=aider_litellm -- not executed by this call; row remains status='queued', pollable by dispatch-tick.py's own real mechanical pickup." >&2
+    echo "REGISTERED ONLY (--no-relay): umr_id=$UMR_ID execution_path=$EXECUTION_PATH -- not executed by this call; row remains status='queued', pollable by dispatch-tick.py's own real mechanical pickup." >&2
   else
-    AIDER_MODEL="${AIDER_LITELLM_MODEL:-openrouter/z-ai/glm-5.2}"
-    if [ -z "${OPENROUTER_API_KEY:-}" ]; then
-      # Same real fallback anthropic_openrouter_proxy.py's own
-      # get_openrouter_key() already uses -- the shared .env, not a new key
-      # source invented for this path.
-      OPENROUTER_API_KEY="$(grep '^OPENROUTER_API_KEY=' /opt/veridian/shared/.env 2>/dev/null | head -1 | cut -d= -f2-)"
-      export OPENROUTER_API_KEY
-    fi
+    CLI_MODEL=$(echo "$EXEC_SETTINGS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('model') or 'claude-haiku-4-5-20251001')")
+    CLI_EFFORT=$(echo "$EXEC_SETTINGS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('effort') or 'low')")
+    CLI_TIMEOUT_SECONDS=$(echo "$EXEC_SETTINGS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('timeout_seconds') or 900)")
+    CLI_MAX_BUDGET_USD=$(echo "$EXEC_SETTINGS_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('max_budget_usd') or 1.5)")
     REPO_PATH="/opt/veridian/repos/$REPO"
-    if [ -z "${OPENROUTER_API_KEY:-}" ]; then
-      echo "WARNING: OPENROUTER_API_KEY unavailable (env and /opt/veridian/shared/.env both empty) -- cannot execute the aider_litellm path for umr_id=$UMR_ID." >&2
+    if [ ! -d "$REPO_PATH" ]; then
+      echo "WARNING: repo not found at $REPO_PATH -- cannot execute the $EXECUTION_PATH path for umr_id=$UMR_ID." >&2
       python3 superboss-register.py mark-umr-terminal --umr-id "$UMR_ID" --status failed \
-        --reason "aider_litellm execution path: OPENROUTER_API_KEY unavailable" >/dev/null
-    elif [ ! -d "$REPO_PATH" ]; then
-      echo "WARNING: repo not found at $REPO_PATH -- cannot execute the aider_litellm path for umr_id=$UMR_ID." >&2
-      python3 superboss-register.py mark-umr-terminal --umr-id "$UMR_ID" --status failed \
-        --reason "aider_litellm execution path: repo not found at $REPO_PATH" >/dev/null
+        --reason "$EXECUTION_PATH execution path: repo not found at $REPO_PATH" >/dev/null
     else
       # Deliberately NOT veridian-task.py create -- that command's own
       # cmd_create always ends with `systemctl --user start
-      # veridian-worker@*.service`, which spins up exactly the
+      # veridian-worker@*.service`, which spins up exactly the interactive
       # claude_code_cli worker this tier-3/4 path exists to avoid. This
       # does the same real worktree-off-origin/HEAD setup cmd_create does
       # (fetch, resolve the real default branch, `git worktree add -b`),
-      # minus the systemd spawn, so aider gets a real, isolated, disposable
-      # checkout to work in.
-      AIDER_TASK_ID="aider-task-$(date -u +%Y%m%d-%H%M%S)-$$"
-      AIDER_TASK_DIR="/opt/veridian/ai-os/tasks/${AIDER_TASK_ID}"
-      AIDER_WORKSPACE="${AIDER_TASK_DIR}/workspace"
-      AIDER_BRANCH="worker/${AIDER_TASK_ID}"
-      mkdir -p "$AIDER_TASK_DIR"
+      # minus the systemd spawn, so the CLI gets a real, isolated,
+      # disposable checkout to work in.
+      CLI_TASK_ID="cli-headless-task-$(date -u +%Y%m%d-%H%M%S)-$$"
+      CLI_TASK_DIR="/opt/veridian/ai-os/tasks/${CLI_TASK_ID}"
+      CLI_WORKSPACE="${CLI_TASK_DIR}/workspace"
+      CLI_BRANCH="worker/${CLI_TASK_ID}"
+      mkdir -p "$CLI_TASK_DIR"
+
+      # Real fix for PR #374's AUDIT:FAIL finding #4 (per-run worktrees/task
+      # directories never cleaned up on success or failure, a real disk
+      # leak): registered the moment there is anything real to clean up
+      # (this mkdir, just above), fires on EVERY exit from this point on --
+      # normal fall-through, an early `exit 1` from some other real gate
+      # later in the script, or an uncaught error under this script's own
+      # `set -euo pipefail`. `git worktree remove --force` is tried first
+      # (the real, correct way to drop a worktree's registration out of
+      # $REPO_PATH/.git/worktrees/), falling back to a bare `rm -rf` of the
+      # workspace dir if that fails for any reason (e.g. the worktree setup
+      # itself never completed) -- either way $CLI_TASK_DIR itself is always
+      # removed last, so no directory under /opt/veridian/ai-os/tasks/ is
+      # ever left behind by this branch, on any real outcome.
+      _cli_headless_cleanup() {
+        if [ -n "${CLI_WORKSPACE:-}" ] && [ -d "$CLI_WORKSPACE" ]; then
+          git -C "$REPO_PATH" worktree remove --force "$CLI_WORKSPACE" 2>/dev/null || rm -rf "$CLI_WORKSPACE"
+        fi
+        if [ -n "${CLI_BRANCH:-}" ]; then
+          git -C "$REPO_PATH" branch -D "$CLI_BRANCH" >/dev/null 2>&1 || true
+        fi
+        rm -f "${CLI_OUT:-}" "${CLI_LOG:-}" 2>/dev/null || true
+        if [ -n "${CLI_TASK_DIR:-}" ] && [ -d "$CLI_TASK_DIR" ]; then
+          rm -rf "$CLI_TASK_DIR"
+        fi
+      }
+      trap _cli_headless_cleanup EXIT
+
       # Real setup (fetch/resolve-default-branch/worktree-add), but never
       # allowed to abort this whole script via `set -e` -- a genuine
       # failure here must still leave a real, honest failed terminal status
       # on $UMR_ID, same fail-safe posture as every other real gate in this
       # script, not a bare non-zero exit that leaves the row unexplained.
-      AIDER_SETUP_OK=1
+      CLI_SETUP_OK=1
       set +e
       git -C "$REPO_PATH" fetch origin && \
-        AIDER_DEFAULT_REF=$(git -C "$REPO_PATH" symbolic-ref refs/remotes/origin/HEAD) && \
-        AIDER_DEFAULT_BRANCH="${AIDER_DEFAULT_REF##*/}" && \
-        git -C "$REPO_PATH" worktree add -b "$AIDER_BRANCH" "$AIDER_WORKSPACE" "origin/$AIDER_DEFAULT_BRANCH"
-      AIDER_SETUP_OK=$?
+        CLI_DEFAULT_REF=$(git -C "$REPO_PATH" symbolic-ref refs/remotes/origin/HEAD) && \
+        CLI_DEFAULT_BRANCH="${CLI_DEFAULT_REF##*/}" && \
+        git -C "$REPO_PATH" worktree add -b "$CLI_BRANCH" "$CLI_WORKSPACE" "origin/$CLI_DEFAULT_BRANCH"
+      CLI_SETUP_OK=$?
       set -e
-      if [ "$AIDER_SETUP_OK" -ne 0 ]; then
-        echo "WARNING: aider_litellm worktree setup failed for umr_id=$UMR_ID (repo=$REPO)." >&2
+      if [ "$CLI_SETUP_OK" -ne 0 ]; then
+        echo "WARNING: $EXECUTION_PATH worktree setup failed for umr_id=$UMR_ID (repo=$REPO)." >&2
         python3 superboss-register.py mark-umr-terminal --umr-id "$UMR_ID" --status failed \
-          --reason "aider_litellm execution path: worktree setup (fetch/worktree add) failed for repo=$REPO" >/dev/null
-        AIDER_BASE_SHA=""
+          --reason "$EXECUTION_PATH execution path: worktree setup (fetch/worktree add) failed for repo=$REPO" >/dev/null
       else
-        AIDER_BASE_SHA=$(git -C "$AIDER_WORKSPACE" rev-parse HEAD)
-      fi
-      if [ -n "$AIDER_BASE_SHA" ]; then
+        CLI_BASE_SHA=$(git -C "$CLI_WORKSPACE" rev-parse HEAD)
 
-      # Real pricing for openrouter/z-ai/glm-5.2, mirrored (schema SHAPE
-      # only, per this task's own SPEC) from compliance-tracker's own
-      # ai_model_registry seed row for this exact provider/model pair
-      # (drizzle/0231_ai_router_mother_router.sql) -- gives aider's own
-      # real cost accounting a real per-token price to compute the measured
-      # cost delta against, instead of reporting an unmapped-model $0.00.
-      AIDER_MODEL_METADATA_FILE="$(mktemp --suffix=.json)"
-      python3 -c "
-import json, sys
-json.dump({sys.argv[1]: {
-    'input_cost_per_token': 0.00000042,
-    'output_cost_per_token': 0.00000132,
-    'litellm_provider': 'openrouter',
-    'mode': 'chat',
-}}, open(sys.argv[2], 'w'))
-" "$AIDER_MODEL" "$AIDER_MODEL_METADATA_FILE"
+        # Real fix for PR #374's AUDIT:FAIL finding #2 (prompt-derived
+        # --file arguments extracted via an unvalidated regex, real
+        # path-traversal risk): task-20260814-131322's original design
+        # mechanically extracted path-shaped tokens out of $PROMPT and
+        # passed each straight through to aider's own --file flag with no
+        # containment check at all -- a prompt containing e.g.
+        # "../../../etc/passwd" or an absolute path would have been handed
+        # to aider verbatim. This rewrite drops that whole mechanism
+        # structurally rather than re-validating it: `claude -p` (unlike
+        # aider) never takes a caller-supplied --file/--add-dir list built
+        # from prompt text -- the model reads/writes files itself, through
+        # its own Read/Edit/Write/Bash tools, which are sandboxed to its
+        # cwd ($CLI_WORKSPACE, set below) by Claude Code's own permission
+        # system since no --add-dir is ever passed here. There is
+        # therefore no regex-extracted path argument left for a
+        # prompt-injected "../" to reach in this branch at all -- do not
+        # reintroduce one (e.g. a future --add-dir derived from prompt
+        # text) without a real allowlist check against
+        # `realpath -q` being a descendant of $CLI_WORKSPACE first.
+        CLI_PROMPT="SPEC: ${PROMPT}
 
-      # Real, live-confirmed finding (this task's own second real dispatch,
-      # umr_id=UMR-20260814-132851-7e1b): passing the whole worktree
-      # directory (or `.`) as aider's only positional argument makes aider
-      # treat every existing file as read-only repo-map context, never
-      # "added to the chat" -- fine for a prompt that only CREATES a new
-      # file (worked, umr_id=UMR-20260814-132552-13cf), but a prompt that
-      # needs to EDIT an existing file gets aider's own real, correct
-      # refusal ("I need to edit an existing file, please add it to the
-      # chat") instead of a real edit -- confirmed live in that log.
-      # Real, general fix: mechanically extract path-shaped tokens
-      # (existing or not) from $PROMPT and pass each explicitly via aider's
-      # own --file flag ("specify a file to edit"), which adds it to the
-      # chat as real editable content whether or not it exists yet -- same
-      # real mechanical-extraction discipline task-gateway.py's own
-      # extract_keywords_mechanical() already uses for a different purpose,
-      # not a second bespoke NLP layer. Falls back to no --file args (the
-      # create-new-file-only behavior already proven live) if the prompt
-      # names nothing path-shaped.
-      AIDER_FILE_ARGS=()
-      while IFS= read -r f; do
-        [ -n "$f" ] && AIDER_FILE_ARGS+=(--file "$f")
-      done < <(printf '%s\n' "$PROMPT" | grep -oE '[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]{1,6}' | sort -u)
+PROTOCOL (tier-${TIER} claude_code_cli_headless execution, umr_id=${UMR_ID}): this is a single non-interactive invocation with a real wall-clock timeout -- there is no follow-up turn. Commit and push your own real work yourself (branch \"${CLI_BRANCH}\" is already checked out here, tracking origin/${CLI_DEFAULT_BRANCH}) as you go, not only at the very end, so genuine partial progress survives even if you don't reach a final commit before the timeout. This script also makes a best-effort safety-net commit of any real uncommitted changes after you finish, but that is a fallback, not a substitute for you committing your own work."
 
-      AIDER_LOG="$(mktemp)"
-      set +e
-      # Real, live-confirmed bug fixed here too: aider resolves its own git
-      # root (and therefore where it writes .aider.chat.history.md/
-      # .aider.tags.cache.*/.gitignore edits) from the process's cwd, NOT
-      # from a trailing positional file argument -- running this without
-      # first `cd`-ing into $AIDER_WORKSPACE dropped .aider.chat.history.md
-      # into whatever unrelated repo dispatch-owner-task.sh itself happened
-      # to be invoked from (confirmed live: task-20260814-131322's own
-      # veridian-scripts checkout, not the disposable compliance-tracker
-      # worktree aider was actually editing). Run in a subshell so this
-      # script's own cwd is restored either way. --map-tokens 0 skips the
-      # (slow, and for a --file-driven edit largely unnecessary) full repo
-      # scan -- consistent with this whole path existing to be the CHEAP
-      # tier-3/4 backend, not a repo-map-hungry one.
-      (cd "$AIDER_WORKSPACE" && aider --model "$AIDER_MODEL" --model-metadata-file "$AIDER_MODEL_METADATA_FILE" \
-        --map-tokens 0 --no-stream --yes-always --message "$PROMPT" "${AIDER_FILE_ARGS[@]}") \
-        > "$AIDER_LOG" 2>&1
-      AIDER_EXIT=$?
-      set -e
-      rm -f "$AIDER_MODEL_METADATA_FILE"
-
-      AIDER_HEAD_SHA=$(git -C "$AIDER_WORKSPACE" rev-parse HEAD)
-      # Real, live-confirmed gap (this task's own third real dispatch,
-      # umr_id=UMR-20260814-133127-f8cd): aider's own auto-commit did not
-      # fire for an edit applied to a brand-new file added via --file for a
-      # path that did not exist yet -- the real edit landed on disk
-      # (confirmed live: `git status --porcelain` showed the new file
-      # genuinely present, just untracked/uncommitted), auto-commit simply
-      # never ran. Commit it ourselves rather than discarding real,
-      # already-applied work as a false "no changes" failure -- same real
-      # git identity (global user.name/user.email) the auto-commit path
-      # itself already uses (confirmed live against the first real commit,
-      # umr_id=UMR-20260814-132552-13cf).
-      if [ "$AIDER_HEAD_SHA" = "$AIDER_BASE_SHA" ] && [ -n "$(git -C "$AIDER_WORKSPACE" status --porcelain)" ]; then
-        git -C "$AIDER_WORKSPACE" add -A
-        git -C "$AIDER_WORKSPACE" commit -m "${TITLE} (aider-litellm tier-${TIER}, umr_id=${UMR_ID})" >/dev/null
-        AIDER_HEAD_SHA=$(git -C "$AIDER_WORKSPACE" rev-parse HEAD)
-      fi
-      # Real measured token/cost delta -- aider's own real usage-report
-      # line (base_coder.py's show_usage_report()/format_usage_report()),
-      # not estimated here.
-      AIDER_TOKENS_LINE=$(grep -oE "Tokens: [0-9.]+[a-zA-Z]* sent, [0-9.]+[a-zA-Z]* received\." "$AIDER_LOG" | tail -1)
-      AIDER_COST_LINE=$(grep -oE 'Cost: \$[0-9.]+ message, \$[0-9.]+ session\.' "$AIDER_LOG" | tail -1)
-
-      if [ "$AIDER_EXIT" -ne 0 ] || [ "$AIDER_HEAD_SHA" = "$AIDER_BASE_SHA" ]; then
-        echo "AIDER_LITELLM EXECUTION DID NOT PRODUCE A COMMIT for umr_id=$UMR_ID (aider exit=$AIDER_EXIT) -- see $AIDER_LOG" >&2
-        python3 superboss-register.py mark-umr-terminal --umr-id "$UMR_ID" --status failed \
-          --reason "aider_litellm execution path: model=$AIDER_MODEL exit=$AIDER_EXIT, no commit produced. ${AIDER_TOKENS_LINE} ${AIDER_COST_LINE}" >/dev/null
-      else
+        CLI_OUT="$(mktemp --suffix=.json)"
+        CLI_LOG="$(mktemp)"
         set +e
-        git -C "$AIDER_WORKSPACE" push -u origin "$AIDER_BRANCH"
-        AIDER_PUSH_OK=$?
+        # Real fix for PR #374's AUDIT:FAIL finding #3 (the synchronous
+        # execution call has no timeout, can hang the whole dispatch
+        # pipeline): `timeout` wraps the real invocation with
+        # CLI_TIMEOUT_SECONDS (config-driven, tier_execution_config.json --
+        # never hardcoded), same real mechanism doc-worker-entrypoint.sh's
+        # own MAX_WALL_SECONDS wrap already uses for its own `claude -p`
+        # call. --dangerously-skip-permissions + --max-budget-usd + a
+        # disposable per-run worktree is the same real posture
+        # worker-entrypoint.sh/doc-worker-entrypoint.sh/
+        # supervisor-entrypoint.sh already use for their own real
+        # `claude -p` invocations -- not a new risk introduced here. Run in
+        # a subshell so this script's own cwd is restored either way.
+        (cd "$CLI_WORKSPACE" && timeout "$CLI_TIMEOUT_SECONDS" claude -p "$CLI_PROMPT" \
+          --model "$CLI_MODEL" --effort "$CLI_EFFORT" --dangerously-skip-permissions \
+          --max-budget-usd "$CLI_MAX_BUDGET_USD" --output-format json) \
+          > "$CLI_OUT" 2>"$CLI_LOG"
+        CLI_EXIT=$?
         set -e
-        if [ "$AIDER_PUSH_OK" -ne 0 ]; then
-          echo "WARNING: aider_litellm real commit $AIDER_HEAD_SHA made but push failed for umr_id=$UMR_ID." >&2
-          python3 superboss-register.py mark-umr-terminal --umr-id "$UMR_ID" --status failed --repo "$REPO" \
-            --commit-sha "$AIDER_HEAD_SHA" \
-            --reason "aider_litellm execution path: model=$AIDER_MODEL made a real local commit but git push failed. ${AIDER_TOKENS_LINE} ${AIDER_COST_LINE}" >/dev/null
-        else
-          AIDER_GH_REPO=$(git -C "$REPO_PATH" remote get-url origin | sed -E 's#^.*github\.com[:/]##; s#\.git$##')
-          # stdout only (never 2>&1) -- gh pr create's own real, harmless
-          # stderr warnings (e.g. an aider-managed .gitignore tweak left
-          # uncommitted in the disposable worktree, never part of the real
-          # pushed branch/PR diff) must not pollute the PR URL this script
-          # parses --pr-number and the mark-umr-terminal --reason from.
-          AIDER_PR_URL=$(gh pr create --repo "$AIDER_GH_REPO" --base "$AIDER_DEFAULT_BRANCH" \
-            --head "$AIDER_BRANCH" --title "$TITLE" \
-            --body "Real tier-${TIER} dispatch via the aider-chat+litellm execution backend (umr_id=${UMR_ID}, model=${AIDER_MODEL}). ${AIDER_TOKENS_LINE} ${AIDER_COST_LINE}" 2>/dev/null) || true
-          AIDER_PR_NUMBER=$(echo "$AIDER_PR_URL" | grep -oE '[0-9]+$' | tail -1)
-          echo "AIDER_LITELLM EXECUTED: umr_id=$UMR_ID commit=$AIDER_HEAD_SHA pr=$AIDER_PR_URL model=$AIDER_MODEL $AIDER_TOKENS_LINE $AIDER_COST_LINE"
+        CLI_TIMED_OUT=0
+        [ "$CLI_EXIT" -eq 124 ] && CLI_TIMED_OUT=1
 
-          MARK_ARGS=(mark-umr-terminal --umr-id "$UMR_ID" --status completed_unmerged --repo "$REPO" \
-            --commit-sha "$AIDER_HEAD_SHA" \
-            --reason "aider_litellm execution path: model=$AIDER_MODEL. ${AIDER_TOKENS_LINE} ${AIDER_COST_LINE}. PR: $AIDER_PR_URL")
-          if [ -n "$AIDER_PR_NUMBER" ]; then
-            MARK_ARGS+=(--pr-number "$AIDER_PR_NUMBER")
-          fi
-          python3 superboss-register.py "${MARK_ARGS[@]}" >/dev/null
+        # Same real, confirmed bug class worker-entrypoint.sh/
+        # doc-worker-entrypoint.sh already had to fix (2026-07-20 RCA):
+        # `claude -p --output-format json` can return exit 0 even when the
+        # underlying API call itself failed -- the error is captured INSIDE
+        # the JSON payload ("is_error":true), never surfaced as a non-zero
+        # process exit. Checked here proactively so this new call site
+        # never regresses into that same silently-swallowed-failure class.
+        CLI_IS_ERROR=$(python3 -c "
+import json
+try:
+    with open('$CLI_OUT') as f:
+        d = json.load(f)
+    print('1' if d.get('is_error') else '0')
+except Exception:
+    print('0')
+")
+        CLI_COST_USD=$(python3 -c "
+import json
+try:
+    with open('$CLI_OUT') as f:
+        d = json.load(f)
+    print(d.get('total_cost_usd', 0) or 0)
+except Exception:
+    print(0)
+")
+
+        # Real, general safety-net commit -- same real posture
+        # task-20260814-131322's original aider branch already established
+        # (commit real, already-applied on-disk changes ourselves rather
+        # than discard them as a false "no changes" failure if the model's
+        # own turn ended -- timeout, budget cap, or otherwise -- without
+        # itself running `git commit`), applied here whether or not this
+        # invocation's own exit path was clean. Same real git identity
+        # (global user.name/user.email) every other real commit in this
+        # script already uses.
+        if [ -n "$(git -C "$CLI_WORKSPACE" status --porcelain)" ]; then
+          git -C "$CLI_WORKSPACE" add -A
+          git -C "$CLI_WORKSPACE" commit -m "${TITLE} (${EXECUTION_PATH} tier-${TIER}, umr_id=${UMR_ID}, safety-net commit)" >/dev/null
         fi
-      fi
+        CLI_HEAD_SHA=$(git -C "$CLI_WORKSPACE" rev-parse HEAD)
+
+        CLI_OUTCOME_DETAIL="model=$CLI_MODEL effort=$CLI_EFFORT exit=$CLI_EXIT timed_out=$CLI_TIMED_OUT is_error=$CLI_IS_ERROR cost_usd=$CLI_COST_USD"
+        if [ "$CLI_TIMED_OUT" -eq 1 ]; then
+          # Real fix for PR #374's AUDIT:FAIL finding #3's other half (a
+          # defined failure/escalation behavior on timeout, not just a bare
+          # timeout wrapper): a timeout is recorded with its own distinct,
+          # greppable "timed_out=1" reason regardless of whether real
+          # progress survived, so this class of outcome is distinguishable
+          # from a genuine model/tool error for any later RCA/redispatch
+          # sweep -- never silently folded into a generic "failed".
+          CLI_OUTCOME_DETAIL="TIMEOUT after ${CLI_TIMEOUT_SECONDS}s: $CLI_OUTCOME_DETAIL"
+        fi
+
+        if [ "$CLI_HEAD_SHA" = "$CLI_BASE_SHA" ]; then
+          # No real change landed at all (whether because of a clean
+          # no-op turn, a timeout before any edit, or a real error) --
+          # nothing to push, never leaves the row stuck: a real, honest
+          # failed terminal status.
+          echo "CLAUDE_CODE_CLI_HEADLESS EXECUTION DID NOT PRODUCE A COMMIT for umr_id=$UMR_ID ($CLI_OUTCOME_DETAIL) -- see $CLI_LOG" >&2
+          python3 superboss-register.py mark-umr-terminal --umr-id "$UMR_ID" --status failed \
+            --reason "$EXECUTION_PATH execution path: $CLI_OUTCOME_DETAIL, no commit produced" >/dev/null
+        else
+          set +e
+          git -C "$CLI_WORKSPACE" push -u origin "$CLI_BRANCH"
+          CLI_PUSH_OK=$?
+          set -e
+          if [ "$CLI_PUSH_OK" -ne 0 ]; then
+            echo "WARNING: $EXECUTION_PATH real commit $CLI_HEAD_SHA made but push failed for umr_id=$UMR_ID." >&2
+            python3 superboss-register.py mark-umr-terminal --umr-id "$UMR_ID" --status failed --repo "$REPO" \
+              --commit-sha "$CLI_HEAD_SHA" \
+              --reason "$EXECUTION_PATH execution path: $CLI_OUTCOME_DETAIL, made a real local commit but git push failed" >/dev/null
+          else
+            CLI_GH_REPO=$(git -C "$REPO_PATH" remote get-url origin | sed -E 's#^.*github\.com[:/]##; s#\.git$##')
+            # stdout only (never 2>&1) -- gh pr create's own real, harmless
+            # stderr warnings must not pollute the PR URL this script
+            # parses --pr-number and the mark-umr-terminal --reason from.
+            CLI_PR_URL=$(gh pr create --repo "$CLI_GH_REPO" --base "$CLI_DEFAULT_BRANCH" \
+              --head "$CLI_BRANCH" --title "$TITLE" \
+              --body "Real tier-${TIER} dispatch via the $EXECUTION_PATH execution backend (umr_id=${UMR_ID}). $CLI_OUTCOME_DETAIL" 2>/dev/null) || true
+            CLI_PR_NUMBER=$(echo "$CLI_PR_URL" | grep -oE '[0-9]+$' | tail -1)
+            echo "CLAUDE_CODE_CLI_HEADLESS EXECUTED: umr_id=$UMR_ID commit=$CLI_HEAD_SHA pr=$CLI_PR_URL $CLI_OUTCOME_DETAIL"
+
+            MARK_ARGS=(mark-umr-terminal --umr-id "$UMR_ID" --status completed_unmerged --repo "$REPO" \
+              --commit-sha "$CLI_HEAD_SHA" \
+              --reason "$EXECUTION_PATH execution path: $CLI_OUTCOME_DETAIL. PR: $CLI_PR_URL")
+            if [ -n "$CLI_PR_NUMBER" ]; then
+              MARK_ARGS+=(--pr-number "$CLI_PR_NUMBER")
+            fi
+            python3 superboss-register.py "${MARK_ARGS[@]}" >/dev/null
+          fi
+        fi
       fi
     fi
   fi

@@ -1348,7 +1348,18 @@ def find_target_identifier_duplicate(conn, title, prompt, repo=None, window_hour
         return None
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
-    rows = query_umr_tasks(conn, limit=limit)
+    # full=True (real regression fix, live-audit on PR #308 head 4380f7f9,
+    # independently reproduced): query_umr_tasks()'s default light column
+    # set (UMR-20260813-125756-9221) excludes inputs_json, so without this
+    # every row.get("inputs_json") below silently returned None -- inputs
+    # collapsed to {}, row_ids was always empty, and this dedup guard never
+    # matched a real duplicate no matter how exact. limit defaults to 30
+    # (hard-capped at MAX_UMR_QUERY_LIMIT=2000 by query_umr_tasks itself)
+    # and every CLI invocation is already wrapped by
+    # install_cli_resource_guard()'s wall-clock/RSS watchdog, so fetching
+    # the blob columns for this bounded a real duplicate-dispatch check is
+    # safe and necessary -- this function cannot do its one job without them.
+    rows = query_umr_tasks(conn, limit=limit, full=True)
     for row in rows:
         if row.get("status") not in ("queued", "running"):
             continue
@@ -3365,8 +3376,56 @@ def _ensure_umr_table(conn):
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='umr_tasks'"
             ).fetchone()["sql"] or ""
         )
+        # UMR-20260813-125756-9221: same "must not be skipped by the fast
+        # path on an already-migrated DB" hazard the comment above already
+        # documents for status_migrated -- the (status, ts_submitted) index
+        # _migrate_umr_tasks_status_ts_index() below adds is itself a real
+        # migration, so its existence has to be part of this fast-path gate
+        # too, or a DB that already satisfies every column/status check
+        # (i.e. every real production DB right now) would never pick it up.
+        index_migrated = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_umr_tasks_status_ts'"
+        ).fetchone() is not None
         if {"last_heartbeat", "tenant_id", "utm_source", "external_agent_eligible",
                 "ts_relay_attempted"} <= cols and status_migrated:
+            # AUDIT:FAIL 2026-08-13T16:50Z (PR #308, head 34bb70b6) real
+            # regression, independently reproduced and fixed here: the naive
+            # version of this gate fell all the way through to the "slow
+            # path" below whenever index_migrated was False, even though
+            # every other real migration already ran. That slow path opens
+            # with `CREATE TABLE IF NOT EXISTS umr_tasks (...)` -- a provable
+            # silent no-op against a table that already exists under any
+            # schema, partial or full -- immediately followed by
+            # unconditional `CREATE INDEX ... ON umr_tasks(tier)` /
+            # `...(task_identity)` etc., which assume the FULL base schema
+            # (tier, ts_submitted, ...) is already present. That assumption
+            # only holds for a genuine, from-day-one production umr_tasks
+            # table; it does not hold in general for anything that merely
+            # satisfies THIS gate (the 5 ALTER-added columns + widened status
+            # CHECK say nothing about the original base columns). Reproduced
+            # directly against tests/../test_full_server_file_registration.py
+            # ::_bootstrap_and_point_env_at_tmp_db's minimal stub table (has
+            # the 5 gate columns + widened status, deliberately omits tier
+            # and ts_submitted) -- pre-fix: `sqlite3.OperationalError: no
+            # such column: tier` inside init_db(); post-fix (below): the stub
+            # keeps hitting this fast-path return exactly as it did before
+            # this PR, index or no index.
+            #
+            # Real fix: never fall through to that full slow path just to
+            # backfill one additive index. Add ONLY the missing index,
+            # directly, the same idempotent/additive shape every other
+            # _migrate_umr_* function already uses -- and only attempt it
+            # when the column the index is actually built on (ts_submitted)
+            # is present, so this can never crash a table (real or test
+            # stub) that predates even the base schema. Every real
+            # production umr_tasks table has had ts_submitted since its
+            # original CREATE TABLE, so this still delivers the PR's real
+            # goal (auto-backfilling idx_umr_tasks_status_ts onto every
+            # already-migrated live DB on first connect) for every DB that
+            # actually matters; it just no longer crashes ones that don't
+            # look like a real production table.
+            if not index_migrated and "ts_submitted" in cols:
+                _migrate_umr_tasks_status_ts_index(conn)
             return
     status_sql = ",".join("'" + s + "'" for s in UMR_STATUSES)
     conn.execute(f"""CREATE TABLE IF NOT EXISTS umr_tasks (
@@ -3409,6 +3468,16 @@ def _ensure_umr_table(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_umr_tasks_identity ON umr_tasks(task_identity)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_umr_tasks_status ON umr_tasks(status)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_umr_tasks_tier ON umr_tasks(tier)")
+    # UMR-20260813-125756-9221: see _migrate_umr_tasks_status_ts_index()'s own
+    # docstring for why the plain idx_umr_tasks_status index above is not
+    # enough on its own -- real EXPLAIN QUERY PLAN evidence gathered for this
+    # task showed `SELECT * FROM umr_tasks WHERE status=? ORDER BY
+    # ts_submitted DESC LIMIT ?` (resource_governor.py --query-umr's real
+    # query) using idx_umr_tasks_status for the WHERE but still falling back
+    # to `USE TEMP B-TREE FOR ORDER BY`, which materializes every matching
+    # row (status, ts_submitted) covers both the WHERE and the ORDER BY, so
+    # the same query plans as a pure index walk that stops at LIMIT rows.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umr_tasks_status_ts ON umr_tasks(status, ts_submitted DESC)")
     conn.commit()
     _migrate_umr_last_heartbeat(conn)
     _migrate_umr_tenant_id(conn)
@@ -3423,6 +3492,48 @@ def _ensure_umr_table(conn):
     # already exist on the live table by the time this one runs, or it would
     # be silently dropped on rebuild.
     _migrate_umr_tasks_status_widen(conn)
+    _migrate_umr_tasks_status_ts_index(conn)
+
+
+def _migrate_umr_tasks_status_ts_index(conn):
+    """UMR-20260813-125756-9221 (Priority-1 UMR-20260806-171945-5767
+    addendum, register-CLI-invocation guard task): idempotent, additive
+    CREATE INDEX for a pre-existing umr_tasks table that predates this
+    migration -- same "check via sqlite_master, create if missing, no
+    rebuild needed (this is a pure additive index, not a column/CHECK
+    change)" shape as every other _migrate_umr_* function above, just
+    simpler because CREATE INDEX IF NOT EXISTS is itself already idempotent
+    and requires no table rebuild.
+
+    Real root cause this fixes (measured against the live, 4GB+
+    superboss-register.sqlite for this task, not guessed): --query-umr
+    --status X --limit N runs `SELECT * FROM umr_tasks WHERE status=?
+    ORDER BY ts_submitted DESC LIMIT ?`. With only the single-column
+    idx_umr_tasks_status index available, SQLite's real (measured via
+    EXPLAIN QUERY PLAN) plan is `SEARCH ... USING INDEX idx_umr_tasks_status
+    (status=?)` followed by `USE TEMP B-TREE FOR ORDER BY` -- it has to
+    pull every matching row's FULL columns (including the large
+    inputs_json/outputs_json/metadata_json/metric_snapshot_json blobs) into
+    a temp b-tree to sort them by ts_submitted BEFORE the LIMIT can be
+    applied, so LIMIT bounds the output but not the real work/memory. For
+    status='killed' alone that was measured at 826 rows totalling ~717MB of
+    JSON blob columns -- a real, measured, direct contributor to the
+    incident's ~2GB resident PID 1685324 (51+ minute wedge, D-state,
+    wchan=mem_cgroup_handle_over_high, box at zero free memory/swap).
+
+    This composite (status, ts_submitted DESC) index lets SQLite walk the
+    index itself in the exact order ORDER BY needs, so it can stop after
+    LIMIT matching rows without ever materializing the rest -- confirmed via
+    EXPLAIN QUERY PLAN against a real `.backup`-safe copy of the live DB:
+    the same query plans as a single `SEARCH ... USING INDEX
+    idx_umr_tasks_status_ts (status=?)` with no temp b-tree step at all."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_umr_tasks_status_ts'"
+    ).fetchone()
+    if row is not None:
+        return
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umr_tasks_status_ts ON umr_tasks(status, ts_submitted DESC)")
+    conn.commit()
 
 
 def _migrate_umr_tasks_status_widen(conn):
@@ -6346,6 +6457,41 @@ def query_ocid_artifact_links(conn, ocid_number=None, umr_id=None, repo=None, pr
     return [dict(r) for r in rows]
 
 
+# UMR-20260813-125756-9221: real, measured root cause (see
+# _migrate_umr_tasks_status_ts_index()'s docstring for the index half of the
+# fix) -- `SELECT *` on umr_tasks pulls inputs_json/outputs_json/
+# metadata_json/metric_snapshot_json for every returned row even though
+# --query-umr's normal listing use never renders them. Measured against the
+# live register for this task: status='killed' alone averaged ~868KB of
+# combined JSON-blob-column text per row (826 rows, ~717MB total) against a
+# table where every OTHER column combined is small. query_umr_tasks() now
+# selects this bounded, blob-free column list by default and only selects
+# `*` when a caller explicitly passes full=True (resource_governor.py's
+# --query-umr wires this to a new, explicit --full flag -- never the
+# default), so a bounded --limit really does bound the resident row data,
+# not just the row COUNT.
+UMR_TASKS_LIGHT_COLUMNS = (
+    "umr_id", "task_identity", "ts_submitted", "tier", "status", "source_trigger",
+    "task_kind", "unit_name", "logs_ref", "ts_dispatched", "ts_sigterm", "ts_completed",
+    "reason", "last_heartbeat", "tenant_id", "utm_source", "utm_medium", "utm_campaign",
+    "utm_content", "utm_term", "external_agent_eligible", "external_agent_task_type",
+    "blast_radius", "requires_multi_file_context", "files_touched", "external_agent_status",
+    "external_agent_reject_count", "external_agent_dispatch_count", "ts_relay_attempted",
+    "relay_outcome", "relay_detail",
+)
+
+# UMR-20260813-125756-9221: hard ceiling on --query-umr's own --limit, applied
+# regardless of what a caller passes -- defense in depth alongside the real
+# SQL-level LIMIT pushdown below (item C's CLI-level wall-clock/RSS guard is
+# the other real backstop; this one bounds row COUNT specifically, at the
+# one real place umr_tasks rows are ever queried).
+MAX_UMR_QUERY_LIMIT = 2000
+
+
+def _umr_select_columns(full):
+    return "*" if full else ", ".join(UMR_TASKS_LIGHT_COLUMNS)
+
+
 def _umr_row_to_dict(row):
     d = dict(row)
     for key in ("inputs_json", "outputs_json", "metric_snapshot_json", "metadata_json"):
@@ -6354,7 +6500,8 @@ def _umr_row_to_dict(row):
     return d
 
 
-def query_umr_tasks(conn, limit=20, status=None, tier=None, task_identity=None, query_text=None, umr_id=None):
+def query_umr_tasks(conn, limit=20, status=None, tier=None, task_identity=None, query_text=None,
+                     umr_id=None, full=False):
     """Real search over umr_tasks -- exact umr_id match first (umr_id is the
     real PRIMARY KEY, so this can only ever return the one row it names or
     nothing -- real fix, UMR-20260813-042207: --query-umr --umr-id X
@@ -6364,25 +6511,46 @@ def query_umr_tasks(conn, limit=20, status=None, tier=None, task_identity=None, 
     instead, regardless of X), then exact task_identity match, then FTS5
     over task_identity/source_trigger/logs_ref for a free-text --search,
     else a plain filtered listing (newest first). Same two-stage resolution
-    shape lookup_entity()/lookup_capability() already use."""
+    shape lookup_entity()/lookup_capability() already use.
+
+    `full` (UMR-20260813-125756-9221): when False (the default), the SELECT
+    excludes the large inputs_json/outputs_json/metadata_json/
+    metric_snapshot_json blob columns -- see UMR_TASKS_LIGHT_COLUMNS's own
+    comment for the real measured sizes this is fixing. Pass full=True to
+    get every column, including those blobs, whenever a caller's own logic
+    actually reads one of those columns -- e.g. inspecting one exact
+    --umr-id row's inputs_json for debugging, or find_target_identifier_
+    duplicate()'s real per-row inputs_json parse (real regression once
+    fixed here at live-audit time on PR #308: that caller was silently
+    defeated by the light-column default until it started passing
+    full=True). Getting this wrong is silent, not an error -- the excluded
+    columns just come back as missing keys -- so any new caller that reads
+    inputs_json/outputs_json/metadata_json/metric_snapshot_json off these
+    rows MUST pass full=True."""
+    limit = min(int(limit), MAX_UMR_QUERY_LIMIT) if limit else limit
+    cols = _umr_select_columns(full)
     if umr_id:
-        rows = conn.execute(
-            "SELECT * FROM umr_tasks WHERE umr_id=? LIMIT ?",
+        cur = conn.execute(
+            f"SELECT {cols} FROM umr_tasks WHERE umr_id=? LIMIT ?",
             (umr_id, limit),
-        ).fetchall()
+        )
+        rows = list(cur)
     elif task_identity:
-        rows = conn.execute(
-            "SELECT * FROM umr_tasks WHERE task_identity=? ORDER BY ts_submitted DESC LIMIT ?",
+        cur = conn.execute(
+            f"SELECT {cols} FROM umr_tasks WHERE task_identity=? ORDER BY ts_submitted DESC LIMIT ?",
             (task_identity, limit),
-        ).fetchall()
+        )
+        rows = list(cur)
     elif query_text:
         q = _fts_query(query_text)
+        fts_cols = "t.*" if full else ", ".join("t." + c for c in UMR_TASKS_LIGHT_COLUMNS)
         try:
-            rows = conn.execute(
-                "SELECT t.* FROM umr_tasks_fts f JOIN umr_tasks t ON t.rowid = f.rowid "
+            cur = conn.execute(
+                f"SELECT {fts_cols} FROM umr_tasks_fts f JOIN umr_tasks t ON t.rowid = f.rowid "
                 "WHERE umr_tasks_fts MATCH ? ORDER BY t.ts_submitted DESC LIMIT ?",
                 (q, limit),
-            ).fetchall()
+            )
+            rows = list(cur)
         except sqlite3.OperationalError:
             rows = []
     else:
@@ -6395,9 +6563,24 @@ def query_umr_tasks(conn, limit=20, status=None, tier=None, task_identity=None, 
             params.append(tier)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(limit)
-        rows = conn.execute(
-            f"SELECT * FROM umr_tasks {where} ORDER BY ts_submitted DESC LIMIT ?", params
-        ).fetchall()
+        # Real fix (UMR-20260813-125756-9221, see
+        # _migrate_umr_tasks_status_ts_index()'s docstring): this ORDER BY
+        # ts_submitted DESC LIMIT ? only really bounds the work done -- not
+        # just the output -- because idx_umr_tasks_status_ts covers both the
+        # WHERE and the ORDER BY, so SQLite can walk it directly instead of
+        # falling back to `USE TEMP B-TREE FOR ORDER BY` (which would
+        # materialize every matching row, blob columns included, before
+        # LIMIT could apply). Confirmed via EXPLAIN QUERY PLAN.
+        cur = conn.execute(
+            f"SELECT {cols} FROM umr_tasks {where} ORDER BY ts_submitted DESC LIMIT ?", params
+        )
+        # Real fix (UMR-20260813-125756-9221): stream the cursor instead of
+        # a single fetchall() -- the SQL LIMIT above already bounds the
+        # result set, but building the Python list row-by-row (rather than
+        # asking sqlite3 to buffer the whole result in one C call) keeps
+        # this path from ever silently regressing back into "materialize
+        # everything, then slice" if a future edit here drops the LIMIT.
+        rows = [r for r in cur]
 
     matches = [_umr_row_to_dict(r) for r in rows]
     if status and (umr_id or task_identity or query_text):

@@ -78,8 +78,13 @@ same branch/PR, per UMR-20260814-131747-420e.
       task's own protocol: never edit the shared `PROGRESS.md`/other
       tasks' `progress/*.md`).
 
+- [x] Called `agent_work_briefing.py record-completion` for
+      UMR-20260814-135513-1067 (status=completed, pr_number=375,
+      commit_sha=21cb3dd10789f0a836de79e9cc2571468c94904b,
+      file_path=hooks/pretooluse_worker_enforcement.py,
+      repo=veridian-scripts), citing UMR-20260814-131747-420e as the row
+      this completes.
+
 ## Remaining
 
-- [ ] Call `agent_work_briefing.py record-completion` for
-      UMR-20260814-135513-1067, citing UMR-20260814-131747-420e as the row
-      this completes.
+- [ ] None -- task complete.

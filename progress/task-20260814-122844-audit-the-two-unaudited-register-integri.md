@@ -1,0 +1,21 @@
+# PROGRESS -- task-20260814-122844-audit-the-two-unaudited-register-integri
+
+## Completed
+- [x] Verified SPEC claims independently against live GitHub state (PR 363 head 1edcc421..., PR 361 head 64165610..., PR 360 head + its AUDIT:FAIL comment) -- all corroborated, not false-premise this time.
+
+## Completed (cont.)
+- [x] Tier-1 audit PR 363 (progress_completion_gate: stop recording exit-0 as failure) -- read diff (git diff main...1edcc421), ran real tests (41 passed, plus 47-test broader sweep), posted AUDIT: PASS citing head 1edcc421fc1fab5bdaae7f7ab399d83302b42f04, merged squash -> 165619a8
+- [x] Tier-1 audit PR 361 (superboss-register: close completed_unmerged reconciliation dead end) -- read diff (git diff main...6416561), ran real tests (standalone test PASS incl. negative cases; confirmed 2 unrelated pre-existing test failures reproduce on main too, not a regression), posted AUDIT: PASS citing head 6416561061d3a2bbd0cd93f7f9ab31df4169610f, merged squash -> 48d7c87b
+
+## Completed (cont. 2)
+- [x] PR 360: read its AUDIT:FAIL comment, extracted the 3 named defects (no named-file check, retroactively-editable body-based task_id correlation, no owner/org allowlist). Rebased its stale branch onto latest main (post PR#363/#361 merges), implemented the real corrected fix in progress_completion_gate.py (owner/repo allowlist via resource_governor.ALL_KNOWN_REPOS/GH_ORG reuse, headRefName-only + createdAt-freshness task_id correlation, shared _matched_named_files() named-file match), rewrote/added 9 tests in TestCrossRepoPrEvidence + new TestCrossRepoEvidenceHelpers (35/35 pass, 61/61 broader sweep, py_compile clean, tier1 confirmed, manual CLI run verified). Pushed to PR 360's branch (new head a935d70cdb0c4c5bac592f90fa789de4c542acdf).
+
+## Completed (cont. 3)
+- [x] PR 360: independent audit dispatched to a separate subagent (I implemented the fix, so could not self-certify). Verdict: AUDIT: PASS (re-verified all 3 corrective fixes -- named-file match, owner/org allowlist, headRefName+createdAt correlation -- by reading the real diff and personally re-running 35+61 tests in a fresh worktree; flagged one adversarial residual risk, judged non-blocking). Posted https://github.com/FChecklist/veridian-scripts/pull/360#issuecomment-5293449990 and merged -> 6a22ce8b1d3b4efb6548b0a03b55b475ab1cdd9d. All 3 PRs (363, 361, 360) now real, independently audited, and merged.
+
+## Partially complete / honest status at handoff
+- [~] Functional proof for PR 363: confirmed live checkout (/opt/veridian/scripts) in sync with origin/main. Found the real register row this exact bug produced, still status='failed' at the time: UMR-20260814-071851-4d86 (unit veridian-worker@task-20260814-071919-rca--umr-20260807-003517-23bb-killed.service). Requeued it for real via `superboss-register.py reset-umr-to-queued` (real reason logged, real DB write) so the live dispatch pipeline (veridian-cron-dispatch-tick.timer, ~10min cadence) redispatches it against the now-fixed gate. As of this handoff the row is real and status='queued' (dispatch tick fired once since requeue; the worker itself had not yet started/exited) -- the real end-to-end exit-0-recorded-as-success proof requires that live worker run to actually complete, which is a genuinely long-running external process this session's remaining budget cannot wait out. A background Monitor (task b1yv11a25) is still watching `resource_governor.py --query-umr --umr-id UMR-20260814-071851-4d86` for its terminal status and will notify on completion -- NOT verified complete as of this commit. Do not report this specific sub-item as done without checking that row's real current status first.
+
+## Remaining
+- [ ] Whoever picks this up next: check `python3 /opt/veridian/scripts/resource_governor.py --query-umr --umr-id UMR-20260814-071851-4d86` for the real terminal status of the redispatched worker; if status is now 'completed' (not 'failed'), that is the real functional proof PR 363's fix works in production -- record it. If still stuck, investigate why the dispatch pipeline hasn't picked it up / the worker hasn't exited.
+- [ ] record-completion via agent_work_briefing.py for UMR-20260814-111051-15c5 (citing the 3 real merges: 165619a8, 48d7c87b, 6a22ce8b, plus the in-flight functional-proof redispatch)

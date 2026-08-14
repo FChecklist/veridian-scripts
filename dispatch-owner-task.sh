@@ -110,6 +110,25 @@ TIER="${3:-2}"
 MEDIUM="${4:-claude_code_cli}"
 REPO="${5:-compliance-tracker}"
 
+# task-20260814-131322 / UMR-20260814-131248-baed: real execution-backend
+# selection. Tier 0/1/2 keep the existing behavior below unchanged (register
+# + relay into the live interactive tmux session, which is what eventually
+# gets a claude_code_cli worker to look at this). Tier 3 and 4 (the two
+# lowest-priority tiers) instead execute via aider-chat + litellm against an
+# already-configured, already-priced cheaper provider model
+# (openrouter/z-ai/glm-5.2 -- the same real provider/model pair
+# compliance-tracker's own ai_model_registry already seeds as its sole
+# judgment-tier-eligible entry, drizzle/0231_ai_router_mother_router.sql;
+# consulted here for its schema SHAPE only -- input/output cost-per-token,
+# provider, model -- not its code) instead of ever spinning up an
+# interactive claude_code_cli session for genuinely low-priority work. See
+# the aider_litellm branch below (replaces step 5's tmux relay for this
+# path only) for the real execution itself.
+EXECUTION_PATH="claude_code_cli"
+if [ "$TIER" = "3" ] || [ "$TIER" = "4" ]; then
+  EXECUTION_PATH="aider_litellm"
+fi
+
 cd "$SCRIPT_DIR"
 
 # 1. Duplicate check -- don't silently re-dispatch the same ask.
@@ -215,8 +234,18 @@ fi
 #    submit's classification machinery has a bad moment.
 SESSION_ID="dispatch-owner-task.sh:${MEDIUM}:$$"
 SUBMIT_CLASSIFY_ERR="$(mktemp)"
-if SUBMIT_CLASSIFY_JSON=$(python3 task-gateway.py submit --text "$PROMPT" --source owner --session-id "$SESSION_ID" 2>"$SUBMIT_CLASSIFY_ERR"); then
+if SUBMIT_CLASSIFY_JSON=$(python3 task-gateway.py submit --text "$PROMPT" --source owner --session-id "$SESSION_ID" --tier "$TIER" 2>"$SUBMIT_CLASSIFY_ERR"); then
   INSTRUCTION_ID=$(echo "$SUBMIT_CLASSIFY_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['instruction_id'])")
+  # task-20260814-131322 / UMR-20260814-131248-baed: task-gateway.py submit
+  # is the one real single-source-of-truth for tier -> execution_path (see
+  # its own execution_path_for_tier()) -- take its answer when this call
+  # succeeded, rather than trusting only this script's own local TIER=3/4
+  # check (computed above, before this call ran, as the real fallback for
+  # the classification-failed branch below).
+  GATEWAY_EXECUTION_PATH=$(echo "$SUBMIT_CLASSIFY_JSON" | python3 -c "import json,sys; v=json.load(sys.stdin).get('execution_path'); print(v or '')")
+  if [ -n "$GATEWAY_EXECUTION_PATH" ]; then
+    EXECUTION_PATH="$GATEWAY_EXECUTION_PATH"
+  fi
   rm -f "$SUBMIT_CLASSIFY_ERR"
 else
   echo "WARNING: task-gateway.py submit (real software-first classification) failed -- falling back to direct log-instruction so this real dispatch is not blocked by a classification-step hiccup. Failure detail:" >&2
@@ -250,13 +279,27 @@ if [ "$ACCEPTED" != "True" ]; then
   exit 1
 fi
 
-# 4. Link instruction -> work item -> the real UMR id (output side).
-WORK_JSON=$(python3 superboss-register.py log-work --instruction-id "$INSTRUCTION_ID" --ai-task-id "$UMR_ID" --source owner --medium "$MEDIUM" --status open)
+# 4. Link instruction -> work item -> the real UMR id (output side). Real
+#    execution_path (task-20260814-131322) is recorded into work_items'
+#    own metadata_json here -- ALWAYS, for every tier, not only the new
+#    aider_litellm branch -- so which backend a task actually used is
+#    queryable later for every real dispatch (superboss-register.py search/
+#    query-knowledge over work_items, or a direct metadata_json read), not
+#    just inferable after the fact from which branch below happened to run.
+WORK_METADATA=$(python3 -c "import json,sys; print(json.dumps({'execution_path': sys.argv[1], 'tier': sys.argv[2]}))" "$EXECUTION_PATH" "$TIER")
+WORK_JSON=$(python3 superboss-register.py log-work --instruction-id "$INSTRUCTION_ID" --ai-task-id "$UMR_ID" --source owner --medium "$MEDIUM" --status open --metadata "$WORK_METADATA")
 WORK_ITEM_ID=$(echo "$WORK_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['work_item_id'])")
 
-echo "DISPATCHED: umr_id=$UMR_ID instruction_id=$INSTRUCTION_ID work_item_id=$WORK_ITEM_ID task_identity=$TASK_IDENTITY"
+echo "DISPATCHED: umr_id=$UMR_ID instruction_id=$INSTRUCTION_ID work_item_id=$WORK_ITEM_ID task_identity=$TASK_IDENTITY execution_path=$EXECUTION_PATH"
 
-# 5. Relay into the live interactive tmux session -- same call, no separate
+# 5. Deliver the work. Tier 0/1/2 (EXECUTION_PATH=claude_code_cli) relay
+#    into the live interactive tmux session exactly as before. Tier 3/4
+#    (EXECUTION_PATH=aider_litellm, task-20260814-131322) instead execute
+#    directly via aider-chat + litellm below -- no tmux, no interactive
+#    session, no claude_code_cli worker involved in that branch at all.
+if [ "$EXECUTION_PATH" = "claude_code_cli" ]; then
+
+# 5a. Relay into the live interactive tmux session -- same call, no separate
 #    raw tmux send-keys step for anyone (or anything) to skip past.
 #
 # UMR-20260806-094226-8617 (real root cause of the input-line-sticking
@@ -334,5 +377,147 @@ if [ "$RELAY" -eq 1 ]; then
     python3 superboss-register.py mark-umr-relay-attempted --umr-id "$UMR_ID" \
       --outcome session_not_found --detail "tmux session '$TMUX_SESSION' not found at relay time" >/dev/null
     echo "RELAY ATTEMPTED, session absent (courtesy only, NOT authoritative): umr_id=$UMR_ID -- row remains status='queued', pollable by dispatch-tick.py's own real mechanical pickup" >&2
+  fi
+fi
+
+else
+  # 5b. Tier 3/4 real execution backend (task-20260814-131322,
+  # UMR-20260814-131248-baed): aider-chat + litellm against
+  # openrouter/z-ai/glm-5.2, the same already-configured, already-priced
+  # cheap model this box already routes its GLM-5.2 traffic through
+  # (anthropic_openrouter_proxy.py's own PROXY_MODEL default) -- litellm
+  # talks to OpenRouter directly here, so no proxy service needs to be
+  # running for this path (confirmed live: no GLM-5.2-proxy routing unit is
+  # currently loaded server-side). This script drives aider synchronously
+  # to a real terminal outcome and records it itself -- no tmux relay, no
+  # claude_code_cli worker service, for this branch.
+  #
+  # $RELAY (--no-relay) is reused here with the same real meaning it has in
+  # the claude_code_cli branch above -- "register only, do not deliver yet"
+  # -- applied to this branch's own delivery mechanism (running aider)
+  # instead of a tmux relay.
+  if [ "$RELAY" -eq 0 ]; then
+    echo "REGISTERED ONLY (--no-relay): umr_id=$UMR_ID execution_path=aider_litellm -- not executed by this call; row remains status='queued', pollable by dispatch-tick.py's own real mechanical pickup." >&2
+  else
+    AIDER_MODEL="${AIDER_LITELLM_MODEL:-openrouter/z-ai/glm-5.2}"
+    if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+      # Same real fallback anthropic_openrouter_proxy.py's own
+      # get_openrouter_key() already uses -- the shared .env, not a new key
+      # source invented for this path.
+      OPENROUTER_API_KEY="$(grep '^OPENROUTER_API_KEY=' /opt/veridian/shared/.env 2>/dev/null | head -1 | cut -d= -f2-)"
+      export OPENROUTER_API_KEY
+    fi
+    REPO_PATH="/opt/veridian/repos/$REPO"
+    if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+      echo "WARNING: OPENROUTER_API_KEY unavailable (env and /opt/veridian/shared/.env both empty) -- cannot execute the aider_litellm path for umr_id=$UMR_ID." >&2
+      python3 superboss-register.py mark-umr-terminal --umr-id "$UMR_ID" --status failed \
+        --reason "aider_litellm execution path: OPENROUTER_API_KEY unavailable" >/dev/null
+    elif [ ! -d "$REPO_PATH" ]; then
+      echo "WARNING: repo not found at $REPO_PATH -- cannot execute the aider_litellm path for umr_id=$UMR_ID." >&2
+      python3 superboss-register.py mark-umr-terminal --umr-id "$UMR_ID" --status failed \
+        --reason "aider_litellm execution path: repo not found at $REPO_PATH" >/dev/null
+    else
+      # Deliberately NOT veridian-task.py create -- that command's own
+      # cmd_create always ends with `systemctl --user start
+      # veridian-worker@*.service`, which spins up exactly the
+      # claude_code_cli worker this tier-3/4 path exists to avoid. This
+      # does the same real worktree-off-origin/HEAD setup cmd_create does
+      # (fetch, resolve the real default branch, `git worktree add -b`),
+      # minus the systemd spawn, so aider gets a real, isolated, disposable
+      # checkout to work in.
+      AIDER_TASK_ID="aider-task-$(date -u +%Y%m%d-%H%M%S)-$$"
+      AIDER_TASK_DIR="/opt/veridian/ai-os/tasks/${AIDER_TASK_ID}"
+      AIDER_WORKSPACE="${AIDER_TASK_DIR}/workspace"
+      AIDER_BRANCH="worker/${AIDER_TASK_ID}"
+      mkdir -p "$AIDER_TASK_DIR"
+      # Real setup (fetch/resolve-default-branch/worktree-add), but never
+      # allowed to abort this whole script via `set -e` -- a genuine
+      # failure here must still leave a real, honest failed terminal status
+      # on $UMR_ID, same fail-safe posture as every other real gate in this
+      # script, not a bare non-zero exit that leaves the row unexplained.
+      AIDER_SETUP_OK=1
+      set +e
+      git -C "$REPO_PATH" fetch origin && \
+        AIDER_DEFAULT_REF=$(git -C "$REPO_PATH" symbolic-ref refs/remotes/origin/HEAD) && \
+        AIDER_DEFAULT_BRANCH="${AIDER_DEFAULT_REF##*/}" && \
+        git -C "$REPO_PATH" worktree add -b "$AIDER_BRANCH" "$AIDER_WORKSPACE" "origin/$AIDER_DEFAULT_BRANCH"
+      AIDER_SETUP_OK=$?
+      set -e
+      if [ "$AIDER_SETUP_OK" -ne 0 ]; then
+        echo "WARNING: aider_litellm worktree setup failed for umr_id=$UMR_ID (repo=$REPO)." >&2
+        python3 superboss-register.py mark-umr-terminal --umr-id "$UMR_ID" --status failed \
+          --reason "aider_litellm execution path: worktree setup (fetch/worktree add) failed for repo=$REPO" >/dev/null
+        AIDER_BASE_SHA=""
+      else
+        AIDER_BASE_SHA=$(git -C "$AIDER_WORKSPACE" rev-parse HEAD)
+      fi
+      if [ -n "$AIDER_BASE_SHA" ]; then
+
+      # Real pricing for openrouter/z-ai/glm-5.2, mirrored (schema SHAPE
+      # only, per this task's own SPEC) from compliance-tracker's own
+      # ai_model_registry seed row for this exact provider/model pair
+      # (drizzle/0231_ai_router_mother_router.sql) -- gives aider's own
+      # real cost accounting a real per-token price to compute the measured
+      # cost delta against, instead of reporting an unmapped-model $0.00.
+      AIDER_MODEL_METADATA_FILE="$(mktemp --suffix=.json)"
+      python3 -c "
+import json, sys
+json.dump({sys.argv[1]: {
+    'input_cost_per_token': 0.00000042,
+    'output_cost_per_token': 0.00000132,
+    'litellm_provider': 'openrouter',
+    'mode': 'chat',
+}}, open(sys.argv[2], 'w'))
+" "$AIDER_MODEL" "$AIDER_MODEL_METADATA_FILE"
+
+      AIDER_LOG="$(mktemp)"
+      set +e
+      aider --model "$AIDER_MODEL" --model-metadata-file "$AIDER_MODEL_METADATA_FILE" \
+        --no-stream --yes-always --message "$PROMPT" "$AIDER_WORKSPACE" \
+        > "$AIDER_LOG" 2>&1
+      AIDER_EXIT=$?
+      set -e
+      rm -f "$AIDER_MODEL_METADATA_FILE"
+
+      AIDER_HEAD_SHA=$(git -C "$AIDER_WORKSPACE" rev-parse HEAD)
+      # Real measured token/cost delta -- aider's own real usage-report
+      # line (base_coder.py's show_usage_report()/format_usage_report()),
+      # not estimated here.
+      AIDER_TOKENS_LINE=$(grep -oE "Tokens: [^.]*\." "$AIDER_LOG" | tail -1)
+      AIDER_COST_LINE=$(grep -oE '\$[0-9.]+ message, \$[0-9.]+ session' "$AIDER_LOG" | tail -1)
+
+      if [ "$AIDER_EXIT" -ne 0 ] || [ "$AIDER_HEAD_SHA" = "$AIDER_BASE_SHA" ]; then
+        echo "AIDER_LITELLM EXECUTION DID NOT PRODUCE A COMMIT for umr_id=$UMR_ID (aider exit=$AIDER_EXIT) -- see $AIDER_LOG" >&2
+        python3 superboss-register.py mark-umr-terminal --umr-id "$UMR_ID" --status failed \
+          --reason "aider_litellm execution path: model=$AIDER_MODEL exit=$AIDER_EXIT, no commit produced. ${AIDER_TOKENS_LINE} ${AIDER_COST_LINE}" >/dev/null
+      else
+        set +e
+        git -C "$AIDER_WORKSPACE" push -u origin "$AIDER_BRANCH"
+        AIDER_PUSH_OK=$?
+        set -e
+        if [ "$AIDER_PUSH_OK" -ne 0 ]; then
+          echo "WARNING: aider_litellm real commit $AIDER_HEAD_SHA made but push failed for umr_id=$UMR_ID." >&2
+          python3 superboss-register.py mark-umr-terminal --umr-id "$UMR_ID" --status failed --repo "$REPO" \
+            --commit-sha "$AIDER_HEAD_SHA" \
+            --reason "aider_litellm execution path: model=$AIDER_MODEL made a real local commit but git push failed. ${AIDER_TOKENS_LINE} ${AIDER_COST_LINE}" >/dev/null
+        else
+          AIDER_GH_REPO=$(git -C "$REPO_PATH" remote get-url origin | sed -E 's#^.*github\.com[:/]##; s#\.git$##')
+          AIDER_PR_URL=$(gh pr create --repo "$AIDER_GH_REPO" --base "$AIDER_DEFAULT_BRANCH" \
+            --head "$AIDER_BRANCH" --title "$TITLE" \
+            --body "Real tier-${TIER} dispatch via the aider-chat+litellm execution backend (umr_id=${UMR_ID}, model=${AIDER_MODEL}). ${AIDER_TOKENS_LINE} ${AIDER_COST_LINE}" 2>&1) || true
+          AIDER_PR_NUMBER=$(echo "$AIDER_PR_URL" | grep -oE '[0-9]+$' | tail -1)
+          echo "AIDER_LITELLM EXECUTED: umr_id=$UMR_ID commit=$AIDER_HEAD_SHA pr=$AIDER_PR_URL model=$AIDER_MODEL $AIDER_TOKENS_LINE $AIDER_COST_LINE"
+
+          MARK_ARGS=(mark-umr-terminal --umr-id "$UMR_ID" --status completed_unmerged --repo "$REPO" \
+            --commit-sha "$AIDER_HEAD_SHA" \
+            --reason "aider_litellm execution path: model=$AIDER_MODEL. ${AIDER_TOKENS_LINE} ${AIDER_COST_LINE}. PR: $AIDER_PR_URL")
+          if [ -n "$AIDER_PR_NUMBER" ]; then
+            MARK_ARGS+=(--pr-number "$AIDER_PR_NUMBER")
+          fi
+          python3 superboss-register.py "${MARK_ARGS[@]}" >/dev/null
+        fi
+      fi
+      fi
+    fi
   fi
 fi

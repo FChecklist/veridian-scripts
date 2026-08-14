@@ -1,4 +1,4 @@
-# PROGRESS -- task-20260814-181115-verify-real-pr-state-before-recording-a
+# PROGRESS -- task-20260814-180958-measure-real-token-usage-before-after-di
 
 ## Completed
 

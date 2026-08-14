@@ -36,11 +36,17 @@
       worker-entrypoint.sh, tests/test_progress_completion_gate.py) to this task's own
       branch in veridian-scripts.
 
-## Remaining
-- [ ] Open the PR against veridian-scripts (this task's own workspace repo already
-      IS veridian-scripts, so pushing this branch + `gh pr create` is the whole step).
+- [x] Opened PR against veridian-scripts: https://github.com/FChecklist/veridian-scripts/pull/360
+      (this task's own workspace repo already IS veridian-scripts, so this is a
+      same-repo PR, not cross-repo, for this task itself). Confirmed via
+      `gh pr view 360` -- state OPEN, real files: progress_completion_gate.py,
+      worker-entrypoint.sh, tests/test_progress_completion_gate.py, plus this
+      progress doc.
 - [ ] Record completion via agent_work_briefing.py record-completion for
       UMR-20260814-070059-6484.
+
+## Remaining
+- [ ] Await Tier-1 audit of PR #360 (no self-certification).
 
 ## Real test output (python3 -m pytest tests/test_progress_completion_gate.py -v)
 

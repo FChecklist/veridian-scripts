@@ -300,6 +300,16 @@ def _connect():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA journal_mode=WAL")
+    # UMR-20260814-033914-63ef: defense in depth alongside the real fix
+    # (idx_umr_tasks_ts, see _migrate_umr_tasks_ts_index()'s docstring) for
+    # the transient `database or disk is full` crash -- forces any SQLite
+    # temp b-tree/temp table this connection still ends up needing (e.g. an
+    # ORDER BY this index migration doesn't cover, or a future query path)
+    # to live in memory rather than spilling to a temp file on disk, so a
+    # burst of concurrent heavy queries can no longer exhaust disk space via
+    # SQLite's temp store. Per-connection only; does not change the on-disk
+    # DB file itself.
+    conn.execute("PRAGMA temp_store=MEMORY")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -1382,18 +1392,28 @@ def find_target_identifier_duplicate(conn, title, prompt, repo=None, window_hour
         return None
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
-    # full=True (real regression fix, live-audit on PR #308 head 4380f7f9,
-    # independently reproduced): query_umr_tasks()'s default light column
-    # set (UMR-20260813-125756-9221) excludes inputs_json, so without this
-    # every row.get("inputs_json") below silently returned None -- inputs
-    # collapsed to {}, row_ids was always empty, and this dedup guard never
-    # matched a real duplicate no matter how exact. limit defaults to 30
-    # (hard-capped at MAX_UMR_QUERY_LIMIT=2000 by query_umr_tasks itself)
-    # and every CLI invocation is already wrapped by
-    # install_cli_resource_guard()'s wall-clock/RSS watchdog, so fetching
-    # the blob columns for this bounded a real duplicate-dispatch check is
-    # safe and necessary -- this function cannot do its one job without them.
-    rows = query_umr_tasks(conn, limit=limit, full=True)
+    # extra_columns=("inputs_json",) -- NOT full=True (real fix,
+    # UMR-20260814-033914-63ef, replacing this call's original full=True from
+    # PR #308): query_umr_tasks()'s default light column set
+    # (UMR-20260813-125756-9221) excludes inputs_json, so without naming it
+    # explicitly every row.get("inputs_json") below silently returns None --
+    # inputs collapses to {}, row_ids is always empty, and this dedup guard
+    # never matches a real duplicate no matter how exact (the real PR #308
+    # regression). full=True fixed that correctness bug but also pulled
+    # outputs_json/metadata_json/metric_snapshot_json -- 3 blob columns this
+    # function never reads -- for every one of the (no-status-filter, so
+    # previously unindexed-for-ORDER-BY) rows involved; under real
+    # concurrency (40 near-simultaneous callers measured in one ~3.5s window)
+    # that was the real, measured, transient `sqlite3.OperationalError:
+    # database or disk is full` root cause (SQLite's temp store, not the DB
+    # file itself -- see _migrate_umr_tasks_ts_index()'s docstring for the
+    # EXPLAIN QUERY PLAN evidence and the index-based fix for the other half
+    # of this). extra_columns=("inputs_json",) keeps the one column this
+    # function actually needs while dropping the 3 it doesn't. limit
+    # defaults to 30 (hard-capped at MAX_UMR_QUERY_LIMIT=2000 by
+    # query_umr_tasks itself) and every CLI invocation is already wrapped by
+    # install_cli_resource_guard()'s wall-clock/RSS watchdog.
+    rows = query_umr_tasks(conn, limit=limit, extra_columns=("inputs_json",))
     for row in rows:
         if row.get("status") not in ("queued", "running"):
             continue
@@ -3420,6 +3440,14 @@ def _ensure_umr_table(conn):
         index_migrated = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_umr_tasks_status_ts'"
         ).fetchone() is not None
+        # UMR-20260814-033914-63ef (P1 UMR-20260806-171945-5767 addendum,
+        # transient disk-full crash in target-identifier dedup): same
+        # "must not be skipped by the fast path on an already-migrated DB"
+        # hazard as index_migrated above, for the new ts_submitted-only
+        # index _migrate_umr_tasks_ts_index() adds below.
+        ts_only_index_migrated = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_umr_tasks_ts'"
+        ).fetchone() is not None
         if {"last_heartbeat", "tenant_id", "utm_source", "external_agent_eligible",
                 "ts_relay_attempted"} <= cols and status_migrated:
             # AUDIT:FAIL 2026-08-13T16:50Z (PR #308, head 34bb70b6) real
@@ -3460,6 +3488,8 @@ def _ensure_umr_table(conn):
             # look like a real production table.
             if not index_migrated and "ts_submitted" in cols:
                 _migrate_umr_tasks_status_ts_index(conn)
+            if not ts_only_index_migrated and "ts_submitted" in cols:
+                _migrate_umr_tasks_ts_index(conn)
             return
     status_sql = ",".join("'" + s + "'" for s in UMR_STATUSES)
     conn.execute(f"""CREATE TABLE IF NOT EXISTS umr_tasks (
@@ -3527,6 +3557,44 @@ def _ensure_umr_table(conn):
     # be silently dropped on rebuild.
     _migrate_umr_tasks_status_widen(conn)
     _migrate_umr_tasks_status_ts_index(conn)
+    _migrate_umr_tasks_ts_index(conn)
+
+
+def _migrate_umr_tasks_ts_index(conn):
+    """UMR-20260814-033914-63ef (P1 UMR-20260806-171945-5767 addendum,
+    transient disk-full crash in find_target_identifier_duplicate): real,
+    measured root cause -- find_target_identifier_duplicate() calls
+    query_umr_tasks(conn, limit=limit, ...) with NO status filter (it has to
+    look across every recent row regardless of status, then filter
+    'queued'/'running' in Python), which lands in query_umr_tasks()'s plain-
+    listing branch with `where=""`. idx_umr_tasks_status_ts is a COMPOSITE
+    (status, ts_submitted DESC) index -- useless for ordering when status is
+    unconstrained, because it groups rows by status first, not by
+    ts_submitted globally. Confirmed via EXPLAIN QUERY PLAN against a fresh
+    schema: `SELECT * FROM umr_tasks ORDER BY ts_submitted DESC LIMIT 30`
+    plans as `SCAN umr_tasks` + `USE TEMP B-TREE FOR ORDER BY` -- i.e. SQLite
+    materializes the ENTIRE table (every row, every blob column, when
+    full=True) into a temp b-tree before LIMIT can apply, not just the 30
+    rows actually returned. Real incident evidence (this task's own SPEC):
+    40 near-simultaneous dispatch pre-flight checks each running this same
+    unbounded full-table materialization at once is the real suspected
+    cause of the captured `sqlite3.OperationalError: database or disk is
+    full` (transient ENOSPC on SQLite's temp store, not the live DB file --
+    a plain `SELECT count(*)` succeeded immediately after).
+
+    This dedicated ts_submitted-only index lets SQLite walk the index
+    directly in the exact order ORDER BY needs and stop after LIMIT rows,
+    with no temp b-tree step at all -- confirmed via EXPLAIN QUERY PLAN
+    (`SCAN umr_tasks USING INDEX idx_umr_tasks_ts`, no TEMP B-TREE line).
+    Idempotent/additive, same shape as _migrate_umr_tasks_status_ts_index()
+    directly above."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_umr_tasks_ts'"
+    ).fetchone()
+    if row is not None:
+        return
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_umr_tasks_ts ON umr_tasks(ts_submitted DESC)")
+    conn.commit()
 
 
 def _migrate_umr_tasks_status_ts_index(conn):
@@ -6657,8 +6725,20 @@ UMR_TASKS_LIGHT_COLUMNS = (
 MAX_UMR_QUERY_LIMIT = 2000
 
 
-def _umr_select_columns(full):
-    return "*" if full else ", ".join(UMR_TASKS_LIGHT_COLUMNS)
+def _umr_light_columns(extra_columns=None):
+    """UMR-20260814-033914-63ef: UMR_TASKS_LIGHT_COLUMNS plus any caller-
+    named blob columns it actually reads, deduped -- lets a caller opt into
+    exactly the blob column(s) it needs (e.g. find_target_identifier_
+    duplicate() needs inputs_json but not outputs_json/metadata_json/
+    metric_snapshot_json) without paying for full=True's `SELECT *`."""
+    if not extra_columns:
+        return UMR_TASKS_LIGHT_COLUMNS
+    extra = tuple(c for c in extra_columns if c not in UMR_TASKS_LIGHT_COLUMNS)
+    return UMR_TASKS_LIGHT_COLUMNS + extra
+
+
+def _umr_select_columns(full, extra_columns=None):
+    return "*" if full else ", ".join(_umr_light_columns(extra_columns))
 
 
 def _umr_row_to_dict(row):
@@ -6670,7 +6750,7 @@ def _umr_row_to_dict(row):
 
 
 def query_umr_tasks(conn, limit=20, status=None, tier=None, task_identity=None, query_text=None,
-                     umr_id=None, full=False, exclude_rca_complete=False):
+                     umr_id=None, full=False, exclude_rca_complete=False, extra_columns=None):
     """Real search over umr_tasks -- exact umr_id match first (umr_id is the
     real PRIMARY KEY, so this can only ever return the one row it names or
     nothing -- real fix, UMR-20260813-042207: --query-umr --umr-id X
@@ -6688,14 +6768,29 @@ def query_umr_tasks(conn, limit=20, status=None, tier=None, task_identity=None, 
     comment for the real measured sizes this is fixing. Pass full=True to
     get every column, including those blobs, whenever a caller's own logic
     actually reads one of those columns -- e.g. inspecting one exact
-    --umr-id row's inputs_json for debugging, or find_target_identifier_
-    duplicate()'s real per-row inputs_json parse (real regression once
-    fixed here at live-audit time on PR #308: that caller was silently
-    defeated by the light-column default until it started passing
-    full=True). Getting this wrong is silent, not an error -- the excluded
-    columns just come back as missing keys -- so any new caller that reads
-    inputs_json/outputs_json/metadata_json/metric_snapshot_json off these
-    rows MUST pass full=True.
+    --umr-id row's inputs_json for debugging. Getting this wrong is silent,
+    not an error -- the excluded columns just come back as missing keys --
+    so any new caller that reads inputs_json/outputs_json/metadata_json/
+    metric_snapshot_json off these rows MUST pass full=True, or (better,
+    see `extra_columns` below) name only the specific blob column(s) it
+    actually needs.
+
+    `extra_columns` (UMR-20260814-033914-63ef, real fix for a transient
+    `database or disk is full` crash -- see _migrate_umr_tasks_ts_index()'s
+    docstring for the full incident): a caller that reads exactly one blob
+    column (e.g. find_target_identifier_duplicate() only ever reads
+    inputs_json, never outputs_json/metadata_json/metric_snapshot_json)
+    should pass extra_columns=("inputs_json",) instead of full=True --
+    same correctness (that one column is present) at a fraction of
+    full=True's `SELECT *` row size, since the other 3 blob columns (which
+    that caller never even looks at) are never pulled off disk at all.
+    real regression this replaces: PR #308 fixed find_target_identifier_
+    duplicate() by making it pass full=True (the light-column default
+    silently dropped inputs_json, so its per-row match check always saw
+    `{}` and never matched a real duplicate) -- extra_columns=("inputs_json",)
+    preserves that same fix (inputs_json is still always present) while
+    dropping the 3 unused blob columns full=True was needlessly also
+    pulling for every row.
 
     `exclude_rca_complete` (real fix, UMR-20260814-013850-fd7f -- RCA of
     UMR-20260813-060311-6eea): pm-sentinel-tick.sh's Check 2a scans
@@ -6717,7 +6812,7 @@ def query_umr_tasks(conn, limit=20, status=None, tier=None, task_identity=None, 
     is a scoped opt-in filter a caller must explicitly request, not a
     default -- direct --umr-id lookups are completely unaffected."""
     limit = min(int(limit), MAX_UMR_QUERY_LIMIT) if limit else limit
-    cols = _umr_select_columns(full)
+    cols = _umr_select_columns(full, extra_columns)
     if umr_id:
         cur = conn.execute(
             f"SELECT {cols} FROM umr_tasks WHERE umr_id=? LIMIT ?",
@@ -6732,7 +6827,7 @@ def query_umr_tasks(conn, limit=20, status=None, tier=None, task_identity=None, 
         rows = list(cur)
     elif query_text:
         q = _fts_query(query_text)
-        fts_cols = "t.*" if full else ", ".join("t." + c for c in UMR_TASKS_LIGHT_COLUMNS)
+        fts_cols = "t.*" if full else ", ".join("t." + c for c in _umr_light_columns(extra_columns))
         try:
             cur = conn.execute(
                 f"SELECT {fts_cols} FROM umr_tasks_fts f JOIN umr_tasks t ON t.rowid = f.rowid "
@@ -6758,10 +6853,16 @@ def query_umr_tasks(conn, limit=20, status=None, tier=None, task_identity=None, 
         # _migrate_umr_tasks_status_ts_index()'s docstring): this ORDER BY
         # ts_submitted DESC LIMIT ? only really bounds the work done -- not
         # just the output -- because idx_umr_tasks_status_ts covers both the
-        # WHERE and the ORDER BY, so SQLite can walk it directly instead of
-        # falling back to `USE TEMP B-TREE FOR ORDER BY` (which would
-        # materialize every matching row, blob columns included, before
-        # LIMIT could apply). Confirmed via EXPLAIN QUERY PLAN.
+        # WHERE and the ORDER BY when `status` is given, so SQLite can walk
+        # it directly instead of falling back to `USE TEMP B-TREE FOR ORDER
+        # BY` (which would materialize every matching row, blob columns
+        # included, before LIMIT could apply). Confirmed via EXPLAIN QUERY
+        # PLAN. When `status` is NOT given (e.g. find_target_identifier_
+        # duplicate()'s own call, which must see every recent row regardless
+        # of status), that composite index can't help -- it's ordered by
+        # status first -- so idx_umr_tasks_ts (see
+        # _migrate_umr_tasks_ts_index()'s docstring; real fix,
+        # UMR-20260814-033914-63ef) covers this unfiltered case instead.
         cur = conn.execute(
             f"SELECT {cols} FROM umr_tasks {where} ORDER BY ts_submitted DESC LIMIT ?", params
         )

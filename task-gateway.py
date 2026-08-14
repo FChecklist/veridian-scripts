@@ -71,6 +71,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from workflow_contract import (  # noqa: E402
     phase_for_task_gateway_subcommand, REQUIRED_TASK_SECTIONS, has_all_required_sections,
 )
+# task-20260814-180459 (real file-attachment intake): see
+# attach_to_submit_text() below for how this is folded into cmd_submit.
+import attachment_intake  # noqa: E402
 
 VERIDIAN_ROOT = "/opt/veridian"
 SCRIPTS = f"{VERIDIAN_ROOT}/scripts"
@@ -436,15 +439,41 @@ def execution_path_for_tier(tier):
 
 
 def cmd_submit(args):
+    # task-20260814-180459 (real file-attachment intake): one real local
+    # file (text/markdown/PDF/image), if --attach was given, is turned into
+    # a real text block (hash/path/mimetype always real; extracted content
+    # for text/markdown/PDF-with-a-library, an honestly-disclosed
+    # non-extraction note otherwise -- see attachment_intake.py) and folded
+    # into `input_text` BEFORE the OWNER_ENGINE gate/keyword-extraction/
+    # dedup/search below ever run -- so attachment-derived content goes
+    # through exactly the same real pipeline typed text does, never a
+    # second, parallel path. A caller-supplied path that doesn't actually
+    # exist is a real usage error, not silently ignored.
+    attachment_record = None
+    input_text = args.text
+    if args.attach:
+        attachment_record = attachment_intake.build_attachment_record(args.attach)
+        if not attachment_record["exists"]:
+            fail(
+                "attachment file not found -- task-20260814-180459 real "
+                "file-attachment intake requires a real, existing local file path",
+                attach_path=attachment_record["path"], attachment=attachment_record,
+            )
+        attachment_block = attachment_intake.render_attachment_block(attachment_record)
+        input_text = (
+            f"{args.text}\n\n{attachment_block}" if args.text.strip() else attachment_block
+        )
+
     # OWNER DIRECTIVE 2026-07-25 (KE-20260725-061008-8423) point 2, mandatory
-    # default for --source owner: raw text is gated through the OWNER_ENGINE
-    # software before anything below (keyword extraction, log-instruction,
+    # default for --source owner: raw text (now including any attachment
+    # block folded in above) is gated through the OWNER_ENGINE software
+    # before anything below (keyword extraction, log-instruction,
     # duplicate/search/knowledge/capability lookups) touches it. --source
     # ai_agent is unaffected (that text was never a raw owner chat).
     owner_engine_gate = None
-    effective_text = args.text
+    effective_text = input_text
     if args.source == "owner":
-        owner_engine_gate = run_owner_engine_gate(args.text, args.session_id)
+        owner_engine_gate = run_owner_engine_gate(input_text, args.session_id)
         effective_text = owner_engine_gate["final_output"]
 
     keywords = extract_keywords_mechanical(effective_text)
@@ -462,17 +491,31 @@ def cmd_submit(args):
         keywords = [w for w in words if w.lower() not in STOPWORDS][:5]
     keyword_str = " ".join(keywords) if keywords else effective_text
 
-    log_cmd = ["python3", SUPERBOSS, "log-instruction",
-               "--text", effective_text, "--source", args.source,
-               "--medium", "task_gateway", "--session-id", args.session_id]
+    log_metadata = {}
     if owner_engine_gate:
         # Raw owner text is preserved for audit in metadata_json, not lost --
         # but per point 2 it is metadata, not what search/classification/
         # dispatch (above and below) operate on. That is effective_text.
-        log_cmd += ["--metadata", json.dumps({
-            "owner_engine_chat_id": owner_engine_gate["chat_id"],
-            "owner_engine_raw_text": args.text,
-        })]
+        log_metadata["owner_engine_chat_id"] = owner_engine_gate["chat_id"]
+        log_metadata["owner_engine_raw_text"] = input_text
+    if attachment_record:
+        # task-20260814-180459 real requirement: "record the real file
+        # hash/path/mimetype in the register" -- persisted here for every
+        # attachment regardless of category/extraction outcome (text, PDF,
+        # image, other), not only images, so any real attachment this
+        # instruction carried stays traceable from the register. Full
+        # extracted_text is left out of the DB metadata (it already lives
+        # inside effective_text/input_text above, going through the real
+        # pipeline) -- this is deliberately just the hash/path/mimetype/
+        # status fingerprint, not a duplicate copy of the content.
+        log_metadata["attachment"] = {
+            k: v for k, v in attachment_record.items() if k != "extracted_text"
+        }
+    log_cmd = ["python3", SUPERBOSS, "log-instruction",
+               "--text", effective_text, "--source", args.source,
+               "--medium", "task_gateway", "--session-id", args.session_id]
+    if log_metadata:
+        log_cmd += ["--metadata", json.dumps(log_metadata)]
     log_result = run_json(log_cmd, "log-instruction")
     instruction_id = log_result.get("instruction_id")
 
@@ -557,9 +600,15 @@ def cmd_submit(args):
             "category": owner_engine_gate["classification"]["category"] if owner_engine_gate else None,
             "intent": owner_engine_gate["classification"]["intent"] if owner_engine_gate else None,
             "token_reduction_pct": owner_engine_gate["processing"]["token_reduction_pct"] if owner_engine_gate else None,
-            "raw_text_chars": len(args.text) if owner_engine_gate else None,
+            "raw_text_chars": len(input_text) if owner_engine_gate else None,
             "gated_text_chars": len(effective_text) if owner_engine_gate else None,
         },
+        # task-20260814-180459: present (non-null) only when --attach was
+        # given. extracted_text is included here (unlike the register
+        # metadata above) as real, visible evidence of what actually
+        # reached the pipeline above -- see extraction_status for whether
+        # that's real extracted content or an honestly-disclosed gap.
+        "attachment": attachment_record,
         "machine_contract_call": {
             "request": capability_request,
             "response": capability_response,
@@ -1660,6 +1709,14 @@ def build_parser():
     # that doesn't know its tier yet at submit time -- execution_path is
     # simply omitted from the response in that case, never guessed.
     s.add_argument("--tier", type=int, default=None, choices=[0, 1, 2, 3, 4])
+    # task-20260814-180459 (real file-attachment intake): one real local
+    # file path (text/markdown/PDF/image). Its content (or, for images/
+    # unsupported types, an honestly-disclosed non-extraction note) is
+    # folded into the SAME `text` this command already gates/dedups/
+    # searches -- see attach_to_submit_text() -- never a second, parallel
+    # path. Optional; omitted entirely for a plain-text-only submission.
+    s.add_argument("--attach", default=None,
+                    help="real local file path to attach (text/markdown/PDF/image)")
     s.set_defaults(func=cmd_submit)
 
     st = sub.add_parser("start")

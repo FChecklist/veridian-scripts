@@ -150,6 +150,34 @@ with open(outp, 'w') as f:
 fi
 # --- NO-OP-BRANCH-GUARD-BLOCK-END ---
 
+# --- GITLINK-GUARD-BLOCK-START (UMR-20260813-235552-dc9a, see
+# tests/test_gitlink_guard.py) ---
+# Real incident: a worker whose workspace was checked out from the WRONG
+# repo (e.g. this task.yaml's own $REPO field pointing at claude-control for
+# a task whose real target was veridian-scripts) improvised a nested `git
+# clone` of the correct repo inside its own workspace to do its real work
+# (observed directory names `veridian-scripts-work`, `veridian-scripts-
+# clean`), and worker-entrypoint.sh's own checkpoint commits swept that
+# nested .git directory in as a bare submodule gitlink (mode 160000). Before
+# this guard, nothing here distinguished that from a real change -- `gh pr
+# create` below fired unconditionally and opened a real PR whose entire diff
+# was that one gitlink entry: looks like delivered work, contains none. Real,
+# directly observed evidence: FChecklist/claude-control PRs #146, #170, #191
+# (diff stat 1 file changed, 1 insertion(+), each). Deterministic check runs
+# BEFORE the paid AI review call above would otherwise run on a diff with no
+# real content to review, same cost-avoidance principle as the no-op guard
+# immediately above.
+GITLINK_VIOLATIONS=$(python3 /opt/veridian/scripts/gitlink_guard.py "$WORKSPACE" "origin/$DEFAULT_BRANCH" --head-ref HEAD 2>>"$TASK_DIR/supervisor.log")
+GITLINK_GUARD_RC=$?
+if [ "$GITLINK_GUARD_RC" -ne 0 ]; then
+  GITLINK_LIST=$(echo "$GITLINK_VIOLATIONS" | tr '\n' ' ')
+  GITLINK_REASON="branch '$BRANCH' contains a bare git submodule gitlink (mode 160000) at path(s) [$GITLINK_LIST] that is not a genuine, pre-existing, declared submodule of this repo -- almost certainly a nested checkout of a DIFFERENT repo (this UMR's known pattern: 'veridian-scripts-work'/'veridian-scripts-clean' nested inside a claude-control workspace) swept in by an unconditional 'git add -A'. Refusing to open a PR that would contain nothing but this gitlink (real precedent: claude-control PRs #146, #170, #191, all gitlink-only). The worker's real changes, if any, are either genuinely absent from this branch or still sitting untracked inside the offending nested directory on the server -- a human needs to look at $WORKSPACE/${GITLINK_LIST% *} directly, not just retry."
+  echo "GITLINK GUARD TRIPPED: $GITLINK_REASON" >> "$TASK_DIR/supervisor.log"
+  python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status blocked --note "$GITLINK_REASON"
+  exit 1
+fi
+# --- GITLINK-GUARD-BLOCK-END ---
+
 TIER=$(python3 /opt/veridian/scripts/risk-tier.py "$WORKSPACE" "origin/$DEFAULT_BRANCH" 2>>"$TASK_DIR/supervisor.log")
 echo "Risk tier: $TIER" >> "$TASK_DIR/supervisor.log"
 

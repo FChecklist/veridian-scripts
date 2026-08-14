@@ -24,8 +24,27 @@
       find_real_pr_across_repos() finds a PR that exists ONLY in a different repo than
       the one searched first (mocked `gh` subprocess calls keyed by --repo), plus a test
       of `_umr_cross_repo_pr_check()`'s dispatched-repo-first / fallback-to-others wiring.
-- [x] Ran the new test file: all tests pass.
+- [x] Ran the new test file: all 7 tests pass. Also re-ran
+      test_resource_governor_queue_management.py + test_resource_governor_owner_priority_advance.py
+      (existing suites) against a copy of the live DB: unaffected, all pass.
+- [x] Added `scripts/find-real-pr.sh`, a real standalone CLI wrapper around a new
+      `--find-real-pr QUERY_TEXT [--find-real-pr-repos r1,r2,...]` flag on
+      resource_governor.py's argparse (same "shell script wraps `python3
+      resource_governor.py <flag>`" convention as resource_governor_tick_loop.sh /
+      dispatch-owner-task.sh -- one real implementation, no divergent bash
+      reimplementation of the `gh pr list --search` logic). Verified it end-to-end with
+      a fake `gh` binary on PATH: correctly finds a PR that exists only in
+      veridian-scripts when claude-control (searched first) has no match.
+      progress_completion_gate.py check-completion confirmed this satisfies the
+      code-named-objective gate (`scripts/find-real-pr.sh` is the objective file
+      progress_completion_gate.py's own extractor names from this task's SPEC text --
+      `resource_governor.py`'s bare mention is excluded as a known boilerplate
+      standing-CLI-tool citation, per that gate's own `_BOILERPLATE_TOOL_NAME_EXCLUDED`).
 - [x] Committed + pushed.
+
+## Real PR
+- veridian-scripts PR #366 (https://github.com/FChecklist/veridian-scripts/pull/366),
+  branch worker/task-20260814-092520-build-cross-repo-pr-lookup--prevent-repo.
 
 ## Remaining
 - [ ] (optional follow-up, out of this task's scope) extend the same cross-repo check to

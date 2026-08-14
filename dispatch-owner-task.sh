@@ -470,21 +470,73 @@ json.dump({sys.argv[1]: {
 }}, open(sys.argv[2], 'w'))
 " "$AIDER_MODEL" "$AIDER_MODEL_METADATA_FILE"
 
+      # Real, live-confirmed finding (this task's own second real dispatch,
+      # umr_id=UMR-20260814-132851-7e1b): passing the whole worktree
+      # directory (or `.`) as aider's only positional argument makes aider
+      # treat every existing file as read-only repo-map context, never
+      # "added to the chat" -- fine for a prompt that only CREATES a new
+      # file (worked, umr_id=UMR-20260814-132552-13cf), but a prompt that
+      # needs to EDIT an existing file gets aider's own real, correct
+      # refusal ("I need to edit an existing file, please add it to the
+      # chat") instead of a real edit -- confirmed live in that log.
+      # Real, general fix: mechanically extract path-shaped tokens
+      # (existing or not) from $PROMPT and pass each explicitly via aider's
+      # own --file flag ("specify a file to edit"), which adds it to the
+      # chat as real editable content whether or not it exists yet -- same
+      # real mechanical-extraction discipline task-gateway.py's own
+      # extract_keywords_mechanical() already uses for a different purpose,
+      # not a second bespoke NLP layer. Falls back to no --file args (the
+      # create-new-file-only behavior already proven live) if the prompt
+      # names nothing path-shaped.
+      AIDER_FILE_ARGS=()
+      while IFS= read -r f; do
+        [ -n "$f" ] && AIDER_FILE_ARGS+=(--file "$f")
+      done < <(printf '%s\n' "$PROMPT" | grep -oE '[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]{1,6}' | sort -u)
+
       AIDER_LOG="$(mktemp)"
       set +e
-      aider --model "$AIDER_MODEL" --model-metadata-file "$AIDER_MODEL_METADATA_FILE" \
-        --no-stream --yes-always --message "$PROMPT" "$AIDER_WORKSPACE" \
+      # Real, live-confirmed bug fixed here too: aider resolves its own git
+      # root (and therefore where it writes .aider.chat.history.md/
+      # .aider.tags.cache.*/.gitignore edits) from the process's cwd, NOT
+      # from a trailing positional file argument -- running this without
+      # first `cd`-ing into $AIDER_WORKSPACE dropped .aider.chat.history.md
+      # into whatever unrelated repo dispatch-owner-task.sh itself happened
+      # to be invoked from (confirmed live: task-20260814-131322's own
+      # veridian-scripts checkout, not the disposable compliance-tracker
+      # worktree aider was actually editing). Run in a subshell so this
+      # script's own cwd is restored either way. --map-tokens 0 skips the
+      # (slow, and for a --file-driven edit largely unnecessary) full repo
+      # scan -- consistent with this whole path existing to be the CHEAP
+      # tier-3/4 backend, not a repo-map-hungry one.
+      (cd "$AIDER_WORKSPACE" && aider --model "$AIDER_MODEL" --model-metadata-file "$AIDER_MODEL_METADATA_FILE" \
+        --map-tokens 0 --no-stream --yes-always --message "$PROMPT" "${AIDER_FILE_ARGS[@]}") \
         > "$AIDER_LOG" 2>&1
       AIDER_EXIT=$?
       set -e
       rm -f "$AIDER_MODEL_METADATA_FILE"
 
       AIDER_HEAD_SHA=$(git -C "$AIDER_WORKSPACE" rev-parse HEAD)
+      # Real, live-confirmed gap (this task's own third real dispatch,
+      # umr_id=UMR-20260814-133127-f8cd): aider's own auto-commit did not
+      # fire for an edit applied to a brand-new file added via --file for a
+      # path that did not exist yet -- the real edit landed on disk
+      # (confirmed live: `git status --porcelain` showed the new file
+      # genuinely present, just untracked/uncommitted), auto-commit simply
+      # never ran. Commit it ourselves rather than discarding real,
+      # already-applied work as a false "no changes" failure -- same real
+      # git identity (global user.name/user.email) the auto-commit path
+      # itself already uses (confirmed live against the first real commit,
+      # umr_id=UMR-20260814-132552-13cf).
+      if [ "$AIDER_HEAD_SHA" = "$AIDER_BASE_SHA" ] && [ -n "$(git -C "$AIDER_WORKSPACE" status --porcelain)" ]; then
+        git -C "$AIDER_WORKSPACE" add -A
+        git -C "$AIDER_WORKSPACE" commit -m "${TITLE} (aider-litellm tier-${TIER}, umr_id=${UMR_ID})" >/dev/null
+        AIDER_HEAD_SHA=$(git -C "$AIDER_WORKSPACE" rev-parse HEAD)
+      fi
       # Real measured token/cost delta -- aider's own real usage-report
       # line (base_coder.py's show_usage_report()/format_usage_report()),
       # not estimated here.
-      AIDER_TOKENS_LINE=$(grep -oE "Tokens: [^.]*\." "$AIDER_LOG" | tail -1)
-      AIDER_COST_LINE=$(grep -oE '\$[0-9.]+ message, \$[0-9.]+ session' "$AIDER_LOG" | tail -1)
+      AIDER_TOKENS_LINE=$(grep -oE "Tokens: [0-9.]+[a-zA-Z]* sent, [0-9.]+[a-zA-Z]* received\." "$AIDER_LOG" | tail -1)
+      AIDER_COST_LINE=$(grep -oE 'Cost: \$[0-9.]+ message, \$[0-9.]+ session\.' "$AIDER_LOG" | tail -1)
 
       if [ "$AIDER_EXIT" -ne 0 ] || [ "$AIDER_HEAD_SHA" = "$AIDER_BASE_SHA" ]; then
         echo "AIDER_LITELLM EXECUTION DID NOT PRODUCE A COMMIT for umr_id=$UMR_ID (aider exit=$AIDER_EXIT) -- see $AIDER_LOG" >&2
@@ -502,9 +554,14 @@ json.dump({sys.argv[1]: {
             --reason "aider_litellm execution path: model=$AIDER_MODEL made a real local commit but git push failed. ${AIDER_TOKENS_LINE} ${AIDER_COST_LINE}" >/dev/null
         else
           AIDER_GH_REPO=$(git -C "$REPO_PATH" remote get-url origin | sed -E 's#^.*github\.com[:/]##; s#\.git$##')
+          # stdout only (never 2>&1) -- gh pr create's own real, harmless
+          # stderr warnings (e.g. an aider-managed .gitignore tweak left
+          # uncommitted in the disposable worktree, never part of the real
+          # pushed branch/PR diff) must not pollute the PR URL this script
+          # parses --pr-number and the mark-umr-terminal --reason from.
           AIDER_PR_URL=$(gh pr create --repo "$AIDER_GH_REPO" --base "$AIDER_DEFAULT_BRANCH" \
             --head "$AIDER_BRANCH" --title "$TITLE" \
-            --body "Real tier-${TIER} dispatch via the aider-chat+litellm execution backend (umr_id=${UMR_ID}, model=${AIDER_MODEL}). ${AIDER_TOKENS_LINE} ${AIDER_COST_LINE}" 2>&1) || true
+            --body "Real tier-${TIER} dispatch via the aider-chat+litellm execution backend (umr_id=${UMR_ID}, model=${AIDER_MODEL}). ${AIDER_TOKENS_LINE} ${AIDER_COST_LINE}" 2>/dev/null) || true
           AIDER_PR_NUMBER=$(echo "$AIDER_PR_URL" | grep -oE '[0-9]+$' | tail -1)
           echo "AIDER_LITELLM EXECUTED: umr_id=$UMR_ID commit=$AIDER_HEAD_SHA pr=$AIDER_PR_URL model=$AIDER_MODEL $AIDER_TOKENS_LINE $AIDER_COST_LINE"
 

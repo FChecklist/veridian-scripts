@@ -233,6 +233,16 @@ trap 'kill $CHECKPOINT_PID 2>/dev/null' EXIT
 
 cd "$WORKSPACE"
 
+# 2026-08-14 (task-20260814-132651-add-pretooluse-hook-enforcement-layer-fo):
+# real, mechanical PreToolUse hook enforcement (hooks/pretooluse_worker_enforcement.py,
+# wired into ~/.claude/settings.json) identifies "which worker am I" primarily via
+# this process's own real cgroup membership (veridian-worker@<task_id>.service, kernel-
+# enforced, not spoofable by the worker itself) -- exported here too, as a defense-in-
+# depth FALLBACK only, for any environment where that cgroup signal is unavailable (e.g.
+# a non-systemd host, or a future non-cgroup test harness). Never the primary signal;
+# see that hook's own module docstring for the full resolution order.
+export VERIDIAN_TASK_ID="$TASK_ID"
+
 # --- GITLINK GUARD (2026-08-13, UMR-20260813-235552-dc9a) ---
 # Real incident: a worker whose workspace was checked out from the WRONG
 # repo improvised a nested `git clone` of the correct repo to do its real

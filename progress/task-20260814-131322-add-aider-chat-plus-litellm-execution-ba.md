@@ -39,6 +39,8 @@
       status=completed_unmerged, reason carries the real measured delta (Tokens: 700 sent, 303 received.
       Cost: $0.00069 message, $0.00069 session.), and no stray files left in this task's own checkout.
 
+- [x] Recorded completion via `agent_work_briefing.py record-completion --umr-id UMR-20260814-131248-baed`.
+- [x] Marked this task's own UMR-20260814-131248-baed `completed_unmerged` (commit 5ff12288, PR #374).
+
 ## Remaining
-- [ ] Record completion via `agent_work_briefing.py record-completion --umr-id UMR-20260814-131248-baed`.
-- [ ] Push the fix commits; nothing else outstanding.
+- none -- task complete. PR #374 (FChecklist/veridian-scripts) awaiting review/merge.

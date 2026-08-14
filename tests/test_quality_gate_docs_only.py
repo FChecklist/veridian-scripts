@@ -164,6 +164,37 @@ class DocsOnlyDetectionPatternTest(unittest.TestCase):
     def test_mixed_diff_is_code_relevant(self):
         self.assertTrue(_is_code_relevant(self.ext_pattern, self.name_pattern, ["PROGRESS.md", "quality-gate.sh"]))
 
+    # -- root-caused 2026-08-14 (task-20260814-062124, RCA of UMR-43d0):
+    # ai-os governance bookkeeping files that AGENTS.md Rule 11 / this repo's
+    # own conventions require every docs-only task to touch (claim register,
+    # doc index) are still .yaml, so they were wrongly classified
+    # code-relevant, forcing a full build that then failed on real build-lock
+    # contention -- for a diff that touched zero code.
+    def test_active_claims_yaml_is_docs_only(self):
+        self._assert_docs_only("ai-os/boss/ACTIVE-CLAIMS.yaml")
+
+    def test_os_yaml_is_docs_only(self):
+        self._assert_docs_only("ai-os/OS.yaml")
+
+    def test_rca_task_diff_shape_is_docs_only(self):
+        self.assertFalse(_is_code_relevant(self.ext_pattern, self.name_pattern, [
+            "ai-os/OS.yaml",
+            "ai-os/boss/ACTIVE-CLAIMS.yaml",
+            "ai-os/registry/UMR-20260808-150937-43d0-RCA.md",
+            "progress/task-20260814-062124-rca--umr-20260808-150937-43d0-killed.md",
+        ]))
+
+    def test_other_ai_os_yaml_is_still_code_relevant(self):
+        """The allowlist addition is deliberately narrow (two specific,
+        verified-safe paths), not `ai-os/**/*.yaml` generally -- any other
+        yaml under ai-os/ must still fail closed."""
+        self._assert_code_relevant("ai-os/MASTER-TRACKER.yaml")
+        self._assert_code_relevant("ai-os/engines/ENGINES.yaml")
+
+    def test_unrelated_top_level_yaml_is_still_code_relevant(self):
+        self._assert_code_relevant("OS.yaml")
+        self._assert_code_relevant("ACTIVE-CLAIMS.yaml")
+
 
 class DocsOnlyEndToEndTest(unittest.TestCase):
     """Full subprocess runs of the real quality-gate.sh against real git
@@ -254,6 +285,30 @@ class DocsOnlyEndToEndTest(unittest.TestCase):
         workspace = self._make_repo_with_diff(
             {"README.md": "hello\n", "package.json": "{}\n"},
             {"yarn.lock": "# yarn lockfile v1\n"},
+        )
+        proc = self._run_gate(workspace)
+        self.assertNotIn("skipping node/python lint/build/test gates", proc.stdout)
+
+    def test_ai_os_governance_yaml_diff_skips_gates(self):
+        """Root-caused 2026-08-14 (task-20260814-062124, RCA of UMR-43d0):
+        this exact diff shape (new registry doc + the two governance
+        bookkeeping files every such task is required to touch) was
+        wrongly paying the full build gate and failing on real build-lock
+        contention for a change that touched zero code."""
+        workspace = self._make_repo_with_diff(
+            {"README.md": "hello\n"},
+            {
+                "ai-os/OS.yaml": "docs: []\n",
+                "ai-os/boss/ACTIVE-CLAIMS.yaml": "claims: []\n",
+                "ai-os/registry/UMR-EXAMPLE-RCA.md": "# RCA\n",
+            },
+        )
+        proc = self._run_gate(workspace)
+        self.assertIn("skipping node/python lint/build/test gates", proc.stdout)
+
+    def test_other_ai_os_yaml_diff_does_not_skip_gates(self):
+        workspace = self._make_repo_with_diff(
+            {"README.md": "hello\n"}, {"ai-os/MASTER-TRACKER.yaml": "open: []\n"}
         )
         proc = self._run_gate(workspace)
         self.assertNotIn("skipping node/python lint/build/test gates", proc.stdout)

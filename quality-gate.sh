@@ -167,7 +167,25 @@ DOCS_ONLY=0
 # filename -- now fails closed to code-relevant (gates run), the one
 # direction this check is allowed to get wrong.
 DOCS_ONLY_EXT_PATTERN='\.(md|rst|png|jpe?g|gif|svg|ico|webp|bmp|tiff?|avif)$'
-DOCS_ONLY_NAME_PATTERN='(^|/)(docs/.*|LICENSE([.][A-Za-z0-9]+)?)$'
+# Root-caused 2026-08-14 (task-20260814-062124, RCA of UMR-20260808-150937-43d0):
+# a genuinely docs-only RCA task -- diff was exactly one new registry .md doc
+# plus the two governance bookkeeping files AGENTS.md Rule 11 and this repo's
+# own CLAUDE.md mandate every such task touch (ai-os/boss/ACTIVE-CLAIMS.yaml,
+# the claim-register every session must write to before starting work; and
+# ai-os/OS.yaml, the doc-index every new registry doc gets indexed into) --
+# still paid the full node lint/build/test gates and failed on build-lock
+# contention, because those two files are .yaml and the allowlist above only
+# recognized prose extensions and a docs/ directory, not these paths. Verified
+# LIVE before allowlisting (not assumed) that neither file is code-relevant:
+# `grep -rn "ai-os.*\.yaml" src/` finds zero `import`/`require`/`readFileSync`
+# of either file anywhere in the Next.js module graph -- every hit is a prose
+# comment citing the file as a reference, not a build-time or type-check-time
+# dependency; both are read (if at all) at request-time by API route handlers,
+# never at `next build`/`eslint`/test time. Deliberately NOT widened to
+# `ai-os/**/*.yaml` generally -- e.g. ai-os/engines/ENGINES.yaml is unverified
+# and this allowlist's own stated posture (see comment above) is to fail
+# closed on anything not explicitly checked, not to guess by directory.
+DOCS_ONLY_NAME_PATTERN='(^|/)(docs/.*|LICENSE([.][A-Za-z0-9]+)?)$|^ai-os/boss/ACTIVE-CLAIMS\.yaml$|^ai-os/OS\.yaml$'
 if [ -n "$CHANGED_FILES" ] \
    && ! echo "$CHANGED_FILES" | grep -qvE "${DOCS_ONLY_EXT_PATTERN}|${DOCS_ONLY_NAME_PATTERN}"; then
   DOCS_ONLY=1

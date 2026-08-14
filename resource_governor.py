@@ -5656,6 +5656,16 @@ def main():
                           "external_ai_state_machine.py list-sessions lookup "
                           f"(default: {BACKFILL_OWNER_EMAIL!r})")
     ap.add_argument("--query-umr", action="store_true", help="search/list umr_tasks rows")
+    ap.add_argument("--query-token-usage", dest="query_token_usage", action="store_true",
+                     help="task-20260814-180958 / UMR-20260814-180929-cbdd: real per-dispatch "
+                          "token-usage report -- reads the last --limit real work_items rows "
+                          "carrying a real token_usage block (raw prompt tokens before the "
+                          "dedup/search/tightening pipeline vs the final assembled prompt's "
+                          "tokens after, both real tiktoken counts written by task-gateway.py's "
+                          "cmd_start, see count_tokens_real() there) and reports the real "
+                          "average_reduction_pct across them plus a plain below/at/above-50% "
+                          "verdict -- never asserts a percentage without this real query backing "
+                          "it. Reuses --limit (same default/semantics as --query-umr).")
     ap.add_argument("--limit", type=int, default=20)
     ap.add_argument("--status", default=None)
     ap.add_argument("--exclude-rca-complete", dest="exclude_rca_complete", action="store_true",
@@ -5839,6 +5849,44 @@ def main():
         if cross_repo_pr_check is not None:
             result["cross_repo_pr_check"] = cross_repo_pr_check
         print(json.dumps(result, indent=2, default=str))
+        return
+
+    if args.query_token_usage:
+        # Same fail-open pattern as --query-umr above: a broken/unavailable
+        # Superboss Register must produce a real, informative CLI error
+        # (and non-zero exit) here, never an uncaught Python traceback.
+        sbr, error = _safe_superboss_register("--query-token-usage")
+        if error:
+            print(json.dumps({"error": error}))
+            sys.exit(1)
+        conn = sbr._connect()
+        try:
+            rows = sbr.query_work_item_token_usage(conn, limit=args.limit)
+        finally:
+            conn.close()
+        pct_values = [r["reduction_pct"] for r in rows if isinstance(r.get("reduction_pct"), (int, float))]
+        average_reduction_pct = round(sum(pct_values) / len(pct_values), 2) if pct_values else None
+        total_raw = sum(r["raw_prompt_tokens"] for r in rows)
+        total_final = sum(r["final_prompt_tokens"] for r in rows)
+        # Aggregate (sum-of-tokens) delta alongside the mean-of-per-dispatch-
+        # percentages headline number above -- reported together so a single
+        # outlier dispatch can't silently dominate the mean without being
+        # visible (both numbers are real, computed from the same rows;
+        # neither is asserted alone as "the" percentage).
+        aggregate_reduction_pct = round((1 - total_final / total_raw) * 100, 2) if total_raw else None
+        if average_reduction_pct is None:
+            goal_50_pct_verdict = None
+        elif average_reduction_pct >= 50:
+            goal_50_pct_verdict = "at_or_above_50_pct"
+        else:
+            goal_50_pct_verdict = "below_50_pct"
+        print(json.dumps({
+            "dispatch_count": len(rows),
+            "average_reduction_pct": average_reduction_pct,
+            "aggregate_reduction_pct": aggregate_reduction_pct,
+            "goal_50_pct_verdict": goal_50_pct_verdict,
+            "dispatches": rows,
+        }, indent=2, default=str))
         return
 
     if args.list_queue:

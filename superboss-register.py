@@ -7040,6 +7040,50 @@ def query_umr_tasks(conn, limit=20, status=None, tier=None, task_identity=None, 
     return matches
 
 
+def query_work_item_token_usage(conn, limit=20):
+    """Real query (task-20260814-180958 / UMR-20260814-180929-cbdd): the
+    last `limit` real work_items rows carrying a real token_usage block in
+    their metadata_json (written by task-gateway.py's cmd_start -- see
+    count_tokens_real()/lookup_instruction_raw_text() there), newest first.
+    work_items is small (a few thousand rows -- checked live before writing
+    this), so a plain metadata_json LIKE scan is fine here; this does not
+    need (and does not get) its own index or FTS5 table, unlike umr_tasks'
+    much larger real row counts.
+
+    Rows without a complete real token_usage.raw_prompt_tokens/
+    final_prompt_tokens pair (every work_items row created before this
+    instrumentation existed, or one whose linked instruction_id had no
+    raw_text -- see lookup_instruction_raw_text()'s own None case) are
+    skipped: this only ever reports on real, complete before/after pairs,
+    never a partial or guessed one. Returns a list of dicts, newest first;
+    empty list if no real dispatch has this data yet."""
+    limit = max(int(limit), 1) if limit else 20
+    cur = conn.execute(
+        "SELECT work_item_id, ts, metadata_json FROM work_items "
+        "WHERE metadata_json LIKE '%token_usage%' ORDER BY ts DESC LIMIT ?",
+        (limit,),
+    )
+    rows = []
+    for r in cur:
+        try:
+            meta = json.loads(r["metadata_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        tu = meta.get("token_usage") or {}
+        raw_tokens = tu.get("raw_prompt_tokens")
+        final_tokens = tu.get("final_prompt_tokens")
+        if not isinstance(raw_tokens, int) or not isinstance(final_tokens, int) or raw_tokens <= 0:
+            continue
+        rows.append({
+            "work_item_id": r["work_item_id"],
+            "ts": r["ts"],
+            "raw_prompt_tokens": raw_tokens,
+            "final_prompt_tokens": final_tokens,
+            "reduction_pct": tu.get("reduction_pct"),
+        })
+    return rows
+
+
 def touch_umr_heartbeat(args):
     """2026-07-29 (Stage 3 reconciliation-sweep prerequisite): CLI entrypoint
     worker-entrypoint.sh/doc-worker-entrypoint.sh call to stamp

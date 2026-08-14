@@ -1377,6 +1377,32 @@ _TARGET_ID_EXCLUDED_SECTION_LABELS = {
     "OUT OF SCOPE", "PRIOR CONTEXT", "EVIDENCE", "EVIDENCE ONLY",
     "NOT TARGET", "NOT A TARGET",
 }
+_TARGET_ID_BLANK_LINE_RE = re.compile(r'\n[ \t]*\n')
+
+
+def _truncate_excluded_section_at_blank_line(content):
+    """Independent-audit fix (post UMR-20260814-034424-ded4, same UMR):
+    `_split_labeled_sections()` gives an excluded-label section
+    (OUT OF SCOPE:/PRIOR CONTEXT:/EVIDENCE(-ONLY):/NOT-(A-)TARGET:) an
+    unbounded span -- from right after its own `LABEL:` to the *next
+    recognized header or end of text*. In an unstructured fallback-mode
+    prompt with no closing header, that silently swallows every genuine
+    target identifier that happens to be written *after* the excluded
+    citation with no header of its own -- e.g. "PRIOR CONTEXT: <UMR
+    cited only as evidence>\\n\\nNow the actual work: land PR #500."
+    dropped PR #500 entirely, a real false negative (the guard fails to
+    flag a genuine duplicate). Only the immediate cited paragraph is
+    truly "the citation" -- bound the exclusion to the first blank line
+    (paragraph break) and return the (included) remainder separately, so
+    unrelated trailing prose is scanned exactly as if the excluded
+    citation were never there. Deliberately conservative in the same
+    direction as the rest of this function: when in doubt, keep scanning
+    (a spurious "possible duplicate" flag is cheap; a missed real
+    duplicate is not)."""
+    m = _TARGET_ID_BLANK_LINE_RE.search(content)
+    if not m:
+        return content[:0]
+    return content[m.start():]
 
 
 def _split_labeled_sections(text):
@@ -1457,9 +1483,17 @@ def extract_target_identifiers(text, default_repo=None):
         scan_text = " ".join(
             content for label, content in segments if label in _TARGET_ID_SECTION_LABELS)
     else:
-        scan_text = " ".join(
-            content for label, content in segments
-            if label not in _TARGET_ID_EXCLUDED_SECTION_LABELS)
+        kept = []
+        for label, content in segments:
+            if label in _TARGET_ID_EXCLUDED_SECTION_LABELS:
+                # Only the cited paragraph is excluded; trailing prose
+                # past the first blank line is genuine dispatch text and
+                # must still be scanned (see
+                # _truncate_excluded_section_at_blank_line docstring).
+                kept.append(_truncate_excluded_section_at_blank_line(content))
+            else:
+                kept.append(content)
+        scan_text = " ".join(kept)
     text = scan_text
 
     for m in _UMR_ID_RE.finditer(text):

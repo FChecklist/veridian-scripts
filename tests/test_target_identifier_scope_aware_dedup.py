@@ -344,3 +344,64 @@ def test_title_always_counts_even_when_prompt_has_a_target_section_elsewhere(scr
     conn.close()
     assert dup is not None
     assert dup["umr_id"] == "UMR-TEST-title-only"
+
+
+# ---------------------------------------------------------------------------
+# Independent-audit regression: an unclosed fallback-mode excluded-section
+# label (no TARGET:/SCOPE: header anywhere, no further recognized header
+# after it either) must not swallow real target-naming prose that follows
+# it -- only the immediately-cited paragraph is really "the citation".
+# ---------------------------------------------------------------------------
+
+def test_unclosed_excluded_section_does_not_swallow_trailing_real_target(scratch_db):
+    """Real bug found on independent audit of PR #350: `PRIOR CONTEXT:`
+    (etc.) with no closing header gave `_split_labeled_sections()` an
+    unbounded span running to end-of-text, so a genuine target named in
+    ordinary prose *after* the cited-as-evidence paragraph -- separated
+    only by a blank line, not a new header -- was silently dropped,
+    letting a real duplicate dispatch through undetected."""
+    sbr = _seed_full_schema(scratch_db)
+    _insert_row(
+        scratch_db, "UMR-TEST-unclosed-prior-context", status="running",
+        title="Rebase and land veridian-scripts#500",
+        prompt="Resolving the merge conflict in superboss-register.py.",
+        repo="veridian-scripts", hours_ago=0.1,
+    )
+    conn = sqlite3.connect(scratch_db)
+    conn.row_factory = sqlite3.Row
+    sbr._ensure_umr_table(conn)
+    dup = sbr.find_target_identifier_duplicate(
+        conn,
+        "Second dispatch, different title",
+        (
+            "PRIOR CONTEXT: the flaky CI runner issue for "
+            "UMR-20260101-000000-feed is already known and unrelated to "
+            "this dispatch.\n\n"
+            "Now, the actual work: rebase and land veridian-scripts#500, "
+            "resolving the merge conflict in superboss-register.py."
+        ),
+        repo="veridian-scripts", window_hours=4, limit=30,
+    )
+    conn.close()
+    assert dup is not None, (
+        "PR #500, named in real prose after an unclosed PRIOR CONTEXT: "
+        "paragraph break, must still be extracted as this dispatch's own "
+        "target and match the real prior duplicate")
+    assert dup["umr_id"] == "UMR-TEST-unclosed-prior-context"
+
+
+def test_unclosed_excluded_section_still_excludes_the_cited_paragraph_itself():
+    """Companion pure-function check: the excluded citation itself (before
+    the blank line) must still be excluded -- this is a scope fix, not a
+    removal of the exclusion mechanism."""
+    sbr = _load_sbr()
+    prompt = (
+        "PRIOR CONTEXT: the flaky CI runner issue for "
+        "UMR-20260101-000000-feed is already known and unrelated to this "
+        "dispatch.\n\n"
+        "Now, the actual work: rebase and land veridian-scripts#500, "
+        "resolving the merge conflict in superboss-register.py."
+    )
+    ids = sbr.extract_target_identifiers(prompt, default_repo="veridian-scripts")
+    assert "pr:veridian-scripts#500" in ids
+    assert "umr:UMR-20260101-000000-feed" not in ids

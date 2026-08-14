@@ -90,6 +90,10 @@ def test_genuine_fragmented_duplicate_still_caught():
             return _FakeCompletedProcess(0, json.dumps([
                 {"number": 65, "title": "Resolve fresh conflict on PR #58"},
             ]))
+        if cmd[:3] == ["gh", "pr", "view"]:
+            # UMR-20260814-172611: matched PR must carry a real (non-docs)
+            # file for the guard to still treat it as a genuine duplicate.
+            return _FakeCompletedProcess(0, json.dumps({"files": [{"path": "resource_governor.py"}]}))
         raise AssertionError(f"unexpected gh call: {cmd}")
 
     with mock.patch.object(rg, "_run", side_effect=fake_run):

@@ -319,11 +319,14 @@ $ python3 -m pytest test_full_server_file_registration.py -q
     this branch, running_worker_count=5/cap=5 on `main`) -- reproduces
     identically on `main`, confirmed real-machine-state-dependent, not
     diff-caused.
-- [ ] Post a new Tier-1 audit comment on PR #308 citing current head
-      `42a56d3` explicitly (the real head after this addendum's fix commit,
-      not the stale `34bb70b6` nor the pre-fix `4380f7f9`).
-- [ ] Merge PR #308 to `main` -- ONLY if the new audit is a real PASS.
-- [ ] Call `agent_work_briefing.py record-completion` for
+- [x] Posted a new Tier-1 `AUDIT:PASS` comment on PR #308 citing current
+      head `6d1aaa87` explicitly (the real head after the PROGRESS.md
+      commit, not the stale `34bb70b6` nor the intermediate `4380f7f9`/
+      `42a56d3`): https://github.com/FChecklist/veridian-scripts/pull/308#issuecomment-5287967734
+- [x] Merged PR #308 to `main` (real `AUDIT:PASS` at `6d1aaa87`):
+      `gh pr merge 308 --squash` -> `merged: true`, merge commit
+      `989fb5d53319749f562326fd87a13812d74ba92e`.
+- [x] Called `agent_work_briefing.py record-completion` for
       `UMR-20260813-235507-1710` with a real summary of this work.
 
 ---

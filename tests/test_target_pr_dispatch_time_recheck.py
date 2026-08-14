@@ -223,6 +223,36 @@ def test_closed_pr_superseded_claim_citing_unmerged_pr_does_not_block():
     assert evidence is None
 
 
+def test_closed_pr_with_unrelated_mid_sentence_superseded_mention_does_not_block():
+    """PR#376 AUDIT:FAIL lower-severity note: _SUPERSEDED_BY_RE must not
+    false-match a comment that merely mentions another PR's supersession
+    mid-sentence, unrelated to whether *this* PR was itself superseded --
+    e.g. a reviewer comment discussing a different PR's history. Real close
+    comments state supersession as their own clause (see PR#298's real
+    comment, test_closed_pr_with_real_merged_successor_still_blocks() above);
+    a mid-sentence aside about an unrelated PR must not be read the same way."""
+    rg = _load_rg("rg_targetpr_superseded_3", {"VERIDIAN_SCRIPTS_DIR": SCRIPTS_DIR})
+    closed_pr = {"number": 600, "state": "CLOSED", "mergedAt": None,
+                 "closedAt": "2026-08-13T14:09:30Z",
+                 "url": "https://github.com/FChecklist/veridian-scripts/pull/600"}
+    comments_payload = {
+        "body": "Closing this as a duplicate effort, unrelated to PR #298, which was "
+                "superseded by #299 in a different discussion thread entirely.",
+        "comments": [],
+    }
+
+    def fake_run(cmd, **kwargs):
+        if "--json" in cmd and "body,comments" in cmd:
+            return _FakeCompletedProcess(0, json.dumps(comments_payload))
+        return _FakeCompletedProcess(0, json.dumps(closed_pr))
+
+    with mock.patch.object(rg, "_run", side_effect=fake_run):
+        blocked, evidence = rg.target_pr_already_resolved(
+            "Merge real veridian-scripts PR#600", hint_repo="veridian-scripts")
+    assert blocked is False, (blocked, evidence)
+    assert evidence is None
+
+
 def test_open_dirty_target_pr_never_blocks():
     """The real UMR-20260813-111352-6973 shape: PR #136 is real, current
     OPEN/DIRTY -- must NOT block (the right answer there is a fresh

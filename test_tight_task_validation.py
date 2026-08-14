@@ -10,7 +10,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from tight_task_validation import detect_field_contradiction  # noqa: E402
+from tight_task_validation import detect_field_contradiction, validate_tight_task  # noqa: E402
 
 
 def _base_task(**overrides):
@@ -22,6 +22,7 @@ def _base_task(**overrides):
         "complexityTier": "integrative",
         "knownContext": "Read the gateway spec first.",
         "constraints": "",
+        "filePaths": ["scripts/task-gateway.py"],
     }
     task.update(overrides)
     return task
@@ -135,3 +136,34 @@ def test_true_positive_unconditional_conflict_is_still_detected():
     result = detect_field_contradiction(task)
     assert result["detected"] is True, result
     assert "cron" in result["conflictingTerm"]
+
+
+# --- filePaths (UMR-20260814-132703-a1f9) ------------------------------------
+
+def test_file_paths_valid_real_repo_relative_paths_passes():
+    """A real, non-empty list of real repo-relative paths passes the whole
+    validator (proving the check is actually wired into validate_tight_task,
+    not just a standalone helper)."""
+    task = _base_task(filePaths=["tight_task_validation.py", "test_tight_task_validation.py"])
+    result = validate_tight_task(task)
+    assert result["valid"] is True, result
+
+
+def test_file_paths_missing_fails():
+    """An absent filePaths (the pre-existing gap this closes: no field today
+    requires an explicit file-path list) must fail validate_tight_task with
+    a real, actionable reason -- not silently pass."""
+    task = _base_task(filePaths=None)
+    result = validate_tight_task(task)
+    assert result["valid"] is False, result
+    assert "File paths" in result["reason"], result
+
+
+def test_file_paths_placeholder_entry_fails():
+    """A filePaths list with a placeholder entry (reusing is_placeholder(),
+    this module's own existing helper) must fail, same as any other
+    placeholder value elsewhere in this validator."""
+    task = _base_task(filePaths=["scripts/task-gateway.py", "TBD"])
+    result = validate_tight_task(task)
+    assert result["valid"] is False, result
+    assert "placeholder" in result["reason"], result

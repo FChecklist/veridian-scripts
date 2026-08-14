@@ -4984,6 +4984,16 @@ def main():
     ap.add_argument("--query-umr", action="store_true", help="search/list umr_tasks rows")
     ap.add_argument("--limit", type=int, default=20)
     ap.add_argument("--status", default=None)
+    ap.add_argument("--exclude-rca-complete", dest="exclude_rca_complete", action="store_true",
+                     help="RCA of UMR-20260813-060311-6eea (UMR-20260814-013850-fd7f): for the "
+                          "plain-listing --query-umr path only (no --umr-id/--task-identity/"
+                          "--search), skip rows whose reason already starts with the established "
+                          "\"RCA (UMR-...)\" convention -- i.e. a prior RCA already wrote a real, "
+                          "evidenced terminal verdict back into this row. Callers that scan "
+                          "--status killed to find rows STILL NEEDING an RCA (e.g. pm-sentinel-"
+                          "tick.sh Check 2a) should pass this to stop re-dispatching an RCA for a "
+                          "row that already has one, once dispatch-owner-task.sh's own 6h content-"
+                          "duplicate window lapses.")
     ap.add_argument("--search", default=None, help="free-text FTS5 query over task_identity/source_trigger/logs_ref")
     ap.add_argument("--task-identity", dest="task_identity", default=None)
     ap.add_argument("--full", action="store_true",
@@ -5087,7 +5097,8 @@ def main():
         sbr._ensure_umr_table(conn)
         rows = sbr.query_umr_tasks(conn, limit=args.limit, status=args.status,
                                     task_identity=args.task_identity, query_text=args.search,
-                                    umr_id=args.umr_id, full=args.full)
+                                    umr_id=args.umr_id, full=args.full,
+                                    exclude_rca_complete=args.exclude_rca_complete)
         # Point 2 (task-gateway.py audit-24-points, UMR-20260808-145030-f3d1):
         # this IS the other canonical query path (alongside task-gateway.py
         # status) -- log it. Best-effort: a broken log write must never break

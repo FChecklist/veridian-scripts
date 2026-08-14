@@ -797,7 +797,18 @@ done <<< "$CHAIN_UMRS"
 # Check 2a: killed-status rows needing RCA (system-wide, bounded).
 # ---------------------------------------------------------------------------
 echo "--- Check 2a: killed-status rows needing RCA ---"
-KILLED_JSON="$(python3 "$RESOURCE_GOVERNOR_PY" --query-umr --status killed --limit 15 2>/dev/null)"
+# Real fix (RCA of UMR-20260813-060311-6eea, dispatched as
+# UMR-20260814-013850-fd7f): this scan used to return EVERY status=killed
+# row up to --limit regardless of whether a prior RCA already wrote a real,
+# evidenced terminal verdict back into that row's own `reason` (the
+# established "RCA (UMR-...)" convention). Once dispatch-owner-task.sh's own
+# 6h content-duplicate window lapsed, an already-resolved row would
+# resurface and get RCA-dispatched again on a later tick -- confirmed as
+# the real root cause of this exact row (UMR-20260813-060311-6eea) being
+# re-dispatched a day after UMR-20260813-091810-5045 already closed it with
+# real evidence. --exclude-rca-complete (resource_governor.py) filters
+# those already-closed rows out at the query layer instead.
+KILLED_JSON="$(python3 "$RESOURCE_GOVERNOR_PY" --query-umr --status killed --limit 15 --exclude-rca-complete 2>/dev/null)"
 KILLED_IDS="$(printf '%s' "$KILLED_JSON" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)

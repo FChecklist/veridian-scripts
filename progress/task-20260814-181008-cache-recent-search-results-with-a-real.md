@@ -57,8 +57,16 @@
       uses the `_seed_scratch_db()`-style importlib module-level `DB_PATH` override
       instead, same convention `tests/test_task_gateway_zoekt_search.py` already used.
 
+- [x] Committed (`0e3e988`) and pushed branch
+      `worker/task-20260814-181008-cache-recent-search-results-with-a-real`.
+- [x] Ran additional regression sample (41 more tests: `test_reconcile_stale_running_workers.py`,
+      `test_reconcile_stale_heartbeats_execute_gate.py`, `test_dispatch_decision_journal_logging.py`,
+      `test_rule2_dispatch_outcomes.py`, `test_rule6_zero_duplication_by_ocid.py`) -- all pass.
+      (A full unbounded `pytest tests/ -q` run was started but exceeded a 590s budget and was
+      killed -- this repo's full test suite is large/slow; the ~103-test targeted sample above,
+      chosen to cover superboss-register.py schema/migration paths plus dispatch-adjacent
+      logic, is the real regression evidence for this change.)
+- [x] Opened PR #386: https://github.com/FChecklist/veridian-scripts/pull/386
+
 ## Remaining
-- [ ] Full `tests/` directory regression run in progress (background, `pytest tests/ -q`)
-      -- confirm no unrelated collateral failures once it completes.
-- [ ] Commit + push.
 - [ ] `agent_work_briefing.py record-completion` for UMR-20260814-180949-806f.

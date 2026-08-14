@@ -336,6 +336,40 @@ def run_zoekt_search(query, limit=10):
         return {"ok": False, "hits": [], "error": f"{type(e).__name__}: {e}", "query": query}
 
 
+_SEARCH_CACHE_MISS = {"hit": False, "result": None, "age_seconds": None, "cache_key": None, "ttl_seconds": None}
+
+
+def get_search_cache_result(query_text):
+    """task-20260814-181008: fail-open cache lookup, same real convention
+    run_zoekt_search() above already uses -- a hiccup here (SUPERBOSS
+    subprocess failure, e.g. a deploy-ordering skew where task-gateway.py
+    has rolled out ahead of a superboss-register.py that doesn't carry
+    get-search-cache yet, or any other real infra issue) must never block
+    or crash cmd_submit's own search step. Returns an honest miss shape on
+    any failure, never raises -- callers fall straight through to the same
+    live search path they'd take on a real, ordinary cache miss."""
+    try:
+        proc = run(["python3", SUPERBOSS, "get-search-cache", "--query-text", query_text])
+        if proc.returncode != 0:
+            return dict(_SEARCH_CACHE_MISS)
+        return json.loads(proc.stdout)
+    except (OSError, json.JSONDecodeError):
+        return dict(_SEARCH_CACHE_MISS)
+
+
+def put_search_cache_result(query_text, result_obj):
+    """task-20260814-181008: fail-open cache write, same convention as
+    get_search_cache_result() above -- a failed write must never block or
+    crash cmd_submit (the live results just computed are returned to the
+    caller either way; this is a best-effort write for the NEXT
+    dispatch)."""
+    try:
+        run(["python3", SUPERBOSS, "put-search-cache", "--query-text", query_text,
+             "--result-json", json.dumps(result_obj, default=str)])
+    except OSError:
+        pass
+
+
 def extract_keywords_mechanical(text):
     """STANDING_DIRECTIVE.yaml v2_task_lifecycle_pipeline.phase_1_software_first_search
     .keyword_extraction_baseline_mechanical_first.step_1_mechanical: regex-extract
@@ -488,23 +522,49 @@ def cmd_submit(args):
         "check-task-key",
     )
 
-    dup_result = run_json(
-        ["python3", SUPERBOSS, "check-duplicate", keyword_str],
-        "check-duplicate",
-    )
-    search_result = run_json(
-        ["python3", SUPERBOSS, "search", keyword_str, "--limit", "10"],
-        "search",
-    )
-    knowledge_result = run_json(
-        ["python3", SUPERBOSS, "query-knowledge", keyword_str],
-        "query-knowledge",
-    )
-    # UMR171945-0017: real Zoekt code-search hit, folded in alongside the
-    # three superboss-register.sqlite FTS5 lookups above -- see
-    # run_zoekt_search()'s own docstring for why this is additive, not a
-    # replacement for any of them.
-    zoekt_result = run_zoekt_search(keyword_str, limit=10)
+    # task-20260814-181008: real short-TTL cache for this whole search step
+    # (check-duplicate/search/query-knowledge/zoekt) -- a real, confirmed gap
+    # was that every dispatch re-ran all four fresh, even when a near-
+    # identical query had just run minutes earlier from a different
+    # dispatch. Keyed on keyword_str (the exact same string driving all four
+    # calls below), so a hit means the whole battery already ran recently
+    # for this query and can be reused wholesale, skipping three subprocess
+    # calls into superboss-register.sqlite's own FTS5 tables plus one live
+    # Zoekt HTTP call. See get_search_cache()/put_search_cache() in
+    # superboss-register.py for the cache table itself (reuses the existing
+    # sqlite register file, no new database) and why TTL=5min
+    # (SEARCH_CACHE_TTL_SECONDS there).
+    cache_check = get_search_cache_result(keyword_str)
+    if cache_check.get("hit"):
+        cached = cache_check["result"]
+        dup_result = cached["dup_result"]
+        search_result = cached["search_result"]
+        knowledge_result = cached["knowledge_result"]
+        zoekt_result = cached["zoekt_result"]
+    else:
+        dup_result = run_json(
+            ["python3", SUPERBOSS, "check-duplicate", keyword_str],
+            "check-duplicate",
+        )
+        search_result = run_json(
+            ["python3", SUPERBOSS, "search", keyword_str, "--limit", "10"],
+            "search",
+        )
+        knowledge_result = run_json(
+            ["python3", SUPERBOSS, "query-knowledge", keyword_str],
+            "query-knowledge",
+        )
+        # UMR171945-0017: real Zoekt code-search hit, folded in alongside the
+        # three superboss-register.sqlite FTS5 lookups above -- see
+        # run_zoekt_search()'s own docstring for why this is additive, not a
+        # replacement for any of them.
+        zoekt_result = run_zoekt_search(keyword_str, limit=10)
+        put_search_cache_result(keyword_str, {
+            "dup_result": dup_result,
+            "search_result": search_result,
+            "knowledge_result": knowledge_result,
+            "zoekt_result": zoekt_result,
+        })
     # Phase 1 Capability Registry live wiring (task-20260724-083420,
     # closes_engines: [3]): lookup_contract's call_site_requirement --
     # "any code path about to construct an LLM prompt to accomplish a named
@@ -567,6 +627,18 @@ def cmd_submit(args):
         "task_key_candidate": task_key_candidate,
         "task_key_already_claimed": task_key_check.get("already_claimed", False),
         "task_key_existing_task_id": task_key_check.get("existing_task_id"),
+        # task-20260814-181008: real evidence of whether this dispatch's search
+        # step (check-duplicate/search/query-knowledge/zoekt, all four above)
+        # was served from the short-TTL search_cache or freshly re-run live --
+        # a real cache_hit=True/age_seconds pair here is the logged marker a
+        # test asserts on to prove reuse actually happened, not just that the
+        # cache table exists.
+        "search_cache": {
+            "hit": bool(cache_check.get("hit")),
+            "age_seconds": cache_check.get("age_seconds"),
+            "ttl_seconds": cache_check.get("ttl_seconds"),
+            "cache_key": cache_check.get("cache_key"),
+        },
         "duplicate_found": bool(dup_result.get("found", 0) > 0),
         "duplicate_evidence": dup_result.get("matches", []),
         "prior_search_results": search_result,

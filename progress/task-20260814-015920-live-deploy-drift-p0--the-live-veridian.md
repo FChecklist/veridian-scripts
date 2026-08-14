@@ -116,17 +116,16 @@ changed in *this* invocation.
       historical task-note text (task IDs/notes containing the word
       "error"), not a live failure.
 
+- [x] Pushed (`c73213b`) and refreshed PR #325 with a real comment
+      (https://github.com/FChecklist/veridian-scripts/pull/325#issuecomment-5288656479)
+      re-requesting a fresh Tier-1 audit against head SHA `c73213b`,
+      disclosing the 6 stray files, and flagging the one real
+      not-yet-on-main fix (`superboss-register.py` commit `29947ca`) so an
+      auditor can decide keep-whole-branch vs cherry-pick-and-close.
+
 ## Remaining
-- [ ] Push this commit + this progress file, refresh PR #325 (same branch,
-      new head SHA) with a comment re-requesting a fresh Tier-1 audit
-      against the new head SHA -- flag in that comment that PR #343/#344
-      (a separate worker's parallel reconcile pass) already merged
-      equivalent content directly to main, so an auditor should check
-      whether PR #325 is now fully redundant (near-empty real diff beyond
-      the 6 stray pre-existing files above) and closable rather than
-      mergeable.
 - [ ] Record completion via `agent_work_briefing.py record-completion`
-      once pushed.
+      once pushed. (about to run)
 - [ ] (Carried over from prior invocations, still explicitly out of scope)
       pm-sentinel-tick.sh's duplicate-refusal-counted-as-failure behavior --
       worth a dedicated UMR.

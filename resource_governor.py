@@ -135,6 +135,53 @@ PROC_MEMINFO_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_MEMINFO", "/proc/memi
 PROC_DISKSTATS_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_DISKSTATS", "/proc/diskstats")
 PROC_NETDEV_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_NETDEV", "/proc/net/dev")
 PROC_VMSTAT_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_VMSTAT", "/proc/vmstat")
+PROC_LOADAVG_PATH = os.environ.get("VERIDIAN_GOVERNOR_PROC_LOADAVG", "/proc/loadavg")
+
+# Real, additive load1-backoff calibration-defect override (PM sentinel real
+# evidence, 2026-08-14T07:45-07:52Z governing SPEC for this UMR). Real
+# incident this closes: dispatch_core.py's load1_backoff gate refuses
+# dispatch whenever os.getloadavg()[0] (the kernel's 1-minute exponentially
+# decayed load average) exceeds cpu_count * BACKOFF_UTILIZATION_PCT (0.80).
+# load1 counts every task in D state (TASK_UNINTERRUPTIBLE -- blocked on I/O,
+# not runnable) identically to a genuinely CPU-bound RUNNING task -- it is a
+# demand proxy, not a real CPU-availability measurement. Real evidence
+# gathered live: the governor tick logged blocking_category=
+# resource_headroom_veto action=deferred with slot_detail exactly {check:
+# load1_backoff, load1: 9.4169921875, cpu_count: 8, threshold: 6.4}
+# repeatedly, while a SIMULTANEOUS `vmstat 1 3` showed runnable r=0-1,
+# blocked b=0, CPU 90-96% idle, and only one node worker at 79% of one core
+# out of 8 -- load1 near 9 was not real CPU demand. `free -h` showed 427Mi
+# free RAM with swap at 3.1Gi/4.0Gi used, and both kswapd0 and kcompactd0
+# (swap-reclaim kernel threads) were actively consuming CPU alongside a
+# D-state systemd-run scope in the veridian-checkpoint-heartbeat slice --
+# the real inflation source was uninterruptible D-state + memory-pressure
+# reclaim, not compute demand. Real measured impact: zero rows dispatched
+# between 07:19:22 and 07:49 UTC while the queued backlog grew to 4 rows, on
+# a machine that was over 90% idle -- a throughput stall (the gate later
+# self-resolved at load1=4.87 and the queue drained), not a permanent
+# deadlock, but a real calibration defect all the same.
+#
+# See read_loadavg_runnable()/_override_load1_backoff_when_cpu_idle() below
+# for the real mechanism -- this stays in resource_governor.py (explicitly
+# exempt from the narrow 2026-08-08 stop-work order per this UMR's own SPEC)
+# and wraps dispatch_core.py's own has_free_slot_detail() result;
+# dispatch_core.py itself is left unmodified, same convention
+# _override_stale_swap_backoff() above already established for the
+# swap_backoff gate.
+#
+# Real, conservative safety backstop: the override requires BOTH (1) this
+# SAME tick's own real, delta-based /proc/stat CPU utilization (sample_
+# metrics()'s "cpu", already computed once per tick -- see cpu_percent()
+# above) confirmed under this ceiling, AND (2) /proc/loadavg's own live
+# nr_running/cpu_count runnable-queue snapshot confirmed non-contended (see
+# _override_load1_backoff_when_cpu_idle()'s own docstring) -- so a genuine
+# CPU-bound burst (compute demand, not D-state/swap-reclaim noise) still
+# throttles dispatch exactly as before. 50% is meaningfully below even
+# BACKOFF_UTILIZATION_PCT's own 80% ceiling (real evidence showed 4-10%
+# utilization during the incident), leaving a wide, deliberate margin before
+# this could ever misfire on real load. Overridable for tests only.
+LOAD1_OVERRIDE_MAX_CPU_UTILIZATION_PCT = float(
+    os.environ.get("VERIDIAN_GOVERNOR_LOAD1_OVERRIDE_MAX_CPU_PCT", "50.0"))
 
 # Real, additive stale-swap-ratchet override (UMR-20260813-155201-da76,
 # addendum to P1 UMR-20260806-171945-5767 / UMR-20260813-163237 spec "unwedge
@@ -1004,6 +1051,105 @@ def _override_stale_swap_backoff(slot_ok, slot_detail, now=None):
         "mem_headroom_bytes": mem_headroom_bytes,
         "required_bytes": dc.PER_WORKER_MEMORY_BUDGET_BYTES,
         "swap_activity": activity_detail,
+    }
+
+
+# ---------------------------------------------------------------------------
+# load1-backoff calibration-defect override (this UMR, 2026-08-14) -- see the
+# LOAD1_OVERRIDE_MAX_CPU_UTILIZATION_PCT constant's own comment above for the
+# full real incident. Same two-piece shape as the swap-ratchet override just
+# above: (1) reuse this SAME tick's own real, delta-based /proc/stat CPU
+# utilization already computed by sample_metrics() (never a second /proc/stat
+# read -- the metrics dict is already threaded through _dispatch_one_inner()
+# by the time slot_detail is checked), and (2) a real, live /proc/loadavg
+# runnable-queue snapshot, independent of both load1 and the delta-based cpu
+# metric, as the safety backstop against a genuine CPU-bound burst.
+# ---------------------------------------------------------------------------
+
+def read_loadavg_runnable(path=None):
+    """Real, current runnable-vs-total task counts from /proc/loadavg's own
+    4th field ("nr_running/nr_threads", e.g. "2/456") -- the kernel's own
+    live snapshot of how many tasks are actually runnable RIGHT NOW, as
+    opposed to load1 (1st field)'s 1-minute exponentially-decayed average,
+    which counts a D-state (uninterruptible I/O wait) task identically to a
+    genuinely CPU-bound running one. See
+    _override_load1_backoff_when_cpu_idle()'s own docstring for why this is
+    the real safety backstop that still throttles a genuine CPU-bound burst.
+    Returns (nr_running, nr_threads)."""
+    path = path or PROC_LOADAVG_PATH
+    with open(path) as f:
+        line = f.read().strip()
+    fields = line.split()
+    running_str, _, total_str = fields[3].partition("/")
+    return int(running_str), int(total_str)
+
+
+def _override_load1_backoff_when_cpu_idle(slot_ok, slot_detail, metrics, now=None):
+    """Real, narrow override of dispatch_core.has_free_slot_detail()'s
+    "load1_backoff" veto specifically -- see the LOAD1_OVERRIDE_MAX_CPU_
+    UTILIZATION_PCT constant's own comment above for the full real incident
+    (PM sentinel evidence, 2026-08-14: load1=9.42 against an 8-core
+    threshold of 6.4 while `vmstat 1 3` showed 90-96% real CPU idle and
+    r=0-1, the inflation being D-state + kswapd0/kcompactd0 swap-reclaim
+    under low free RAM / high swap use, not real CPU demand).
+
+    Deliberately narrow, same convention as _override_stale_swap_backoff()
+    above: only ever overrides slot_detail["check"] == "load1_backoff".
+    NEVER overrides "load1_unreadable" (a real os.getloadavg() failure must
+    keep failing safe/refusing, never be treated as "idle"), "cap_exhausted",
+    "mem_backoff", "mem_hard_ceiling", "mem_headroom_budget", "swap_backoff",
+    or "swap_hard_ceiling" -- none of those are the load1 calibration defect
+    this UMR's real evidence found; overriding any of them would be exactly
+    the kind of invented exemption this task's own spec forbids.
+
+    Both of the following real, freshly-live conditions must hold, or the
+    original (slot_ok, slot_detail) is returned unchanged -- this only ever
+    narrows a block, it never widens uncertainty into an override:
+      1. metrics["cpu"] -- this SAME dispatch tick's own real, delta-based
+         /proc/stat utilization (sample_metrics()/cpu_percent() above,
+         already computed moments earlier in this exact call, never a fresh
+         second /proc/stat read here) -- confirmed under
+         LOAD1_OVERRIDE_MAX_CPU_UTILIZATION_PCT. Real CPU demand itself must
+         be independently confirmed low, not just "load1 says so".
+      2. read_loadavg_runnable()'s real, live nr_running is at/under
+         cpu_count -- the kernel's own current runnable-queue snapshot,
+         independent of both load1 and the delta-based cpu metric above.
+         This is the real safety backstop: a genuine CPU-bound burst pushes
+         nr_running above cpu_count immediately, so this still throttles
+         real saturation even if it started just after the cpu metric's own
+         sampling window closed.
+
+    Returns (ok, detail) in the exact same shape dispatch_core.py's own
+    has_free_slot_detail() uses. When it overrides, detail carries
+    check="load1_backoff_override_cpu_idle" plus every real number both
+    conditions were computed from, so this is fully diagnosable from the
+    tick log / veridian-dispatch-decision journal alone, same as every other
+    real check in this module."""
+    if slot_ok or not slot_detail or slot_detail.get("check") != "load1_backoff":
+        return slot_ok, slot_detail
+
+    cpu_percent_now = (metrics or {}).get("cpu")
+    if cpu_percent_now is None or cpu_percent_now >= LOAD1_OVERRIDE_MAX_CPU_UTILIZATION_PCT:
+        return slot_ok, slot_detail  # real CPU utilization not independently confirmed low
+
+    cpu_count = slot_detail.get("cpu_count") or os.cpu_count() or 1
+    try:
+        nr_running, nr_threads = read_loadavg_runnable()
+    except (OSError, ValueError, IndexError):
+        return slot_ok, slot_detail  # real /proc/loadavg unreadable -- fail open to the original block
+    if nr_running > cpu_count:
+        return slot_ok, slot_detail  # real runnable-queue contention -- genuine saturation, still throttle
+
+    return True, {
+        "check": "load1_backoff_override_cpu_idle",
+        "original_check": "load1_backoff",
+        "load1": slot_detail.get("load1"),
+        "cpu_count": cpu_count,
+        "threshold": slot_detail.get("threshold"),
+        "cpu_percent": cpu_percent_now,
+        "cpu_percent_threshold": LOAD1_OVERRIDE_MAX_CPU_UTILIZATION_PCT,
+        "nr_running": nr_running,
+        "nr_threads": nr_threads,
     }
 
 
@@ -3474,6 +3620,25 @@ def _dispatch_one_inner(dry_run=False, now=None):
                 f"INFO: dispatch_one() overrode a stale swap_backoff ratchet for "
                 f"umr_id={row['umr_id']!r} -- real MemAvailable headroom confirmed abundant and "
                 f"real swap I/O confirmed quiet, see slot_detail: {slot_detail}"
+            )
+
+        # This UMR (2026-08-14, PM sentinel real evidence): a "load1_backoff"
+        # slot_detail specifically can be a calibration defect -- load1
+        # counts D-state (uninterruptible I/O wait) tasks identically to real
+        # CPU demand -- rather than genuine CPU saturation. See
+        # _override_load1_backoff_when_cpu_idle()'s own docstring for the
+        # real, narrow conditions (this tick's own real delta-based CPU
+        # utilization AND a live /proc/loadavg runnable-queue snapshot both
+        # confirmed non-saturated) required before this can ever override,
+        # and for why every other real gate is left completely untouched.
+        # Passes through unchanged in every other case.
+        slot_overridden_load1 = slot_ok is False and (slot_detail or {}).get("check") == "load1_backoff"
+        slot_ok, slot_detail = _override_load1_backoff_when_cpu_idle(slot_ok, slot_detail, metrics, now=now)
+        if slot_overridden_load1 and slot_ok:
+            _append_attention(
+                f"INFO: dispatch_one() overrode a load1_backoff calibration defect for "
+                f"umr_id={row['umr_id']!r} -- real CPU utilization confirmed idle and real "
+                f"runnable-queue depth confirmed at/under cpu_count, see slot_detail: {slot_detail}"
             )
 
         if not slot_ok:

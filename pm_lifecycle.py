@@ -392,50 +392,91 @@ def fresh_audit_fail(evidence):
     return verdict.startswith("AUDIT: FAIL") and audit.get("stale") is not True
 
 
-# ---------------------------------------------------------------------------
-# Step 6: audit-fail retry
-# ---------------------------------------------------------------------------
+def needs_independent_audit(evidence):
+    """Real gap this closes: the platform's own automatic reviewer
+    (veridian-supervisor@<task_id>.service / supervisor-entrypoint.sh) only
+    ever spawns for the tier-0/1/2 interactive-tmux-relay execution path
+    (via veridian-task.py's pending_review handoff) -- a tier-3/4
+    claude_code_cli_headless dispatch creates its real PR directly
+    (dispatch-owner-task.sh's own headless block) with NO automatic audit
+    ever posted. Without this check, a headless-tier PR with a real, open,
+    genuinely mergeable PR but zero audit comments would sit at
+    verdict=None forever: not a fresh FAIL (nothing to retry-fix) and not a
+    fresh PASS (nothing to merge) -- silently stuck. True only for a real
+    OPEN PR with no real AUDIT:PASS/FAIL comment posted yet."""
+    pr = evidence.get("pr_match") or {}
+    audit = evidence.get("audit") or {}
+    verdict = (audit.get("verdict") or {}).get("verdict")
+    return bool(pr) and pr.get("state") == "OPEN" and not verdict
+
+
+def decide_next_action(evidence, retry_count, max_retries):
+    """Pure decision function (no I/O) driving the real step 5/6 loop --
+    separated out so this task's own required regression test can cover
+    "the ... audit-fail-retry logic" (and the sibling "no audit posted yet"
+    case) deterministically, without any real gh/dispatch call. Returns one
+    of "proceed" (fresh AUDIT:PASS -- go merge), "dispatch_fix" (fresh
+    AUDIT:FAIL -- redispatch a real fix), "dispatch_audit" (real OPEN PR,
+    no audit posted yet -- redispatch a real independent reviewer), or
+    "stop" (retry cap hit, or state is ambiguous/stale -- surface to the
+    PM rather than guessing)."""
+    if fresh_audit_pass(evidence):
+        return "proceed"
+    if retry_count >= max_retries:
+        return "stop"
+    if fresh_audit_fail(evidence):
+        return "dispatch_fix"
+    if needs_independent_audit(evidence):
+        return "dispatch_audit"
+    return "stop"
+
 
 def should_retry_fix(evidence, retry_count, max_retries):
-    """Pure decision function (no I/O) -- separated out so this task's own
-    required regression test can cover "the ... audit-fail-retry logic"
-    deterministically without any real gh/dispatch call."""
-    if retry_count >= max_retries:
-        return False
-    return fresh_audit_fail(evidence)
+    """Real, narrower predicate over decide_next_action() -- kept as its
+    own function (rather than folded away) because this task's own SPEC
+    explicitly calls out "the ... audit-fail-retry logic" as its own
+    regression-test target, distinct from the "no audit yet" case."""
+    return decide_next_action(evidence, retry_count, max_retries) == "dispatch_fix"
 
 
 def verify_with_retries(row, umr_id, rodl, tier, medium, repo, no_relay,
                          poll_interval, poll_timeout, max_fix_retries,
-                         verify_fn=None, dispatch_fix_fn=None, poll_fn=None, query_fn=None):
+                         verify_fn=None, dispatch_fix_fn=None, dispatch_audit_fn=None,
+                         poll_fn=None, query_fn=None):
     """Real step 5/6 loop, extracted to its own injectable function so this
     task's own SPEC-required regression test can cover "the ... audit-fail-
-    retry logic" deterministically (fake verify_fn/dispatch_fix_fn/poll_fn/
-    query_fn, no real gh/dispatch/subprocess calls) -- exercised by
-    run_full_cycle() with the real functions as defaults. Returns
-    {"verify_evidence": ..., "retries": int, "fix_history": [...], "row": ...}
-    -- `row` is re-read after each real fix lands (same PR, new commit on
-    the same branch), never re-derived from the fix dispatch's own umr_id."""
+    retry logic" deterministically (fake verify_fn/dispatch_fix_fn/
+    dispatch_audit_fn/poll_fn/query_fn, no real gh/dispatch/subprocess
+    calls) -- exercised by run_full_cycle() with the real functions as
+    defaults. Returns {"verify_evidence": ..., "retries": int,
+    "fix_history": [...], "row": ...} -- `row` is re-read after each real
+    fix/audit dispatch lands (same PR, new commit or new comment on the
+    same branch), never re-derived from the dispatch's own umr_id."""
     verify_fn = verify_fn or independent_verify
     dispatch_fix_fn = dispatch_fix_fn or dispatch_audit_fix
+    dispatch_audit_fn = dispatch_audit_fn or dispatch_independent_audit
     poll_fn = poll_fn or poll_until_terminal
     query_fn = query_fn or query_umr
 
     retries = 0
     verify_evidence = verify_fn(row, rodl)
     fix_history = []
-    while should_retry_fix(verify_evidence, retries, max_fix_retries):
-        fix_dispatch = dispatch_fix_fn(verify_evidence, tier, medium, repo, no_relay=no_relay)
-        fix_history.append({"retry": retries, "dispatch": fix_dispatch})
+    while True:
+        action = decide_next_action(verify_evidence, retries, max_fix_retries)
+        if action in ("proceed", "stop"):
+            break
+        dispatch_fn = dispatch_fix_fn if action == "dispatch_fix" else dispatch_audit_fn
+        dispatch_result = dispatch_fn(verify_evidence, tier, medium, repo, no_relay=no_relay)
+        fix_history.append({"retry": retries, "action": action, "dispatch": dispatch_result})
         retries += 1
-        if fix_dispatch["outcome"] not in ("dispatched", "registered_only"):
+        if dispatch_result["outcome"] not in ("dispatched", "registered_only"):
             break
-        fix_umr_id = fix_dispatch["umr_id"]
-        fix_poll = poll_fn(fix_umr_id, poll_interval=poll_interval, poll_timeout=poll_timeout)
-        fix_history[-1]["poll"] = {k: v for k, v in fix_poll.items() if k != "samples"}
-        if fix_poll["timed_out"]:
+        dispatched_umr_id = dispatch_result["umr_id"]
+        sub_poll = poll_fn(dispatched_umr_id, poll_interval=poll_interval, poll_timeout=poll_timeout)
+        fix_history[-1]["poll"] = {k: v for k, v in sub_poll.items() if k != "samples"}
+        if sub_poll["timed_out"]:
             break
-        row, _ = query_fn(umr_id)  # re-read the ORIGINAL row (same PR, new commit on same branch)
+        row, _ = query_fn(umr_id)  # re-read the ORIGINAL row (same PR, new commit/comment on same branch)
         verify_evidence = verify_fn(row, rodl)
     return {"verify_evidence": verify_evidence, "retries": retries, "fix_history": fix_history, "row": row}
 
@@ -467,22 +508,72 @@ def dispatch_audit_fix(evidence, tier, medium, repo, no_relay=False):
     return dispatch_task(title, prompt, tier, medium, repo, no_relay=no_relay)
 
 
+def dispatch_independent_audit(evidence, tier, medium, repo, no_relay=False):
+    """Real fix for the tier-3/4 headless "no automatic supervisor review"
+    gap (see needs_independent_audit()'s own docstring) -- dispatches a
+    real independent reviewer, same real prompt shape pm-sentinel-tick.sh's
+    own dispatch_gap("audit:...") already uses manually for a real
+    MERGEABLE/CLEAN PR. Deliberately asks the reviewer to POST a real
+    "AUDIT: PASS"/"AUDIT: FAIL" comment (the same structured verdict line
+    supervisor-entrypoint.sh's own mandatory-audit-check.yml convention
+    requires) but NOT to merge -- this orchestrator's own step 7 is the one
+    real merge gateway for a pm_lifecycle.py-driven cycle, so responsibility
+    for the actual `gh pr merge` call never splits across two dispatched
+    processes racing each other."""
+    pr = evidence.get("pr_match") or {}
+    title = f"Independent audit of PR #{pr.get('number')} ({evidence.get('repo')})"
+    prompt = build_tightened_prompt(
+        objective=(
+            f"Perform a real, independent review of PR #{pr.get('number')} "
+            f"({evidence.get('repo')}, branch {pr.get('headRefName')}) -- this PR has no audit "
+            "comment yet."
+        ),
+        scope=f"Only PR #{pr.get('number')} in {evidence.get('repo')}. Review only -- do NOT merge.",
+        success_criteria=(
+            f"Re-verify live state yourself first: gh pr view {pr.get('number')} --repo "
+            f"{GH_ORG}/{evidence.get('repo')} --comments (real posted comments, not just the CI "
+            "badge). Then post a real, structured verdict comment via: gh pr comment "
+            f"{pr.get('number')} --repo {GH_ORG}/{evidence.get('repo')} --body \"AUDIT: PASS\" "
+            "(first line exactly 'AUDIT: PASS' or 'AUDIT: FAIL', followed by real, specific "
+            "findings). Do not fabricate a PASS."
+        ),
+        expected_output="A real 'AUDIT: PASS' or 'AUDIT: FAIL' comment posted on the PR, citing real findings.",
+        known_context="No prior audit comment exists on this PR yet -- this is the first real review.",
+        complexity_tier="moderate",
+    )
+    return dispatch_task(title, prompt, tier, medium, repo, no_relay=no_relay)
+
+
 # ---------------------------------------------------------------------------
 # Step 7: merge + re-verify
 # ---------------------------------------------------------------------------
 
 def merge_and_reverify(evidence):
+    """Real merge + re-verify. Skips the actual `gh pr merge` call (never
+    a second, racing merge attempt) if the PR is ALREADY MERGED -- real,
+    live gap: for a tier-0/1/2 dispatch, veridian-task.py's own
+    pending_review handoff already spawned veridian-supervisor@<task_id>
+    .service (supervisor-entrypoint.sh), which posts the real AUDIT:PASS/
+    FAIL comment this function's caller just verified AND, on a real PASS,
+    already calls `gh pr merge "$PR_URL" --merge` itself (its own real
+    independent-review merge gate, the same call this function makes for
+    the tier-3/4 headless path where no such automatic reviewer exists).
+    By the time this function runs, that merge may already be real and
+    done -- still returns merged=True with real post-merge evidence in
+    that case, it just doesn't call `gh pr merge` a second time."""
     pr = evidence.get("pr_match") or {}
     repo = evidence.get("repo")
     number = pr.get("number")
     if not (repo and number):
         return {"merged": False, "reason": "no real repo/PR number to merge"}
 
-    rc, out, err = _run(
-        ["gh", "pr", "merge", str(number), "--repo", f"{GH_ORG}/{repo}", "--merge"],
-        timeout=60,
-    )
-    merge_call = {"rc": rc, "stdout": out, "stderr": err}
+    merge_call = None
+    if pr.get("state") != "MERGED":
+        rc, out, err = _run(
+            ["gh", "pr", "merge", str(number), "--repo", f"{GH_ORG}/{repo}", "--merge"],
+            timeout=60,
+        )
+        merge_call = {"rc": rc, "stdout": out, "stderr": err}
 
     rc2, view, err2 = _run_json(
         ["gh", "pr", "view", str(number), "--repo", f"{GH_ORG}/{repo}",
@@ -491,7 +582,8 @@ def merge_and_reverify(evidence):
     )
     merged = bool(view and view.get("state") == "MERGED" and view.get("mergedAt"))
     return {
-        "merged": merged, "merge_call": merge_call,
+        "merged": merged, "already_merged_by_platform": merge_call is None,
+        "merge_call": merge_call,
         "post_merge_view": view, "post_merge_view_error": err2,
     }
 
@@ -653,9 +745,14 @@ def run_full_cycle(args):
         return 0
 
     pr = verify_evidence.get("pr_match") or {}
-    if pr.get("state") != "OPEN":
+    # MERGED is a real success state, not a failure -- see
+    # merge_and_reverify()'s own docstring: the platform's own automatic
+    # reviewer (supervisor-entrypoint.sh, tier-0/1/2 path only) may already
+    # have merged this exact PR on its own real AUDIT:PASS by the time this
+    # runs. Only CLOSED-without-merging is a genuine terminal failure here.
+    if pr.get("state") not in ("OPEN", "MERGED"):
         report["certified"] = False
-        report["reason"] = f"real PR state is {pr.get('state')!r}, not OPEN -- nothing to merge."
+        report["reason"] = f"real PR state is {pr.get('state')!r} -- nothing to merge."
         print(json.dumps(report, indent=2, default=str))
         return 0
 

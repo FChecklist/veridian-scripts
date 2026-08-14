@@ -229,6 +229,69 @@ def test_verify_with_retries_gives_up_at_cap_never_loops_forever():
     print("PASS: test_verify_with_retries_gives_up_at_cap_never_loops_forever")
 
 
+def _evidence_no_audit(repo="veridian-scripts", pr_number=42, branch="b1", state="OPEN"):
+    return {"repo": repo, "pr_match": {"number": pr_number, "headRefName": branch, "state": state}, "audit": None}
+
+
+def test_needs_independent_audit_true_only_for_open_pr_with_no_verdict():
+    mod = _load_module()
+    assert mod.needs_independent_audit(_evidence_no_audit()) is True
+    assert mod.needs_independent_audit(_evidence("AUDIT: PASS", stale=False)) is False
+    assert mod.needs_independent_audit(_evidence("AUDIT: FAIL", stale=False)) is False
+    assert mod.needs_independent_audit(_evidence_no_audit(state="MERGED")) is False
+    assert mod.needs_independent_audit({"repo": "x", "pr_match": None, "audit": None}) is False
+    print("PASS: test_needs_independent_audit_true_only_for_open_pr_with_no_verdict")
+
+
+def test_decide_next_action_full_matrix():
+    mod = _load_module()
+    assert mod.decide_next_action(_evidence("AUDIT: PASS", stale=False), 0, 2) == "proceed"
+    assert mod.decide_next_action(_evidence("AUDIT: FAIL", stale=False), 0, 2) == "dispatch_fix"
+    assert mod.decide_next_action(_evidence("AUDIT: FAIL", stale=False), 2, 2) == "stop"  # cap hit
+    assert mod.decide_next_action(_evidence_no_audit(), 0, 2) == "dispatch_audit"
+    assert mod.decide_next_action(_evidence_no_audit(), 2, 2) == "stop"  # cap hit
+    assert mod.decide_next_action(_evidence("AUDIT: FAIL", stale=True), 0, 2) == "stop"  # stale, ambiguous
+    print("PASS: test_decide_next_action_full_matrix")
+
+
+def test_verify_with_retries_dispatches_independent_audit_when_none_posted_yet():
+    """The tier-3/4 headless-dispatch gap: a real OPEN, real PR with NO
+    audit comment at all must get a real independent-audit dispatch, not
+    get silently stuck forever."""
+    mod = _load_module()
+    evidences = [_evidence_no_audit(), _evidence("AUDIT: PASS", stale=False)]
+    verify_calls = []
+
+    def fake_verify(row, rodl):
+        verify_calls.append(row)
+        return evidences[len(verify_calls) - 1]
+
+    audit_dispatch_calls = []
+    fix_dispatch_calls = []
+
+    def fake_dispatch_audit(evidence, tier, medium, repo, no_relay=False):
+        audit_dispatch_calls.append(evidence)
+        return {"outcome": "dispatched", "umr_id": "UMR-audit-1"}
+
+    def fake_dispatch_fix(evidence, tier, medium, repo, no_relay=False):
+        fix_dispatch_calls.append(evidence)
+        return {"outcome": "dispatched", "umr_id": "UMR-fix-1"}
+
+    result = mod.verify_with_retries(
+        row={"umr_id": "UMR-orig", "status": "completed_unmerged"}, umr_id="UMR-orig",
+        rodl=None, tier=4, medium="claude_code_cli", repo="veridian-scripts", no_relay=False,
+        poll_interval=1, poll_timeout=10, max_fix_retries=2,
+        verify_fn=fake_verify, dispatch_fix_fn=fake_dispatch_fix, dispatch_audit_fn=fake_dispatch_audit,
+        poll_fn=lambda *a, **k: {"row": {}, "timed_out": False, "samples": []},
+        query_fn=lambda umr_id: ({"umr_id": umr_id, "status": "completed_unmerged"}, None),
+    )
+
+    assert len(audit_dispatch_calls) == 1
+    assert len(fix_dispatch_calls) == 0
+    assert mod.fresh_audit_pass(result["verify_evidence"]) is True
+    print("PASS: test_verify_with_retries_dispatches_independent_audit_when_none_posted_yet")
+
+
 def test_verify_with_retries_stops_immediately_when_dispatch_is_refused():
     """If the real fix dispatch itself is refused/rejected (not a timeout,
     not a poll issue), the loop must stop rather than retry the same

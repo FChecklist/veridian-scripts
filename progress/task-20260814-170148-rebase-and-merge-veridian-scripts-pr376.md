@@ -14,5 +14,7 @@
 - [x] Merged PR #379 (`gh pr merge 379 --merge`) -- `origin/main` now at `85df9c0`, confirmed to include the merge commit.
 - [x] Closed PR #376 with a pointer comment to #379 (`gh pr comment 376` + `gh pr close 376`) -- state is `CLOSED`.
 
+- [x] `record-completion` write-back to UMR-20260814-170119-7a8a via `agent_work_briefing.py` -- done.
+
 ## Remaining
-- [ ] `record-completion` write-back to UMR-20260814-170119-7a8a via `agent_work_briefing.py`.
+(none -- task complete)

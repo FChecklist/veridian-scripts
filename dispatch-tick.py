@@ -253,6 +253,96 @@ MAX_CONSECUTIVE_RESUME_REJECTIONS = 3
 # ever turns out to be wrong for some future task_identity, this constant is
 # the one real place to widen it, not a second, parallel cap somewhere else.
 
+RESUME_SOURCE_TRIGGER = "dispatch-tick:resume_interrupted_workers"
+# Named so _count_active_resume_umr() below and the real resource_governor.
+# submit() call inside resume_interrupted_workers_tick() can never drift out
+# of sync with each other (one had to be a copy-pasted string literal
+# before this constant existed).
+
+# ---------------------------------------------------------------------------
+# task-20260815-154633 fix (real starvation incident, 2026-08-15): a real
+# Owner-directed fix sat queued for 1+ real hour despite real CPU load
+# dropping to trivially low levels and 15+ real worker units being manually
+# freed. Root cause, confirmed live by this task (17 active
+# RESUME_SOURCE_TRIGGER umr_tasks rows -- 14 queued + 3 running -- against
+# dispatch_core.CONCURRENCY_CAP=5, running_worker_count()==5, i.e. fully
+# saturated): resume_interrupted_workers_tick() runs before module_queue_tick()
+# in main()'s real call order (see main() below), and both draw on the exact
+# same shared, fixed dispatch_core.CONCURRENCY_CAP real-slot pool --
+# resume_interrupted_workers_tick() indirectly (every accepted submit() row
+# is later dispatched by resource_governor.dispatch_one()'s own tick, at
+# tier=1, the highest real priority, see the submit() call below),
+# module_queue_tick() directly (has_free_slot_with_stale_swap_override()
+# before every real dispatch_module_item() call). A resume backlog at or
+# above CONCURRENCY_CAP is a DETERMINISTIC, not occasional, starvation of
+# module_queue_tick() and of every other real dispatch_one() consumer: every
+# real slot resource_governor.dispatch_one() frees gets immediately
+# reclaimed by the next tier=1 resume row before a lower-tier/non-queue
+# dispatch path ever gets a look at it, for as long as the backlog stays >=
+# cap.
+#
+# Fix: resume_interrupted_workers_tick() below now caps its OWN real
+# concurrent consumption (queued+dispatched+running umr_tasks rows under
+# RESUME_SOURCE_TRIGGER) at one less than CONCURRENCY_CAP, via
+# _count_active_resume_umr() + the reserved_max_active check inside the
+# loop -- reserving at least one real slot that a resume backlog, however
+# large, can never claim. This is deliberately a cap on resume's own
+# consumption, not a reorder of main()'s call sequence or a change to
+# dispatch_core.py (frozen under the 2026-08-08 stop-work order, see this
+# module's own has_free_slot_with_stale_swap_override() precedent for why
+# every fix in this file wraps dispatch_core.py's real output instead of
+# editing it): resume's own real interrupted-task recovery guarantee is
+# fully unchanged -- every candidate this function finds is still evaluated
+# and still eligible to be queued, every tick, exactly as before; only how
+# many of them may be simultaneously ACTIVE at once is now bounded below
+# the real fixed cap. A resume backlog under the reserved limit (the common
+# case -- see the regression test this fix ships with) sees zero behavior
+# change: the reservation check never finds active_resume_count at or above
+# reserved_max_active, so it never skips anything.
+# ---------------------------------------------------------------------------
+
+
+def _count_active_resume_umr(sbr_module=None):
+    """Real, read-only count of umr_tasks rows this function's own
+    RESUME_SOURCE_TRIGGER currently has in an active status (queued,
+    dispatched, or running -- superboss-register.py's own UMR_ACTIVE_STATUSES,
+    the same three statuses find_active_umr_by_identity() uses) -- i.e. how
+    many real capacity slots the resume step itself currently has claimed or
+    is about to claim, across every task_identity combined, not just one.
+    resume_interrupted_workers_tick() below uses this to cap its own real
+    consumption at one less than dispatch_core.CONCURRENCY_CAP (see the fix
+    comment above) so a large resume backlog can never claim every real
+    slot and starve module_queue_tick() (or any other real
+    dispatch_core.has_free_slot() consumer) for the whole tick.
+
+    Same fail-open philosophy as every other real _safe_superboss_register()
+    caller in this module (see _existing_active_umr()'s own docstring): an
+    unavailable Superboss Register returns None here ('cannot confirm the
+    real count'), never 0 and never a large number -- resume_interrupted_
+    workers_tick() treats None as 'skip the reservation check entirely this
+    tick' (same as _existing_active_umr() returning None falls back to
+    submit()'s own gate being the real authority) rather than either
+    silently letting an unbounded backlog through (if treated as 0) or
+    wrongly blocking every real resume the moment the DB is briefly
+    unreachable (if treated as a large number). An infra hiccup here must
+    never additionally throttle real interrupted-worker recovery on top of
+    whatever already broke."""
+    sbr_module = sbr_module or resource_governor
+    sbr, error = sbr_module._safe_superboss_register("resume_interrupted_workers_tick")
+    if error:
+        return None
+    conn = sbr._connect()
+    try:
+        placeholders = ",".join("?" * len(sbr.UMR_ACTIVE_STATUSES))
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM umr_tasks WHERE source_trigger=? "
+            f"AND status IN ({placeholders})",
+            (RESUME_SOURCE_TRIGGER, *sbr.UMR_ACTIVE_STATUSES),
+        ).fetchone()
+        return row["n"] if row else 0
+    finally:
+        conn.close()
+
 
 def _is_permanently_dead_resume(task_id, sbr_module=None):
     """Real, read-only pre-check: has task_id already been marked
@@ -381,8 +471,33 @@ def resume_interrupted_workers_tick(tasks):
     (accepted or rejected) so that streak stays accurate; a task_identity
     that starts being accepted again has its streak cleared, so it is never
     wrongly kept dead by stale history.
+
+    task-20260815-154633 fix (real starvation incident): before submitting
+    a genuinely-new candidate, checks active_resume_count (this function's
+    own real queued+dispatched+running umr_tasks rows, via
+    _count_active_resume_umr() above) against reserved_max_active (one less
+    than dispatch_core.CONCURRENCY_CAP) and skips the submit() call --
+    leaving the candidate for a future tick, exactly as if it had lost a
+    race for a slot that tick, never marking it dead or duplicate -- once
+    that reservation limit is reached. See the module-level comment above
+    _count_active_resume_umr() for the full real incident and why this is a
+    cap on resume's own consumption rather than any change to its real
+    recovery guarantee: every candidate is still found and still eligible
+    every tick, only the number simultaneously ACTIVE at once is bounded.
+    A backlog already below reserved_max_active never trips this check --
+    active_resume_count starts below the limit and, even as accepted
+    submissions increment the local counter across this same loop, never
+    reaches it -- so existing small-backlog behavior is completely
+    unchanged.
     """
     resumed, skipped_running, skipped_duplicate, skipped_dead = [], [], [], []
+    skipped_reserved_capacity = []
+    active_resume_count = _count_active_resume_umr()
+    # active_resume_count is None only when the Superboss Register itself is
+    # unavailable this tick -- _count_active_resume_umr()'s own docstring
+    # covers why that must skip the reservation check entirely (fail-open),
+    # never be treated as 0 or as "over the limit".
+    reserved_max_active = max(dispatch_core.CONCURRENCY_CAP - 1, 1)
     for task_id, doc in tasks.items():
         service = doc.get("service")
         if not service or not service.startswith("veridian-worker@"):
@@ -409,6 +524,14 @@ def resume_interrupted_workers_tick(tasks):
                   f"no duplicate row written): {task_id}")
             continue
 
+        if active_resume_count is not None and active_resume_count >= reserved_max_active:
+            skipped_reserved_capacity.append(task_id)
+            print(f"SKIP resume (reserving {dispatch_core.CONCURRENCY_CAP - reserved_max_active} "
+                  f"real capacity slot(s) for module_queue_tick/other dispatch this tick, "
+                  f"{active_resume_count} resume task(s) already active >= reserved_max_active="
+                  f"{reserved_max_active}, will retry next tick): {task_id}")
+            continue
+
         action = "reset_failed_and_start" if state == "failed" else "start"
         result = resource_governor.submit(
             task_spec={
@@ -418,11 +541,13 @@ def resume_interrupted_workers_tick(tasks):
                 "inputs": {"action": action, "resumed_after_state": state},
             },
             tier=1,  # already-started work outranks brand-new dispatch in priority
-            source_trigger="dispatch-tick:resume_interrupted_workers",
+            source_trigger=RESUME_SOURCE_TRIGGER,
         )
         just_died = _record_resume_outcome(task_id, bool(result["accepted"]))
         if result["accepted"]:
             resumed.append(task_id)
+            if active_resume_count is not None:
+                active_resume_count += 1
             print(f"RESUME QUEUED: {task_id} (unit was {state!r}, action={action}, umr_id={result['umr_id']})")
         else:
             skipped_duplicate.append(task_id)
@@ -437,6 +562,7 @@ def resume_interrupted_workers_tick(tasks):
         "skipped_running": skipped_running,
         "skipped_duplicate": skipped_duplicate,
         "skipped_dead": skipped_dead,
+        "skipped_reserved_capacity": skipped_reserved_capacity,
     }
 
 

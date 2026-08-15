@@ -117,4 +117,16 @@ one).
       only) and produce the BOOLEAN ALL_CLEAR verdict.
 - [ ] Post the final result as a task completion note in `umr_tasks`.
 - [ ] `agent_work_briefing.py record-completion --umr-id UMR-20260806-141055-1fec`
-      with the real final summary.
+      with the real final (audit-complete) summary.
+
+## Completed (continued)
+
+- [x] Recorded this pass's real diagnostic work as an interim entry (no
+      `--umr-status`, so `umr_tasks` for this UMR was deliberately left
+      untouched/non-terminal) via `agent_work_briefing.py record-completion
+      --umr-id UMR-20260806-141055-1fec --entry-text "..."` -- confirmed
+      written to `ai_agent_registry` (`AGENT-20260806-141055-1fec`,
+      `total_tasks_handled: 1`), 2026-08-15T03:25:22Z. This UMR is NOT
+      being reported done; the entry exists so a future re-dispatch of
+      this same UMR doesn't re-derive the gate-check/diagnosis from
+      scratch.

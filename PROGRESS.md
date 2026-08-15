@@ -1,4 +1,4 @@
-# PROGRESS -- task-20260815-154633-fix-real-starvation-bug--interrupted-wor
+# PROGRESS -- task-20260815-220852-document-the-real-dispatch-tick-architec
 
 ## Completed
 

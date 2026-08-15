@@ -214,15 +214,62 @@ REGISTERED_ONLY_RE = re.compile(r"REGISTERED ONLY \(--no-relay\): umr_id=(\S+)")
 RELAY_RE = re.compile(r"umr_id=(\S+)")
 
 
+_ttv_mod = None
+
+
+def _ttv():
+    """Lazy-loaded tight_task_validation.py (real in-process import, same
+    _load_module() convention as _load_module() itself uses for
+    policy_decision.py/reconcile_owner_dispatch_status.py above) -- the
+    SAME module preflight-guard.py's own check_tight_task_schema() and
+    task-gateway.py's cmd_start() both validate every real dispatch
+    against, reused here (never a second, re-typed copy of VALID_TIERS or
+    validate_tight_task()) so build_tightened_prompt() can catch an invalid
+    prompt at construction time instead of ~2s into a live, billed worker
+    unit (task-20260815-215959-rca-and-resume--gtm-certification-worker,
+    real fix: every real call site below used to default/pass
+    complexity_tier="moderate", which is NOT in VALID_TIERS -- every
+    worker dispatched down that path hit preflight-guard.py's
+    tight_task_schema_violation hard stop and self-disabled within ~2
+    seconds, before a single model token was spent. Confirmed against a
+    real, live dead unit: veridian-worker@task-20260815-051206-drive-gtm-
+    certification-registry-to-real.service, dispatched
+    2026-08-15T05:12:10.677697Z, completed 2026-08-15T05:12:12.994884Z --
+    task.yaml's own checkpoint note: 'PRE-FLIGHT HARD STOP
+    (tight_task_schema_violation): Complexity tier "moderate" is not
+    recognized. Please use one of: mechanical, integrative, judgment.'
+    That same reason string was found on 52 of ~70 recent status=failed
+    umr_tasks rows -- systemic, not a one-off."""
+    global _ttv_mod
+    if _ttv_mod is None:
+        _ttv_mod = _load_module("tight_task_validation.py", "pm_lifecycle_ttv")
+    return _ttv_mod
+
+
 def build_tightened_prompt(objective, scope, success_criteria, expected_output,
-                            known_context=None, complexity_tier="moderate"):
+                            known_context=None, complexity_tier="integrative"):
     """Assembles the labeled-field prompt shape tight_task_validation.py's
     own validate_tight_task()/parse_labeled_fields() validate against
     (## OBJECTIVE / ## SCOPE / ## SUCCESS_CRITERIA / ## EXPECTED_OUTPUT /
     ## KNOWN_CONTEXT / ## COMPLEXITY_TIER) -- built here, not left to the
     caller to hand-format, so every real dispatch this orchestrator makes
     is a real "validated tightened prompt" per this task's own SPEC step 3,
-    not free text."""
+    not free text.
+
+    Default tier changed from the real bug "moderate" (not a member of
+    VALID_TIERS -- see _ttv()'s own docstring for the full incident) to
+    "integrative", a real, valid tier -- matches this function's own real
+    callers, which all describe work against an EXISTING PR/component
+    (dispatch_audit_fix/dispatch_independent_audit below, both of which
+    already pass a real known_context, which "integrative" requires and
+    "mechanical" does not).
+
+    Validates the assembled prompt against the SAME real gate
+    preflight-guard.py applies at dispatch time, BEFORE ever calling
+    dispatch_task() -- so a caller of this orchestrator gets a real,
+    loud, immediate ValueError with preflight-guard's own guidance text
+    instead of a silently-dispatched task that dies ~2s later for a
+    reason no one sees until they go looking at task.yaml."""
     lines = [
         "## OBJECTIVE", objective.strip(), "",
         "## SCOPE", scope.strip(), "",
@@ -232,7 +279,18 @@ def build_tightened_prompt(objective, scope, success_criteria, expected_output,
     if known_context:
         lines += ["## KNOWN_CONTEXT", known_context.strip(), ""]
     lines += ["## COMPLEXITY_TIER", complexity_tier.strip()]
-    return "\n".join(lines)
+    prompt = "\n".join(lines)
+
+    ttv = _ttv()
+    parsed = ttv.parse_labeled_fields(prompt)
+    verdict = ttv.validate_tight_task(parsed)
+    if not verdict.get("valid", False):
+        raise ValueError(
+            f"build_tightened_prompt() assembled a prompt that fails preflight-guard.py's own "
+            f"tight_task_schema_violation gate -- refusing to dispatch it: {verdict.get('reason')} "
+            f"{verdict.get('guidance', '')}"
+        )
+    return prompt
 
 
 def dispatch_task(title, prompt, tier, medium, repo, attach=None, no_relay=False):
@@ -532,7 +590,7 @@ def dispatch_audit_fix(evidence, tier, medium, repo, no_relay=False):
             f"Most recent audit verdict on this PR: {finding!r} (createdAt={verdict.get('createdAt')}). "
             "Do not fabricate completion."
         ),
-        complexity_tier="moderate",
+        complexity_tier="integrative",
     )
     return dispatch_task(title, prompt, tier, medium, repo, no_relay=no_relay)
 
@@ -568,7 +626,7 @@ def dispatch_independent_audit(evidence, tier, medium, repo, no_relay=False):
         ),
         expected_output="A real 'AUDIT: PASS' or 'AUDIT: FAIL' comment posted on the PR, citing real findings.",
         known_context="No prior audit comment exists on this PR yet -- this is the first real review.",
-        complexity_tier="moderate",
+        complexity_tier="integrative",
     )
     return dispatch_task(title, prompt, tier, medium, repo, no_relay=no_relay)
 
@@ -953,7 +1011,14 @@ def build_parser():
     p_run.add_argument("--success-criteria", default=None)
     p_run.add_argument("--expected-output", default=None)
     p_run.add_argument("--known-context", default=None)
-    p_run.add_argument("--complexity-tier", default="moderate")
+    # Real bug fix (task-20260815-215959-rca-and-resume--gtm-certification-worker):
+    # this used to default to "moderate", not a member of
+    # tight_task_validation.VALID_TIERS -- see _ttv()'s own docstring above
+    # for the full incident. choices= is the CLI-level mirror of the same
+    # real gate build_tightened_prompt() now enforces in-process: a typo'd
+    # --complexity-tier now fails argparse immediately, loudly, before any
+    # dispatch, instead of ~2s into a live worker unit.
+    p_run.add_argument("--complexity-tier", default="integrative", choices=_ttv().VALID_TIERS)
     p_run.set_defaults(func=run_full_cycle)
 
     return ap

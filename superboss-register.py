@@ -8821,6 +8821,8 @@ def cmd_mark_umr_terminal(args):
     fields = {"status": args.status, "ts_completed": ts_completed}
     if args.reason:
         fields["reason"] = args.reason
+    if args.logs_ref:
+        fields["logs_ref"] = args.logs_ref
     outputs = {}
     if args.pr_number is not None:
         outputs["pr_number"] = args.pr_number
@@ -11217,6 +11219,14 @@ if __name__ == "__main__":
     p_markterm.add_argument("--repo-root", dest="repo_root", default=None,
                              help="override the local repo checkout path used for the real "
                                   "commit-ancestor/file-exists check (default: derived from --repo)")
+    p_markterm.add_argument("--logs-ref", dest="logs_ref", default=None,
+                             help="real path to this task's own diagnostic logs (worker.log/"
+                                  "systemd.log under its task_dir) -- task-20260815-215959-rca-"
+                                  "and-resume--gtm-certification-worker fix: this column existed "
+                                  "on every umr_tasks row but no real writer ever populated it, so "
+                                  "a failed row gave no pointer back to its own real stdout/stderr "
+                                  "(journalctl alone shows only Started/Consumed CPU time -- see "
+                                  "worker-exit-status-bridge.py's own real caller of this flag)")
 
     p_gtmupd = sub.add_parser("update-gtm-category",
                                help="UMR-20260806-114728-d469 (ported to current main under "

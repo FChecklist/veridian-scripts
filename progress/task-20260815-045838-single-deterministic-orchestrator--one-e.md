@@ -124,4 +124,10 @@ orchestrator: one entrance, one exit, boolean output contract for VERIDIAN).
 ## record-completion write-back
 
 - [x] `python3 agent_work_briefing.py record-completion --umr-id "UMR-20260806-171945-5767" --entry-text "..."`
-      -- run after this file was committed (see commit history for exact invocation).
+      run for real -- agent_id=AGENT-20260806-171945-5767,
+      memory_file=/opt/veridian/ai-os/memory/agents/AGENT-20260806-171945-5767.md.
+- [x] PR opened: https://github.com/FChecklist/veridian-scripts/pull/411
+- [x] Final DB verification (live query, not assumed): capability_registry row
+      CAP-20260815-050139-2f7a and capability_graduation_log row
+      GRAD-20260815-050157-465d (decision=graduated, umr_id=UMR-20260806-171945-5767)
+      both confirmed present.

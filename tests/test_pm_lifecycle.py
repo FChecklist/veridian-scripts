@@ -11,6 +11,7 @@ test_find_real_pr_across_repos.py already use.
 """
 import importlib.util
 import os
+import re
 import sys
 
 SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -19,6 +20,15 @@ SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 def _load_module():
     spec = importlib.util.spec_from_file_location(
         "pm_lifecycle_test", os.path.join(SCRIPTS_DIR, "pm_lifecycle.py"),
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _load_plan_generator():
+    spec = importlib.util.spec_from_file_location(
+        "plan_generator_test", os.path.join(SCRIPTS_DIR, "plan_generator.py"),
     )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -593,6 +603,69 @@ def test_check_deterministic_path_never_auto_executes_unlisted_capability():
     # deterministic-looking capability row.
     assert det["auto_executable_matches"] == []
     print("PASS: test_check_deterministic_path_never_auto_executes_unlisted_capability")
+
+
+# ---------------------------------------------------------------------------
+# complexity_tier / plan_generator.VALID_TIERS (task-20260815-225232-reject-
+# invalid-complexity-tier-constant) -- real regression for the schema-
+# rejection root cause: pm_lifecycle.py used to hardcode complexity_tier=
+# "moderate" in four places, but "moderate" is not a member of
+# plan_generator.VALID_TIERS, so tight_task_validation.py's own schema gate
+# hard-rejected every task minted through pm_lifecycle.py with reason_code
+# tight_task_schema_violation before it ever touched a file.
+# ---------------------------------------------------------------------------
+
+COMPLEXITY_TIER_LITERAL_RE = re.compile(r'complexity_tier\s*=\s*"([^"]+)"')
+COMPLEXITY_TIER_ARGPARSE_DEFAULT_RE = re.compile(
+    r'--complexity-tier",\s*default\s*=\s*"([^"]+)"'
+)
+
+
+def test_every_complexity_tier_literal_in_pm_lifecycle_is_a_valid_tier():
+    valid_tiers = set(_load_plan_generator().VALID_TIERS)
+    with open(os.path.join(SCRIPTS_DIR, "pm_lifecycle.py")) as f:
+        source = f.read()
+
+    literals = set(COMPLEXITY_TIER_LITERAL_RE.findall(source))
+    literals |= set(COMPLEXITY_TIER_ARGPARSE_DEFAULT_RE.findall(source))
+    # sanity check on the regex itself: this file really does hardcode
+    # complexity_tier literals -- if this ever goes empty, the scan below
+    # would trivially "pass" without checking anything real.
+    assert literals, "expected to find real complexity_tier string literals in pm_lifecycle.py"
+
+    invalid = literals - valid_tiers
+    assert not invalid, (
+        f"pm_lifecycle.py hardcodes complexity_tier literal(s) {sorted(invalid)!r} "
+        f"that are NOT members of plan_generator.VALID_TIERS {sorted(valid_tiers)!r} -- "
+        "these will be hard-rejected by tight_task_validation.py's schema gate "
+        "(reason_code tight_task_schema_violation) at dispatch time"
+    )
+    print("PASS: test_every_complexity_tier_literal_in_pm_lifecycle_is_a_valid_tier")
+
+
+def test_build_tightened_prompt_raises_on_invalid_complexity_tier():
+    mod = _load_module()
+    try:
+        mod.build_tightened_prompt(
+            "do the thing", "only this repo", "run: python3 -m pytest tests/",
+            "a real merged PR", complexity_tier="moderate",
+        )
+    except ValueError as e:
+        assert "moderate" in str(e)
+        print("PASS: test_build_tightened_prompt_raises_on_invalid_complexity_tier")
+        return
+    raise AssertionError("expected ValueError for complexity_tier='moderate' (not a VALID_TIERS member)")
+
+
+def test_build_tightened_prompt_accepts_every_valid_tier():
+    mod = _load_module()
+    for tier in _load_plan_generator().VALID_TIERS:
+        prompt = mod.build_tightened_prompt(
+            "do the thing", "only this repo", "criteria", "output",
+            complexity_tier=tier,
+        )
+        assert prompt.endswith(tier)
+    print("PASS: test_build_tightened_prompt_accepts_every_valid_tier")
 
 
 if __name__ == "__main__":

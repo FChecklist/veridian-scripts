@@ -318,6 +318,102 @@ def test_cli_insert_and_resolve_end_to_end():
     print("PASS: test_cli_insert_and_resolve_end_to_end")
 
 
+def test_cli_update_pm_decision_pending_end_to_end():
+    """UMR-20260806-163738-4323: real CLI coverage for
+    update_pm_decision_pending()/cmd_update_pm_decision_pending() -- the new
+    write path that lets an aggregate-condition row (e.g. resource_governor.py's
+    flag_stale_queued_tasks()) be refreshed in place instead of resolved and
+    reinserted. Same real in-process argparse.Namespace convention as
+    test_cli_insert_and_resolve_end_to_end above, never a subprocess."""
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        sbr = _load("sbr_test_cli_update", "superboss-register.py", env=_scratch_env(scratch_db))
+        os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
+        try:
+            insert_args = argparse.Namespace(
+                title="AGGREGATE: 1 thing", detail="v1 detail",
+                options_json=None, recommended_option=None, related_umr=None,
+            )
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = captured
+            try:
+                sbr.cmd_insert_pm_decision_pending(insert_args)
+            finally:
+                sys.stdout = old_stdout
+            decision_id = json.loads(captured.getvalue())["id"]
+
+            update_args = argparse.Namespace(
+                decision_id=decision_id, title="AGGREGATE: 2 things", detail="v2 detail",
+                related_umr=None, recommended_option="investigate",
+            )
+            captured = io.StringIO()
+            sys.stdout = captured
+            try:
+                sbr.cmd_update_pm_decision_pending(update_args)
+            finally:
+                sys.stdout = old_stdout
+            updated = json.loads(captured.getvalue())
+            assert updated == {"id": decision_id, "updated": True}, updated
+
+            conn = sbr._connect()
+            row = conn.execute("SELECT * FROM pm_decisions_pending WHERE id=?", (decision_id,)).fetchone()
+            assert row["title"] == "AGGREGATE: 2 things", dict(row)
+            assert row["detail"] == "v2 detail"
+            assert row["recommended_option"] == "investigate"
+            assert row["status"] == "open", "update must never itself close the row"
+            conn.close()
+
+            # A field intentionally left None on the update call must be
+            # left completely unchanged, not nulled out.
+            update_args2 = argparse.Namespace(
+                decision_id=decision_id, title=None, detail="v3 detail only",
+                related_umr=None, recommended_option=None,
+            )
+            captured = io.StringIO()
+            sys.stdout = captured
+            try:
+                sbr.cmd_update_pm_decision_pending(update_args2)
+            finally:
+                sys.stdout = old_stdout
+            conn = sbr._connect()
+            row = conn.execute("SELECT * FROM pm_decisions_pending WHERE id=?", (decision_id,)).fetchone()
+            assert row["title"] == "AGGREGATE: 2 things", "untouched field must survive a partial update"
+            assert row["detail"] == "v3 detail only"
+            conn.close()
+        finally:
+            os.environ.pop("SUPERBOSS_REGISTER_DB", None)
+    print("PASS: test_cli_update_pm_decision_pending_end_to_end")
+
+
+def test_cli_update_unknown_id_exits_nonzero():
+    with tempfile.TemporaryDirectory() as d:
+        scratch_db = os.path.join(d, "scratch.sqlite")
+        _seed_scratch_db(scratch_db)
+        sbr = _load("sbr_test_cli_update_unknown", "superboss-register.py", env=_scratch_env(scratch_db))
+        os.environ["SUPERBOSS_REGISTER_DB"] = scratch_db
+        try:
+            update_args = argparse.Namespace(
+                decision_id=424242, title="x", detail=None, related_umr=None, recommended_option=None,
+            )
+            captured = io.StringIO()
+            old_stdout = sys.stdout
+            sys.stdout = captured
+            try:
+                sbr.cmd_update_pm_decision_pending(update_args)
+                assert False, "expected sys.exit(1) for an unknown decision id"
+            except SystemExit as e:
+                assert e.code == 1, e.code
+            finally:
+                sys.stdout = old_stdout
+            result = json.loads(captured.getvalue())
+            assert result == {"id": 424242, "updated": False}, result
+        finally:
+            os.environ.pop("SUPERBOSS_REGISTER_DB", None)
+    print("PASS: test_cli_update_unknown_id_exits_nonzero")
+
+
 def test_cli_resolve_unknown_id_exits_nonzero():
     with tempfile.TemporaryDirectory() as d:
         scratch_db = os.path.join(d, "scratch.sqlite")

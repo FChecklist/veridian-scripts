@@ -1706,24 +1706,43 @@ _TARGET_ID_SCRIPT_NAME_BOILERPLATE_EXCLUDED = {"resource_governor.py", "superbos
 # I run" from "what I edit".
 #
 # Real, deterministic, narrow fix for this one well-evidenced shape: a
-# script/path identifier immediately followed by "run", "orchestrator run",
-# or bare "orchestrator" names that occurrence as something being INVOKED,
-# not edited, and is excluded from contributing an identifier -- this
-# applies at the individual regex-match level, so it works both inside a
-# declared TARGET:/SCOPE: section and (the actual fix) in fallback
-# full-text-scan mode, on either side of a find_target_identifier_duplicate()
-# comparison, with no dependency on whether that particular text ever
-# declares a section of its own. A name that also appears elsewhere in the
-# same text in a genuine, non-citation context is still extracted normally
-# from that occurrence -- this excludes only the specific citation
-# occurrence, never blanket-excludes the identifier by name (unlike
+# script/path identifier immediately followed by "orchestrator" (bare or
+# "orchestrator run") or "run via/using/through/by" names that occurrence
+# as something being INVOKED, not edited, and is excluded from contributing
+# an identifier. Independent-audit fix (pre-merge review of this same UMR):
+# the first version of this regex also matched a BARE trailing "run" with
+# no "orchestrator"/"via" qualifier at all -- e.g. "worker.py run() function"
+# or "pm_lifecycle.py run out of memory" -- which is ordinary bug-report
+# phrasing, not an invocation citation, and wrongly dropped a real target
+# identifier (find_target_identifier_duplicate() returns None outright when
+# my_ids is empty, so this could have silently disabled the whole guard for
+# a dispatch phrased this ordinary way). Narrowed to require "orchestrator"
+# or an invocation preposition after "run", both present verbatim in the
+# real a5e1 incident text ("pm_lifecycle.py orchestrator run", "pm_lifecycle
+# .py run via this file's own dispatch_gap()") -- this stays a real fix for
+# that incident while no longer firing on a bare "run" used descriptively.
+#
+# Independent-audit fix, same review: this exclusion is deliberately
+# applied ONLY to fallback (no declared TARGET:/SCOPE: section) scanning,
+# never to a text's own declared TARGET:/SCOPE: section content -- that
+# section is documented above (UMR-20260814-034424-ded4) as the
+# dispatcher's own exhaustive target declaration and must take precedence
+# over this heuristic, not be silently overridden by it. This is still the
+# real fix for the incident: a5e1's real prompt (the historical/stored-row
+# side that exposed the one-directional gap) declares no TARGET:/SCOPE:
+# section at all, so it is always scanned in fallback mode regardless.
+#
+# A name that also appears elsewhere in the same text in a genuine,
+# non-citation context is still extracted normally from that occurrence --
+# this excludes only the specific citation occurrence, never blanket-
+# excludes the identifier by name (unlike
 # _TARGET_ID_SCRIPT_NAME_BOILERPLATE_EXCLUDED above, which does, and stays
 # unchanged). Same "narrow, evidenced, real-incident-driven exclusion"
 # precedent as that set and as _DISCLOSURE_CITATION_RE; deliberately does
 # NOT touch umr:/pr: extraction, which has its own separate real-incident
 # history and no false-positive of this shape.
 _TARGET_ID_INVOCATION_CITATION_TRAILING_RE = re.compile(
-    r'\s*(?:orchestrator\s+)?(?:run|orchestrator|invocation|execution)\b',
+    r'\s*(?:orchestrator(?:\s+run)?\b|run\s+(?:via|using|through|by)\b)',
     re.IGNORECASE,
 )
 
@@ -1891,23 +1910,27 @@ def extract_target_identifiers(text, default_repo=None):
 
     UMR-20260815-052932-e80b real fix (see the
     _TARGET_ID_INVOCATION_CITATION_TRAILING_RE module comment above for the
-    real incident): a script/path identifier immediately followed by "run",
-    "orchestrator run", or bare "orchestrator" is excluded -- that specific
-    occurrence names the identifier as something being invoked/dispatched,
-    not edited. Unlike the TARGET:/SCOPE: section restriction above, this
-    applies with no dependency on whether the surrounding text declares any
-    section at all, so it is the real fix for the historical/stored-row
-    side of a find_target_identifier_duplicate() comparison too -- a row
-    written before this false-positive class was known, with no
-    TARGET:/SCOPE: framing of its own, no longer has a bare "X orchestrator
-    run" citation mistaken for a real edit target just because its text
-    falls into fallback (no-section) scanning."""
+    real incident and its own independent-audit narrowing): a script/path
+    identifier immediately followed by "orchestrator"/"orchestrator run" or
+    "run via/using/through/by" is excluded -- that specific occurrence
+    names the identifier as something being invoked/dispatched, not
+    edited. This exclusion applies ONLY in fallback (no declared
+    TARGET:/SCOPE: section) scanning, never inside a text's own declared
+    TARGET:/SCOPE: section -- that section is this function's own
+    exhaustive target declaration (see the fix directly above) and must
+    never be silently overridden by this heuristic. This is still the real
+    fix for the incident: a historical stored row written before this
+    false-positive class was known, with no TARGET:/SCOPE: framing of its
+    own, always falls into fallback scanning regardless, so it no longer
+    has a bare "X orchestrator run"/"X run via ..." citation mistaken for
+    a real edit target."""
     ids = set()
     text = text or ""
 
     text = _TARGET_ID_ESCAPE_HATCH_RE.sub(" ", text)
     segments = _split_labeled_sections(text)
-    if any(label in _TARGET_ID_SECTION_LABELS for label, _ in segments):
+    is_scoped = any(label in _TARGET_ID_SECTION_LABELS for label, _ in segments)
+    if is_scoped:
         scan_text = " ".join(
             content for label, content in segments if label in _TARGET_ID_SECTION_LABELS)
     else:
@@ -1936,7 +1959,7 @@ def extract_target_identifiers(text, default_repo=None):
             ids.add(f"pr:{default_repo.lower()}#{m.group(1)}")
 
     for m in _TARGET_ID_FILE_PATH_RE.finditer(text):
-        if _TARGET_ID_INVOCATION_CITATION_TRAILING_RE.match(text, m.end()):
+        if not is_scoped and _TARGET_ID_INVOCATION_CITATION_TRAILING_RE.match(text, m.end()):
             continue
         ids.add(f"path:{m.group(0)}")
 
@@ -1944,7 +1967,7 @@ def extract_target_identifiers(text, default_repo=None):
         name = m.group(1)
         if name in _TARGET_ID_SCRIPT_NAME_BOILERPLATE_EXCLUDED:
             continue
-        if _TARGET_ID_INVOCATION_CITATION_TRAILING_RE.match(text, m.end()):
+        if not is_scoped and _TARGET_ID_INVOCATION_CITATION_TRAILING_RE.match(text, m.end()):
             continue
         ids.add(f"script:{name}")
 

@@ -251,6 +251,62 @@ def test_false_positive_new_dispatch_target_section_vs_unstructured_stored_row(s
 
 
 # ---------------------------------------------------------------------------
+# Independent-audit regression (pre-merge review of this same UMR): the
+# first version of _TARGET_ID_INVOCATION_CITATION_TRAILING_RE matched a
+# BARE trailing "run" with no "orchestrator"/"via" qualifier, which fired
+# on ordinary bug-report phrasing ("worker.py run() function", "X.py runs
+# out of memory") and wrongly dropped a real target identifier -- since
+# find_target_identifier_duplicate() returns None outright when my_ids is
+# empty, this could have silently disabled the whole guard. It also fired
+# unconditionally, even inside a text's own declared TARGET: section,
+# overriding what should be an authoritative, exhaustive declaration.
+# Narrowed to require "orchestrator" or an invocation preposition
+# (via/using/through/by) after "run" -- both verbatim in the real a5e1
+# incident text -- and restricted to fallback (no declared section)
+# scanning only.
+# ---------------------------------------------------------------------------
+
+def test_bare_trailing_run_as_ordinary_prose_is_not_a_citation():
+    """"run() function" / "run out of memory" / "run configuration" are
+    ordinary bug-report phrasing, not invocation citations -- the
+    identifier must still be extracted."""
+    sbr = _load_sbr()
+    assert sbr.extract_target_identifiers(
+        "Fix the crash in worker.py run() function") == ["script:worker.py"]
+    assert sbr.extract_target_identifiers(
+        "edit scripts/deploy.py run configuration block") == [
+        "path:scripts/deploy.py"]
+    assert sbr.extract_target_identifiers(
+        "fix pm_lifecycle.py run out of memory bug") == ["script:pm_lifecycle.py"]
+
+
+def test_invocation_citation_exclusion_never_overrides_a_declared_target_section():
+    """A bare trailing "run" inside a dispatcher's own explicit TARGET:
+    section must never be excluded -- that section is this function's own
+    exhaustive target declaration and must not be silently emptied by this
+    heuristic (an empty my_ids makes find_target_identifier_duplicate()
+    return None immediately, silently disabling the whole guard)."""
+    sbr = _load_sbr()
+    ids = sbr.extract_target_identifiers(
+        "TARGET: pm_lifecycle.py run out of memory bug -- add streaming to "
+        "fix it.")
+    assert ids == ["script:pm_lifecycle.py"]
+
+
+def test_orchestrator_run_still_excluded_even_though_bare_run_is_not():
+    """Companion check: the real incident's own "orchestrator run"/"run
+    via" phrasing is still excluded by the narrowed regex -- this is not a
+    revert, only a narrowing of the trigger condition."""
+    sbr = _load_sbr()
+    assert sbr.extract_target_identifiers(
+        "check whether a real pm_lifecycle.py orchestrator run targeting "
+        "these gaps is already in flight") == []
+    assert sbr.extract_target_identifiers(
+        "dispatch exactly one real pm_lifecycle.py run via this file's "
+        "own dispatch_gap() mechanism") == []
+
+
+# ---------------------------------------------------------------------------
 # Real protection kept intact: genuine same-target duplicates still refused.
 # ---------------------------------------------------------------------------
 

@@ -55,9 +55,34 @@ UMR: UMR-20260815-052932-e80b
 - [x] Committed real code change in `superboss-register.py` (not a
       docs-only diff) plus the new real test file.
 
+- [x] Pushed branch, opened PR #420
+      (FChecklist/veridian-scripts).
+- [x] Requested independent audit. First audit returned **AUDIT:FAIL**:
+      the initial `_TARGET_ID_INVOCATION_CITATION_TRAILING_RE` also matched
+      a bare trailing "run" with no "orchestrator"/"via" qualifier (e.g.
+      "worker.py run() function", "pm_lifecycle.py run out of memory"),
+      which is ordinary bug-report phrasing, not an invocation citation --
+      a real, demonstrated false-negative risk (could silently empty
+      `my_ids` and fully bypass the duplicate guard), and it fired even
+      inside a text's own declared TARGET: section, overriding what should
+      be an authoritative declaration. Confirmed both failures reproduce
+      against the real module before fixing.
+- [x] Fixed: narrowed the regex to require "orchestrator" (bare or
+      "orchestrator run") or "run via/using/through/by" -- both phrasings
+      verbatim in the real a5e1 incident text -- and restricted the
+      exclusion to fallback (no declared TARGET:/SCOPE: section) scanning
+      only, never overriding a declared section. Re-verified: the
+      auditor's false-negative repros now return non-empty ids, the real
+      a5e1 incident citations are still excluded, and the real d6ad/a5e1
+      live-DB intersection is still empty.
+- [x] Added 3 more regression tests
+      (`test_bare_trailing_run_as_ordinary_prose_is_not_a_citation`,
+      `test_invocation_citation_exclusion_never_overrides_a_declared_target_section`,
+      `test_orchestrator_run_still_excluded_even_though_bare_run_is_not`).
+      Full suite: 40 passed (was 37).
+- [x] Committed and pushed the narrowing fix to PR #420.
+
 ## Remaining
-- [ ] Push branch and open PR.
-- [ ] Get a real independent AUDIT:PASS confirming umr:/pr: duplicate
-      detection is not weakened, before merge.
+- [ ] Get a second independent AUDIT:PASS on the narrowed fix before merge.
 - [ ] After merge: `agent_work_briefing.py record-completion --umr-id
       UMR-20260815-052932-e80b`.

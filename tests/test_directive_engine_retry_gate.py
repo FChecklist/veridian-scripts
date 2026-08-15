@@ -113,6 +113,16 @@ def test_first_terminal_failure_is_allowed_to_retry_and_marks_state():
         conn.commit()
         conn.close()
 
+        # Real fix (UMR-20260806-102737-d780, P0 dispatch-queue-starvation
+        # blocker): run_check_duplicate_battery() now fails CLOSED on a real
+        # subprocess/parse failure, and this test's default TASK_GATEWAY
+        # (unmocked) genuinely fails in this sandboxed test environment --
+        # which used to be silently swallowed by the old fail-OPEN bug this
+        # module's own retry-once gate is unrelated to. Mock the battery
+        # call to a real, successful, no-duplicate-found result so this test
+        # exercises the retry-once gate in isolation, not task-gateway.py's
+        # own subprocess plumbing.
+        de.run_check_duplicate_battery = lambda *a, **k: (None, False)
         calls = []
         de.submit_task = lambda *a, **k: (calls.append((a, k)) or {"accepted": True, "umr_id": umr_id})
 
@@ -300,6 +310,16 @@ def test_retry_state_file_is_corruption_tolerant():
         conn.commit()
         conn.close()
 
+        # Real fix (UMR-20260806-102737-d780, P0 dispatch-queue-starvation
+        # blocker): run_check_duplicate_battery() now fails CLOSED on a real
+        # subprocess/parse failure, and this test's default TASK_GATEWAY
+        # (unmocked) genuinely fails in this sandboxed test environment --
+        # which used to be silently swallowed by the old fail-OPEN bug this
+        # module's own retry-once gate is unrelated to. Mock the battery
+        # call to a real, successful, no-duplicate-found result so this test
+        # exercises the retry-once gate in isolation, not task-gateway.py's
+        # own subprocess plumbing.
+        de.run_check_duplicate_battery = lambda *a, **k: (None, False)
         calls = []
         de.submit_task = lambda *a, **k: (calls.append((a, k)) or {"accepted": True, "umr_id": umr_id})
         result = de.process_one({"task_identity": "test-corrupt-state-task", "tier": 2,

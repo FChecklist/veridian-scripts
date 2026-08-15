@@ -143,13 +143,23 @@ that time.
 
 ## Remaining
 
-- [ ] `record-completion` write-back to `agent_work_briefing.py` citing
+- [x] `record-completion` write-back to `agent_work_briefing.py` citing
       UMR-20260806-165509-4d7c, including the false-premise finding.
-- [ ] Evaluate real graduation into `capability_registry` per the standing
-      4-step spec -- this landed as a fix inside an already-registered
-      capability's own source file (resource_governor.py), not a new
-      standalone script; per repo convention (`capability_registry` entries
-      documented as one row per registered *script*, not per function),
-      no new registry row is warranted here -- documenting that
-      conclusion rather than forcing a mismatched entry.
-- [ ] Commit + push.
+      Independently re-verified via GitHub: PR #412, 2 non-docs-only real
+      files in diff, state=OPEN. `umr_tasks` row marked
+      `status=completed` with real evidence
+      (commit_sha=7819974f0a869193b58c2b5939ee74e0136b1edf,
+      file_path=resource_governor.py, pr_number=412,
+      repo=veridian-scripts).
+- [x] Evaluated real graduation into `capability_registry` per the
+      standing 4-step spec -- this landed as a fix inside an
+      already-registered capability's own source file
+      (resource_governor.py), not a new standalone script; repo
+      convention (`*_capability_record.json` files map one row per
+      registered *script* via `mechanism_path`, not per function) means
+      no new registry row is warranted here. Not forcing a mismatched
+      entry.
+- [x] Commit + push. PR opened:
+      https://github.com/FChecklist/veridian-scripts/pull/412
+      (worker/task-20260815-045659-urgent-structural-fix--next-queued-task
+      -> main, commit 7819974).

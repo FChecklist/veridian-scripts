@@ -252,6 +252,26 @@
 # resource_governor.py / superboss-register.py / task-gateway.py /
 # resource_governor_tick_loop.sh -- reads/calls their real CLIs only.
 #
+# RELATED REAL ADMIN COMMANDS (task-20260815-231659, additive -- neither
+# replaces this script's or dispatch-owner-task.sh's single dispatch
+# gateway; both are read/admin tools a PM tier runs directly, same standing
+# as an ad hoc resource_governor.py --list-queue/--query-umr call):
+#   queue-manager.py list --status queued  -- real queue visibility across
+#       BOTH the pre-dispatch umr_tasks backlog (delegates to
+#       resource_governor.py --list-queue, the same real read this script's
+#       own gap checks use) and post-dispatch task.yaml files, clearly
+#       labeled by source so an empty post-dispatch scan alone is never
+#       mistaken for an empty queue. queue-manager.py stop-pending/
+#       resume-pending/priority-pending <umr_id> delegate straight to
+#       resource_governor.py --stop-task/--resume-task/--set-priority --
+#       never a second writer against umr_tasks.
+#   timer-manager.py list  -- real veridian-*.timer status (filters
+#       server-side via a systemctl unit-name pattern, so it reports
+#       currently-stopped timers correctly, not just active ones); start/
+#       stop/enable/disable/reschedule wrap the same systemctl --user verbs
+#       this file's own UNIT_STATE check (systemctl --user show) already
+#       reads.
+#
 # Wired as a systemd --user timer (see systemd/veridian-pm-sentinel-tick.
 # service + .timer in this same directory) firing hourly, modeled on the
 # existing veridian-cron-dispatch-tick.service/.timer pattern already live on

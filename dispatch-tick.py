@@ -253,6 +253,41 @@ MAX_CONSECUTIVE_RESUME_REJECTIONS = 3
 # ever turns out to be wrong for some future task_identity, this constant is
 # the one real place to widen it, not a second, parallel cap somewhere else.
 
+RESUME_SUBMIT_BATCH_LIMIT = int(os.environ.get("VERIDIAN_RESUME_SUBMIT_BATCH_LIMIT", "10"))
+# Real fix (UMR-20260815-105911-a2c9, "unstarve dispatch queue" investigation):
+# this loop used to call resource_governor.submit() for EVERY real resumable
+# task.yaml it found on a single tick, with no cap at all -- fine for the
+# CONCURRENCY_CAP=5 spawn gate itself (dispatch_core still only ever lets 5
+# run at once), but not for the umr_tasks QUEUE this writes into: submit()
+# stamps every accepted row with the SAME hardcoded tier=1 and a
+# near-identical ts_submitted (the whole sweep finishes in seconds), and
+# next_queued_task()'s (effective_priority, ts_submitted) ranking ages every
+# row at the same rate -- so a large same-tick batch can never be overtaken
+# by a same-or-lower-tier row arriving after it, for as long as it takes the
+# whole batch to drain (see resource_governor.py's own
+# OWNER_STARVATION_GUARANTEE_SECONDS comment for the full mechanism). Real,
+# live-confirmed incident: a single legitimate credit-unblock sweep
+# (2026-08-15T03:56-04:15Z, resuming 87 real task_identities that had been
+# genuinely blocked for weeks on a since-resolved OpenRouter balance issue)
+# queued all 87 at once, at tier=1, and a second such sweep re-queued ~30
+# more at 08:42:46-08:43:00Z the same morning -- together enough to pin
+# every one of this box's 5 concurrency slots to 2026-07-18 identities for
+# hours while real, live owner_dispatch_gateway rows queued behind them with
+# zero dispatches. Real fix: cap how many NEW resume submissions a single
+# tick call makes -- every task.yaml this tick finds still resumable but
+# past the cap is left alone (not marked dead, not skipped permanently) and
+# is picked up again by a LATER tick, same as it always was for a task the
+# concurrency cap alone deferred; this only spreads a large batch's own
+# ts_submitted values out across multiple ticks instead of stamping all of
+# them within the same few seconds. Companion fix, not a substitute, for
+# resource_governor.py's own starvation guarantee -- that guarantee bounds
+# how long any individual owner row can wait NO MATTER what else floods the
+# queue; this fix reduces how badly a single sweep can flood it in the first
+# place. skipped_running/skipped_dead/skipped_duplicate checks above never
+# count against this cap -- only a REAL resource_governor.submit() call
+# (accepted or rejected) does, since those are the only outcomes that
+# actually write a fresh, same-tick umr_tasks row.
+
 
 def _is_permanently_dead_resume(task_id, sbr_module=None):
     """Real, read-only pre-check: has task_id already been marked
@@ -383,6 +418,8 @@ def resume_interrupted_workers_tick(tasks):
     wrongly kept dead by stale history.
     """
     resumed, skipped_running, skipped_duplicate, skipped_dead = [], [], [], []
+    skipped_batch_cap = []
+    submit_calls = 0
     for task_id, doc in tasks.items():
         service = doc.get("service")
         if not service or not service.startswith("veridian-worker@"):
@@ -409,6 +446,18 @@ def resume_interrupted_workers_tick(tasks):
                   f"no duplicate row written): {task_id}")
             continue
 
+        # RESUME_SUBMIT_BATCH_LIMIT (see its own module-level comment): checked
+        # here, AFTER every zero-cost skip above, so a tick with a huge
+        # resumable backlog still pays for the cheap dead/duplicate checks on
+        # every real candidate (keeping those bookkeeping streaks accurate)
+        # but only ever calls the real, row-writing resource_governor.submit()
+        # up to the cap -- everything past it is left exactly as it was
+        # (still status=pending/in_progress, unit still not active) for a
+        # LATER tick to pick up, never marked dead or duplicate.
+        if submit_calls >= RESUME_SUBMIT_BATCH_LIMIT:
+            skipped_batch_cap.append(task_id)
+            continue
+
         action = "reset_failed_and_start" if state == "failed" else "start"
         result = resource_governor.submit(
             task_spec={
@@ -420,6 +469,7 @@ def resume_interrupted_workers_tick(tasks):
             tier=1,  # already-started work outranks brand-new dispatch in priority
             source_trigger="dispatch-tick:resume_interrupted_workers",
         )
+        submit_calls += 1
         just_died = _record_resume_outcome(task_id, bool(result["accepted"]))
         if result["accepted"]:
             resumed.append(task_id)
@@ -432,11 +482,17 @@ def resume_interrupted_workers_tick(tasks):
                       f"{MAX_CONSECUTIVE_RESUME_REJECTIONS} consecutive rejections reached, "
                       f"will not be resubmitted again")
 
+    if skipped_batch_cap:
+        print(f"BATCH CAP REACHED: {len(skipped_batch_cap)} real resumable task(s) left for a "
+              f"later tick (RESUME_SUBMIT_BATCH_LIMIT={RESUME_SUBMIT_BATCH_LIMIT} real submit() "
+              f"calls already made this tick): {skipped_batch_cap}")
+
     return {
         "resumed": resumed,
         "skipped_running": skipped_running,
         "skipped_duplicate": skipped_duplicate,
         "skipped_dead": skipped_dead,
+        "skipped_batch_cap": skipped_batch_cap,
     }
 
 

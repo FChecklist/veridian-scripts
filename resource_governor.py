@@ -240,6 +240,42 @@ MAX_TASK_IDENTITY_LEN = 500
 # effective priority is max(0, tier - age_seconds // this interval).
 AGING_PROMOTION_INTERVAL_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_AGING_INTERVAL_S", str(15 * 60)))
 
+# Real starvation-guarantee fix (UMR-20260815-105911-a2c9, "unstarve dispatch
+# queue" investigation). Real, live-confirmed gap in the aging scheme above:
+# effective_priority()'s (tier, age) formula ages EVERY queued row at the
+# same rate, so a same-tier BATCH arrival (dozens of rows submitted within
+# the same few seconds, e.g. dispatch-tick.py's resume_interrupted_workers_tick()
+# re-queuing a whole backlog of stale task_identities in one sweep) can never
+# be overtaken by a later-arriving row at the same nominal tier: both age
+# identically, and next_queued_task()'s own ts_submitted tiebreak always
+# favors the older row -- by construction, aging alone can never invert that
+# relative order. Confirmed live: ~20 real owner_dispatch_gateway rows
+# (source_trigger of dispatch-owner-task.sh's real, direct Owner-instruction
+# path) sat status='queued'/ts_dispatched=NULL continuously from
+# 2026-08-15T04:15:49Z through 09:17:55Z (6.5+ hours, zero real dispatches)
+# while all 4 of the box's occupied concurrency slots stayed pinned to a
+# same-morning batch of tier=1 dispatch-tick:resume_interrupted_workers rows
+# (2026-07-18 task_identities, legitimately unblocked that same morning by a
+# separate real fix but all queued in one ~20-second sweep -- see
+# dispatch-tick.py's RESUME_SUBMIT_BATCH_LIMIT for the companion fix that
+# stops a single sweep from flooding the queue at this scale again).
+#
+# Real fix: OWNER_DISPATCH_SOURCE_TRIGGER rows (direct, live Owner
+# instructions -- the one real source_trigger this box treats as
+# time-sensitive by construction, never bulk/automated backlog work) get a
+# hard, bounded wait guarantee independent of tier/age-of-competitors: once
+# such a row has been queued for OWNER_STARVATION_GUARANTEE_SECONDS, it is
+# picked next unconditionally, ahead of every other queued row regardless of
+# that row's own effective_priority. 30 minutes (2x AGING_PROMOTION_INTERVAL_
+# SECONDS) is deliberately short relative to the 6.5+ hour real incident this
+# closes, and deliberately not zero/instant -- a genuine resource_headroom
+# veto or a real, small CONCURRENCY_CAP=5 backlog of other Owner work must
+# still be allowed to legitimately delay a single owner row by a bounded,
+# small amount, just never indefinitely.
+OWNER_DISPATCH_SOURCE_TRIGGER = "owner_dispatch_gateway"
+OWNER_STARVATION_GUARANTEE_SECONDS = int(os.environ.get(
+    "VERIDIAN_GOVERNOR_OWNER_STARVATION_GUARANTEE_S", str(30 * 60)))
+
 # UMR-20260813-125756-9221 (addendum to Priority-1 UMR-20260806-171945-5767):
 # real hard guard at this CLI's own entry point. Real incident this closes,
 # measured by the PM desktop sentinel 2026-08-13 12:52-12:56 UTC: a single
@@ -1908,10 +1944,17 @@ def _queue_sort_key(row, now=None):
 
 def list_queue(status="queued", limit=100):
     """Real, read-only listing of umr_tasks rows in the given status
-    (default 'queued'), sorted in the exact order next_queued_task() would
-    dispatch them in. A read is inherently atomic under this DB's WAL mode
-    (PRAGMA journal_mode=WAL, already set by _connect()) -- no write lock
-    needed for this one."""
+    (default 'queued'), sorted in the exact (effective_priority, ts_submitted)
+    order next_queued_task() ranks them in. One real exception, additive as
+    of UMR-20260815-105911-a2c9: next_queued_task() also applies a narrow
+    starvation-guard override (see OWNER_STARVATION_GUARANTEE_SECONDS) that
+    can promote a single aged-out owner_dispatch_gateway row ahead of this
+    ranking -- this listing is a plain priority-order report and does not
+    reproduce that override, so the row it shows in position 0 is not
+    guaranteed to be the literal next real dispatch pick whenever that guard
+    is active. A read is inherently atomic under this DB's WAL mode (PRAGMA
+    journal_mode=WAL, already set by _connect()) -- no write lock needed for
+    this one."""
     sbr, error = _safe_superboss_register("list_queue")
     if error:
         return {"ok": False, "error": error}
@@ -2748,23 +2791,45 @@ def _orchestrator_tick_maintenance(sbr, now=None):
 # Dynamic realignment (anti-starvation aging) + dispatcher
 # ---------------------------------------------------------------------------
 
-def effective_priority(row, now=None):
+def _row_age_seconds(row, now=None):
     now = now or _utcnow()
     ts_submitted = row["ts_submitted"]
     if isinstance(ts_submitted, str):
         ts_submitted = datetime.fromisoformat(ts_submitted)
-    age_seconds = max(0.0, (now - ts_submitted).total_seconds())
+    return max(0.0, (now - ts_submitted).total_seconds())
+
+
+def effective_priority(row, now=None):
+    now = now or _utcnow()
+    age_seconds = _row_age_seconds(row, now)
     promotions = int(age_seconds // AGING_PROMOTION_INTERVAL_SECONDS)
     return max(TIER_MIN, row["tier"] - promotions)
 
 
 def next_queued_task(conn, now=None):
     now = now or _utcnow()
-    rows = conn.execute("SELECT * FROM umr_tasks WHERE status='queued'").fetchall()
+    rows = [dict(r) for r in conn.execute("SELECT * FROM umr_tasks WHERE status='queued'").fetchall()]
     if not rows:
         return None
-    ranked = sorted(rows, key=lambda r: (effective_priority(dict(r), now), r["ts_submitted"]))
-    return dict(ranked[0])
+
+    # Real starvation guard -- see OWNER_STARVATION_GUARANTEE_SECONDS' own
+    # module-level comment for the full real incident/rationale. Scoped
+    # narrowly: only fires when at least one real owner_dispatch_gateway row
+    # has aged past the guarantee, and only that (oldest-first) row is
+    # affected -- every other queued row, on every other tick, is still
+    # ranked purely by the existing (effective_priority, ts_submitted) order
+    # below, unchanged.
+    starved_owner_rows = [
+        r for r in rows
+        if r.get("source_trigger") == OWNER_DISPATCH_SOURCE_TRIGGER
+        and _row_age_seconds(r, now) >= OWNER_STARVATION_GUARANTEE_SECONDS
+    ]
+    if starved_owner_rows:
+        starved_owner_rows.sort(key=lambda r: r["ts_submitted"])
+        return starved_owner_rows[0]
+
+    ranked = sorted(rows, key=lambda r: (effective_priority(r, now), r["ts_submitted"]))
+    return ranked[0]
 
 
 def _perform_spawn(row):

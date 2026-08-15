@@ -1188,5 +1188,331 @@ class PmSentinelTickLiveDeployDriftInSyncTest(unittest.TestCase):
             self.assertEqual(len(drift_rows), 0, msg=report_rows)
 
 
+def _seed_gtm_categories(copy_path, rows):
+    """Real, minimal gtm_certification_categories seed for Check 4's tests
+    (2026-08-15 addendum). `rows` is a list of (category_index,
+    category_name, passed, evidence_summary) tuples; ocid_number is always
+    'OCID-020' (the real, live scope this table's real rows already use --
+    verified live during this integration) and parent_umr_id is always the
+    real OCID-020 governing UMR (UMR-20260802-165606-4413, verified live via
+    ocid_canonical_registry) so a real citation in it is at least
+    well-formed, even though ocid_canonical_registry itself is not seeded in
+    this schema-only copy (gtm_part34_certification_check.py's own
+    _lookup_ocid_governing_umr() call must therefore tolerate returning None
+    here -- exercised by these same tests)."""
+    conn = sqlite3.connect(copy_path)
+    now = "2026-08-15T00:00:00+00:00"
+    for category_index, category_name, passed, evidence_summary in rows:
+        conn.execute(
+            "INSERT INTO gtm_certification_categories "
+            "(category_index, category_name, ocid_number, parent_umr_id, passed, "
+            "evidence_summary, created_at, last_updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (category_index, category_name, "OCID-020", "UMR-20260802-165606-4413",
+             passed, evidence_summary, now, now),
+        )
+    conn.commit()
+    conn.close()
+
+
+def _ocid_master_standard_audit_log_rows(copy_path, event_type=None):
+    conn = sqlite3.connect(copy_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        if event_type:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT * FROM ocid_master_standard_audit_log WHERE event_type=?", (event_type,)
+            ).fetchall()]
+        else:
+            rows = [dict(r) for r in conn.execute("SELECT * FROM ocid_master_standard_audit_log").fetchall()]
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return rows
+
+
+# Real, representative 25-row OCID-020 gtm_certification_categories fixture
+# -- 16 real passed=1 rows with real (non-placeholder) evidence, plus the
+# real 9-gap composition prompt.txt's own SPEC cites (4 hard FAIL rows,
+# passed=0; 5 never-validated rows, passed IS NULL) -- same category names/
+# indices/composition as the real live table had at SPEC-authoring time
+# (verified independently live during this integration: the real live count
+# had already moved to 7 real gap rows by the time this was built, exactly
+# the kind of drift SPEC point 1 itself warns will happen -- this fixture
+# intentionally still seeds the SPEC's own original 9-row composition, since
+# a fixture proving the dispatch path must not silently assume today's live
+# count either).
+_GTM_PASSED_ROWS = [
+    (1, "architecture audit", 1, "dependency-cruiser no-circular rule: 0 error(s), 0 warning(s)."),
+    (2, "static code analysis", 1, "eslint exit 0 (0 errors), tsc --noEmit exit 0 (0 errors)."),
+    (4, "API testing", 1, "7/7 real public endpoints returned their expected status code."),
+    (5, "UI testing", 1, "UI check of 2 real pages (login, signup): 2/2 clean."),
+    (6, "end to end testing", 1, "npx playwright test e2e/ (exit 0): expected=1, unexpected=0."),
+    (7, "regression testing", 1, "bun test -> 2512 pass, 0 fail, 2512 tests across 223 files."),
+    (8, "accessibility testing", 1, "axe-core scan: 1 total violation(s), 0 at serious/critical impact."),
+    (9, "performance testing", 1, "lighthouse --only-categories=performance: real score 0.88."),
+    (12, "database testing", 1, "4/4 core tables present with all required columns."),
+    (14, "governance testing", 1, "resolver_present=True, resolved_path_matches_live_db=True."),
+    (15, "multi tenant testing", 1, "Multi-tenant isolation probe: 4/4 test accounts, 0 leaks."),
+    (16, "role permission testing", 1, "Role permission matrix: 17/17 real checks, 0 mismatches."),
+    (18, "responsive testing", 1, "Responsive check across 3 real viewport sizes: 3/3 succeeded."),
+    (19, "backup and recovery testing", 1, "2/2 monitored databases have a real backup <= 48h old."),
+    (20, "monitoring testing", 1, "3/3 expected monitoring units active+enabled."),
+    (21, "deployment testing", 1, "vercel ls: a Ready deployment found in real output."),
+    (22, "documentation audit", 1, "8/8 required docs present and non-empty."),
+    (24, "lighthouse audit", 1, "lighthouse full default categories: all >= 0.88."),
+]
+_GTM_GAP_ROWS = [
+    (3, "security audit", 0, "gitleaks: 17 finding(s) (exit 1)."),
+    (10, "load testing", None, "Real safety-gate refusal: real swap free too low."),
+    (11, "stress testing", None, "Real safety-gate refusal: real swap free too low."),
+    (13, "AI testing", None, "real resource gate refused new subprocess."),
+    (17, "browser compatibility", 0, "Browser compatibility check found real failures."),
+    (23, "UX audit", 0, "UX audit FAIL: 5 heuristic(s) at severity>=3."),
+    (25, "production readiness audit", 0, "Production readiness synthesis: real FAIL."),
+]
+# SPEC's own illustrative composition names exactly 9 real gap rows (4 hard
+# FAIL + 5 never-validated) -- _GTM_GAP_ROWS above is the real live 7-row set
+# this integration independently verified; two more never-validated rows
+# (multi tenant testing / role permission testing) are added here ONLY for
+# the dispatch-path fixture below, to exercise the SPEC's own named 9-row
+# shape without asserting today's live count as a permanent fact elsewhere.
+_GTM_NINE_GAP_ROWS = _GTM_GAP_ROWS + [
+    (15, "multi tenant testing", None, "never independently validated."),
+    (16, "role permission testing", None, "never independently validated."),
+]
+_GTM_NINE_GAP_PASSED_ROWS = [r for r in _GTM_PASSED_ROWS if r[0] not in (15, 16)]
+
+
+class PmSentinelTickGtmCertDispatchTest(unittest.TestCase):
+    """Check 4 (2026-08-15 addendum) fixture 1/3: a real 9-gap-row
+    gtm_certification_categories (OCID-020) state (SPEC's own named
+    composition) with no prior real in-flight dispatch -- proves a real
+    pm_lifecycle.py-driven dispatch is made through the existing
+    dispatch_gap()/DISPATCH_OWNER_TASK_SH gateway, citing the real live gap
+    count/list, and that FINDINGS_LOGGED/FINDINGS_ACTIONED reconcile."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_gtmcert_dispatch_test_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        self.copy_path = _seeded_copy(self.tmpdir, [])
+        _seed_gtm_categories(self.copy_path, _GTM_NINE_GAP_PASSED_ROWS + _GTM_NINE_GAP_ROWS)
+
+        self.state_file = os.path.join(self.tmpdir, "pm-sentinel-inflight.json")
+        self.report_file = os.path.join(self.tmpdir, "pm-sentinel-tick-report.jsonl")
+        self.metrics_file = os.path.join(self.tmpdir, "pm-sentinel-tick.prom")
+        self.env = dict(os.environ)
+        self.env["PM_SENTINEL_LIVE_SCRIPTS_DIR"] = self.tmpdir
+        self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
+        self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
+        self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
+        self.env["PM_SENTINEL_REPORT_FILE"] = self.report_file
+        self.env["PM_SENTINEL_METRICS_FILE"] = self.metrics_file
+        self.env["DISPATCH_OWNER_TASK_SH"] = REAL_DISPATCH_OWNER_TASK_SH
+        self.env["VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS"] = ""
+        self.env["DISPATCH_TMUX_SESSION"] = "pm-sentinel-test-throwaway-session"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run_tick(self):
+        return subprocess.run(
+            [SENTINEL_SH], cwd=HERE, env=self.env,
+            capture_output=True, text=True, timeout=90,
+        )
+
+    def test_real_gap_rows_dispatch_one_real_pm_lifecycle_run(self):
+        result = self._run_tick()
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+
+        self.assertIn("9 real gap row(s) in gtm_certification_categories (OCID-020)", result.stdout)
+        self.assertIn("DISPATCHING for gtm_part3_4_certification", result.stdout)
+        self.assertIn("DISPATCHED gtm_part3_4_certification ->", result.stdout)
+
+        rows = _umr_tasks_rows(self.copy_path)
+        self.assertEqual(len(rows), 1, msg=rows)
+        inputs = json.loads(rows[0]["inputs_json"])
+        prompt = inputs.get("prompt", "")
+        self.assertIn("OCID-020", prompt)
+        self.assertIn("pm_lifecycle.py", prompt)
+        self.assertIn("gtm_write_category_result.py", prompt)
+        self.assertEqual(inputs.get("repo"), "compliance-tracker")
+
+        with open(self.state_file) as f:
+            state = json.load(f)
+        self.assertIn("gtm_part3_4_certification", state)
+
+        with open(self.report_file) as f:
+            report_rows = [json.loads(line) for line in f if line.strip()]
+        gap_rows = [r for r in report_rows if r["gap_type"] == "gtm_certification_gap"]
+        self.assertEqual(len(gap_rows), 1, msg=report_rows)
+
+        # No real completion certificate was written -- real gap rows remain.
+        self.assertEqual(_ocid_master_standard_audit_log_rows(
+            self.copy_path, "gtm_part3_4_certification_complete"), [])
+
+
+class PmSentinelTickGtmCertCertifyTest(unittest.TestCase):
+    """Check 4 (2026-08-15 addendum) fixture 2/3: a real zero-gap,
+    all-evidenced gtm_certification_categories (OCID-020) state -- proves
+    the one real completion certificate is written to the existing
+    ocid_master_standard_audit_log table, never a dispatch, and that a
+    second real tick does NOT write a second real certificate row
+    (idempotent -- no per-tick audit-log spam once genuinely certified)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_gtmcert_certify_test_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        self.copy_path = _seeded_copy(self.tmpdir, [])
+        all_passed_rows = [
+            (idx, name, 1, evidence) for idx, name, _passed, evidence in (_GTM_PASSED_ROWS + [
+                (r[0], r[1], 1, "real, independently re-verified evidence, no longer a gap") for r in _GTM_GAP_ROWS
+            ])
+        ]
+        _seed_gtm_categories(self.copy_path, all_passed_rows)
+
+        self.state_file = os.path.join(self.tmpdir, "pm-sentinel-inflight.json")
+        self.report_file = os.path.join(self.tmpdir, "pm-sentinel-tick-report.jsonl")
+        self.metrics_file = os.path.join(self.tmpdir, "pm-sentinel-tick.prom")
+        self.env = dict(os.environ)
+        self.env["PM_SENTINEL_LIVE_SCRIPTS_DIR"] = self.tmpdir
+        self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
+        self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
+        self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
+        self.env["PM_SENTINEL_REPORT_FILE"] = self.report_file
+        self.env["PM_SENTINEL_METRICS_FILE"] = self.metrics_file
+        # Real dispatch-owner-task.sh is fine here -- it must never actually
+        # be invoked for a genuine zero-gap state, so pointing it at the
+        # real one (never exercised) is a stronger proof than a fake that
+        # could silently mask a real call.
+        self.env["DISPATCH_OWNER_TASK_SH"] = REAL_DISPATCH_OWNER_TASK_SH
+        self.env["VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS"] = ""
+        self.env["DISPATCH_TMUX_SESSION"] = "pm-sentinel-test-throwaway-session"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run_tick(self):
+        return subprocess.run(
+            [SENTINEL_SH], cwd=HERE, env=self.env,
+            capture_output=True, text=True, timeout=90,
+        )
+
+    def test_zero_gap_all_evidenced_writes_one_real_certificate(self):
+        result = self._run_tick()
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+        self.assertIn("CERTIFIED: 0 real gap rows", result.stdout)
+        self.assertNotIn("DISPATCHING", result.stdout)
+
+        cert_rows = _ocid_master_standard_audit_log_rows(
+            self.copy_path, "gtm_part3_4_certification_complete")
+        self.assertEqual(len(cert_rows), 1, msg=cert_rows)
+        self.assertEqual(cert_rows[0]["ocid_number"], "OCID-020")
+        detail = json.loads(cert_rows[0]["detail_json"])
+        self.assertEqual(detail["gap_count"], 0)
+        self.assertEqual(detail["total_rows"], 25)
+        self.assertTrue(detail["evidenced_rows"])
+
+        # No real dispatch happened -- there was no real gap to dispatch for.
+        self.assertEqual(_umr_tasks_rows(self.copy_path), [])
+
+        # A second real tick does not write a second real certificate row
+        # (idempotent -- see gtm_part34_certification_check.py's own
+        # already_certified() guard).
+        second = self._run_tick()
+        self.assertEqual(second.returncode, 0, msg=second.stdout + second.stderr)
+        self.assertIn("already certified previously", second.stdout)
+        cert_rows_after_second = _ocid_master_standard_audit_log_rows(
+            self.copy_path, "gtm_part3_4_certification_complete")
+        self.assertEqual(len(cert_rows_after_second), 1, msg=cert_rows_after_second)
+
+
+class PmSentinelTickGtmCertInFlightTest(unittest.TestCase):
+    """Check 4 (2026-08-15 addendum) fixture 3/3: a real gap-row state PLUS
+    a real already-queued umr_tasks row whose own real prompt text cites
+    gtm_certification_categories/OCID-020 -- proves the real content-based
+    in-flight search (resource_governor.py --query-umr --search) finds it
+    and this check does nothing this tick (zero duplication), even though
+    this script's own STATE_FILE has no record of ever dispatching it
+    (the real, concrete case this content search exists for -- see Check
+    4's own header comment)."""
+
+    def setUp(self):
+        self.IN_FLIGHT_UMR = f"UMR-TESTFIX-20260101-000000-{uuid.uuid4().hex[:8]}"
+        self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_gtmcert_inflight_test_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        self.copy_path = _seeded_copy(self.tmpdir, [
+            (self.IN_FLIGHT_UMR, "test-seed-gtm-cert-inflight-OCID-020-fix", "queued",
+             "test-seeded: a real prior dispatch already targeting this gap"),
+        ])
+        # Real, live content resource_governor.py --query-umr --search
+        # actually matches against -- task_identity/source_trigger/logs_ref
+        # (its own real FTS5 index, per --search's own --help text), never
+        # inputs_json.prompt/title (NOT FTS-indexed -- confirmed live via
+        # umr_tasks_fts's own real CREATE VIRTUAL TABLE column list). The
+        # real live dispatch convention this fixture mirrors: dispatch-
+        # owner-task.sh derives task_identity from the real dispatched
+        # title/prompt, so a real citation like "OCID-020" in the title
+        # ends up naturally present in task_identity too -- e.g. this
+        # integration's own live verification found real rows named
+        # "task-...--ocid-020-independentl..." this same way.
+        conn = sqlite3.connect(self.copy_path)
+        conn.execute(
+            "UPDATE umr_tasks SET inputs_json=? WHERE umr_id=?",
+            (json.dumps({
+                "title": "Close real OCID-020 GTM certification gaps",
+                "prompt": "Real gtm_certification_categories gap for OCID-020, "
+                          "citing UMR-20260815-033344-4799 as the original seed UMR.",
+                "repo": "compliance-tracker",
+            }), self.IN_FLIGHT_UMR),
+        )
+        conn.commit()
+        conn.close()
+        _seed_gtm_categories(self.copy_path, _GTM_PASSED_ROWS + _GTM_GAP_ROWS)
+
+        self.state_file = os.path.join(self.tmpdir, "pm-sentinel-inflight.json")
+        self.report_file = os.path.join(self.tmpdir, "pm-sentinel-tick-report.jsonl")
+        self.metrics_file = os.path.join(self.tmpdir, "pm-sentinel-tick.prom")
+        self.env = dict(os.environ)
+        self.env["PM_SENTINEL_LIVE_SCRIPTS_DIR"] = self.tmpdir
+        self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
+        self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
+        self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
+        self.env["PM_SENTINEL_REPORT_FILE"] = self.report_file
+        self.env["PM_SENTINEL_METRICS_FILE"] = self.metrics_file
+        # Real dispatch-owner-task.sh is fine here -- it must never actually
+        # be invoked once the real content search finds the already-queued
+        # row, so pointing it at the real one (never exercised) is a
+        # stronger proof than a fake that could silently mask a real call.
+        self.env["DISPATCH_OWNER_TASK_SH"] = REAL_DISPATCH_OWNER_TASK_SH
+        self.env["VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS"] = ""
+        self.env["DISPATCH_TMUX_SESSION"] = "pm-sentinel-test-throwaway-session"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run_tick(self):
+        return subprocess.run(
+            [SENTINEL_SH], cwd=HERE, env=self.env,
+            capture_output=True, text=True, timeout=90,
+        )
+
+    def test_already_in_flight_row_is_not_duplicated(self):
+        result = self._run_tick()
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+
+        self.assertIn(f"IN-FLIGHT: real content search", result.stdout)
+        self.assertIn(self.IN_FLIGHT_UMR, result.stdout)
+        self.assertNotIn("DISPATCHING for gtm_part3_4_certification", result.stdout)
+
+        # Only the real seeded in-flight row exists -- no real duplicate
+        # dispatch was made.
+        rows = _umr_tasks_rows(self.copy_path)
+        self.assertEqual(len(rows), 1, msg=rows)
+        self.assertEqual(rows[0]["umr_id"], self.IN_FLIGHT_UMR)
+
+        self.assertEqual(_ocid_master_standard_audit_log_rows(
+            self.copy_path, "gtm_part3_4_certification_complete"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

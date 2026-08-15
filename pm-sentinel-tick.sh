@@ -97,6 +97,14 @@
 #   3. Real PR audit: for status='completed_unmerged' rows, `gh pr view` for
 #      real mergeable/review/check state PLUS the real posted comments (gh
 #      api .../comments), never just a CI badge.
+#   4. OCID-020 GTM certification (Part3+4) completion tracking (2026-08-15
+#      addendum) -- real, live gtm_certification_categories gap query (never
+#      a hardcoded count/list), a real content-based in-flight dedup search
+#      ahead of dispatch, a real pm_lifecycle.py-driven dispatch on a
+#      genuine gap, and -- only when genuinely zero gap rows AND every
+#      passed=1 row carries real evidence -- one real, timestamped,
+#      evidence-citing completion certificate written to the existing
+#      ocid_master_standard_audit_log table. See Check 4 below for detail.
 #
 # On a genuine gap, dispatches (capped at MAX_DISPATCHES_PER_TICK=5 new
 # dispatches per tick) via dispatch-owner-task.sh --no-relay, citing the real
@@ -356,6 +364,23 @@ elif [ -f "/opt/veridian/scripts/check_live_scripts_drift.py" ]; then
   CHECK_LIVE_SCRIPTS_DRIFT_PY="/opt/veridian/scripts/check_live_scripts_drift.py"
 else
   CHECK_LIVE_SCRIPTS_DRIFT_PY="$SCRIPT_DIR/check_live_scripts_drift.py"
+fi
+
+# Check 4 real testability seam (2026-08-15 addendum, Owner directive
+# "update ... pm-sentinel-tick.sh to complete Part3+4 with minimum tokens,
+# real work, audit, and completion certificate"): same env-override ->
+# co-located -> canonical-live-path resolution as every other real tool
+# above -- gtm_part34_certification_check.py already exists and answers
+# exactly the question Check 4 needs (real live gtm_certification_categories
+# gap state for OCID-020, plus the one real completion-certificate write
+# path), so this reuses it directly rather than reimplementing the same
+# query/evidence-check/certificate-write logic here.
+if [ -n "${GTM_PART34_CERTIFICATION_CHECK_PY:-}" ]; then
+  :
+elif [ -f "/opt/veridian/scripts/gtm_part34_certification_check.py" ]; then
+  GTM_PART34_CERTIFICATION_CHECK_PY="/opt/veridian/scripts/gtm_part34_certification_check.py"
+else
+  GTM_PART34_CERTIFICATION_CHECK_PY="$SCRIPT_DIR/gtm_part34_certification_check.py"
 fi
 
 # Real, deliberately narrow keyword test backing is_financial_decision()
@@ -1027,6 +1052,90 @@ else:
     echo "    not yet a genuine actionable gap (mergeable=${MERGEABLE} mergeState=${MERGE_STATE} checks=${CHECKS_OK}) -- still in flight, nothing to do this tick"
   fi
 done <<< "$UNMERGED_ROWS"
+
+# ---------------------------------------------------------------------------
+# Check 4 (2026-08-15 addendum, Owner directive "update /pm, PM-in-server,
+# veridian-server-sentinel, PM-in-desktop to complete Part3+4 with minimum
+# tokens, real work, audit, and completion certificate"): OCID-020
+# gtm_certification_categories (Part3+4 GTM certification) completion
+# tracking. Real, live, re-queried-every-tick gap state -- never a hardcoded
+# expected count/list (the SPEC's own illustrative "9 real gap rows" count
+# was already stale by the time this was verified live during this
+# integration: 7 real gap rows as of this commit, see PROGRESS.md -- exactly
+# why this re-queries live instead of trusting that number).
+#
+# One real script call (gtm_part34_certification_check.py) does the entire
+# read AND, only when genuinely zero gap rows AND every passed=1 row carries
+# real non-placeholder evidence, the one real completion-certificate write
+# -- in the SAME connection, so the certificate can never be written against
+# a stale prior read (SPEC point 4: "do not backdate, do not certify on a
+# stale prior read"). This script never dispatches anything itself -- a real
+# gap row still only ever gets a real fix through THIS file's own
+# dispatch_gap()/DISPATCH_OWNER_TASK_SH gateway below, same as every other
+# check in this file (REUSE ONLY, single gateway, no bypass).
+#
+# Real dedup (SPEC point 2): this gap's real prior dispatches (the seed UMRs
+# UMR-20260815-033344-4799 / UMR-20260815-042226-f271, both real, both
+# already status=failed as of this integration -- verified live, not
+# in-flight) were never recorded in THIS script's own STATE_FILE (they were
+# dispatched by a different, earlier mechanism), so dispatch_gap()'s normal
+# is_in_flight() state-file layer alone could not see them or any real
+# successor redispatch. A real, live, content-based search (resource_
+# governor.py --query-umr --search -- its own real FTS5 index covers
+# task_identity/source_trigger/logs_ref, per its own --help text; a real
+# dispatched title/prompt's own citations typically end up in task_identity
+# too, since dispatch-owner-task.sh derives it from the real dispatched
+# title, e.g. this integration's own live verification found real rows
+# named "task-...--ocid-020-independentl..." this same way) for the same
+# content this SPEC itself names -- gtm_certification_categories / OCID-020
+# / the two known seed ids -- never only those exact ids, so a redispatched
+# successor UMR would still need to cite one of these terms in its own
+# task_identity/source_trigger/logs_ref to be found; this is a deliberately
+# narrower, cheaper, earlier check than resource_governor.py's own
+# downstream duplicate-PR guard, same two-layer shape as is_in_flight()'s
+# own header comment describes) stands in ahead of dispatch_gap() here, so a
+# genuinely still-live real dispatch (queued/dispatched/running) from ANY
+# source is honored, not just this
+# script's own prior dispatches.
+# ---------------------------------------------------------------------------
+echo "--- Check 4: OCID-020 GTM certification (Part3+4) completion tracking ---"
+GTM_JSON="$(python3 "$GTM_PART34_CERTIFICATION_CHECK_PY" --sbr-path "$SUPERBOSS_REGISTER_PY" 2>/dev/null)"
+GTM_RC=$?
+GTM_GAP_COUNT="$(printf '%s' "$GTM_JSON" | py_field "d.get('gap_count', '')" 2>/dev/null)"
+if [ "$GTM_RC" -ne 0 ] || [ -z "$GTM_GAP_COUNT" ]; then
+  echo "  GTM cert check UNAVAILABLE (gtm_part34_certification_check.py exit $GTM_RC, could not determine real gap state) -- fails closed: NOT treated as a finding this tick, but also not silently OK -- see its own real stderr/output above if this persists."
+elif [ "$GTM_GAP_COUNT" -eq 0 ]; then
+  GTM_CERTIFIED="$(printf '%s' "$GTM_JSON" | py_field "d.get('certified', False)")"
+  GTM_REASON="$(printf '%s' "$GTM_JSON" | py_field "d.get('reason', '')")"
+  if [ "$GTM_CERTIFIED" = "True" ]; then
+    echo "  CERTIFIED: 0 real gap rows, every passed=1 row carries real evidence -- real Part3+4 GTM completion certificate written to ocid_master_standard_audit_log (OCID-020)"
+  else
+    echo "  0 real gap rows this tick, but NOT (re-)certified: ${GTM_REASON:-see gtm_part34_certification_check.py output above}"
+  fi
+else
+  GAP_LIST="$(printf '%s' "$GTM_JSON" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print('; '.join(f\"cat{r['category_index']} {r['category_name']} (passed={r['passed']})\" for r in d.get('gap_rows', [])))
+" 2>/dev/null)"
+  echo "  ${GTM_GAP_COUNT} real gap row(s) in gtm_certification_categories (OCID-020): ${GAP_LIST}"
+  GTM_SEARCH_JSON="$(python3 "$RESOURCE_GOVERNOR_PY" --query-umr --search "gtm_certification_categories OCID-020 UMR-20260815-033344-4799 UMR-20260815-042226-f271" --limit 20 2>/dev/null)"
+  GTM_IN_FLIGHT_UMR="$(printf '%s' "$GTM_SEARCH_JSON" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+hits = [m['umr_id'] for m in d.get('matches', []) if m.get('status') in ('queued', 'dispatched', 'running')]
+print(hits[0] if hits else '')
+" 2>/dev/null)"
+  if [ -n "$GTM_IN_FLIGHT_UMR" ]; then
+    echo "  IN-FLIGHT: real content search (resource_governor.py --query-umr --search) found ${GTM_IN_FLIGHT_UMR} already queued/dispatched/running and citing gtm_certification_categories/OCID-020/the known seed UMRs -- zero duplication, doing nothing this tick"
+  else
+    TARGET_KEY="gtm_part3_4_certification"
+    PROMPT="GOVERNING CHAIN: this task's own dispatching UMR (PM-sentinel tick), Check 4 (2026-08-15 Owner directive: complete Part3+4 GTM certification with minimum tokens, real work, audit, and completion certificate). REAL GAP FOUND: ${GTM_GAP_COUNT} real gtm_certification_categories row(s) for OCID-020 currently show passed=0 or passed IS NULL, re-queried live this tick (never a stale/hardcoded count or list): ${GAP_LIST}. Read the real current row state yourself first (do not trust this summary alone). Run a real pm_lifecycle.py orchestrator cycle targeting these real gaps: python3 pm_lifecycle.py run --title \"Close real OCID-020 GTM certification gaps\" --text \"<real per-category fix instructions citing the real gap list above>\" --repo compliance-tracker --tier 1 --medium ssh_session --no-relay (adjust flags as pm_lifecycle.py's own current --help documents; cite its own real usage, do not guess). Each real fix must call gtm_write_category_result.py to record a real pass/fail/blocked result with real, non-placeholder evidence_summary/evidence_json for the category it actually addresses -- never mark a category passed=1 without real evidence, and never fabricate completion of a category not actually fixed this cycle."
+    record_finding
+    dispatch_gap "$TARGET_KEY" "Drive OCID-020 GTM certification (Part3+4) gap closure (${GTM_GAP_COUNT} real gap row(s))" "$PROMPT" 1 "compliance-tracker"
+    emit_report_row "OCID-020" "gtm_certification_gap" false false false false
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # DECIDE-AND-FIX reconciliation (2026-08-13 addendum, UMR-20260813-105106-e9a7

@@ -83,8 +83,11 @@ this task queue -- see memory)
       DB (read-only outcome, since 7 real gap rows exist -- no write path
       exercised live): confirmed output matches the 7-gap-row state above.
 
+- [x] Committed (ef46b55) + pushed
+      worker/task-20260815-114156-pm-in-server--add-real-part3-4-gtm-cert.
+      Opened PR #424: https://github.com/FChecklist/veridian-scripts/pull/424
+
 ## Remaining
-- [ ] Commit + push this branch, open PR.
 - [ ] Get a real independent AUDIT:PASS before merge (per Rule 10 /
       mandatory-audit-check convention) -- never self-certify.
 - [ ] (Deliberately NOT in this task's scope: pm.md / SKILL.md text was

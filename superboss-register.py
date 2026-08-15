@@ -7377,6 +7377,176 @@ def cmd_update_gtm_category(args):
     print(json.dumps({"category_index": args.category_index, "updated": fields}, indent=2, default=str))
 
 
+def list_gtm_certification_categories(conn):
+    """Real, read-only listing of every real gtm_certification_categories
+    row -- the one real reuse point pm-sentinel-tick.sh's Check 4
+    (2026-08-15 Owner directive: 'update /pm, PM-in-server, veridian-server-
+    sentinel, PM-in-desktop to complete Part3+4 with minimum tokens, real
+    work, audit, and completion certificate', governing UMR UMR-20260815-
+    044235-a5e1) queries live every tick instead of hardcoding real category
+    state -- the real gap count/list changes as real work lands, so it must
+    never be cached across ticks or hardcoded into the caller. No CLI
+    subcommand previously existed to read this table -- gtm_write_category_
+    result.py / update-gtm-category above only ever WRITE one row at a time
+    by category_index; nothing before this read every row back."""
+    cur = conn.execute(
+        "SELECT category_index, category_name, ocid_number, passed, "
+        "evidence_summary, validated_at, last_updated_at "
+        "FROM gtm_certification_categories ORDER BY category_index"
+    )
+    return [dict(r) for r in cur]
+
+
+def cmd_list_gtm_categories(args):
+    """CLI entry point for list_gtm_certification_categories() above.
+
+    Usage:
+      python3 superboss-register.py list-gtm-categories
+    """
+    init_db_silent()
+    conn = _connect()
+    categories = list_gtm_certification_categories(conn)
+    conn.close()
+    print(json.dumps({"categories": categories}, indent=2, default=str))
+
+
+# ---------------------------------------------------------------------------
+# GTM Part3+4 completion certificate (2026-08-15 Owner directive, governing
+# UMR UMR-20260815-044235-a5e1) -- the one real, canonical write path for the
+# "completion certificate" the directive requires. Reuses the existing real
+# ocid_master_standard_audit_log (record_ocid_master_standard_audit_event()
+# above) as its durable store, rather than inventing a second parallel
+# append-only-log mechanism -- one new event_type, not a new table. Never
+# self-certifies: record_gtm_part3_4_completion_certificate() below
+# independently re-verifies its own caller-supplied evidence shape (every
+# cited category real passed=1, every cited category real non-empty/non-
+# placeholder evidence_summary) and raises rather than silently accepting a
+# hollow or partial claim. Idempotent: one real certificate ever, not one
+# per tick -- see gtm_part3_4_certificate_status() below.
+# ---------------------------------------------------------------------------
+GTM_PART3_4_CERTIFICATE_EVENT_TYPE = "gtm_part3_4_completion_certificate"
+
+# Real, deliberately narrow set of placeholder evidence_summary values that
+# must never be accepted as real completion evidence -- same "never fabricate
+# a pass" discipline gtm_write_category_result.py's own docstring already
+# documents for --result blocked. Compared case-insensitively, stripped.
+_GTM_PLACEHOLDER_EVIDENCE_VALUES = {
+    "", "tbd", "n/a", "na", "todo", "pending", "none", "placeholder",
+    "-", "tbd.", "n/a.", "unknown", "coming soon",
+}
+
+
+def gtm_part3_4_certificate_status(conn):
+    """Real, read-only, idempotency check: has a genuine Part3+4 GTM-
+    certification completion certificate already been recorded? Returns the
+    existing real ocid_master_standard_audit_log row (dict) if one exists
+    (the earliest one, in the genuinely-unexpected event more than one was
+    ever written), else None."""
+    _ensure_ocid_master_standard_audit_log_table(conn)
+    row = conn.execute(
+        "SELECT id, ocid_number, umr_id, detail_json, recorded_at "
+        "FROM ocid_master_standard_audit_log WHERE event_type=? "
+        "ORDER BY recorded_at ASC LIMIT 1",
+        (GTM_PART3_4_CERTIFICATE_EVENT_TYPE,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "ocid_number": row["ocid_number"],
+        "umr_id": row["umr_id"],
+        "detail": json.loads(row["detail_json"]),
+        "recorded_at": row["recorded_at"],
+    }
+
+
+def record_gtm_part3_4_completion_certificate(conn, evidence, umr_id=None):
+    """The one real, canonical write path for the Part3+4 GTM-certification
+    completion certificate. `evidence` MUST be a real dict with a
+    'categories' key holding the real, live gtm_certification_categories
+    rows the caller just queried this same tick (list_gtm_certification_
+    categories() above) -- never a fabricated or stale list. Re-verifies,
+    independently of the caller, that every cited category real passed=1
+    and carries a real non-empty, non-placeholder evidence_summary; raises
+    ValueError (refuses to write anything) the instant either check fails,
+    so a caller bug or a stale read can never produce a false certificate.
+
+    Idempotent: if a real certificate already exists (gtm_part3_4_
+    certificate_status()), returns that EXISTING row unchanged (created=
+    False) instead of inserting a second one -- one real certificate ever,
+    not one per tick.
+
+    Does NOT commit -- caller owns the transaction (_write_lock()), same
+    convention as update_gtm_certification_category()/
+    record_ocid_master_standard_audit_event() above."""
+    existing = gtm_part3_4_certificate_status(conn)
+    if existing is not None:
+        return existing, False
+    categories = evidence.get("categories")
+    if not isinstance(categories, list) or len(categories) == 0:
+        raise ValueError(
+            "record_gtm_part3_4_completion_certificate: evidence['categories'] "
+            "must be a real, non-empty list of the actual queried "
+            "gtm_certification_categories rows -- refusing to certify without it"
+        )
+    for c in categories:
+        if c.get("passed") != 1:
+            raise ValueError(
+                f"record_gtm_part3_4_completion_certificate: category_index="
+                f"{c.get('category_index')} real passed value is "
+                f"{c.get('passed')!r}, not 1 -- refusing to certify while any "
+                f"real gap remains (never self-certify on a stale/partial read)"
+            )
+        summary = (c.get("evidence_summary") or "").strip()
+        if summary.lower() in _GTM_PLACEHOLDER_EVIDENCE_VALUES:
+            raise ValueError(
+                f"record_gtm_part3_4_completion_certificate: category_index="
+                f"{c.get('category_index')} has empty/placeholder "
+                f"evidence_summary ({summary!r}) -- refusing to certify on "
+                f"unevidenced passed=1 (never accept passed=1 with empty "
+                f"evidence as real)"
+            )
+    record_ocid_master_standard_audit_event(
+        conn, GTM_PART3_4_CERTIFICATE_EVENT_TYPE, evidence,
+        ocid_number="OCID-020", umr_id=umr_id,
+    )
+    return gtm_part3_4_certificate_status(conn), True
+
+
+def cmd_record_gtm_part3_4_certificate(args):
+    """CLI entry point for record_gtm_part3_4_completion_certificate() above,
+    under _write_lock() -- same convention as cmd_update_gtm_category. Reads
+    --evidence-json (the real, live gtm_certification_categories rows this
+    same tick already queried via list-gtm-categories -- never re-derived or
+    fabricated here). Idempotent: prints the existing real certificate
+    (newly_created=false) rather than writing a duplicate if one already
+    exists.
+
+    Usage:
+      python3 superboss-register.py record-gtm-part3-4-certificate \\
+          --evidence-json '{"categories": [...]}' [--umr-id UMR-...]
+    """
+    try:
+        evidence = json.loads(args.evidence_json)
+    except json.JSONDecodeError as e:
+        print(json.dumps({"error": f"--evidence-json is not valid JSON: {e}"}))
+        sys.exit(1)
+    init_db_silent()
+    conn = _connect()
+    try:
+        with _write_lock():
+            cert, created = record_gtm_part3_4_completion_certificate(
+                conn, evidence, umr_id=args.umr_id
+            )
+            conn.commit()
+    except ValueError as e:
+        conn.close()
+        print(json.dumps({"error": str(e)}))
+        sys.exit(1)
+    conn.close()
+    print(json.dumps({"certificate": cert, "newly_created": created}, indent=2, default=str))
+
+
 def update_umr_task(conn, umr_id, **fields):
     """Partial UPDATE of an existing umr_tasks row -- only the columns passed
     as keyword args are touched. json_fields are dicts that get json.dumps'd
@@ -11060,6 +11230,29 @@ if __name__ == "__main__":
     p_gtmupd.add_argument("--fix-file-path", dest="fix_file_path", default=None)
     p_gtmupd.add_argument("--fix-pr-number", dest="fix_pr_number", type=int, default=None)
 
+    sub.add_parser("list-gtm-categories",
+                    help="2026-08-15 Owner directive (Part3+4 GTM-certification "
+                         "completion tracking, governing UMR UMR-20260815-044235-a5e1): "
+                         "real, read-only listing of every gtm_certification_categories "
+                         "row -- the one real query pm-sentinel-tick.sh's Check 4 makes "
+                         "live every tick")
+
+    p_gtmcert = sub.add_parser("record-gtm-part3-4-certificate",
+                                help="2026-08-15 Owner directive (governing UMR "
+                                     "UMR-20260815-044235-a5e1): the one real, canonical, "
+                                     "idempotent write path for the Part3+4 GTM-"
+                                     "certification completion certificate -- refuses "
+                                     "(raises) unless --evidence-json proves every cited "
+                                     "category real passed=1 with real non-empty, "
+                                     "non-placeholder evidence_summary")
+    p_gtmcert.add_argument("--evidence-json", dest="evidence_json", required=True,
+                            help="JSON object with a 'categories' key holding the real, "
+                                 "live gtm_certification_categories rows this tick already "
+                                 "queried via list-gtm-categories -- never fabricated")
+    p_gtmcert.add_argument("--umr-id", dest="umr_id", default=None,
+                            help="real governing UMR id to cite on the certificate record "
+                                 "(optional -- e.g. this tick's own dispatching UMR)")
+
     p_resetq = sub.add_parser("reset-umr-to-queued",
                                help="UMR-20260806-115605-854d: reset a real umr_tasks row from "
                                     "status='dispatched' back to 'queued' (clears ts_dispatched) -- "
@@ -11328,6 +11521,10 @@ if __name__ == "__main__":
         cmd_mark_umr_terminal(args)
     elif args.cmd == "update-gtm-category":
         cmd_update_gtm_category(args)
+    elif args.cmd == "list-gtm-categories":
+        cmd_list_gtm_categories(args)
+    elif args.cmd == "record-gtm-part3-4-certificate":
+        cmd_record_gtm_part3_4_certificate(args)
     elif args.cmd == "reset-umr-to-queued":
         cmd_reset_umr_to_queued(args)
     elif args.cmd == "add-issue":

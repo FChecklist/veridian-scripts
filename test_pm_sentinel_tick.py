@@ -195,6 +195,45 @@ def _umr_tasks_rows(copy_path):
     return rows
 
 
+def _seed_gtm_categories(copy_path, rows):
+    """Seed real gtm_certification_categories rows into the isolated schema-
+    only copy -- `rows` is a list of (category_index, category_name, passed,
+    evidence_summary) tuples. Real live schema requires category_name/
+    ocid_number/parent_umr_id/created_at/last_updated_at NOT NULL -- a
+    synthetic-but-real parent_umr_id/ocid_number is fine here since Check 4
+    never reads those two columns, only category_index/category_name/
+    passed/evidence_summary (see list_gtm_certification_categories())."""
+    conn = sqlite3.connect(copy_path)
+    for category_index, category_name, passed, evidence_summary in rows:
+        conn.execute(
+            "INSERT INTO gtm_certification_categories (category_index, "
+            "category_name, ocid_number, parent_umr_id, passed, "
+            "evidence_summary, created_at, last_updated_at) VALUES "
+            "(?,?,?,?,?,?,datetime('now'),datetime('now'))",
+            (category_index, category_name, "OCID-020", "UMR-TESTFIX-PARENT",
+             passed, evidence_summary),
+        )
+    conn.commit()
+    conn.close()
+
+
+def _insert_umr_row_with_inputs(copy_path, umr_id, task_identity, status, inputs):
+    """Insert one real umr_tasks row carrying a real inputs_json blob (title/
+    repo/prompt) -- _seeded_copy()'s own INSERT never sets inputs_json (no
+    existing test needed it), but gtm_orchestrator_in_flight()'s real content
+    match is over task_identity + inputs_json.prompt, so the in-flight-dedup
+    test below needs a real row that actually carries prompt text."""
+    conn = sqlite3.connect(copy_path)
+    conn.execute(
+        "INSERT INTO umr_tasks (umr_id, task_identity, ts_submitted, tier, "
+        "status, source_trigger, task_kind, inputs_json) VALUES "
+        "(?,?,datetime('now'),1,?,'owner_dispatch_gateway','veridian_task_create',?)",
+        (umr_id, task_identity, status, json.dumps(inputs)),
+    )
+    conn.commit()
+    conn.close()
+
+
 def _fake_notify_owner(tmpdir, log_path):
     fake_notify = os.path.join(tmpdir, "fake-notify-owner.py")
     with open(fake_notify, "w") as f:
@@ -1186,6 +1225,298 @@ class PmSentinelTickLiveDeployDriftInSyncTest(unittest.TestCase):
                 report_rows = [json.loads(line) for line in f if line.strip()]
             drift_rows = [r for r in report_rows if r["gap_type"] == "live_deploy_drift"]
             self.assertEqual(len(drift_rows), 0, msg=report_rows)
+
+
+class PmSentinelTickGtmCertGapDispatchTest(unittest.TestCase):
+    """Real test for Check 4 (2026-08-15 Owner directive, Part3+4 GTM-
+    certification completion, governing UMR UMR-20260815-044235-a5e1): real
+    gap rows (passed=0 or passed IS NULL) in gtm_certification_categories
+    dispatch exactly one real gap-closure task through the same
+    dispatch_gap() gateway every other check uses, citing the real live-
+    queried gap list -- never a hardcoded count.
+
+    Note: SUPERBOSS_REGISTER_PY is pointed at THIS checkout's own
+    superboss-register.py (not the default live-canonical-path resolution
+    every other check's tests rely on) because list-gtm-categories /
+    record-gtm-part3-4-certificate are new subcommands this same change
+    introduces -- the live server's copy will only gain them once this PR
+    is merged and synced (Check 0's own drift concern), so tests must be
+    explicit about which copy they exercise."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_gtmgap_test_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        self.copy_path = _seeded_copy(self.tmpdir, [])
+        # Real, live-queried gap state: 4 hard FAIL + 5 never-validated, same
+        # real shape the 2026-08-15 directive itself describes -- but the
+        # check must never assume this exact count, only what it queries.
+        _seed_gtm_categories(self.copy_path, [
+            (3, "security audit", 0, "REAL FAIL: xss on login form"),
+            (10, "load testing", None, None),
+            (11, "stress testing", None, None),
+            (13, "AI testing", None, None),
+            (14, "browser compatibility", 0, "REAL FAIL: 2/3 engines loaded"),
+            (15, "multi tenant testing", None, None),
+            (16, "role permission testing", None, None),
+            (23, "UX audit", 0, "REAL FAIL: 5 heuristics failed"),
+            (25, "production readiness audit", 0, "REAL FAIL: synthesis over 24 categories"),
+        ])
+        self.state_file = os.path.join(self.tmpdir, "pm-sentinel-inflight.json")
+        self.report_file = os.path.join(self.tmpdir, "pm-sentinel-tick-report.jsonl")
+        self.metrics_file = os.path.join(self.tmpdir, "pm-sentinel-tick.prom")
+        self.env = dict(os.environ)
+        self.env["PM_SENTINEL_LIVE_SCRIPTS_DIR"] = self.tmpdir
+        self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
+        self.env["SUPERBOSS_REGISTER_PY"] = os.path.join(HERE, "superboss-register.py")
+        self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
+        self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
+        self.env["PM_SENTINEL_REPORT_FILE"] = self.report_file
+        self.env["PM_SENTINEL_METRICS_FILE"] = self.metrics_file
+        self.env["DISPATCH_OWNER_TASK_SH"] = REAL_DISPATCH_OWNER_TASK_SH
+        self.env["VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS"] = ""
+        self.env["DISPATCH_TMUX_SESSION"] = "pm-sentinel-test-throwaway-session"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run_tick(self):
+        return subprocess.run(
+            [SENTINEL_SH], cwd=HERE, env=self.env,
+            capture_output=True, text=True, timeout=90,
+        )
+
+    def test_real_gap_rows_dispatch_one_real_gap_closure_task(self):
+        result = self._run_tick()
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+        self.assertIn("9 real gap row(s) in gtm_certification_categories", result.stdout)
+        self.assertIn("DISPATCHING for gtm-part3-4-gap:OCID-020", result.stdout)
+        self.assertIn("DISPATCHED gtm-part3-4-gap:OCID-020 ->", result.stdout)
+
+        rows = _umr_tasks_rows(self.copy_path)
+        self.assertEqual(len(rows), 1, msg=rows)
+        inputs = json.loads(rows[0]["inputs_json"])
+        prompt = inputs.get("prompt", "")
+        self.assertIn("gtm_certification_categories", prompt)
+        self.assertIn("security audit", prompt)
+        self.assertIn("pm_lifecycle.py", prompt)
+        self.assertEqual(inputs.get("repo"), "compliance-tracker")
+
+        with open(self.report_file) as f:
+            report_rows = [json.loads(line) for line in f if line.strip()]
+        gap_rows = [r for r in report_rows if r["gap_type"] == "gtm_certification_gap"]
+        self.assertEqual(len(gap_rows), 1, msg=report_rows)
+
+    def test_second_tick_does_not_duplicate_via_own_state_file(self):
+        first = self._run_tick()
+        self.assertEqual(first.returncode, 0, msg=first.stdout + first.stderr)
+        second = self._run_tick()
+        self.assertEqual(second.returncode, 0, msg=second.stdout + second.stderr)
+        self.assertIn("IN-FLIGHT:", second.stdout)
+        rows = _umr_tasks_rows(self.copy_path)
+        self.assertEqual(len(rows), 1, msg=rows)
+
+
+class PmSentinelTickGtmCertAlreadyInFlightTest(unittest.TestCase):
+    """Real test for SPEC step 2's content-matched pre-dispatch check
+    (gtm_orchestrator_in_flight()): a real gap exists, but a real, genuinely
+    independent orchestrator run (NOT one this sentinel itself dispatched --
+    no STATE_FILE entry for it at all, modeling the real seed UMRs
+    UMR-20260815-033344-4799 / UMR-20260815-042226-f271 that were dispatched
+    outside this sentinel) is already queued with real prompt text
+    referencing gtm_certification_categories/OCID-020. This tick must do
+    nothing for this gap -- zero duplication."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_gtminflight_test_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        self.copy_path = _seeded_copy(self.tmpdir, [])
+        _seed_gtm_categories(self.copy_path, [
+            (3, "security audit", 0, "REAL FAIL: xss on login form"),
+        ])
+        self.INFLIGHT_UMR = f"UMR-TESTFIX-20260101-000000-{uuid.uuid4().hex[:8]}"
+        _insert_umr_row_with_inputs(
+            self.copy_path, self.INFLIGHT_UMR,
+            f"owner-task-inflight-{uuid.uuid4().hex[:6]}", "queued",
+            {"title": "Close real GTM certification gaps",
+             "repo": "compliance-tracker",
+             "prompt": "Run pm_lifecycle.py to close real gtm_certification_categories gaps under OCID-020"},
+        )
+        self.state_file = os.path.join(self.tmpdir, "pm-sentinel-inflight.json")
+        self.report_file = os.path.join(self.tmpdir, "pm-sentinel-tick-report.jsonl")
+        self.metrics_file = os.path.join(self.tmpdir, "pm-sentinel-tick.prom")
+        self.env = dict(os.environ)
+        self.env["PM_SENTINEL_LIVE_SCRIPTS_DIR"] = self.tmpdir
+        self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
+        self.env["SUPERBOSS_REGISTER_PY"] = os.path.join(HERE, "superboss-register.py")
+        self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
+        self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
+        self.env["PM_SENTINEL_REPORT_FILE"] = self.report_file
+        self.env["PM_SENTINEL_METRICS_FILE"] = self.metrics_file
+        self.env["DISPATCH_OWNER_TASK_SH"] = REAL_DISPATCH_OWNER_TASK_SH
+        self.env["VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS"] = ""
+        self.env["DISPATCH_TMUX_SESSION"] = "pm-sentinel-test-throwaway-session"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run_tick(self):
+        return subprocess.run(
+            [SENTINEL_SH], cwd=HERE, env=self.env,
+            capture_output=True, text=True, timeout=90,
+        )
+
+    def test_genuinely_in_flight_orchestrator_run_blocks_duplicate_dispatch(self):
+        result = self._run_tick()
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+        self.assertIn("IN-FLIGHT: a real pm_lifecycle.py orchestrator run", result.stdout)
+        self.assertIn(self.INFLIGHT_UMR, result.stdout)
+        self.assertNotIn("DISPATCHING for gtm-part3-4-gap:OCID-020", result.stdout)
+
+        # No new umr_tasks row was created -- only the pre-seeded in-flight one.
+        rows = _umr_tasks_rows(self.copy_path)
+        self.assertEqual(len(rows), 1, msg=rows)
+        self.assertEqual(rows[0]["umr_id"], self.INFLIGHT_UMR)
+
+        # DECIDE-AND-FIX: an already-in-flight gap is not a new finding this
+        # tick (nothing new to decide) -- counters stay reconciled at 0/0.
+        self.assertIn("DECIDE-AND-FIX: 0 real finding(s) this tick, 0 same-tick decision(s)", result.stdout)
+        self.assertNotIn("DECIDE-AND-FIX VIOLATION", result.stdout)
+
+
+class PmSentinelTickGtmCertCompletionCertificateTest(unittest.TestCase):
+    """Real test for SPEC step 4: zero real gap rows AND every real passed=1
+    row carries real, non-empty, non-placeholder evidence -> a real,
+    timestamped, evidence-citing completion certificate is written via
+    superboss-register.py record-gtm-part3-4-certificate, exactly once
+    (idempotent across ticks)."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_gtmcert_test_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        self.copy_path = _seeded_copy(self.tmpdir, [])
+        _seed_gtm_categories(self.copy_path, [
+            (1, "static code analysis", 1, "Real eslint exit 0, tsc exit 0 against commit abc1234"),
+            (2, "API testing", 1, "Real 12/12 endpoint checks passed against staging"),
+            (15, "multi tenant testing", 1, "Real 4/4 test accounts, 0 cross-tenant leaks"),
+            (16, "role permission testing", 1, "Real 17/17 role x endpoint checks matched"),
+        ])
+        self.state_file = os.path.join(self.tmpdir, "pm-sentinel-inflight.json")
+        self.report_file = os.path.join(self.tmpdir, "pm-sentinel-tick-report.jsonl")
+        self.metrics_file = os.path.join(self.tmpdir, "pm-sentinel-tick.prom")
+        self.env = dict(os.environ)
+        self.env["PM_SENTINEL_LIVE_SCRIPTS_DIR"] = self.tmpdir
+        self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
+        self.env["SUPERBOSS_REGISTER_PY"] = os.path.join(HERE, "superboss-register.py")
+        self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
+        self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
+        self.env["PM_SENTINEL_REPORT_FILE"] = self.report_file
+        self.env["PM_SENTINEL_METRICS_FILE"] = self.metrics_file
+        self.env["DISPATCH_OWNER_TASK_SH"] = REAL_DISPATCH_OWNER_TASK_SH
+        self.env["VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS"] = ""
+        self.env["DISPATCH_TMUX_SESSION"] = "pm-sentinel-test-throwaway-session"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run_tick(self):
+        return subprocess.run(
+            [SENTINEL_SH], cwd=HERE, env=self.env,
+            capture_output=True, text=True, timeout=90,
+        )
+
+    def test_zero_gaps_all_evidenced_writes_real_certificate(self):
+        result = self._run_tick()
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+        self.assertIn("0 real gap rows in gtm_certification_categories", result.stdout)
+        self.assertIn("CERTIFIED: real Part3+4 GTM-certification completion certificate written", result.stdout)
+
+        conn = sqlite3.connect(self.copy_path)
+        conn.row_factory = sqlite3.Row
+        cert = conn.execute(
+            "SELECT * FROM ocid_master_standard_audit_log "
+            "WHERE event_type='gtm_part3_4_completion_certificate'"
+        ).fetchone()
+        conn.close()
+        self.assertIsNotNone(cert)
+        self.assertEqual(cert["ocid_number"], "OCID-020")
+        detail = json.loads(cert["detail_json"])
+        self.assertEqual(len(detail["categories"]), 4)
+        for c in detail["categories"]:
+            self.assertEqual(c["passed"], 1)
+            self.assertTrue((c["evidence_summary"] or "").strip())
+
+    def test_certificate_is_idempotent_across_ticks(self):
+        first = self._run_tick()
+        self.assertEqual(first.returncode, 0, msg=first.stdout + first.stderr)
+        self.assertIn("CERTIFIED: real Part3+4", first.stdout)
+
+        second = self._run_tick()
+        self.assertEqual(second.returncode, 0, msg=second.stdout + second.stderr)
+        self.assertNotIn("CERTIFIED: real Part3+4", second.stdout)
+        self.assertIn("already certified", second.stdout)
+
+        conn = sqlite3.connect(self.copy_path)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM ocid_master_standard_audit_log "
+            "WHERE event_type='gtm_part3_4_completion_certificate'"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 1)
+
+
+class PmSentinelTickGtmCertEvidenceGapTest(unittest.TestCase):
+    """Real test for SPEC step 4's own "never accept passed=1 with empty
+    evidence as real" guard: zero rows with passed=0/NULL, but one real
+    passed=1 row carries placeholder evidence_summary ("TBD") -- this must
+    be treated as a real, newly-found gap (dispatched for a real fix), and
+    no certificate may be written this tick."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="pm_sentinel_tick_gtmevidgap_test_")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        self.copy_path = _seeded_copy(self.tmpdir, [])
+        _seed_gtm_categories(self.copy_path, [
+            (1, "static code analysis", 1, "Real eslint exit 0, tsc exit 0"),
+            (2, "API testing", 1, "TBD"),
+        ])
+        self.state_file = os.path.join(self.tmpdir, "pm-sentinel-inflight.json")
+        self.report_file = os.path.join(self.tmpdir, "pm-sentinel-tick-report.jsonl")
+        self.metrics_file = os.path.join(self.tmpdir, "pm-sentinel-tick.prom")
+        self.env = dict(os.environ)
+        self.env["PM_SENTINEL_LIVE_SCRIPTS_DIR"] = self.tmpdir
+        self.env["SUPERBOSS_REGISTER_DB"] = self.copy_path
+        self.env["SUPERBOSS_REGISTER_PY"] = os.path.join(HERE, "superboss-register.py")
+        self.env["PM_SENTINEL_STATE_FILE"] = self.state_file
+        self.env["PM_SENTINEL_MAX_DISPATCH"] = "5"
+        self.env["PM_SENTINEL_REPORT_FILE"] = self.report_file
+        self.env["PM_SENTINEL_METRICS_FILE"] = self.metrics_file
+        self.env["DISPATCH_OWNER_TASK_SH"] = REAL_DISPATCH_OWNER_TASK_SH
+        self.env["VERIDIAN_GOVERNOR_STOP_WORK_ORDER_TASK_IDS"] = ""
+        self.env["DISPATCH_TMUX_SESSION"] = "pm-sentinel-test-throwaway-session"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run_tick(self):
+        return subprocess.run(
+            [SENTINEL_SH], cwd=HERE, env=self.env,
+            capture_output=True, text=True, timeout=90,
+        )
+
+    def test_placeholder_evidence_on_passed_row_dispatches_fix_not_certificate(self):
+        result = self._run_tick()
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+        self.assertIn("DISPATCHING for gtm-part3-4-evidence-gap:OCID-020", result.stdout)
+        self.assertIn("2:API testing", result.stdout)
+        self.assertNotIn("CERTIFIED: real Part3+4", result.stdout)
+
+        conn = sqlite3.connect(self.copy_path)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM ocid_master_standard_audit_log "
+            "WHERE event_type='gtm_part3_4_completion_certificate'"
+        ).fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 0)
 
 
 if __name__ == "__main__":

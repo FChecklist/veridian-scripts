@@ -227,9 +227,26 @@ def run_check_duplicate_battery(task_identity, title, prompt):
     docstring establishes for --source ai_agent callers.
 
     Returns the parsed JSON dict from task-gateway.py submit, or None on any
-    failure -- fails open, same philosophy as find_in_flight_duplicate()
-    above: a broken check here must never silently block a real, legitimate
-    DIRECTIVE.yaml-driven dispatch."""
+    failure.
+
+    Real fix (root-cause evidence handed to UMR-20260806-093654-7566, parent
+    UMR-20260806-071025-1d28): this used to be documented as "fails open,
+    same philosophy as find_in_flight_duplicate() above" -- but unlike that
+    function (which only ever *skips an additional, best-effort check*),
+    a broken call here was silently treated by process_one() as "no
+    duplicate found", letting a submission through with ZERO real duplicate
+    verification. Confirmed live via the veridian-directive-engine.service
+    journal (restart 2026-08-06T10:17:50Z): "check-duplicate battery call
+    failed, fail-open, proceeding" immediately followed by "submitted,
+    umr_id=UMR-20260730-041943-093a" for PHASE-3-BUILD-CALC (and the same
+    pair for PHASE-4-BUILD-WORKFLOW) -- resubmitting reused that row's own
+    terminal umr_id (resource_governor.py submit()'s Rule-1 reuse-on-resubmit
+    path), flipping an already-killed row back to queued/running. A duplicate
+    check that cannot verify must never be treated as "verified: no
+    duplicate" -- the caller (process_one()) now treats None as a real,
+    fail-closed blocker: skip the submission and log it for Owner review,
+    same as an actual duplicate_found=true result, rather than proceeding
+    past it."""
     text = f"{title}\n\n{prompt}".strip() if prompt else (title or task_identity)
     try:
         result = subprocess.run(
@@ -241,16 +258,33 @@ def run_check_duplicate_battery(task_identity, title, prompt):
         )
         return json.loads(result.stdout.strip())
     except Exception as e:
-        log_status(task_identity, f"check-duplicate battery call failed, fail-open, proceeding: {e}")
+        log_status(task_identity, f"check-duplicate battery call failed -- fail-closed, "
+                                   f"skipping submission (never assume no-duplicate on a "
+                                   f"broken check): {e}")
         return None
 
 
-def submit_task(task_identity, tier, title, prompt, repo):
+def submit_task(task_identity, tier, title, prompt, repo, force_new_umr_id=False):
+    """force_new_umr_id (root-cause evidence handed to UMR-20260806-093654-7566,
+    parent UMR-20260806-071025-1d28): opt-in, additive -- every existing real
+    caller omits it (defaults False) and behavior is unchanged. Set True by
+    process_one() below on exactly the one real resubmission-of-a-terminal-row
+    retry it already tracks via _mark_retried()/_has_already_retried() --
+    resource_governor.py's submit() otherwise applies its own generic Rule-1
+    reuse-on-resubmit (same task_identity -> reuse the prior row's umr_id),
+    which is correct for its OTHER real caller (dispatch-tick.py resuming a
+    still-non-terminal, merely-interrupted worker) but is exactly the killed-
+    row-resurrection defect for this module's terminal-retry path: reusing a
+    terminal row's own umr_id flips it back to queued/running instead of
+    minting a fresh, independent UMR for the new attempt. See
+    resource_governor.py submit()'s own handling of this field."""
     spec = {
         "task_identity": task_identity,
         "task_kind": "veridian_task_create",
         "inputs": {"repo": repo, "title": title, "prompt": prompt},
     }
+    if force_new_umr_id:
+        spec["force_new_umr_id"] = True
     # 2026-07-29 adversarial-test fix: task_identity used to be embedded
     # directly into the spec filename. A task_identity containing "../"
     # sequences would escape SPEC_TMP_DIR when the file is later opened
@@ -319,6 +353,16 @@ def process_one(entry):
         return "completed"
     if status in ("queued", "dispatched", "running"):
         return status
+    # Real fix (root-cause evidence handed to UMR-20260806-093654-7566, parent
+    # UMR-20260806-071025-1d28): captured BEFORE the retry-once branch below
+    # mutates/consumes `status` for its own bookkeeping -- this is the one real
+    # signal that the submit_task() call at the bottom of this function (if
+    # reached) is a resubmission of a row that already went terminal, not a
+    # brand-new first-ever submission. Passed through as force_new_umr_id so
+    # that resubmission can never reuse (and thereby resurrect) the terminal
+    # row's own umr_id -- see submit_task()'s own docstring for the full real
+    # incident this closes.
+    is_terminal_resubmission = status in ("failed", "rejected_duplicate", "killed")
     if status in ("failed", "rejected_duplicate", "killed"):
         # Real fix (dispatch-queue-starvation investigation, UMR-20260806-090229-f2a7,
         # parent UMR-20260806-071025-1d28): this branch used to gate its real
@@ -400,7 +444,29 @@ def process_one(entry):
     battery = run_check_duplicate_battery(
         task_identity, entry.get("title", task_identity), entry.get("prompt", ""),
     )
-    if battery and battery.get("duplicate_found"):
+    # Real fix (root-cause evidence handed to UMR-20260806-093654-7566, parent
+    # UMR-20260806-071025-1d28): battery is None ONLY when run_check_duplicate_battery()
+    # itself failed (subprocess/timeout/unparseable output) -- previously that was
+    # silently treated the same as "ran fine, found nothing" and fell straight through
+    # to submit_task() below (fail OPEN). Confirmed live via the veridian-directive-
+    # engine.service journal (restart 2026-08-06T10:17:50Z): "check-duplicate battery
+    # call failed, fail-open, proceeding" immediately followed by "submitted,
+    # umr_id=UMR-20260730-041943-093a" for PHASE-3-BUILD-CALC, and the same pair for
+    # PHASE-4-BUILD-WORKFLOW. A duplicate check that cannot verify must skip the
+    # submission and log a real blocker -- never proceed on the assumption that no
+    # duplicate exists (fail CLOSED, symmetric with the duplicate_found=true branch
+    # just below).
+    if battery is None:
+        note_needs_review(
+            task_identity,
+            "task-gateway.py submit's check-duplicate/search/query-knowledge battery "
+            "call failed (could not verify duplicate status) -- fail-closed, submission "
+            "skipped rather than assumed safe",
+        )
+        log_status(task_identity, "skipped -- check-duplicate battery call failed, "
+                                   "fail-closed, not submitting")
+        return "duplicate_check_failed_fail_closed"
+    if battery.get("duplicate_found"):
         note_needs_review(
             task_identity,
             f"task-gateway.py submit's check-duplicate/search/query-knowledge battery "
@@ -413,6 +479,7 @@ def process_one(entry):
     result = submit_task(
         task_identity, entry.get("tier", 2), entry.get("title", task_identity),
         entry.get("prompt", ""), entry.get("repo", "compliance-tracker"),
+        force_new_umr_id=is_terminal_resubmission,
     )
     if not result.get("accepted"):
         if result.get("reason") != "duplicate":

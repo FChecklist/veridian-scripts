@@ -312,21 +312,50 @@ PYEOF
     # in locks_lock_inode_wai for 582-1376s in one sample, chronic not a
     # blip), i.e. effective concurrency was 1, not the configured ceiling of
     # 5 -- a long in-process wait just made every OTHER queued worker slot
-    # sit idle instead of picking up different, unblocked work. Also: this
-    # host's systemd --user manager has BUILD_LOCK_WAIT_SECONDS=1700/
-    # GATE_STEP_TIMEOUT_SECONDS=1800 set in its own global in-memory
-    # environment (confirmed via live /proc/<pid>/environ on
-    # worker-entrypoint.sh's PID and its full descendant chain; origin:
-    # systemctl --user show-environment on manager PID 1023, no file/unit
-    # anywhere sets it, undocumented -- see UMR-20260806-123316-cf9f
-    # completion evidence for the full trail). Because bash's ${VAR:-default}
-    # only applies when VAR is genuinely unset, a plain default-value edit to
-    # BUILD_LOCK_WAIT_SECONDS here would have done nothing real -- the
-    # deliberate fix below is a fixed, hardcoded 20s short wait with NO
-    # ${...:-...} env-var indirection at all for this specific value, so it
-    # can never be silently overridden by that (or any future) global
-    # systemd-manager-level environment value. Same reasoning applies to the
-    # 700s starvation-guard fallback inside acquire_build_lock_fd below.
+    # sit idle instead of picking up different, unblocked work. Also
+    # (HISTORICAL, no longer live -- see 2026-08-15 re-verification below): at
+    # the time of UMR-20260806-123316-cf9f this host's systemd --user manager
+    # had BUILD_LOCK_WAIT_SECONDS=1700/GATE_STEP_TIMEOUT_SECONDS=1800 set in
+    # its own global in-memory environment (confirmed via live
+    # /proc/<pid>/environ on worker-entrypoint.sh's PID and its full
+    # descendant chain; origin: systemctl --user show-environment on manager
+    # PID 1023, no file/unit anywhere sets it, undocumented -- see
+    # UMR-20260806-123316-cf9f completion evidence for the full trail).
+    # Because bash's ${VAR:-default} only applies when VAR is genuinely
+    # unset, a plain default-value edit to BUILD_LOCK_WAIT_SECONDS here would
+    # have done nothing real -- the deliberate fix below is a fixed,
+    # hardcoded 20s short wait with NO ${...:-...} env-var indirection at all
+    # for this specific value, so it can never be silently overridden by
+    # that (or any future) global systemd-manager-level environment value.
+    # Same reasoning applies to the 700s starvation-guard fallback inside
+    # acquire_build_lock_fd below.
+    #
+    # RE-VERIFIED 2026-08-15 (PM-approval-of-proposal-62 follow-up dispatch,
+    # task-20260815-044325-pm-approval-of-proposal-62-build-lock-co, governing
+    # chain UMR-20260806-071025-1d28 / UMR-20260806-042531-be9c): live
+    # systemctl --user show-environment on this same host no longer shows
+    # BUILD_LOCK_WAIT_SECONDS or GATE_STEP_TIMEOUT_SECONDS at all -- manager
+    # PID 1023 (the one that held the stale global override) no longer
+    # exists, so a manager restart at some point after 2026-08-06 organically
+    # cleared it. This changes nothing about the fix below (it was already
+    # hardcoded with zero indirection, specifically so this class of drift
+    # could never matter) -- recorded here only so a future reader does not
+    # go looking for a global override that is confirmed gone.
+    # Proposal 62 (pm_decisions_pending row 62) and both of the PM's
+    # mandatory conditions were already fully closed BEFORE this dispatch:
+    # condition 1 (root cause) here and in UMR-20260806-123316-cf9f's own
+    # completion evidence; condition 2 (real before/after throughput proof
+    # plus a newly-discovered requeue-identity defect) in PR #234
+    # (PROPOSAL_62_THROUGHPUT_PROOF_2026-08-06T2359Z.md). The defect PR #234
+    # found (9 of 11 real contention events unable to use the clean requeue
+    # path because their task had no umr_tasks row) was itself independently
+    # root-caused and fixed later in PR #301 (quality-gate: stop faking a
+    # build-gate failure when a task has no umr_tasks row to requeue, merged
+    # 2026-08-13T23:02:15Z, commit d02176b). This dispatch re-verified all of
+    # the above live and found it unchanged and still correctly deployed
+    # (diff against the live /opt/veridian/scripts checkout: identical); no
+    # functional code change was warranted, so this comment-accuracy
+    # correction is the real, cited change this PR carries.
     #
     # New shape: try for a short, fixed BUILD_LOCK_SHORT_WAIT_SECONDS. If
     # that fails, do NOT block here at all -- cleanly give the slot back

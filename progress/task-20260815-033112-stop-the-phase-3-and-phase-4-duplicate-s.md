@@ -45,9 +45,11 @@ under a *child UMR of this same governing UMR*.
 
 ## Remaining
 
-- [ ] None — SPEC steps 2/3/5/6 (close the rows, patch the code, wait-and-recount, open a fix PR) do not apply: there is nothing genuinely broken right now to close, patch, or re-measure. Per the hard limits ("do not close any row that still has genuinely live work behind it," "do not mark anything completed that did not really complete") and per hard rule 2 (zero duplication), redoing an already-merged fix or force-closing already-terminal rows would itself be the exact waste this SPEC is nominally trying to prevent.
-- [ ] Record completion evidence via `agent_work_briefing.py record-completion` (this doc-only finding).
-- [ ] Commit + push this progress file; open a PR documenting the false-premise finding (no code change — none is warranted).
+- [x] SPEC steps 2/3/5/6 (close the rows, patch the code, wait-and-recount, open a fix PR) do not apply: there is nothing genuinely broken right now to close, patch, or re-measure. Per the hard limits ("do not close any row that still has genuinely live work behind it," "do not mark anything completed that did not really complete") and per hard rule 2 (zero duplication), redoing an already-merged fix or force-closing already-terminal rows would itself be the exact waste this SPEC is nominally trying to prevent.
+- [x] Recorded completion evidence via `agent_work_briefing.py record-completion --umr-id UMR-20260806-092722-e526` (this doc-only finding, `AGENT-20260806-092722-e526`).
+- [x] Committed + pushed this progress file (`c38589f`); opened PR documenting the false-premise finding (no code change — none is warranted): **https://github.com/FChecklist/veridian-scripts/pull/402**
+
+None remaining.
 
 ## Hard-limit compliance
 

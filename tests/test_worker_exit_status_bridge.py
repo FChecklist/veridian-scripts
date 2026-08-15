@@ -141,6 +141,73 @@ def test_self_reported_negative_writes_failed_real_end_to_end(
         assert "mark-umr-terminal" in f.read()
 
 
+def test_blocked_preflight_note_propagates_real_reason_code(monkeypatch, scratch_db, scratch_ai_os):
+    """task-20260815-230158-propagate-the-real-preflight-denial-reas: the real
+    diagnosability fix. When task.yaml's own last checkpoint is status='blocked' with a
+    real preflight-hard-stop note (worker-entrypoint.sh's own
+    `checkpoint ... --note "PRE-FLIGHT HARD STOP ($GUARD_REASON): $GUARD_DETAIL"` --
+    real, live examples: reason_code tight_task_schema_violation citing an unrecognized
+    complexity tier, and reason_code no_runnable_verification_command_in_success_criteria),
+    the register row's own `reason` column must carry that real note text -- not just the
+    generic 'worker-exit-status-bridge (ExecStopPost, ...)' boilerplate that names only
+    the reporting component -- so an operator or PM tier can read WHY a row failed
+    straight from the register, without SSHing in to read task.yaml by hand."""
+    mod = _load_module()
+    monkeypatch.setattr(mod, "AI_OS", scratch_ai_os)
+    monkeypatch.setenv("SUPERBOSS_REGISTER_DB", scratch_db)
+
+    task_id = "test-task-preflight-blocked"
+    unit_name = "veridian-worker@test-task-preflight-blocked.service"
+    umr_id = "UMR-TEST-PREFLIGHT-BLOCKED"
+    real_note = (
+        "PRE-FLIGHT HARD STOP (tight_task_schema_violation): Complexity tier moderate "
+        "is not recognized. Please use one of: mechanical, integrative, judgment."
+    )
+    _insert_umr_row(scratch_db, umr_id, unit_name, status="running")
+    _write_task_yaml(scratch_ai_os, task_id, "blocked", extra_checkpoints=None)
+    task_dir = os.path.join(scratch_ai_os, "tasks", task_id)
+    with open(os.path.join(task_dir, "task.yaml")) as f:
+        task_doc = yaml.safe_load(f)
+    task_doc["checkpoints"][-1]["note"] = real_note
+    with open(os.path.join(task_dir, "task.yaml"), "w") as f:
+        yaml.safe_dump(task_doc, f)
+
+    mod.run(task_id, "worker")
+
+    row = _real_row(scratch_db, umr_id)
+    assert row["status"] == "failed", f"real scratch-DB row: {row}"
+    assert "tight_task_schema_violation" in row["reason"], f"real reason: {row['reason']!r}"
+    assert real_note in row["reason"], f"real reason: {row['reason']!r}"
+    assert not row["reason"].startswith("worker-exit-status-bridge"), (
+        f"reason must not merely lead with the reporter's own name: {row['reason']!r}"
+    )
+
+
+def test_normally_completed_task_reason_path_unchanged(monkeypatch, scratch_db, scratch_ai_os):
+    """The unchanged path this fix must not touch: a self-reported negative status with
+    NO real note (e.g. a plain 'failed' checkpoint, same shape a genuinely-exhausted
+    quality-gate retry loop writes) still gets the pre-existing generic
+    'worker-exit-status-bridge (ExecStopPost, ...)' reason -- there is no real per-cause
+    note to surface instead, so the boilerplate is the correct, unchanged behavior."""
+    mod = _load_module()
+    monkeypatch.setattr(mod, "AI_OS", scratch_ai_os)
+    monkeypatch.setenv("SUPERBOSS_REGISTER_DB", scratch_db)
+
+    task_id = "test-task-normal-failed-no-note"
+    unit_name = "veridian-worker@test-task-normal-failed-no-note.service"
+    umr_id = "UMR-TEST-NORMAL-FAILED"
+    _insert_umr_row(scratch_db, umr_id, unit_name, status="running")
+    _write_task_yaml(scratch_ai_os, task_id, "failed")
+
+    mod.run(task_id, "worker")
+
+    row = _real_row(scratch_db, umr_id)
+    assert row["status"] == "failed", f"real scratch-DB row: {row}"
+    assert row["reason"].startswith("worker-exit-status-bridge"), (
+        f"unchanged path must still lead with the reporter's own name: {row['reason']!r}"
+    )
+
+
 @pytest.mark.parametrize("unit_kind", ["worker", "supervisor"])
 @pytest.mark.parametrize("last_status", ["completed", "in_progress", "pending", "pending_review"])
 def test_non_negative_statuses_never_write(monkeypatch, scratch_db, scratch_ai_os, unit_kind, last_status):

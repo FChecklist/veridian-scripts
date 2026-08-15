@@ -263,14 +263,38 @@ def run(task_id, unit_kind="worker"):
                                   f"not a self-reported negative outcome, leaving at running")
         return
 
-    reason = (
-        f"worker-exit-status-bridge (ExecStopPost, STEP 2 fix task-20260807-052027-platform-"
-        f"integrity--worker-units-exit-0{'  + supervisor-side extension UMR-20260813-090037-9a34' if unit_kind == 'supervisor' else ''}): "
-        f"unit {unit_name} stopped with task.yaml's own last "
-        f"checkpoint status={last_status!r} (a self-reported, no-more-automatic-progress "
-        f"outcome) -- bridging to umr_tasks so the row does not stay at 'running' forever with "
-        f"no further exit ever coming."
-    )
+    # task-20260815-230158-propagate-the-real-preflight-denial-reas: for the one real,
+    # common case that matters most operationally -- a preflight hard stop
+    # (worker-entrypoint.sh's PREFLIGHT-GUARD-BLOCK, e.g. tight_task_schema_violation,
+    # credit_accountant_rejected, circuit_breaker_tripped, ...) -- task.yaml's own last
+    # checkpoint note already carries the real, specific, self-describing rejection
+    # reason (e.g. "PRE-FLIGHT HARD STOP (tight_task_schema_violation): Complexity tier
+    # moderate is not recognized. Please use one of: mechanical, integrative,
+    # judgment."). Previously this hook discarded that note entirely and wrote only its
+    # own generic "worker-exit-status-bridge (ExecStopPost, ...)" boilerplate as the
+    # register reason -- which names the COMPONENT THAT REPORTED the exit, not the
+    # cause, forcing every reader of a failed register row to SSH in and read task.yaml
+    # by hand to learn why. When that real note exists, use IT as the register reason
+    # (so tight_task_schema_violation-shaped rejections are diagnosable straight from
+    # the register), with a short suffix identifying this bridge as the writer -- never
+    # leading with the bridge name. Every other self-reported-negative status (no note,
+    # or a non-'blocked' status such as plain 'failed'/'cancelled'/etc., which this
+    # hook's own generic boilerplate has always covered) is completely unaffected.
+    checkpoint_note = None
+    if last_status == "blocked":
+        checkpoint_note = checkpoints[-1].get("note") if checkpoints else task.get("note")
+
+    if checkpoint_note:
+        reason = f"{checkpoint_note} [via worker-exit-status-bridge]"
+    else:
+        reason = (
+            f"worker-exit-status-bridge (ExecStopPost, STEP 2 fix task-20260807-052027-platform-"
+            f"integrity--worker-units-exit-0{'  + supervisor-side extension UMR-20260813-090037-9a34' if unit_kind == 'supervisor' else ''}): "
+            f"unit {unit_name} stopped with task.yaml's own last "
+            f"checkpoint status={last_status!r} (a self-reported, no-more-automatic-progress "
+            f"outcome) -- bridging to umr_tasks so the row does not stay at 'running' forever with "
+            f"no further exit ever coming."
+        )
     try:
         result = subprocess.run(
             ["python3", SUPERBOSS_REGISTER, "mark-umr-terminal",

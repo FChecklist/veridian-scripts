@@ -1680,6 +1680,53 @@ _TARGET_ID_SCRIPT_NAME_RE = re.compile(r'(?<![\w/.-])([A-Za-z0-9_-]+\.(?:py|sh))
 # duplicate-PR guard).
 _TARGET_ID_SCRIPT_NAME_BOILERPLATE_EXCLUDED = {"resource_governor.py", "superboss-register.py"}
 
+# UMR-20260815-052932-e80b real fix (task-20260815-145619, three consecutive
+# real refusals, 2026-08-15): task-20260815-135327-d6ad ("reject invalid
+# complexity_tier constant in pm_lifecycle so minted tasks pass schema
+# validation", a real, genuine edit of pm_lifecycle.py) was refused as a
+# duplicate of the already-queued UMR-20260815-044235-a5e1 ("PM-in-Server:
+# add real Part3+4 GTM-cert completion tracking to pm-sentinel-tick.sh"),
+# which does not touch pm_lifecycle.py at all. a5e1's real prompt mentions
+# "pm_lifecycle.py" exactly twice -- "check whether a real pm_lifecycle.py
+# orchestrator run ... is already in flight" and "dispatch exactly one real
+# pm_lifecycle.py run via this file's own dispatch_gap()" -- both naming it
+# as something a5e1's OWN real target (pm-sentinel-tick.sh) dispatches/runs,
+# never as something a5e1 edits. a5e1's prompt declares no TARGET:/SCOPE:
+# section (this false-positive class was not yet known when it was
+# written), so the UMR-20260814-034424-ded4 scope-aware restriction above
+# never engages on its side: the whole text is scanned in fallback mode and
+# both "orchestrator run"/"run" citations are extracted exactly like a real
+# edit target, producing a false script:pm_lifecycle.py overlap against
+# d6ad's genuine, unrelated one. This is the real, one-directional gap that
+# incident exposed: today's scope-aware restriction only ever narrows the
+# NEW dispatch's own identifiers (via its own declared TARGET:/SCOPE:
+# section); a historical stored row that predates the TARGET:/SCOPE:
+# convention -- essentially every row in the table -- gets no equivalent
+# narrowing at all, no matter how clearly its own prose distinguishes "what
+# I run" from "what I edit".
+#
+# Real, deterministic, narrow fix for this one well-evidenced shape: a
+# script/path identifier immediately followed by "run", "orchestrator run",
+# or bare "orchestrator" names that occurrence as something being INVOKED,
+# not edited, and is excluded from contributing an identifier -- this
+# applies at the individual regex-match level, so it works both inside a
+# declared TARGET:/SCOPE: section and (the actual fix) in fallback
+# full-text-scan mode, on either side of a find_target_identifier_duplicate()
+# comparison, with no dependency on whether that particular text ever
+# declares a section of its own. A name that also appears elsewhere in the
+# same text in a genuine, non-citation context is still extracted normally
+# from that occurrence -- this excludes only the specific citation
+# occurrence, never blanket-excludes the identifier by name (unlike
+# _TARGET_ID_SCRIPT_NAME_BOILERPLATE_EXCLUDED above, which does, and stays
+# unchanged). Same "narrow, evidenced, real-incident-driven exclusion"
+# precedent as that set and as _DISCLOSURE_CITATION_RE; deliberately does
+# NOT touch umr:/pr: extraction, which has its own separate real-incident
+# history and no false-positive of this shape.
+_TARGET_ID_INVOCATION_CITATION_TRAILING_RE = re.compile(
+    r'\s*(?:orchestrator\s+)?(?:run|orchestrator|invocation|execution)\b',
+    re.IGNORECASE,
+)
+
 # UMR-20260814-034424-ded4 real fix (PM Sentinel first-hand reproduction,
 # 2026-08-14T03:38-03:42Z UTC): three consecutive real refusals of
 # legitimate, non-duplicate P0 dispatches, all racked up against the SAME
@@ -1840,7 +1887,21 @@ def extract_target_identifiers(text, default_repo=None):
     ONLY):/NOT-(A-)TARGET: section is stripped and the remaining text is
     scanned in full, exactly as before this fix (the real 2026-08-13
     same-PR-branch collisions this guard exists for used none of this
-    structure and are unaffected)."""
+    structure and are unaffected).
+
+    UMR-20260815-052932-e80b real fix (see the
+    _TARGET_ID_INVOCATION_CITATION_TRAILING_RE module comment above for the
+    real incident): a script/path identifier immediately followed by "run",
+    "orchestrator run", or bare "orchestrator" is excluded -- that specific
+    occurrence names the identifier as something being invoked/dispatched,
+    not edited. Unlike the TARGET:/SCOPE: section restriction above, this
+    applies with no dependency on whether the surrounding text declares any
+    section at all, so it is the real fix for the historical/stored-row
+    side of a find_target_identifier_duplicate() comparison too -- a row
+    written before this false-positive class was known, with no
+    TARGET:/SCOPE: framing of its own, no longer has a bare "X orchestrator
+    run" citation mistaken for a real edit target just because its text
+    falls into fallback (no-section) scanning."""
     ids = set()
     text = text or ""
 
@@ -1875,11 +1936,15 @@ def extract_target_identifiers(text, default_repo=None):
             ids.add(f"pr:{default_repo.lower()}#{m.group(1)}")
 
     for m in _TARGET_ID_FILE_PATH_RE.finditer(text):
+        if _TARGET_ID_INVOCATION_CITATION_TRAILING_RE.match(text, m.end()):
+            continue
         ids.add(f"path:{m.group(0)}")
 
     for m in _TARGET_ID_SCRIPT_NAME_RE.finditer(text):
         name = m.group(1)
         if name in _TARGET_ID_SCRIPT_NAME_BOILERPLATE_EXCLUDED:
+            continue
+        if _TARGET_ID_INVOCATION_CITATION_TRAILING_RE.match(text, m.end()):
             continue
         ids.add(f"script:{name}")
 

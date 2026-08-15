@@ -1706,11 +1706,11 @@ _TARGET_ID_SCRIPT_NAME_BOILERPLATE_EXCLUDED = {"resource_governor.py", "superbos
 # I run" from "what I edit".
 #
 # Real, deterministic, narrow fix for this one well-evidenced shape: a
-# script/path identifier immediately followed by "orchestrator" (bare or
-# "orchestrator run") or "run via" names that occurrence as something being
+# script/path identifier immediately followed by literally "orchestrator
+# run" or literally "run via" names that occurrence as something being
 # INVOKED, not edited, and is excluded from contributing an identifier.
-# Two independent-audit fixes (pre-merge review of this same UMR), both
-# narrowing the trigger condition further, neither weakening it:
+# Three independent-audit fixes (pre-merge review of this same UMR), each
+# narrowing the trigger condition further, none weakening it:
 #
 #   1. The first version of this regex also matched a BARE trailing "run"
 #      with no qualifier at all -- e.g. "worker.py run() function" or
@@ -1726,14 +1726,23 @@ _TARGET_ID_SCRIPT_NAME_BOILERPLATE_EXCLUDED = {"resource_governor.py", "superbos
 #      "backup_rotate.sh run by cron every night leaves a stale
 #      lockfile"), the exact same failure class as (1), just narrowed to
 #      fewer trigger words instead of eliminated.
+#   3. The third version made the trailing "run" after "orchestrator"
+#      optional (bare "orchestrator" alone was enough to exclude) --
+#      independent audit found this fires on ordinary prose naming the
+#      real pm_lifecycle.py "orchestrator" component/class itself (e.g.
+#      "pm_lifecycle.py orchestrator has a real deadlock when two tasks
+#      race", "refactor the pm_lifecycle.py orchestrator to remove the
+#      real duplicate retry path"), again the same failure class, and
+#      unneeded: both real a5e1 citations already contain literal
+#      "orchestrator run", never bare "orchestrator" alone.
 #
-# Narrowed to require "orchestrator" or literally "run via" -- both
-# present verbatim in the real a5e1 incident text ("pm_lifecycle.py
-# orchestrator run", "pm_lifecycle.py run via this file's own
-# dispatch_gap()") and nothing broader than what that real incident
-# actually evidences. Any future real incident that needs a different
-# preposition recognized should add it here with its own real evidence,
-# not by analogy.
+# Narrowed to require literally "orchestrator run" or literally "run via"
+# -- both present verbatim, together, in the real a5e1 incident text
+# ("pm_lifecycle.py orchestrator run", "pm_lifecycle.py run via this
+# file's own dispatch_gap()") and nothing broader than what that real
+# incident actually evidences. Any future real incident that needs a
+# different phrase recognized should add it here with its own real
+# evidence, not by analogy.
 #
 # Independent-audit fix, same review: this exclusion is deliberately
 # applied ONLY to fallback (no declared TARGET:/SCOPE: section) scanning,
@@ -1755,7 +1764,7 @@ _TARGET_ID_SCRIPT_NAME_BOILERPLATE_EXCLUDED = {"resource_governor.py", "superbos
 # NOT touch umr:/pr: extraction, which has its own separate real-incident
 # history and no false-positive of this shape.
 _TARGET_ID_INVOCATION_CITATION_TRAILING_RE = re.compile(
-    r'\s*(?:orchestrator(?:\s+run)?\b|run\s+via\b)',
+    r'\s*(?:orchestrator\s+run\b|run\s+via\b)',
     re.IGNORECASE,
 )
 
@@ -1923,11 +1932,11 @@ def extract_target_identifiers(text, default_repo=None):
 
     UMR-20260815-052932-e80b real fix (see the
     _TARGET_ID_INVOCATION_CITATION_TRAILING_RE module comment above for the
-    real incident and its own two independent-audit narrowings): a
-    script/path identifier immediately followed by "orchestrator"/
-    "orchestrator run" or literally "run via" is excluded -- that specific
-    occurrence names the identifier as something being invoked/dispatched,
-    not edited. This exclusion applies ONLY in fallback (no declared
+    real incident and its own three independent-audit narrowings): a
+    script/path identifier immediately followed by literally "orchestrator
+    run" or literally "run via" is excluded -- that specific occurrence
+    names the identifier as something being invoked/dispatched, not
+    edited. This exclusion applies ONLY in fallback (no declared
     TARGET:/SCOPE: section) scanning, never inside a text's own declared
     TARGET:/SCOPE: section -- that section is this function's own
     exhaustive target declaration (see the fix directly above) and must

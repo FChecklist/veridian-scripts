@@ -102,8 +102,29 @@ UMR: UMR-20260815-052932-e80b
       this second finding. Full suite: 41 passed (was 40).
 - [x] Committed and pushed the second narrowing to PR #420.
 
+- [x] Third independent audit on commit d9f34ed also returned
+      **AUDIT:FAIL**: confirmed round 1 and round 2 repros stayed fixed and
+      the real incident stayed fixed, but found the trailing "run" after
+      "orchestrator" had been left optional, so bare "orchestrator" alone
+      (no "run") still excluded a real edit target on ordinary prose
+      naming the real orchestrator component/class itself (this codebase
+      uses "orchestrator" pervasively for pm_lifecycle.py's own dispatch
+      machinery) -- e.g. "pm_lifecycle.py orchestrator has a real deadlock
+      when two tasks race". Reproduced before fixing.
+- [x] Fixed: made "run" mandatory after "orchestrator" too --
+      `_TARGET_ID_INVOCATION_CITATION_TRAILING_RE` now requires literally
+      "orchestrator run" or literally "run via", matching only the two
+      exact phrases verbatim in the real a5e1 incident text (both real
+      citations already contain literal "orchestrator run", never bare
+      "orchestrator" alone, so this loses no real coverage). Re-verified:
+      all three audit rounds' repros are fixed, the real incident's two
+      citations are still excluded, and the real live-DB d6ad/a5e1
+      intersection is still empty.
+- [x] Added `test_bare_orchestrator_without_run_is_not_a_citation`. Full
+      suite: 42 passed (was 41).
+- [x] Committed and pushed the third narrowing to PR #420.
+
 ## Remaining
-- [ ] Get a clean independent AUDIT:PASS on the twice-narrowed fix before
-      merge.
+- [ ] Get a clean independent AUDIT:PASS on the fix before merge.
 - [ ] After merge: `agent_work_briefing.py record-completion --umr-id
       UMR-20260815-052932-e80b`.

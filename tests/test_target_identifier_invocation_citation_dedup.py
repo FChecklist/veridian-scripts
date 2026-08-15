@@ -306,6 +306,27 @@ def test_orchestrator_run_still_excluded_even_though_bare_run_is_not():
         "own dispatch_gap() mechanism") == []
 
 
+def test_bare_orchestrator_without_run_is_not_a_citation():
+    """Third independent-audit finding, same UMR: a prior revision made
+    the trailing "run" after "orchestrator" optional, so bare
+    "orchestrator" alone excluded the identifier -- but this fires on
+    ordinary prose naming the real orchestrator component/class itself
+    (this codebase uses "orchestrator" pervasively for pm_lifecycle.py's
+    own dispatch machinery), and is unneeded: both real a5e1 citations
+    already contain literal "orchestrator run", never bare "orchestrator"
+    alone."""
+    sbr = _load_sbr()
+    assert sbr.extract_target_identifiers(
+        "pm_lifecycle.py orchestrator class needs refactoring, extract a "
+        "real interface") == ["script:pm_lifecycle.py"]
+    assert sbr.extract_target_identifiers(
+        "the pm_lifecycle.py orchestrator has a real deadlock when two "
+        "tasks race") == ["script:pm_lifecycle.py"]
+    assert sbr.extract_target_identifiers(
+        "refactor the pm_lifecycle.py orchestrator to remove the real "
+        "duplicate retry path") == ["script:pm_lifecycle.py"]
+
+
 def test_unevidenced_run_prepositions_are_not_citations():
     """Second independent-audit finding, same UMR: a prior revision of
     this fix added "using"/"through"/"by" as siblings of "via" by analogy,

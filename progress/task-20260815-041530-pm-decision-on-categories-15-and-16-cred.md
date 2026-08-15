@@ -148,10 +148,15 @@ Governing UMR: UMR-20260806-071025-1d28. Two-part SPEC.
       a future retry of either `task_identity` can no longer reuse their
       `umr_id` and flip them back to `queued`/`running`).
 
+- [x] Committed (`1b71062e5bd9ae7173763d8448d8210c7107b71d`), pushed, PR
+      opened: [FChecklist/veridian-scripts#407](https://github.com/FChecklist/veridian-scripts/pull/407).
+- [x] Completion evidence recorded via `superboss-register.py log-work`
+      (never raw SQL): `WRK-20260815-043309-7ab4` (Part 2, real commit sha +
+      PR number + file paths), `WRK-20260815-043315-2bc7` (Part 1, real
+      pm_decisions_pending ids + gtm_certification_categories evidence).
+- [x] `agent_work_briefing.py record-completion --umr-id
+      UMR-20260806-102610-1930` called per the deterministic briefing.
+
 ## Remaining
 
-- [ ] Commit + push, open PR against `FChecklist/veridian-scripts` main.
-- [ ] Record completion evidence via `superboss-register.py log-work`
-      (Part 2, with real commit sha + PR number once available).
-- [ ] Call `agent_work_briefing.py record-completion --umr-id
-      UMR-20260806-102610-1930` per the deterministic briefing.
+- [ ] None -- both parts complete. PR #407 awaiting review/merge.

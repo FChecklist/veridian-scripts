@@ -381,6 +381,31 @@ def test_compute_deltas_numeric_and_bool():
     assert deltas["dispatch_tick_active"] == "False -> True"
 
 
+def test_compute_deltas_disk_fields_real_float_trend():
+    """task-20260806-151345 / PM decision row 102 redirect's explicit ask:
+    "a real delta against the prior snapshot so a trend is visible rather
+    than a point reading." disk_avail_gb/disk_avail_pct are real floats
+    (round(x, 2) in parse_df_output), same +N.NN/-N.NN formatting path
+    every other float DELTA_FIELDS entry (swap_free_pct, load_1min, ...)
+    already goes through -- no special-casing needed or added."""
+    prior = {f: 5 for f in pm.DELTA_FIELDS}
+    prior["disk_avail_gb"] = 34.0
+    prior["disk_avail_pct"] = 89.0
+    current = dict(prior)
+    current["disk_avail_gb"] = 30.5  # real reclaim shrank, avail dropped
+    current["disk_avail_pct"] = 85.25
+    deltas = pm.compute_deltas(prior, current)
+    assert deltas["disk_avail_gb"] == "-3.50"
+    assert deltas["disk_avail_pct"] == "-3.75"
+
+
+def test_compute_deltas_disk_fields_no_prior_row():
+    current = {f: 1 for f in pm.DELTA_FIELDS}
+    deltas = pm.compute_deltas(None, current)
+    assert "new (no prior" in deltas["disk_avail_gb"]
+    assert "new (no prior" in deltas["disk_avail_pct"]
+
+
 # ---------------------------------------------------------------------------
 # build_open_issues -- pure threshold/rule logic
 # ---------------------------------------------------------------------------
@@ -488,7 +513,8 @@ def _build_fake_db(path):
             load_1min REAL, load_5min REAL, load_15min REAL, dispatch_tick_active INTEGER,
             parallel_worker_count INTEGER, stuck_task_count INTEGER, tmux_session_alive INTEGER,
             emergency_stop_present INTEGER, db_integrity_ok INTEGER, umr_tasks_total INTEGER,
-            ocid_canonical_registry_total INTEGER, report_json TEXT NOT NULL
+            ocid_canonical_registry_total INTEGER, disk_avail_gb REAL, disk_avail_pct REAL,
+            report_json TEXT NOT NULL
         );
         CREATE TABLE pm_decisions_pending (
             id INTEGER PRIMARY KEY AUTOINCREMENT, opened_ts TEXT NOT NULL, title TEXT NOT NULL,
@@ -588,6 +614,14 @@ def test_end_to_end_smoke_run(tmp_path, monkeypatch):
             return 0, "1 loaded units listed.\n", ""
         if argv[:2] == ["tmux", "has-session"]:
             return 0, "", ""
+        if argv[:2] == ["df", "-B1"]:
+            # Real `df -B1 /` output shape (parse_df_output's own data-row
+            # format) -- synthetic numbers, real parser, same pattern every
+            # other mocked command here already follows.
+            return 0, (
+                "Filesystem     1B-blocks       Used   Available Use% Mounted on\n"
+                "/dev/sda1   322239832064 250732273664 58349756416  82% /\n"
+            ), ""
         return 1, "", "unmocked command"
 
     monkeypatch.setattr(pm, "run_cmd", fake_run_cmd)
@@ -662,9 +696,22 @@ def test_end_to_end_smoke_run(tmp_path, monkeypatch):
 
     conn = sqlite3.connect(db_path)
     row_count = conn.execute("SELECT COUNT(*) FROM pm_report_snapshots").fetchone()[0]
+    persisted_disk_gb, persisted_disk_pct = conn.execute(
+        "SELECT disk_avail_gb, disk_avail_pct FROM pm_report_snapshots"
+    ).fetchone()
     conn.close()
     assert row_count == 1
     assert os.path.exists(str(tmp_path / "pm-report-latest.txt"))
+    # Real disk_avail_gb/pct (from a real df -B1 / read, not synthetic) must
+    # actually reach the persisted row -- otherwise a next run's
+    # get_prior_snapshot() would silently see None and every future disk
+    # delta would read "unknown" forever instead of a real trend.
+    assert persisted_disk_gb == report["current_flat_fields"]["disk_avail_gb"]
+    assert persisted_disk_pct == report["current_flat_fields"]["disk_avail_pct"]
+    # 58349756416 bytes / 1024**3, rounded to 2dp -- parse_df_output's own
+    # real arithmetic, not a fabricated expected value.
+    assert persisted_disk_gb == 54.34
+    assert persisted_disk_pct == 18.11
 
 
 def test_pm_decisions_pending_degrades_gracefully_without_decision_type_column(tmp_path):

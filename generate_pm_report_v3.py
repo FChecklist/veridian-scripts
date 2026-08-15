@@ -1325,6 +1325,16 @@ DELTA_FIELDS = [
     "dispatch_tick_active", "parallel_worker_count", "stuck_task_count",
     "tmux_session_alive", "emergency_stop_present", "db_integrity_ok",
     "umr_tasks_total", "ocid_canonical_registry_total",
+    # task-20260806-151345 / PM decision row 102 redirect: "Build it to
+    # report real free bytes, real used percent, and a real delta against
+    # the prior snapshot so a trend is visible rather than a point
+    # reading." The point-in-time disk_usage section shipped first
+    # (get_disk_usage()/parse_df_output() above); this closes the
+    # remaining trend half of that same PM ask by reusing the exact same
+    # generic prior-snapshot delta machinery every other field here
+    # already uses -- no new rendering code needed, render_report_text()'s
+    # Section 5 loop already iterates deltas generically.
+    "disk_avail_gb", "disk_avail_pct",
 ]
 
 
@@ -2853,8 +2863,9 @@ def write_snapshot_row(sbr, report):
                 mem_available_mb, swap_free_pct, load_1min, load_5min, load_15min,
                 dispatch_tick_active, parallel_worker_count, stuck_task_count,
                 tmux_session_alive, emergency_stop_present, db_integrity_ok,
-                umr_tasks_total, ocid_canonical_registry_total, report_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                umr_tasks_total, ocid_canonical_registry_total,
+                disk_avail_gb, disk_avail_pct, report_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 report["generated_at"],
@@ -2868,6 +2879,7 @@ def write_snapshot_row(sbr, report):
                 int(bool(fields["emergency_stop_present"])) if fields["emergency_stop_present"] is not None else None,
                 int(bool(fields["db_integrity_ok"])) if fields["db_integrity_ok"] is not None else None,
                 fields["umr_tasks_total"], fields["ocid_canonical_registry_total"],
+                fields["disk_avail_gb"], fields["disk_avail_pct"],
                 json.dumps(report),
             ),
         )

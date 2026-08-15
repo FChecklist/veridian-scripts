@@ -114,6 +114,11 @@ def test_first_terminal_failure_is_allowed_to_retry_and_marks_state():
         conn.close()
 
         calls = []
+        # Stubbed the same real way submit_task is below: this test exercises the
+        # retry-once gate, not run_check_duplicate_battery()'s own real subprocess
+        # call (which fail-closed-skips the submission on any failure -- see
+        # test_directive_engine_fail_closed_duplicate_check.py for that behavior).
+        de.run_check_duplicate_battery = lambda *a, **k: {"duplicate_found": False}
         de.submit_task = lambda *a, **k: (calls.append((a, k)) or {"accepted": True, "umr_id": umr_id})
 
         result = de.process_one({"task_identity": "test-first-failure-task", "tier": 2,
@@ -301,6 +306,7 @@ def test_retry_state_file_is_corruption_tolerant():
         conn.close()
 
         calls = []
+        de.run_check_duplicate_battery = lambda *a, **k: {"duplicate_found": False}
         de.submit_task = lambda *a, **k: (calls.append((a, k)) or {"accepted": True, "umr_id": umr_id})
         result = de.process_one({"task_identity": "test-corrupt-state-task", "tier": 2,
                                   "title": "t", "prompt": "p", "repo": "x"})

@@ -1475,6 +1475,22 @@ def submit(task_spec, tier, source_trigger):
                                as umr_tasks.metadata_json.correlation_id
                                (never a placeholder value; a genuinely absent
                                correlation stays absent, not "none"/"n/a").
+      "force_new_umr_id": bool, OPTIONAL (root-cause evidence handed to
+                               UMR-20260806-093654-7566, parent
+                               UMR-20260806-071025-1d28) -- when True, OCID-068
+                               Rule 1's reuse-on-resubmit below (see its own
+                               comment) never reuses a prior row's umr_id, even
+                               if one exists for this task_identity: a fresh
+                               umr_id is always minted, and the prior row (of
+                               ANY status, including a still-terminal one) is
+                               left completely untouched. Omit entirely (or
+                               pass False/None) for every real caller today
+                               except directive_engine.py's submit_task() on
+                               its one real resubmission-of-a-terminal-row
+                               retry -- default is unchanged, so every other
+                               caller (notably dispatch-tick.py's real resume-
+                               an-interrupted-worker path) keeps today's
+                               reuse-on-resubmit behavior exactly as-is.
     }
     Returns {"accepted": bool, "umr_id": str, "reason": str}. Never raises for
     a normal duplicate rejection -- that is a real, logged outcome, not an
@@ -1744,6 +1760,29 @@ def submit(task_spec, tier, source_trigger):
         prior = sbr.find_most_recent_umr_by_identity(conn, task_identity)
         reused_umr_id = prior["umr_id"] if prior else None
 
+        # Real fix (root-cause evidence handed to UMR-20260806-093654-7566, parent
+        # UMR-20260806-071025-1d28): task_spec["force_new_umr_id"] is opt-in and
+        # additive -- every existing real caller omits it, so this block never fires
+        # for them and Rule-1's reuse-on-resubmit behavior above is 100% unchanged
+        # for dispatch-tick.py's resume_interrupted_workers_tick() (its real, still-
+        # non-terminal "resume an interrupted worker" use case, which this field is
+        # never set for). The real caller that DOES set it is directive_engine.py's
+        # submit_task(), on exactly the one real resubmission of a row that already
+        # went terminal (failed/killed/rejected_duplicate) that process_one()'s
+        # retry-once gate allows. Confirmed live: reusing a terminal row's own umr_id
+        # here flips it back to status="queued" in place -- a killed/failed/rejected
+        # row silently resurrected under its own old identity, rather than a fresh,
+        # independent UMR being minted for the new attempt (the
+        # veridian-directive-engine.service journal, restart 2026-08-06T10:17:50Z,
+        # shows exactly this: "submitted, umr_id=UMR-20260730-041943-093a" reusing
+        # PHASE-3-BUILD-CALC's own already-killed row's umr_id). A resubmission must
+        # always mint a new umr_id and must never reuse a terminal one -- forcing
+        # reused_umr_id back to None here means upsert_umr_task() below takes its own
+        # "umr_id not supplied" branch and mints a genuinely fresh id, leaving the
+        # prior terminal row (and its real history) completely untouched.
+        if task_spec.get("force_new_umr_id") and prior is not None:
+            reused_umr_id = None
+
         # Real fix (independent review, PR #26 round 1): upsert_umr_task()'s
         # existing ON CONFLICT(umr_id) DO UPDATE path unconditionally
         # overwrites outputs_json/logs_ref/metric_snapshot_json/
@@ -1770,7 +1809,13 @@ def submit(task_spec, tier, source_trigger):
             "unit_name": task_spec.get("unit_name"),
             "tenant_id": tenant_id,
             "inputs": task_spec.get("inputs", {}),
-            "reason": "queued" if not reused_umr_id else f"resubmitted (reused umr_id, prior status was {prior['status']!r})",
+            "reason": (
+                f"queued (new umr_id minted -- caller requested force_new_umr_id, prior "
+                f"umr_id={prior['umr_id']} was {prior['status']!r}, never reused/resurrected)"
+                if task_spec.get("force_new_umr_id") and prior is not None
+                else ("queued" if not reused_umr_id
+                      else f"resubmitted (reused umr_id, prior status was {prior['status']!r})")
+            ),
             "metadata": metadata,
             "outputs": prior_outputs if reused_umr_id else {},
             "logs_ref": prior["logs_ref"] if reused_umr_id else None,

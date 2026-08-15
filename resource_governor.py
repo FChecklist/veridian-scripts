@@ -28,6 +28,7 @@ import json
 import os
 import re
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -2724,11 +2725,55 @@ def effective_priority(row, now=None):
     return max(TIER_MIN, row["tier"] - promotions)
 
 
+def _owner_priority_override_ids(conn):
+    """Real, narrow consumption-side lookup of owner_priority_override --
+    the table UMR-20260807-070110-5ea7 built and task-20260807-081913's
+    owner_priority_sequence keeps auto-synced every real tick (see
+    _advance_owner_priority_phases_safe()'s own docstring below: "that
+    consumption side of owner_priority_override is UMR-20260807-070110-
+    5ea7's own real, separately-dispatched work" -- this is that landing,
+    done under UMR-20260806-165509-4d7c / task-20260815-045659, governed
+    by the same UMR-20260806-124055-bc80 stop-work order). Deliberately
+    reuses the existing table/schema (umr_id, reason, set_by, ts) rather
+    than a new table or a JSON file, and matches on the real umr_id
+    column -- never a metadata_json/prompt substring scan, which
+    discover_prompt_citing_umrs()'s own docstring in superboss-register.py
+    documents as producing real false positives on this exact database
+    (567 of 8022 rows on a raw LIKE scan vs. 179 genuine citations).
+
+    Returns the real, exact set of currently-overridden umr_id strings, or
+    an empty set on ANY failure (table not yet created on this DB copy,
+    transient read error, ...) -- fails closed to "no override in effect",
+    same convention as every other _safe_superboss_register() consumer in
+    this file; a broken override lookup must never block or crash the
+    real dispatch loop it feeds."""
+    try:
+        rows = conn.execute("SELECT umr_id FROM owner_priority_override").fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    return {dict(r)["umr_id"] for r in rows}
+
+
 def next_queued_task(conn, now=None):
+    """Real dispatch-candidate selection. Bounded, narrow preemption check
+    FIRST (real fix, UMR-20260806-124055-bc80 / task-20260815-045659): if
+    any currently-queued row's umr_id is a real, exact member of
+    owner_priority_override (see _owner_priority_override_ids() above),
+    the oldest such row wins outright, regardless of tier or age of any
+    competing row -- never a wildcard, never a tier/age comparison against
+    non-overridden rows. Only when no queued row is overridden does this
+    fall back to the pre-existing (effective_priority, ts_submitted) sort,
+    completely unchanged for every other row."""
     now = now or _utcnow()
     rows = conn.execute("SELECT * FROM umr_tasks WHERE status='queued'").fetchall()
     if not rows:
         return None
+    override_ids = _owner_priority_override_ids(conn)
+    if override_ids:
+        overridden = [r for r in rows if r["umr_id"] in override_ids]
+        if overridden:
+            overridden_ranked = sorted(overridden, key=lambda r: r["ts_submitted"])
+            return dict(overridden_ranked[0])
     ranked = sorted(rows, key=lambda r: (effective_priority(dict(r), now), r["ts_submitted"]))
     return dict(ranked[0])
 
@@ -3814,6 +3859,14 @@ def _dispatch_one_inner(dry_run=False, now=None):
         conn = sbr._connect()
         sbr._ensure_umr_table(conn)
         sbr._ensure_ocid_artifact_links_table(conn)
+        # Real fix, UMR-20260806-124055-bc80 / task-20260815-045659: ensure
+        # owner_priority_override exists (idempotent) before
+        # next_queued_task() reads it below -- same defensive convention as
+        # the two _ensure_*_table() calls above, so a fresh/never-seeded DB
+        # copy still dispatches correctly rather than hitting a missing-
+        # table read (which _owner_priority_override_ids() also already
+        # fails open on, as defense in depth).
+        sbr._ensure_owner_priority_tables(conn)
         row = next_queued_task(conn, now=now)
         if row is None:
             conn.close()
@@ -4341,9 +4394,12 @@ def _advance_owner_priority_phases_safe(now=None):
     selection -- that consumption side of owner_priority_override is
     UMR-20260807-070110-5ea7's own real, separately-dispatched work (see
     its SPEC: "build a real, narrow, bounded priority-override mechanism
-    in next_queued_task"). This function only keeps owner_priority_override
-    populated with the current real active phase's members every tick, so
-    that mechanism (whenever it lands) always reads a real, up-to-date
+    in next_queued_task"; landed under UMR-20260806-165509-4d7c /
+    task-20260815-045659 -- see next_queued_task()'s and
+    _owner_priority_override_ids()'s own docstrings above). This function
+    only keeps owner_priority_override populated with the current real
+    active phase's members every tick, so that mechanism always reads a
+    real, up-to-date
     table -- extending 5ea7's population lifecycle, not duplicating its
     consumption logic.
 

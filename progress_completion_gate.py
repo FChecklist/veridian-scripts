@@ -258,6 +258,49 @@ def _reason_citation_spans(text):
     return [m.span("list") for m in _REASON_CITATION_RE.finditer(text or "")]
 
 
+# Real fix (RCA of UMR-20260806-092209-7a2e, re-dispatched 2026-08-15 as
+# task-20260815-032442): a FIFTH instance of the same false-positive class
+# as _BOILERPLATE_TOOL_NAME_EXCLUDED/_EVIDENCE_LIST_RE/_REASON_CITATION_RE
+# above. This SPEC's own "Real reproduction command" line reads literally
+# "python3 /opt/veridian/scripts/resource_governor.py --query-umr --limit
+# 14" -- an absolute-path CLI invocation of the standing query front door,
+# quoted verbatim (as every dispatch prompt in this codebase gives repro
+# commands with the full /opt/veridian/scripts/... path, never a bare
+# filename). _BOILERPLATE_TOOL_NAME_EXCLUDED only strips the BARE form
+# ("resource_governor.py"); the "path-prefixed mention is NOT excluded"
+# rule that governs it was designed for a prose reference to the file's own
+# code (e.g. "the bug is in scripts/resource_governor.py"), not for a
+# `python3 <path>` shell invocation -- but FILENAME_RE's match text for
+# both is a path-prefixed string, so the bare-form exclusion never fired
+# here. Live evidence this task independently gathered: re-running that
+# exact command returned 0/14 DIRECTIVE rejected_duplicate rows for the two
+# named identities (the SPEC's claimed 12/14 was a stale, already-fixed
+# 2026-08-06 burst -- 87 total such rows exist, all with ts_submitted
+# before 2026-08-06T10:17:52Z, zero since), the actual root cause
+# (directive_engine.py's in-memory retry-once flag) was already fixed
+# same-day by UMR-20260806-090229-f2a7 and is confirmed byte-identical
+# between the live checkout and this repo's HEAD, and neither underlying
+# row is stuck -- a genuinely no-code-needed disposition this module's own
+# docstring already anticipates. Without this fix, the gate would reject
+# that honest finding for not touching resource_governor.py, which this
+# task never had a real reason to edit.
+_CLI_INVOCATION_RE = re.compile(
+    r"(?:python3?|bash|sh)\s+(?P<list>[A-Za-z0-9_\-./]*\.(?:py|sh))\b",
+    re.IGNORECASE,
+)
+
+
+def _cli_invocation_spans(text):
+    """Character spans of a filename immediately following a real
+    interpreter invocation (`python3 <path>`, `bash <path>`, `sh <path>`)
+    -- see _CLI_INVOCATION_RE's own comment. Same 'excluded only when the
+    filename appears NOWHERE else in the text' rule _evidence_list_spans/
+    _reason_citation_spans above already establish -- a filename that is
+    ALSO named as a real, distinguishing objective elsewhere in the prompt
+    (e.g. "fix the bug in scripts/resource_governor.py") is still kept."""
+    return [m.span("list") for m in _CLI_INVOCATION_RE.finditer(text or "")]
+
+
 def extract_named_code_files(text):
     """Real source/script filenames referenced in a task's own spec text
     (prompt.txt). Order-preserving de-dup; progress/doc artifacts excluded
@@ -279,9 +322,17 @@ def extract_named_code_files(text):
     A filename that appears ONLY inside a quoted `reason:` citation (a
     target row's own historical `reason` field, quoted verbatim into an RCA
     dispatch prompt) is excluded the same way -- see
-    _REASON_CITATION_RE's own comment."""
+    _REASON_CITATION_RE's own comment.
+
+    A filename that appears ONLY immediately after a real interpreter
+    invocation (`python3 <path>`, e.g. a "Real reproduction command" line)
+    is excluded the same way -- see _CLI_INVOCATION_RE's own comment."""
     text = text or ""
-    evidence_spans = _evidence_list_spans(text) + _reason_citation_spans(text)
+    evidence_spans = (
+        _evidence_list_spans(text)
+        + _reason_citation_spans(text)
+        + _cli_invocation_spans(text)
+    )
     all_matches = list(FILENAME_RE.finditer(text))
     outside_evidence = {
         m.group(0) for m in all_matches

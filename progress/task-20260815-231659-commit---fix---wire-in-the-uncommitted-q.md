@@ -15,5 +15,7 @@ UMR-20260815-140654-0230
 - [x] Re-reproduced both bugs as fixed against real live state on the server:
   - Bug (1): `python3 timer-manager.py list` now correctly prints all 6 real currently-stopped `veridian-*.timer` units with correct unit names (previously printed nothing).
   - Bug (2): `python3 queue-manager.py list --status running` correctly surfaces real non-empty `umr_tasks` rows (verified against `running` status, since the real `queued` backlog had drained to 0 by the time of this fix -- confirmed independently via a direct `resource_governor.py --list-queue --status queued` call showing the same real 0, not a tool bug).
-- [ ] Open real PR, obtain real fresh AUDIT:PASS (independent, not self-certified -- dispatching a separate audit task via dispatch-owner-task.sh per this repo's own established pattern).
+- [x] Committed, pushed branch `worker/task-20260815-231659-commit---fix---wire-in-the-uncommitted-q`, opened real PR: https://github.com/FChecklist/veridian-scripts/pull/429
+- [x] Dispatched a real, independent audit of PR #429 via `dispatch-owner-task.sh` (the single gateway, same pattern `pm_lifecycle.py`'s own `dispatch_independent_audit()` uses) -- `umr_id=UMR-20260815-233255-952b`, `task_identity=owner-task-20260815-233253-435207`. Deliberately NOT self-certified: a separate dispatched worker will independently re-verify the diff/claims and post the real `AUDIT: PASS`/`AUDIT: FAIL` comment on PR #429.
+- [ ] Confirm the fresh `AUDIT: PASS` comment lands on PR #429 (current head), matching this repo's real audit convention.
 - [ ] Record completion to UMR-20260815-140654-0230.

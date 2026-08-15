@@ -68,10 +68,16 @@
       `test_rule5_real_stall_detection.py`,
       `test_target_identifier_dedup.py`): all 105 pass, zero regressions.
 
+- [x] Committed (`58c23d7`), pushed to
+      `worker/task-20260815-154633-fix-real-starvation-bug--interrupted-wor`,
+      opened PR #421 on `FChecklist/veridian-scripts`
+      (https://github.com/FChecklist/veridian-scripts/pull/421).
+- [x] `record-completion` call to `agent_work_briefing.py` for
+      `UMR-20260815-070818-d173` done (real work summary recorded; umr_tasks
+      status left untouched pending the real independent audit/merge below).
+
 ## Remaining
-- [ ] Commit + push this change.
-- [ ] Independent AUDIT:PASS, specifically confirming real interrupted-worker
-      recovery is not weakened -- only no longer able to starve fresh
-      dispatches indefinitely.
-- [ ] `record-completion` call to `agent_work_briefing.py` for
-      `UMR-20260815-070818-d173` once real work is confirmed complete.
+- [ ] Independent AUDIT:PASS on PR #421, specifically confirming real
+      interrupted-worker recovery is not weakened -- only no longer able to
+      starve fresh dispatches indefinitely.
+- [ ] Merge once AUDIT:PASS is posted.

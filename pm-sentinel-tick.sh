@@ -1029,6 +1029,180 @@ else:
 done <<< "$UNMERGED_ROWS"
 
 # ---------------------------------------------------------------------------
+# Check 4 (2026-08-15 Owner directive: "update /pm, PM-in-server, veridian-
+# server-sentinel, PM-in-desktop to complete Part3+4 with minimum tokens,
+# real work, audit, and completion certificate" -- governing UMR UMR-20260815-
+# 044235-a5e1, code-level equivalent of that directive for this deterministic
+# tick). Real GTM certification (OCID-020) Part3+4 gap-closure + completion-
+# certificate check: gtm_certification_categories is queried live EVERY tick
+# (never hardcoded -- the real gap count/list changes as real work lands).
+#
+#   - real gap rows (passed=0 or passed IS NULL) > 0: check whether a real
+#     pm_lifecycle.py orchestrator run targeting these gaps is already
+#     queued/running (content-matched via gtm_orchestrator_in_flight() below
+#     -- broader than dispatch_gap()'s own narrower per-target_key STATE_FILE
+#     dedup, because the real seed orchestrator runs for this gap
+#     (UMR-20260815-033344-4799 / UMR-20260815-042226-f271, both since
+#     status=failed) were dispatched independently of this sentinel and would
+#     otherwise be invisible to it); if genuinely in flight, do nothing this
+#     tick (zero duplication). Otherwise dispatch exactly one real gap-
+#     closure task (tier 1, compliance-tracker) citing the real current gap
+#     list just queried, through the same single dispatch_gap() gateway
+#     every other check uses (same cap/dedup/financial-escalation discipline,
+#     no bypass).
+#   - real gap rows == 0: a real completion-evidence check confirms every
+#     passed=1 row has a real non-empty, non-placeholder evidence_summary
+#     (never accept passed=1 with empty evidence as real) -- any row that
+#     fails that check is itself a real, newly-found gap (data-integrity,
+#     not a test gap) and gets its own real RCA dispatch through the same
+#     gateway. Only once every row is both passed=1 AND genuinely evidenced
+#     does this check call superboss-register.py record-gtm-part3-4-
+#     certificate -- the one real, canonical, idempotent write path (never
+#     self-certifies: that CLI command independently re-verifies the same
+#     evidence shape itself and refuses to write on a stale/partial claim).
+#     Idempotent -- a real certificate already on record is left alone, not
+#     rewritten every tick.
+#
+# Token/round-trip discipline (SPEC step 5): reuses this file's own
+# RESOURCE_GOVERNOR_PY/SUPERBOSS_REGISTER_PY resolution and CACHE_DIR (no new
+# query mechanism); gtm_orchestrator_in_flight() below is bounded to
+# --limit 20 per status (queued, running -- the SPEC's own named scope) and
+# writes its real query output to CACHE_DIR temp files rather than passing
+# multi-hundred-KB JSON blobs through argv. Never bypasses dispatch_gap()'s
+# own is_financial_decision()/cap checks -- this check's one real dispatch
+# call site goes through dispatch_gap() exactly like every other check.
+# ---------------------------------------------------------------------------
+echo "--- Check 4: GTM certification Part3+4 completion (OCID-020) ---"
+
+# gtm_orchestrator_in_flight -- SPEC step 2: real, content-matched check for
+# whether a real pm_lifecycle.py orchestrator run targeting these gaps is
+# already queued/running, matched on task_identity or real prompt text
+# referencing "gtm_certification_categories", "OCID-020", or either known
+# seed UMR id (their real successors may carry different ids if they failed
+# and were redispatched -- matching on content, not just those exact ids, is
+# the whole point). Prints "<umr_id>\t<task_identity>" of the first real
+# match found, or nothing if none -- caller checks for non-empty output.
+gtm_orchestrator_in_flight() {
+  local q_file="$CACHE_DIR/.gtm_queued_full.json"
+  local r_file="$CACHE_DIR/.gtm_running_full.json"
+  python3 "$RESOURCE_GOVERNOR_PY" --query-umr --status queued --limit 20 --full > "$q_file" 2>/dev/null
+  python3 "$RESOURCE_GOVERNOR_PY" --query-umr --status running --limit 20 --full > "$r_file" 2>/dev/null
+  python3 -c "
+import json
+
+KEYWORDS = ('gtm_certification_categories', 'ocid-020',
+            'umr-20260815-033344-4799', 'umr-20260815-042226-f271')
+
+for path in ('$q_file', '$r_file'):
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except Exception:
+        continue
+    for m in d.get('matches', []):
+        inputs = m.get('inputs_json') or {}
+        if isinstance(inputs, str):
+            try:
+                inputs = json.loads(inputs)
+            except Exception:
+                inputs = {}
+        prompt = inputs.get('prompt') or inputs.get('text') or ''
+        blob = ((m.get('task_identity') or '') + ' ' + prompt).lower()
+        if any(k in blob for k in KEYWORDS):
+            print((m.get('umr_id') or '') + chr(9) + (m.get('task_identity') or ''))
+            raise SystemExit(0)
+"
+}
+
+GTM_CATEGORIES_JSON="$(python3 "$SUPERBOSS_REGISTER_PY" list-gtm-categories 2>/dev/null)"
+GTM_TOTAL_COUNT="$(printf '%s' "$GTM_CATEGORIES_JSON" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(len(d.get('categories', [])))
+" 2>/dev/null)"
+GTM_TOTAL_COUNT="${GTM_TOTAL_COUNT:-0}"
+GTM_GAP_COUNT="$(printf '%s' "$GTM_CATEGORIES_JSON" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+cats = d.get('categories', [])
+gaps = [c for c in cats if c.get('passed') in (0, None)]
+print(len(gaps))
+" 2>/dev/null)"
+GTM_GAP_COUNT="${GTM_GAP_COUNT:-0}"
+
+if [ "$GTM_TOTAL_COUNT" -eq 0 ] 2>/dev/null; then
+  # Real, deliberate no-op: zero real gtm_certification_categories rows at
+  # all (not merely zero gaps) means this environment's real register has
+  # nothing to certify against yet -- e.g. list-gtm-categories/superboss-
+  # register.py unavailable this tick, or a genuinely empty table. Treating
+  # a vacuously-empty table as "all requirements met" would be a false
+  # certificate, so this deliberately does nothing rather than either
+  # dispatching a meaningless gap-closure task or writing a hollow
+  # certificate. Not a TICK_FAILURES case -- see cmd_list_gtm_categories's
+  # own real error surface above if this persists unexpectedly.
+  echo "  0 real gtm_certification_categories rows found this tick -- nothing to check"
+elif [ "$GTM_GAP_COUNT" -gt 0 ] 2>/dev/null; then
+  GTM_GAP_LIST="$(printf '%s' "$GTM_CATEGORIES_JSON" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+cats = d.get('categories', [])
+gaps = [c for c in cats if c.get('passed') in (0, None)]
+print('; '.join(f\"{c.get('category_index')}:{c.get('category_name')} (passed={c.get('passed')})\" for c in gaps))
+" 2>/dev/null)"
+  echo "  ${GTM_GAP_COUNT} real gap row(s) in gtm_certification_categories (OCID-020): ${GTM_GAP_LIST}"
+  GTM_INFLIGHT_MATCH="$(gtm_orchestrator_in_flight)"
+  if [ -n "$GTM_INFLIGHT_MATCH" ]; then
+    GTM_INFLIGHT_UMR="$(printf '%s' "$GTM_INFLIGHT_MATCH" | cut -f1)"
+    echo "  IN-FLIGHT: a real pm_lifecycle.py orchestrator run ($GTM_INFLIGHT_UMR) already queued/running and content-matched to these gaps -- skipping, zero duplication"
+  else
+    TARGET_KEY="gtm-part3-4-gap:OCID-020"
+    PROMPT="GOVERNING CHAIN: this task's own dispatching UMR (PM-sentinel tick), 2026-08-15 Owner directive Part3+4 GTM-certification completion (governing UMR UMR-20260815-044235-a5e1). REAL GAP FOUND: gtm_certification_categories (OCID-020), queried live this tick via superboss-register.py list-gtm-categories, shows ${GTM_GAP_COUNT} real row(s) with passed=0 or passed IS NULL: ${GTM_GAP_LIST}. Read the real full row detail yourself first (python3 superboss-register.py list-gtm-categories), then run a real pm_lifecycle.py orchestrator run (python3 pm_lifecycle.py run --title ... --text ... --repo compliance-tracker) that genuinely closes the real cited gaps -- real work, not a re-classification -- and writes each real result back via gtm_write_category_result.py (never edit gtm_certification_categories directly). Do not fabricate completion, and do not mark any category passed=1 without a real, non-empty, non-placeholder evidence_summary/artifact citation."
+    record_finding
+    dispatch_gap "$TARGET_KEY" "GTM certification Part3+4: close ${GTM_GAP_COUNT} real gap(s) (OCID-020)" "$PROMPT" 1 "compliance-tracker"
+    emit_report_row "gtm-part3-4:OCID-020" "gtm_certification_gap" false false false false
+  fi
+else
+  echo "  0 real gap rows in gtm_certification_categories (OCID-020) -- checking real completion evidence before any certificate"
+  GTM_EVIDENCE_BAD_LIST="$(printf '%s' "$GTM_CATEGORIES_JSON" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+cats = d.get('categories', [])
+placeholders = {'', 'tbd', 'n/a', 'na', 'todo', 'pending', 'none', 'placeholder',
+                '-', 'tbd.', 'n/a.', 'unknown', 'coming soon'}
+bad = [c for c in cats
+       if (c.get('evidence_summary') or '').strip().lower() in placeholders]
+print('; '.join(f\"{c.get('category_index')}:{c.get('category_name')}\" for c in bad))
+" 2>/dev/null)"
+  if [ -n "$GTM_EVIDENCE_BAD_LIST" ]; then
+    echo "  REAL GAP FOUND: passed=1 row(s) with empty/placeholder evidence_summary (never accepted as real): ${GTM_EVIDENCE_BAD_LIST}"
+    TARGET_KEY="gtm-part3-4-evidence-gap:OCID-020"
+    PROMPT="GOVERNING CHAIN: this task's own dispatching UMR (PM-sentinel tick), 2026-08-15 Owner directive Part3+4 GTM-certification completion (governing UMR UMR-20260815-044235-a5e1). REAL GAP FOUND: gtm_certification_categories (OCID-020) shows 0 rows with passed=0/NULL, but real category row(s) with passed=1 carry an empty or placeholder evidence_summary (never accepted as real completion evidence): ${GTM_EVIDENCE_BAD_LIST}. Read the real full row detail yourself first (python3 superboss-register.py list-gtm-categories), determine the real evidence that should exist (re-run the real gtm_check_*.py for that category if needed), and write a real, non-placeholder evidence_summary/evidence_json back via gtm_write_category_result.py. Do not fabricate completion."
+    record_finding
+    dispatch_gap "$TARGET_KEY" "GTM certification Part3+4: fix unevidenced passed=1 row(s) (OCID-020)" "$PROMPT" 1 "compliance-tracker"
+    emit_report_row "gtm-part3-4:OCID-020" "gtm_certification_evidence_gap" false false false false
+  else
+    CERT_STATUS_JSON="$(python3 "$SUPERBOSS_REGISTER_PY" record-gtm-part3-4-certificate --evidence-json "$(printf '%s' "$GTM_CATEGORIES_JSON" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+print(json.dumps({'categories': d.get('categories', [])}))
+")" --umr-id "UMR-20260815-044235-a5e1" 2>&1)"
+    CERT_RC=$?
+    if [ "$CERT_RC" -ne 0 ]; then
+      echo "  CERTIFICATE WRITE FAILED (superboss-register.py record-gtm-part3-4-certificate exit $CERT_RC): $CERT_STATUS_JSON"
+      TICK_FAILURES=$((TICK_FAILURES + 1))
+    else
+      GTM_CERT_NEW="$(printf '%s' "$CERT_STATUS_JSON" | py_field "d.get('newly_created', False)")"
+      if [ "$GTM_CERT_NEW" = "True" ]; then
+        echo "  CERTIFIED: real Part3+4 GTM-certification completion certificate written (all 25 real rows passed=1, all real-evidenced) -- see ocid_master_standard_audit_log event_type=gtm_part3_4_completion_certificate"
+        emit_report_row "gtm-part3-4:OCID-020" "gtm_certification_complete" true true true true
+      else
+        echo "  already certified (real certificate already on record, not rewritten this tick)"
+      fi
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # DECIDE-AND-FIX reconciliation (2026-08-13 addendum, UMR-20260813-105106-e9a7
 # addendum to UMR-20260813-102459-10c3) -- see header comment above. Every
 # real finding logged via record_finding() must have gone through

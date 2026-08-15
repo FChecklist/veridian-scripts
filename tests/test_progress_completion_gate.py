@@ -184,6 +184,46 @@ class TestExtractNamedCodeFiles(unittest.TestCase):
             gate.extract_named_code_files(text), ["pm-sentinel-tick.sh"]
         )
 
+    def test_excludes_absolute_path_cli_invocation_filenames(self):
+        """Real fix (UMR-20260806-092209-7a2e, re-dispatched 2026-08-15):
+        a SPEC's own "Real reproduction command" line quotes an absolute-
+        path `python3 /opt/veridian/scripts/resource_governor.py ...`
+        invocation verbatim -- a path-prefixed CLI-tool citation, not a
+        prose reference to the file's own code, and not covered by
+        _BOILERPLATE_TOOL_NAME_EXCLUDED (which only strips the bare form)."""
+        text = (
+            "Real reproduction command, python3 /opt/veridian/scripts/"
+            "resource_governor.py --query-umr --limit 14, which currently "
+            "returns twelve of fourteen rows as DIRECTIVE rejected "
+            "duplicate rows."
+        )
+        self.assertEqual(gate.extract_named_code_files(text), [])
+
+    def test_cli_invocation_filename_also_named_elsewhere_still_counts(self):
+        """A filename cited only as a `python3 <path>` CLI invocation AND
+        named again elsewhere (a distinct exact-string mention) as a real,
+        distinguishing objective is NOT excluded for that other mention --
+        only the CLI-invocation-only occurrence is."""
+        text = (
+            "Real reproduction command, python3 /opt/veridian/scripts/"
+            "resource_governor.py --query-umr --limit 14. The real fix "
+            "belongs in scripts/resource_governor.py's own dedup path."
+        )
+        self.assertEqual(
+            gate.extract_named_code_files(text), ["scripts/resource_governor.py"]
+        )
+
+    def test_path_prefixed_boilerplate_tool_name_without_interpreter_still_counts(self):
+        """A path-prefixed mention that is NOT preceded by a real
+        interpreter invocation (`python3`/`bash`/`sh`) is unaffected by the
+        CLI-invocation exclusion and still counts, exactly as
+        test_path_prefixed_boilerplate_tool_name_still_counts already
+        covers for the pre-existing exclusions."""
+        text = "Fix the --query-umr filter in scripts/resource_governor.py"
+        self.assertEqual(
+            gate.extract_named_code_files(text), ["scripts/resource_governor.py"]
+        )
+
 
 class TestCompletionGateConcurrentProgressFiles(unittest.TestCase):
     """(a) two simulated workers, two branches, two progress/<task_id>.md

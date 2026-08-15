@@ -55,9 +55,18 @@ import sys
 import urllib.parse
 from datetime import datetime, timezone
 
-MEMORY_DIR = "/opt/veridian/ai-os/memory"
-BACKUPS_DIR = os.path.join(MEMORY_DIR, "backups")
-LIVE_DB = os.path.join(MEMORY_DIR, "superboss-register.sqlite")
+# Env-overridable (same convention as superboss-register.py's own
+# SUPERBOSS_REGISTER_DB) -- a real testability seam: task-20260815-051128-
+# prevent-register-corruption-recurrence's real CLI-subprocess test for
+# resource_governor.py's --daily-backup-check (which reuses
+# discover_backup_groups() below to find the newest existing backup) needs
+# to redirect these away from the real production paths without ever
+# touching them. Every real production caller (including this module's own
+# --scan-dir-less default CLI invocation) still gets the same real,
+# unchanged default.
+MEMORY_DIR = os.environ.get("VERIDIAN_PMB_MEMORY_DIR", "/opt/veridian/ai-os/memory")
+BACKUPS_DIR = os.environ.get("VERIDIAN_PMB_BACKUPS_DIR", os.path.join(MEMORY_DIR, "backups"))
+LIVE_DB = os.environ.get("VERIDIAN_PMB_LIVE_DB", os.path.join(MEMORY_DIR, "superboss-register.sqlite"))
 DB_BASENAME = "superboss-register.sqlite"
 KEEP_DEFAULT = 3
 _COMPANION_SUFFIXES = ("-wal", "-shm")

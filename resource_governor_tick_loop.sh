@@ -71,5 +71,24 @@ while true; do
   # scan_stuck_tasks() above already own real remediation on their own,
   # different thresholds.
   run_governor --umr-staleness-scan
+  # task-20260815-051128-prevent-register-corruption-recurrence Part B: real
+  # incident, superboss-register.sqlite's own .writelock file sat stuck 5+
+  # hours with no process holding it before anyone/anything noticed --
+  # dispatch silently degraded the whole time. Cheap check (stat the
+  # writelock file's mtime, only escalates to a real /proc/locks holder
+  # check if it looks old) wired into this SAME already-running 30s loop,
+  # not a new standing daemon. Logs a real ATTENTION.md alert when it
+  # fires; see resource_governor.py detect_stuck_writelock()'s own
+  # docstring for the full real threshold/holder-check reasoning.
+  run_governor --writelock-staleness-scan
+  # task-20260815-051128-prevent-register-corruption-recurrence Part C:
+  # real incident, the real backup cadence produced only 3 snapshots on a
+  # single day (2026-08-06) then nothing for 8 more days, forcing recovery
+  # from an 8-day-stale backup. Self-throttled (see
+  # resource_governor.py run_daily_backup_check()'s own docstring) -- this
+  # cheap stat-only mtime check runs every 30s here, but the real backup
+  # itself (reusing full_server_file_registration.py's own take_backup())
+  # only actually fires roughly once/24h.
+  run_governor --daily-backup-check
   sleep 30
 done

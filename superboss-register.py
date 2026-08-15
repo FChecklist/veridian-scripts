@@ -88,6 +88,7 @@ import secrets
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -377,6 +378,123 @@ def _connect():
     conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
     return conn
+
+
+# ---------------------------------------------------------------------------
+# Atomic full-file rewrite pattern (Part A, 2026-08-15 register-corruption
+# incident, task-20260815-051128-prevent-register-corruption-recurrence).
+#
+# Real incident: this DB (2.9GB at the time) was found with a corrupted
+# header; `sqlite3 .recover` confirmed zero salvageable data. Root cause
+# pointed to an unreleased writelock file carrying the exact same timestamp
+# as the corruption (stuck 5+ hours, no process holding it) -- consistent
+# with a process that was interrupted mid-write directly against the live
+# file path. Recovery required falling back to an 8-day-stale backup (real
+# cost: ~8 days of register history lost).
+#
+# Real fix: any code path that must produce an entirely new copy of this
+# file (a migration too large for in-place ALTER TABLE, a compaction/VACUUM
+# pass, a restore) must never write into DB_PATH directly. It builds the new
+# file at a temp path on the SAME filesystem, validates the temp file's
+# real SQLite header + a real PRAGMA integrity_check, and only THEN
+# atomically replaces the live file via os.replace() (a POSIX rename --
+# either the old inode or the new inode is visible at DB_PATH at every
+# instant; there is no window where a reader/writer can observe a
+# partially-written file). If the process building the temp file is
+# killed/crashes at any point before that final os.replace(), DB_PATH is
+# left completely untouched -- exactly the property that would have
+# prevented this incident.
+#
+# A repo-wide grep for direct writes to DB_PATH outside a normal
+# transactional sqlite3 connection (2026-08-15) found no existing violator:
+# every in-place table rebuild elsewhere in this file (e.g.
+# _migrate_wiring_registry_entity_types's CREATE-TABLE-AS-SELECT-then-RENAME)
+# already goes through the ordinary _connect()/_write_lock() path, which is
+# a normal transactional connection against the live file, not a file-level
+# rewrite -- out of this pattern's scope by the SPEC's own carve-out.
+# Compaction/VACUUM -- named explicitly in the incident follow-up -- did not
+# exist anywhere in this codebase before this fix; it is added below using
+# this pattern from day one, so it can never become the next occurrence of
+# this same incident.
+# ---------------------------------------------------------------------------
+
+def atomic_replace_live_db(build_temp_db, db_path=None):
+    """Builds a brand-new sqlite file by calling build_temp_db(tmp_path),
+    then touches the real live `db_path` (default DB_PATH) with exactly one
+    atomic os.replace() -- see the module note above for the full real
+    incident this closes. Caller must hold _write_lock() around this call
+    (every real caller below does) so no concurrent writer can be
+    mid-transaction against db_path when the final rename happens.
+
+    build_temp_db(tmp_path) must create a real, complete sqlite file AT
+    tmp_path (tmp_path itself does not exist yet when it is called -- e.g.
+    `VACUUM INTO` requires this). Any exception raised inside
+    build_temp_db, or a temp file that fails the real header/integrity
+    validation below, leaves db_path completely untouched (and removes the
+    temp file) -- never a partial/corrupt file left in place of the one a
+    real recovery path would look for.
+
+    Returns db_path on success."""
+    db_path = db_path or DB_PATH
+    tmp_dir = os.path.dirname(db_path) or "."
+    os.makedirs(tmp_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=os.path.basename(db_path) + ".atomic-rewrite-", suffix=".tmp", dir=tmp_dir)
+    os.close(fd)
+    os.remove(tmp_path)  # build_temp_db (e.g. VACUUM INTO) requires the target not exist yet
+    try:
+        build_temp_db(tmp_path)
+
+        if not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) == 0:
+            raise RuntimeError(
+                f"atomic_replace_live_db: build_temp_db produced no real file at {tmp_path!r} "
+                "-- refusing to touch the live file")
+        with open(tmp_path, "rb") as f:
+            header = f.read(16)
+        if header != b"SQLite format 3\x00":
+            raise RuntimeError(
+                f"atomic_replace_live_db: temp file at {tmp_path!r} failed the real SQLite "
+                f"header check (found {header!r}) -- refusing to touch the live file")
+
+        check_conn = sqlite3.connect(f"file:{tmp_path}?mode=ro", uri=True)
+        try:
+            rows = check_conn.execute("PRAGMA integrity_check").fetchall()
+        finally:
+            check_conn.close()
+        if not (len(rows) == 1 and rows[0][0] == "ok"):
+            raise RuntimeError(
+                f"atomic_replace_live_db: temp file at {tmp_path!r} failed a real "
+                f"PRAGMA integrity_check ({rows!r}) -- refusing to touch the live file")
+
+        os.replace(tmp_path, db_path)  # atomic same-filesystem rename: the one real write to db_path
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+    return db_path
+
+
+def vacuum_compact_db(db_path=None):
+    """Real compaction, added 2026-08-15 as the first real use of
+    atomic_replace_live_db() above: `VACUUM INTO` writes a brand-new,
+    compacted copy of db_path to a temp path (never touching db_path itself
+    while it runs), which atomic_replace_live_db then validates and swaps
+    in with one atomic rename. Held under the same _write_lock() every
+    other real write path in this file uses, so no concurrent writer can be
+    mid-transaction when the swap happens."""
+    db_path = db_path or DB_PATH
+
+    def _build(tmp_path):
+        src_conn = sqlite3.connect(db_path, timeout=30)
+        try:
+            src_conn.execute("VACUUM INTO ?", (tmp_path,))
+        finally:
+            src_conn.close()
+
+    with _write_lock():
+        return atomic_replace_live_db(_build, db_path=db_path)
 
 
 def init_db():
@@ -10502,6 +10620,13 @@ if __name__ == "__main__":
 
     p_init = sub.add_parser("init")
 
+    p_vacuum = sub.add_parser("vacuum-compact",
+                               help="Part A of task-20260815-051128-prevent-register-corruption-"
+                                    "recurrence: compact the live DB via VACUUM INTO a validated "
+                                    "temp file, then atomically swap it in (see "
+                                    "atomic_replace_live_db()'s docstring) -- never writes into "
+                                    "the live file path directly")
+
     p_hb = sub.add_parser("heartbeat", help="Stage 3 reconciliation-sweep prerequisite: stamp "
                            "last_heartbeat=now() on the active umr_tasks row for --task-identity")
     p_hb.add_argument("--task-identity", dest="task_identity", required=True)
@@ -11074,6 +11199,9 @@ if __name__ == "__main__":
     if args.cmd == "init":
         with _write_lock():
             init_db()
+    elif args.cmd == "vacuum-compact":
+        result_path = vacuum_compact_db()
+        print(json.dumps({"ok": True, "db": result_path}))
     elif args.cmd == "heartbeat":
         with _write_lock():
             touch_umr_heartbeat(args)

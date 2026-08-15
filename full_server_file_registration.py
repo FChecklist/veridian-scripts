@@ -114,7 +114,14 @@ import urllib.parse
 SCRIPTS_DIR = "/opt/veridian/scripts"
 VERIDIAN_ROOT = "/opt/veridian"
 REPOS_ROOT = "/opt/veridian/repos"
-BACKUPS_DIR = "/opt/veridian/ai-os/memory/backups"
+# Env-overridable (same convention as superboss-register.py's own
+# SUPERBOSS_REGISTER_DB) -- a real testability seam: task-20260815-051128-
+# prevent-register-corruption-recurrence's real CLI-subprocess test for
+# resource_governor.py's --daily-backup-check (which calls take_backup()
+# below) needs to redirect this away from the real production backups dir
+# without ever touching it. Every real production caller still gets the
+# same real, unchanged default.
+BACKUPS_DIR = os.environ.get("VERIDIAN_FFR_BACKUPS_DIR", "/opt/veridian/ai-os/memory/backups")
 
 sys.path.insert(0, SCRIPTS_DIR)
 

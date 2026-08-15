@@ -1,0 +1,47 @@
+# Real host config, deploy step is MANUAL (see config/host/README.md) --
+# this REPLACES the live /etc/logrotate.d/rsyslog (same filename,
+# deliberately -- logrotate errors with "duplicate log entry for
+# /var/log/syslog" if the same path is declared in two separate files
+# under /etc/logrotate.d/, so this cannot be a same-named-target sibling
+# file the way the journald.conf.d/ drop-in above is). A future
+# `apt upgrade rsyslog` may overwrite this back to the package default
+# (no maxsize cap) -- that is a real, known tradeoff of editing a
+# distro-owned package config file in place; re-apply this copy after any
+# rsyslog package upgrade.
+#
+# Root cause this caps (UMR-20260814-033442-c885, P0 disk exhaustion RCA):
+# real, measured on this host at incident time -- /var/log/syslog 7510MB,
+# /var/log/syslog.1 1552MB -- while the LIVE /etc/logrotate.d/rsyslog
+# config was `weekly, rotate 4` with NO size cap at all, so nothing bounded
+# growth between one weekly rotation and the next. Everything below is
+# BYTE-IDENTICAL to the live package default (confirmed via `cat
+# /etc/logrotate.d/rsyslog` -- one shared stanza covering all 6 of these
+# paths, not one stanza per file) EXCEPT the added `maxsize 500M` line.
+# `size` (logrotate's absolute-size trigger) is mutually exclusive with
+# time-interval options per `man logrotate`, so this uses `maxsize`
+# instead -- rotates EARLY, before the next scheduled weekly boundary, the
+# moment a file exceeds the cap, while still keeping the existing weekly
+# cadence as the normal case for the other 5 (much smaller-volume) paths.
+# logrotate itself only runs when its own cron/systemd timer fires
+# (typically once/day via cron.daily on this distro), so real growth is
+# bounded to roughly one cap's worth plus at most one day's growth, not an
+# unbounded week's worth.
+/var/log/syslog
+/var/log/mail.log
+/var/log/kern.log
+/var/log/auth.log
+/var/log/user.log
+/var/log/cron.log
+{
+	rotate 4
+	weekly
+	maxsize 500M
+	missingok
+	notifempty
+	compress
+	delaycompress
+	sharedscripts
+	postrotate
+		/usr/lib/rsyslog/rsyslog-rotate
+	endscript
+}

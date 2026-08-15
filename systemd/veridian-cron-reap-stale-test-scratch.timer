@@ -1,0 +1,17 @@
+# See veridian-cron-reap-stale-test-scratch.service in this same directory
+# for the full root-cause writeup and closed-set-authorization disclosure.
+# 30-minute cadence (well under the 2h min-age the reaper itself enforces,
+# so a leak is caught within one real 30-min window of crossing that
+# threshold, not up to a further 2h late) -- jittered, offset from every
+# existing 10/15-minute-cadence unit's own minute so this does not cluster.
+[Unit]
+Description=Run veridian-cron-reap-stale-test-scratch on a 30-minute backstop cadence (UMR-20260814-033442-c885)
+
+[Timer]
+OnCalendar=*:8/30
+RandomizedDelaySec=60
+AccuracySec=10s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

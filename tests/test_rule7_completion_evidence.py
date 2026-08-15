@@ -21,6 +21,7 @@ import argparse
 import importlib.util
 import json as json_module
 import os
+import shutil
 import sys
 import tempfile
 
@@ -213,6 +214,12 @@ def test_cmd_checkpoint_ignores_evidence_json_for_non_completed_status():
                   "(reached real task lookup, not rejected by evidence validation)")
     finally:
         vt.AI_OS = real_ai_os
+        # UMR-20260814-033442-c885 (P0 disk exhaustion RCA): this scratch_dir
+        # was never removed at all before this fix -- a 100%-leak-rate bug
+        # (every single run of this test, pass or fail), not just a
+        # failure-path gap. finally, not just end-of-function, so it still
+        # runs on the assert/SystemExit paths above.
+        shutil.rmtree(scratch_dir, ignore_errors=True)
 
 
 def test_cmd_checkpoint_never_persists_evidence_for_non_completed_status_real_task():
@@ -278,6 +285,10 @@ def test_cmd_checkpoint_never_persists_evidence_for_non_completed_status_real_ta
     finally:
         vt.AI_OS = real_ai_os
         vt.sync_controller_entry = real_sync_controller_entry
+        # UMR-20260814-033442-c885 (P0 disk exhaustion RCA): same 100%-leak-
+        # rate bug as test_cmd_checkpoint_ignores_evidence_json_for_non_completed_status
+        # above -- scratch_dir was never removed at all before this fix.
+        shutil.rmtree(scratch_dir, ignore_errors=True)
     print("PASS: test_cmd_checkpoint_never_persists_evidence_for_non_completed_status_real_task")
 
 

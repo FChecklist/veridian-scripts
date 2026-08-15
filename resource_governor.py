@@ -2759,12 +2759,39 @@ def effective_priority(row, now=None):
 
 
 def next_queued_task(conn, now=None):
+    """Real fix (UMR-20260806-151638-48cc, governing UMR-20260806-071025-1d28):
+    a queued row this old (real age >= MAX_QUEUED_AGE_SECONDS -- the exact
+    same threshold flag_stale_queued_tasks() already uses to open a real
+    pm_decisions_pending 'STALE-QUEUED:' row for it) is never selected here.
+    Live-confirmed the real gap this closes: UMR-20260806-082230-54b8,
+    -082349-e1a8, -083251-604c, -084306-f599 (all real, source_trigger=
+    'owner_dispatch_gateway', submitted 2026-08-06 08:22-08:43Z during a
+    real, since-resolved disk-capacity scare) were each correctly flagged
+    STALE-QUEUED by flag_stale_queued_tasks() at their real 4.0h mark
+    (pm_decisions_pending ids 64/65/66/71, opened_ts 12:22-12:43Z) -- yet
+    this function went on to select and dispatch every one of them anyway
+    ~3h later (real ts_dispatched 15:13-15:14Z), replaying their now-stale
+    original prompt text with zero re-check. The flag was real; it was just
+    never wired into the real dispatch decision. Skipping a stale row here
+    (rather than returning None outright) still lets every other real,
+    non-stale queued row get its normal turn -- a stale row only ever needs
+    a real PM decision (resolve_pm_decision_pending() on its open
+    STALE-QUEUED row) before it becomes eligible again, never the mere
+    passage of another priority-queue tick."""
     now = now or _utcnow()
     rows = conn.execute("SELECT * FROM umr_tasks WHERE status='queued'").fetchall()
     if not rows:
         return None
-    ranked = sorted(rows, key=lambda r: (effective_priority(dict(r), now), r["ts_submitted"]))
-    return dict(ranked[0])
+    ranked = sorted((dict(r) for r in rows), key=lambda r: (effective_priority(dict(r), now), r["ts_submitted"]))
+    for row in ranked:
+        ts_submitted = row["ts_submitted"]
+        if isinstance(ts_submitted, str):
+            ts_submitted = datetime.fromisoformat(ts_submitted)
+        age_seconds = max(0.0, (now - ts_submitted).total_seconds())
+        if age_seconds >= MAX_QUEUED_AGE_SECONDS:
+            continue
+        return row
+    return None
 
 
 def _perform_spawn(row):

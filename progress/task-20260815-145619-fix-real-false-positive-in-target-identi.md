@@ -82,7 +82,28 @@ UMR: UMR-20260815-052932-e80b
       Full suite: 40 passed (was 37).
 - [x] Committed and pushed the narrowing fix to PR #420.
 
+- [x] Second independent audit on commit 27b4e52 also returned
+      **AUDIT:FAIL**: confirmed the v1 false-negatives were fixed and the
+      real incident stayed fixed, but found the `using`/`through`/`by`
+      prepositions added to the regex by analogy to `via` had no real
+      evidence and still fired on ordinary bug-report prose ("worker.py
+      run through 10 iterations before failing", "backup_rotate.sh run by
+      cron every night leaves a stale lockfile") -- reproduced both repros
+      directly against the module before fixing.
+- [x] Fixed: narrowed `_TARGET_ID_INVOCATION_CITATION_TRAILING_RE` to only
+      `orchestrator`/`orchestrator run` and literally `run via` (the one
+      preposition actually present in the real a5e1 incident text) --
+      dropped `using`/`through`/`by` entirely rather than trying to find
+      more real evidence for them. Re-verified: the auditor's new repros
+      now extract normally, the real incident's own two citations are
+      still excluded, the prior audit's repros are still fixed, and the
+      real live-DB d6ad/a5e1 intersection is still empty.
+- [x] Added `test_unevidenced_run_prepositions_are_not_citations` covering
+      this second finding. Full suite: 41 passed (was 40).
+- [x] Committed and pushed the second narrowing to PR #420.
+
 ## Remaining
-- [ ] Get a second independent AUDIT:PASS on the narrowed fix before merge.
+- [ ] Get a clean independent AUDIT:PASS on the twice-narrowed fix before
+      merge.
 - [ ] After merge: `agent_work_briefing.py record-completion --umr-id
       UMR-20260815-052932-e80b`.

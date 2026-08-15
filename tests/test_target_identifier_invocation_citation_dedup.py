@@ -306,6 +306,25 @@ def test_orchestrator_run_still_excluded_even_though_bare_run_is_not():
         "own dispatch_gap() mechanism") == []
 
 
+def test_unevidenced_run_prepositions_are_not_citations():
+    """Second independent-audit finding, same UMR: a prior revision of
+    this fix added "using"/"through"/"by" as siblings of "via" by analogy,
+    with no real-incident evidence for any of the three -- and each fires
+    on ordinary bug-report prose that is not an invocation citation at
+    all. Only "via" is evidenced by the real a5e1 incident text; the
+    identifier must still be extracted for these three."""
+    sbr = _load_sbr()
+    assert sbr.extract_target_identifiers(
+        "worker.py run through 10 iterations before failing with a "
+        "segfault -- add a real guard.") == ["script:worker.py"]
+    assert sbr.extract_target_identifiers(
+        "Noticed backup_rotate.sh run by cron every night leaves a stale "
+        "lockfile behind. Please fix.") == ["script:backup_rotate.sh"]
+    assert sbr.extract_target_identifiers(
+        "pm_lifecycle.py run using the staging config accidentally wrote "
+        "to the prod table. Add a real guard.") == ["script:pm_lifecycle.py"]
+
+
 # ---------------------------------------------------------------------------
 # Real protection kept intact: genuine same-target duplicates still refused.
 # ---------------------------------------------------------------------------

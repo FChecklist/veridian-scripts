@@ -4659,6 +4659,214 @@ def detect_stale_umr_rows(now=None):
 
 
 # ---------------------------------------------------------------------------
+# Stuck-writelock detection (Part B, 2026-08-15 register-corruption incident,
+# task-20260815-051128-prevent-register-corruption-recurrence). Real
+# incident: superboss-register.sqlite's own .writelock file sat stuck for
+# 5+ hours with NO process actually holding it before anyone/anything
+# noticed -- dispatch silently degraded the whole time. This wires a cheap
+# check into the ALREADY-running 30s resource_governor_tick_loop.sh (see
+# --writelock-staleness-scan below), not a new standing daemon.
+# ---------------------------------------------------------------------------
+
+WRITELOCK_STALE_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_WRITELOCK_STALE_SECONDS", 300))
+# 5 minutes: "a few minutes, not hours" per the incident follow-up SPEC.
+# Deliberately independent of superboss-register.py's own
+# _SQLITE_LOCKED_RETRY_MAX_TOTAL_WAIT=1200s (20min) busy-retry ceiling --
+# that ceiling bounds how long a REAL, currently-held lock may legitimately
+# block a contending writer; this threshold only ever fires once BOTH (a)
+# the writelock file is older than this AND (b) find_lock_holder_pid()
+# below confirms no real process currently holds it. A file that is old but
+# still genuinely held by a live writer (well within its own 20-minute
+# retry budget) is never flagged -- only a truly abandoned/orphaned
+# writelock file is.
+
+_bllg = None
+
+
+def _build_lock_liveness_guard():
+    """Lazy in-process load of build_lock_liveness_guard.py's real
+    find_lock_holder_pid() -- same real /proc/locks-based holder
+    identification already proven correct for the quality-gate build lock
+    (see that module's own docstring for why /proc/locks, not fuser, is the
+    real source of truth), reused here rather than reimplemented for the
+    superboss-register.sqlite writelock. Same importlib-by-file-path
+    pattern as _superboss_register()/_task_gateway() above (hyphen/dash-
+    named or otherwise script-shaped files can't be plain `import`ed)."""
+    global _bllg
+    if _bllg is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "build_lock_liveness_guard_governor", os.path.join(SCRIPTS, "build_lock_liveness_guard.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _bllg = _mod
+    return _bllg
+
+
+def detect_stuck_writelock(now=None):
+    """Real, read-only check: is superboss-register.sqlite's own .writelock
+    file a genuinely abandoned/stuck lock right now? Returns None if not
+    (file missing, fresh, or still genuinely held by a live process); a
+    real dict (path, age_seconds, mtime_utc, threshold_seconds) if so.
+    Never raises -- fails open (returns None) if Superboss Register or the
+    lock file itself is unreadable, same fail-open convention as every
+    other real scan in this module.
+
+    Real incident this closes: the writelock file sat stuck 5+ hours with
+    NO process holding it (confirmed the same way this function confirms
+    it -- flock is auto-released when its holder dies, so an old, unheld
+    writelock file is exactly the abandoned-lock signature that incident
+    left behind) before anyone/anything noticed. A file that is old but
+    STILL genuinely held by a live writer is a real, legitimate long write
+    (superboss-register.py's own busy-timeout retry tolerates up to
+    20min) -- not stuck, and never flagged."""
+    now = now or _utcnow()
+    sbr, error = _safe_superboss_register("detect_stuck_writelock")
+    if error:
+        return None
+    lock_path = getattr(sbr, "_WRITE_LOCK_PATH", None) or (sbr.DB_PATH + ".writelock")
+    try:
+        mtime = os.path.getmtime(lock_path)
+    except OSError:
+        return None  # no lock file at all -- nothing to flag
+    age_seconds = max(0.0, now.timestamp() - mtime)
+    if age_seconds < WRITELOCK_STALE_SECONDS:
+        return None
+    try:
+        bllg = _build_lock_liveness_guard()
+        holder_pid = bllg.find_lock_holder_pid(lock_path)
+    except Exception:
+        holder_pid = None  # can't confirm a real holder -- treated conservatively as unheld below
+    if holder_pid is not None:
+        return None  # a real live process genuinely holds it -- a legitimate long write, not stuck
+    return {
+        "path": lock_path,
+        "age_seconds": age_seconds,
+        "mtime_utc": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
+        "threshold_seconds": WRITELOCK_STALE_SECONDS,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Daily register backup (Part C, 2026-08-15 register-corruption incident,
+# task-20260815-051128-prevent-register-corruption-recurrence). Real
+# incident: the real backup cadence produced only 3 snapshots on a single
+# day (2026-08-06) and nothing since, leaving an 8-day-stale recovery point
+# by the time the 2026-08-15 corruption hit (~8 days of register history
+# lost on restore). This wires a self-throttled check into the ALREADY-
+# running 30s resource_governor_tick_loop.sh (see --daily-backup-check
+# below) -- not a new standing daemon/systemd unit: the
+# ~/.config/systemd/user/README.md closed-set STANDING RULE governs new
+# periodic units on this box, so this reuses the already-authorized 30s
+# tick loop instead of asking for a new one.
+#
+# Cadence: DAILY_BACKUP_STALE_SECONDS default 24h. Deliberately not
+# sub-daily: prune_memory_backups.py's own keep-3-most-recent-verified
+# policy is shared across EVERY superboss-register.sqlite.* naming
+# convention combined (pre-fullfile-backup, pre-wiring-backup,
+# pre-dedup-constraint-backup, ...) -- a sub-daily cadence here would just
+# make this job's own backups evict each other (or get evicted by an
+# unrelated ad-hoc backup made the same day) before a slow-developing
+# incident ever got a real chance to be caught by one. Daily gives a real,
+# bounded worst-case staleness (<=24h, not another 8 days) while staying
+# compatible with that existing keep-3 policy.
+# ---------------------------------------------------------------------------
+
+DAILY_BACKUP_STALE_SECONDS = int(os.environ.get("VERIDIAN_GOVERNOR_BACKUP_STALE_SECONDS", 24 * 3600))
+
+_ffr = None
+_pmb = None
+
+
+def _full_server_file_registration():
+    """Lazy in-process load of full_server_file_registration.py's real
+    take_backup() -- reused verbatim (not reimplemented) so Part C's daily
+    backup uses the exact same real online sqlite Connection.backup() +
+    integrity-check-verify-or-delete mechanism and the exact same
+    superboss-register.sqlite.pre-fullfile-backup-<UTC ts> naming
+    convention already established there, per the SPEC's own explicit
+    'reuse ... do not invent a new one' instruction."""
+    global _ffr
+    if _ffr is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "full_server_file_registration_governor", os.path.join(SCRIPTS, "full_server_file_registration.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _ffr = _mod
+    return _ffr
+
+
+def _prune_memory_backups():
+    """Lazy in-process load of prune_memory_backups.py's real
+    discover_backup_groups()/verify_group() -- reused to find the newest
+    EXISTING backup's mtime, never reimplemented. Pruning itself needs zero
+    new logic: prune_memory_backups.py's discovery already recognizes any
+    superboss-register.sqlite.* file generically, regardless of naming
+    convention/tag, so the backups this creates are pruned by the same
+    already-running mechanism automatically."""
+    global _pmb
+    if _pmb is None:
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location(
+            "prune_memory_backups_governor", os.path.join(SCRIPTS, "prune_memory_backups.py"))
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _pmb = _mod
+    return _pmb
+
+
+def newest_backup_mtime(now=None):
+    """Real, CHEAP (stat-only, no file content read) mtime of the single
+    newest superboss-register.sqlite.* backup-group file found under
+    prune_memory_backups.py's own scan dirs (reuses its real
+    discover_backup_groups(), never reimplemented) -- or None if none exist
+    yet. Deliberately does NOT run PRAGMA integrity_check on anything here
+    (that already happens once for real at take_backup()-time below when a
+    fresh backup is actually taken, and separately/regularly for every
+    existing backup via prune_memory_backups.py's own already-running
+    5-minute cadence) -- this function is called every 30s from the tick
+    loop and must stay a cheap stat-only check, never a multi-GB file
+    read, or it would reintroduce exactly the kind of disk-I/O pressure
+    PR#349 already targeted."""
+    try:
+        pmb = _prune_memory_backups()
+    except Exception:
+        return None
+    groups = pmb.discover_backup_groups([pmb.MEMORY_DIR, pmb.BACKUPS_DIR])
+    mtimes = [g["mtime"] for g in groups if g.get("main_path")]
+    return max(mtimes) if mtimes else None
+
+
+def run_daily_backup_check(now=None):
+    """Self-throttled: only actually takes a new backup if the newest
+    existing one (by mtime, cheap stat-only check above) is missing or
+    older than DAILY_BACKUP_STALE_SECONDS. When it does, reuses
+    full_server_file_registration.py's own take_backup() verbatim (real
+    online sqlite Connection.backup() + its own real integrity-check
+    verify-or-delete, same superboss-register.sqlite.pre-fullfile-backup-
+    <ts> naming convention prune_memory_backups.py's discovery already
+    recognizes generically -- no new backup mechanism or naming convention
+    invented here). Never raises -- a failed backup attempt is returned as
+    a real dict for the CLI wrapper below to log to ATTENTION.md, not
+    swallowed silently."""
+    now = now or _utcnow()
+    newest_mtime = newest_backup_mtime(now=now)
+    age = None if newest_mtime is None else max(0.0, now.timestamp() - newest_mtime)
+    if age is not None and age < DAILY_BACKUP_STALE_SECONDS:
+        return {"action": "skipped", "reason": "newest existing backup still fresh",
+                "newest_backup_age_seconds": age, "threshold_seconds": DAILY_BACKUP_STALE_SECONDS}
+    try:
+        ffr = _full_server_file_registration()
+        backup_path = ffr.take_backup()
+        return {"action": "backed_up", "backup_path": backup_path,
+                "newest_backup_age_seconds": age, "threshold_seconds": DAILY_BACKUP_STALE_SECONDS}
+    except Exception as e:
+        return {"action": "failed", "error": f"{type(e).__name__}: {e}",
+                "newest_backup_age_seconds": age, "threshold_seconds": DAILY_BACKUP_STALE_SECONDS}
+
+
+# ---------------------------------------------------------------------------
 # Heartbeat reconciliation sweep (Stage 3, 2026-07-29)
 # ---------------------------------------------------------------------------
 
@@ -5797,6 +6005,15 @@ def main():
     ap.add_argument("--tier", type=int, default=DEFAULT_TIER, help="0 (highest) .. 4 (lowest)")
     ap.add_argument("--source-trigger", default="manual")
     ap.add_argument("--scan-stuck", action="store_true", help="run only the stuck-task SIGTERM/SIGKILL scan")
+    ap.add_argument("--writelock-staleness-scan", dest="writelock_staleness_scan", action="store_true",
+                     help="Part B of task-20260815-051128-prevent-register-corruption-recurrence: "
+                          "cheap check for an abandoned superboss-register.sqlite .writelock file "
+                          "(old + no real process holding it) -- logs a real ATTENTION.md alert")
+    ap.add_argument("--daily-backup-check", dest="daily_backup_check", action="store_true",
+                     help="Part C of task-20260815-051128-prevent-register-corruption-recurrence: "
+                          "self-throttled -- takes a fresh superboss-register.sqlite backup via the "
+                          "existing pre-fullfile-backup mechanism iff the newest existing one is "
+                          "missing or older than 24h")
     ap.add_argument("--umr-staleness-scan", dest="umr_staleness_scan", action="store_true",
                      help="Point 14/16 (task-gateway.py audit-24-points): read-only scan for "
                           "queued+ts_dispatched-NULL rows older than 90min or running rows with a "
@@ -6162,6 +6379,29 @@ def main():
                 f"or running+no-heartbeat >{UMR_STALE_RUNNING_HEARTBEAT_SECONDS//60}min): {stale}"
             )
         print(json.dumps({"stale_rows": stale}, default=str))
+        return
+
+    if args.writelock_staleness_scan:
+        stuck = detect_stuck_writelock()
+        if stuck:
+            _append_attention(
+                f"STUCK-WRITELOCK: superboss-register.sqlite's own writelock at {stuck['path']} is "
+                f"{stuck['age_seconds']:.0f}s old (threshold {stuck['threshold_seconds']}s) with NO "
+                "real process currently holding it -- exactly the abandoned-lock signature the "
+                f"2026-08-15 register-corruption incident left undetected for 5+ hours. "
+                f"mtime_utc={stuck['mtime_utc']}"
+            )
+        print(json.dumps({"stuck_writelock": stuck}, default=str))
+        return
+
+    if args.daily_backup_check:
+        result = run_daily_backup_check()
+        if result["action"] == "failed":
+            _append_attention(
+                f"DAILY-BACKUP-CHECK: real superboss-register.sqlite backup attempt FAILED: "
+                f"{result['error']} -- newest_backup_age_seconds={result.get('newest_backup_age_seconds')}"
+            )
+        print(json.dumps(result, default=str))
         return
 
     if args.reconcile_stale:

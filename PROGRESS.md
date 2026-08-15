@@ -1,4 +1,4 @@
-# PROGRESS -- task-20260815-045850-urgent-re-escalation--scheduler-starvati
+# PROGRESS -- task-20260815-051128-prevent-register-corruption-recurrence
 
 ## Completed
 

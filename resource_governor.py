@@ -2301,6 +2301,40 @@ def _orchestrator_output_contract(sbr, umr_id, status, reason, outputs):
         return outputs
 
 
+def _row_output_contract(sbr, row, status, reason):
+    """UMR-20260806-171945-5767 (single deterministic orchestrator), real
+    gap closed 2026-08-15: reconcile_stale_heartbeats() / backfill_null_heartbeats()
+    / _shed_load()'s direct sbr.update_umr_task(...) terminal-status writes
+    never passed an `outputs` kwarg at all, so the real boolean output
+    contract (_orchestrator_output_contract() above) never reached those
+    genuinely-real, already-existing terminal write sites, even though
+    dispatch_one()'s own writes (its 6 call sites) already get it. Same
+    repeating pattern (a terminal umr_tasks write via update_umr_task())
+    that _orchestrator_output_contract() was built to unify -- this reaches
+    the remaining real callers instead of leaving them a second,
+    undocumented code path.
+
+    update_umr_task()'s own `outputs` kwarg is a full-column REPLACE, not a
+    JSON merge (see its docstring) -- so this reads the row's own real,
+    already-persisted outputs_json first and merges the contract on top of
+    it, never dropping whatever input-time evidence upsert_umr_task() already
+    wrote there. `row` must already carry the real outputs_json column value
+    for this umr_id (every real caller here already has that row in hand
+    from its own SELECT), so this never issues a second query.
+
+    Delegates the actual contract derivation to _orchestrator_output_contract()
+    itself (never reimplements its terminal-status check or its fail-open
+    exception handling) -- this function only adds the "read existing
+    outputs_json first" step those call sites were missing."""
+    try:
+        existing = json.loads(row["outputs_json"] or "{}")
+        if not isinstance(existing, dict):
+            existing = {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        existing = {}
+    return _orchestrator_output_contract(sbr, row["umr_id"], status, reason, existing)
+
+
 def _orchestrator_reuse_verdict_gate(sbr, conn, row):
     """Step 2: call reuse_verdict_engine.py's real assess() before any new
     dispatch (spawn). Returns (blocked: bool, verdict_result_or_None).
@@ -4779,11 +4813,13 @@ def reconcile_stale_heartbeats(now=None, ttl_seconds=None, execute=False):
         # is true at the write-FUNCTION level; it is the evidence-gate
         # specifically that is (correctly) scoped to cmd_mark_umr_terminal()'s
         # own AI/PM-claimed-completion use case, not universal.
+        reconcile_reason = (f"reconciled by heartbeat sweep: unit {unit} inactive, last_heartbeat "
+                             f"stale (>{ttl}s), real exit status={terminal}")
         with sbr._write_lock():
             sbr.update_umr_task(
                 conn, row["umr_id"], status=terminal, ts_completed=_now_iso(),
-                reason=(f"reconciled by heartbeat sweep: unit {unit} inactive, last_heartbeat "
-                        f"stale (>{ttl}s), real exit status={terminal}"),
+                reason=reconcile_reason,
+                outputs=_row_output_contract(sbr, row, terminal, reconcile_reason),
             )
             conn.commit()
         actions.append({"umr_id": row["umr_id"], "unit_name": unit,
@@ -5278,7 +5314,8 @@ def backfill_null_heartbeats(now=None, execute=False, email=None):
             entry["decision"] = "marked_completed" if execute else "would_mark_completed"
             if execute:
                 with sbr._write_lock():
-                    sbr.update_umr_task(conn, row["umr_id"], status="completed", ts_completed=_now_iso(), reason=reason)
+                    sbr.update_umr_task(conn, row["umr_id"], status="completed", ts_completed=_now_iso(), reason=reason,
+                                         outputs=_row_output_contract(sbr, row, "completed", reason))
                     conn.commit()
                 report["counts"]["systemd_marked_completed"] += 1
         elif decided_status == "running":
@@ -5297,7 +5334,8 @@ def backfill_null_heartbeats(now=None, execute=False, email=None):
             entry["decision"] = "marked_failed" if execute else "would_mark_failed"
             if execute:
                 with sbr._write_lock():
-                    sbr.update_umr_task(conn, row["umr_id"], status="failed", ts_completed=_now_iso(), reason=reason)
+                    sbr.update_umr_task(conn, row["umr_id"], status="failed", ts_completed=_now_iso(), reason=reason,
+                                         outputs=_row_output_contract(sbr, row, "failed", reason))
                     conn.commit()
                 report["counts"]["systemd_marked_failed"] += 1
         report["examined"].append(entry)
@@ -5364,7 +5402,8 @@ def backfill_null_heartbeats(now=None, execute=False, email=None):
             # session status, not a PR/commit claim.
             entry["mark_complete_call_result"] = _external_ai_mark_complete(match["id"])
             with sbr._write_lock():
-                sbr.update_umr_task(conn, row["umr_id"], status="completed", ts_completed=_now_iso(), reason=reason)
+                sbr.update_umr_task(conn, row["umr_id"], status="completed", ts_completed=_now_iso(), reason=reason,
+                                     outputs=_row_output_contract(sbr, row, "completed", reason))
                 conn.commit()
             report["counts"]["external_reconciled_completed"] += 1
         report["examined"].append(entry)

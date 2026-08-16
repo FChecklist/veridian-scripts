@@ -1,0 +1,47 @@
+# =============================================================================
+# NOT YET INSTALLED / NOT PART OF THE CLOSED SET OF 18.
+#
+# ~/.config/systemd/user/README.md documents a standing rule: the 18
+# veridian-cron-*.service/.timer pairs already live under
+# ~/.config/systemd/user/ are a CLOSED SET, and "a genuinely new
+# cadence/purpose requires an explicit Owner decision to add unit #19 --
+# never a default/automatic action by any script, worker, or session."
+# This unit is a genuinely new purpose (a dedicated daily sqlite backup
+# generator) and would be that 19th unit.
+#
+# PM instruction UMR-20260805-171657-01de explicitly authorized building
+# and testing this script/timer construction now (real branch, real code,
+# real tests against synthetic data). It did NOT constitute the separate,
+# Owner-level "add unit #19" decision the closed-set rule itself calls
+# for -- PM and Owner are distinct roles (see AGENTS.md's Contact section /
+# the project operating model). Accordingly: this file is committed to
+# this repo's systemd/ directory as a real, tested, ready-to-install
+# artifact, but has deliberately NOT been copied into
+# ~/.config/systemd/user/, NOT enabled, and NOT started on this box. Two
+# independent gates must both clear before that happens:
+#   1. A real Owner decision to add this as unit #19 (the closed-set rule
+#      above, independent of item 2).
+#   2. The file_inventory corruption precondition in the paired
+#      .py script's docstring (Hard Rule 8, superboss-register.sqlite) --
+#      a real PRAGMA integrity_check against the live database must
+#      independently confirm "ok" before this timer is ever pointed at it.
+# =============================================================================
+[Unit]
+Description=VERIDIAN cron-replacement: Daily WAL-safe online-backup + backup-integrity-verify of superboss-register.sqlite and credit-ledger.sqlite (OCID-020 category 19, UMR-20260805-165909-4d8b)
+# Root cause this fixes: no active mechanism produces backups for
+# /opt/veridian/ai-os/memory/superboss-register.sqlite anywhere on this box
+# (confirmed via systemctl --user list-timers / crontab -l / repo-wide grep
+# -- see sqlite_daily_backup.py's own module docstring for full detail,
+# including why health-check-15min.py's existing raw-copy backup doesn't
+# cover this: it's gated behind the ENTIRE live database passing a
+# full-database integrity_check first, so one corrupted table blocks
+# backups of every table, healthy ones included).
+# Same shared concurrency/load-shed gate as every other consolidated
+# cron-replacement job (see the other 18 units' own identical line).
+ConditionPathExists=!/opt/veridian/ai-os/locks/resource-governor-EMERGENCY_STOP
+
+[Service]
+Type=oneshot
+ExecStart=/opt/veridian/scripts/run-logged.sh "sqlite-daily-backup" /usr/bin/python3 /opt/veridian/scripts/sqlite_daily_backup.py
+StandardOutput=append:/opt/veridian/ai-os/logs/sqlite-daily-backup-cron.log
+StandardError=append:/opt/veridian/ai-os/logs/sqlite-daily-backup-cron.log

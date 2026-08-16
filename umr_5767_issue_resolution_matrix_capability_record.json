@@ -1,0 +1,48 @@
+{
+  "capability_name": "umr_5767_issue_resolution_matrix",
+  "inputs": [
+    {
+      "key": "issue_number",
+      "label": "Real issue_number to look up in the issues[] array (1-977 today, real_issue_count field)",
+      "type": "number",
+      "optional": true
+    },
+    {
+      "key": "checklist_item",
+      "label": "Real checklist_resolution_table key to look up (70 keys today, real_checklist_item_count field, e.g. GATEWAY_LIVE)",
+      "type": "text",
+      "optional": true
+    }
+  ],
+  "business_rules": [
+    {
+      "leaf_key": "umr_5767_issue_resolution_matrix",
+      "phase": "output",
+      "mechanism_path": "UMR_5767_ISSUE_RESOLUTION_MATRIX.json",
+      "registered": false
+    }
+  ],
+  "workflow": null,
+  "automation": null,
+  "documents": [
+    "/opt/veridian/ai-os/UMR_5767_ISSUE_RESOLUTION_MATRIX.json"
+  ],
+  "reports": null,
+  "apis": [
+    "/opt/veridian/ai-os/UMR_5767_ISSUE_RESOLUTION_MATRIX.json"
+  ],
+  "ui_screens": null,
+  "permissions": "server-local filesystem read only, no HTTP route or CLI wrapper exists today (verified: no script under /opt/veridian/scripts references this file's name); no tenant/org scoping applicable",
+  "ai_required": false,
+  "confidence": 1.0,
+  "version": "unversioned",
+  "owner": "VERIDIAN platform ops tooling -- single deterministic orchestrator workstream (UMR-20260806-171945-5767)",
+  "metadata": {
+    "originating_umr": "UMR-20260806-171945-5767",
+    "registered_by_task": "task-20260807-142924-register-the-real-965-issue-resolution-m",
+    "independent_verification_performed": "Loaded and parsed the file with python3 json.load() this session (valid JSON, 1,263,697 bytes, sha256 d633dec8488550895927c793d3ccd55bb68427aba97d57ae77c86cefcfacf4ca). Confirmed top-level real_checklist_item_count=70 matches len(checklist_resolution_table)=70 (exact). Confirmed issues[] is a real list of 977 entries, issue_number running 1..977 with no duplicates.",
+    "false_premise_found": "This task's own dispatch SPEC claimed 'real issue_count 965'. The file's own real_issue_count field and the real len(issues) both independently read 977, not 965 -- registered using the real, live 977 count, not the SPEC's unverified 965 claim. Likely source of the SPEC's 965 figure: the file's own phase2_subphase1_tool_selection.selected_2026-08-07 block cites an internal sub-range 'covers_issue_range: 916-965' for one tool (git blob object model) -- a range boundary, not the document total -- which appears to have been misread as the whole-document issue count when this task was generated.",
+    "checked_for_duplicate": "lookup-capability --capability-name umr_5767_issue_resolution_matrix returned found=false (zero matches) before registering; list-capabilities (24 existing rows at build time) contains no row for this name.",
+    "db_path_verification": "superboss-register.py resolves its real DB_PATH to /opt/veridian/ai-os/memory/superboss-register.sqlite (confirmed via resolve_superboss_db_path()); a stale-decoy /opt/veridian/scripts/superboss-register.sqlite (0 bytes) exists on disk at this box and was NOT written to -- registration went only through the superboss-register.py CLI, never a raw INSERT against either file."
+  }
+}

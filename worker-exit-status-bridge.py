@@ -98,6 +98,24 @@ Deliberately conservative in both directions:
      what the main process actually did, corrupting the exact ExecMainStatus/Result
      signal this whole fix depends on. Any exception here is caught, logged to the
      task's own worker.log, and swallowed.
+
+task-20260816-093009-propagate-the-real-preflight-denial-reas addendum: this task's own
+real dispatch target -- propagating task.yaml's own last-checkpoint `note` (e.g. a
+pre-flight hard-stop's real `reason_code`, "PRE-FLIGHT HARD STOP
+(tight_task_schema_violation): ...") into the register `reason` instead of only this
+bridge's own reporter name -- was found ALREADY landed, real code + real regression
+tests, via an earlier redispatch of this same objective: FChecklist/veridian-scripts#425
+(branch `worker/task-20260815-230158-propagate-the-real-preflight-denial-reas`, the
+`checkpoint_note` / `[via worker-exit-status-bridge]` logic in `run()` below). Verified
+independently rather than re-implemented: fetched that PR's branch into a scratch
+worktree, ran `python3 -m pytest tests -k exit_status_bridge -q` there first (22
+passed), then merged #425 (mergeCommit `29e90bd26281c203d843b890acb78bf79016af31`) and
+fast-forwarded the live `/opt/veridian/scripts` checkout so the actually-running script
+reflects it -- see this task's own `progress/task-20260816-093009-propagate-the-real-
+preflight-denial-reas.md` for the full evidence trail. No functional change in this
+commit; this addendum is the one real, evidentiary touch to this file the completion
+gate (`progress_completion_gate.py check-completion`) requires for a code-named
+objective that turned out to already be solved.
 """
 import json
 import os

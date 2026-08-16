@@ -23,6 +23,18 @@
 # secrets (variable literally named with "test" context, file is *.test.ts,
 # used only to exercise HMAC signature-verification code paths against
 # synthetic input) -- never a real webhook/API secret.
+#
+# Group C (1 fingerprint, added 2026-08-14, task-20260814-125658): the same
+# Group B test-fixture literal (`SECRET = "whsec_test_secret_1234567890"`)
+# also appears quoted inside ai-os/OCID-056-CREDENTIAL-EXPOSURE-REPORT.md,
+# which is itself the audit report that already reviewed and cleared this
+# exact literal (see that file's own "Reviewed and confirmed NOT a real
+# exposure" table, `route.test.ts`/`vercel-signature.test.ts` row). Verified
+# directly: fresh `gitleaks detect --source . --no-git` against a clean
+# clone of compliance-tracker HEAD 21dda46336905c00d5c13d8b3c476f9eab0b6e3c
+# on 2026-08-14 showed exactly this one new fingerprint, nothing else new.
+# Same classification as Group B -- a doc quoting an already-cleared test
+# fixture, not a new secret.
 src/lib/composio-connectors.ts:generic-api-key:85
 src/lib/composio-connectors.ts:generic-api-key:86
 src/lib/composio-connectors.ts:generic-api-key:87
@@ -39,3 +51,4 @@ src/lib/composio-connectors.ts:generic-api-key:101
 src/lib/composio-connectors.ts:generic-api-key:102
 src/app/api/webhooks/vercel-deployment/route.test.ts:generic-api-key:16
 src/lib/webhooks/vercel-signature.test.ts:generic-api-key:6
+ai-os/OCID-056-CREDENTIAL-EXPOSURE-REPORT.md:generic-api-key:36

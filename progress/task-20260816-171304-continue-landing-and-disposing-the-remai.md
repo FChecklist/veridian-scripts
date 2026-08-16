@@ -83,19 +83,31 @@ diff/content read below.)
       #442 before merging.
 
 ## Remaining
-- [ ] Poll UMR-20260816-172756-80cc / PR #442 for the real AUDIT verdict;
-      merge #442 into main on PASS, then close #355 pointing at #442's
-      merge commit. If FAIL, report #355/#442's real defect instead of
-      merging.
-- [ ] Close #276 (superseded by 86a2a81) and #273 (superseded by
-      86a2a81+7f70543) with real citing comments.
-- [ ] Close #423 (superseded by 89b30ab), #417 (superseded by 58c23d7),
-      #405 (superseded by 1b71062) with real citing comments.
-- [ ] Post real-defect summary comments (or confirm existing audit comments
-      already say enough) on the real-defect bucket: #8, #72, #190, #204,
-      #213, #357, #401, #416, #422, #435 -- leave open, no merge.
-- [ ] Write final report table (all 16) and record completion via
-      agent_work_briefing.py.
+- [x] Close #276 (superseded by 86a2a81) and #273 (superseded by
+      86a2a81+7f70543) with real citing comments. DONE.
+- [x] Close #423 (superseded by 89b30ab), #417 (superseded by 58c23d7),
+      #405 (superseded by 1b71062) with real citing comments. DONE.
+- [x] Real-defect bucket (#8, #72, #190, #204, #213, #357, #401, #416,
+      #422, #435) left open as-is: each already carries a detailed,
+      specific, genuine audit comment on GitHub citing the real bug/file --
+      re-posting would be redundant; the disposition table below is the
+      report of exact defect + file for each.
+- [ ] **UMR-20260816-172756-80cc / PR #442 audit still queued, not blocking
+      completion of this task's own real diff.** Confirmed via
+      `resource_governor.py --list-queue`: this UMR is position 0 (nothing
+      ahead of it), blocked purely by the box's real 5/5 concurrent-worker
+      cap (other real, unrelated dispatched tasks currently running --
+      `veridian-worker@task-20260816-172825-...`,
+      `...-172131-stop-workers-opening-a-pull-request-for...`,
+      `...-171310-finish-disposing-the-last-open-pull-requ...` among them).
+      Per "Never self-certify", #355 stays open and #442 stays unmerged
+      until a real AUDIT:PASS/FAIL lands on #442 -- a background Monitor
+      (task bqm6lp0hy) is watching UMR-20260816-172756-80cc for a terminal
+      status and this task will act (merge #442 + close #355, or report
+      #442's real defect) the moment it does, in a follow-up turn.
+- [x] Write final report table (all 16) below.
+- [ ] Record completion via agent_work_briefing.py once #442's real verdict
+      is in (or in a follow-up if this turn ends first).
 
 ## Disposition table (real reasons, pending final #442 outcome)
 | # | Outcome | Real reason | Docs-only |

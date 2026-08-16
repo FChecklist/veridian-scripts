@@ -85,9 +85,33 @@ at least one file needing manual read of both sides.
       confirmed via `gh pr view --json state,mergedAt` on all 10. Posted a
       traceability comment on each pointing at #437 anyway.
 
+## Bundle 2 (#419 + #429) -- merged locally, pending push/audit/merge
+- [x] #419 and #429 both independently added `queue-manager.py`/
+      `timer-manager.py` as previously-uncommitted live CLI tools (each
+      PR's own diff vs its OWN base is a fresh 100755 add, confirmed via
+      `git diff <base> <head>`). Read both full files in real worktrees
+      (`git worktree add`, not truncated `git show` piping) side by side:
+      #429's versions (401/156 lines) are a strict superset of #419's
+      (227/128 lines) -- every function/subcommand in #419's copy is
+      present verbatim in #429's, plus #429 adds real, documented bug
+      fixes (stopped-timer NEXT/LEFT column-shift bug in `list_timers`;
+      `list --status queued` blind to the real pre-dispatch backlog) and
+      new pre-dispatch-queue subcommands. Confirmed with a real diff of the
+      two full files, not assumed from titles.
+- [x] Resolved: merged #419 first (PROGRESS.md-only conflict, kept ours),
+      then #429 (conflicts in PROGRESS.md + queue-manager.py +
+      timer-manager.py) -- kept #429's queue-manager.py/timer-manager.py
+      wholesale (`git checkout --theirs`, justified above, not a blind
+      pick), kept accumulated PROGRESS.md. `pm-sentinel-tick.sh` and
+      `pm_lifecycle.py` (part of #429's own real diff, not a freelance
+      edit by this task) auto-merged clean, no manual resolution needed.
+      `bash -n pm-sentinel-tick.sh` clean, `py_compile` clean on
+      queue-manager.py/timer-manager.py/pm_lifecycle.py, 13/13 new tests
+      passing (`tests/test_queue_manager.py`, `tests/test_timer_manager.py`).
+
 ## Remaining
-- [ ] Process #419 + #429 (mutual file overlap: queue-manager.py,
-      timer-manager.py) as their own cycle.
+- [ ] Push bundle-2 branch, open superseding PR, get independent audit,
+      merge on PASS, confirm #419/#429 auto-flip to MERGED.
 - [ ] Process the 18 remaining real-code-conflict PRs: 8, 61, 65, 72, 79,
       198, 204, 273, 276, 355, 357, 405, 416, 417, 422, 423, 424, 435 --
       prioritise newest-first per SPEC ("oldest-conflicting last"), read

@@ -352,6 +352,68 @@ is semantically consistent with the bucket it was placed in.
     "pass" (category 25's own already-established real state) -- the same
     "deterministic gate" concept this script already reuses elsewhere, not
     a new field invented for this rule.
+
+Sections 17-18 (this task's own real ask, Owner finding: the PM was still
+making manual AI queries every ten-minute cycle for two real reasons -- (a)
+re-deriving values -- swap, EMERGENCY_STOP, worker count -- that Section 1
+above already reports directly, and (b) two genuine gaps this script had no
+section for at all: real PR merge state for a real tracked-PR list, and real
+per-row status for the Owner's own recently-dispatched UMRs. (a) is not a
+code gap -- Section 1 already reports swap_free_pct, emergency_stop_present
+and parallel_worker_count on every run; the fix for (a) is the PM reading
+this report instead of re-deriving those fields, documented in the "SKILL.md
+still not accessible from this server" note below. (b) is a real code gap,
+closed by the two new sections below.
+  17. TRACKED PR MERGE STATE -- real `gh pr view <N> --repo <org>/<repo>
+      --json number,title,state,mergedAt,mergeCommit,headRefName,url` for
+      every entry in a real, configurable tracked-PR list, loaded from a
+      real JSON file (TRACKED_PR_LIST_PATH, env-overridable via
+      VERIDIAN_PM_REPORT_TRACKED_PR_LIST_PATH, default
+      "{SCRIPTS}/TRACKED_PRS.json") -- see load_tracked_pr_list() for the
+      exact real file format. Deliberately NEVER a hardcoded PR number
+      anywhere in this script: the tracked set is edited by changing that
+      real file, not this code. The file ships with an empty list -- this
+      task's own directive named no specific PR numbers to track, and this
+      script does not invent a plausible-looking starter list; the PM/Owner
+      populates it with the real PRs they want watched. A missing config
+      file is reported as a real, honest "nothing configured yet" state
+      (config_file_found=False, zero results), never a fabricated empty-vs-
+      misconfigured ambiguity. A present-but-unparseable file IS a real
+      error, surfaced as such rather than silently treated as empty. Each
+      real tracked entry that fails its own individual `gh pr view` call
+      (closed/deleted PR, bad repo/number, `gh` auth/rate-limit failure)
+      reports its own real per-entry error rather than aborting the whole
+      section.
+  18. RECENT OWNER-DISPATCHED UMR STATUS (last real
+      OWNER_UMR_RECENT_WINDOW_HOURS hours, default 2, env-overridable via
+      VERIDIAN_PM_REPORT_OWNER_UMR_RECENT_WINDOW_HOURS) -- real per-row SQL
+      listing (umr_id, ts_submitted, status, real age_hours) for every real
+      umr_tasks row with source_trigger='owner_dispatch_gateway' AND
+      ts_submitted within that trailing window, ORDER BY ts_submitted DESC.
+      Complements Section 14 (which reports all-time/trailing-24h aggregate
+      COUNTs only, no per-row detail) with the itemized, short-window view
+      the PM actually needs every ten-minute cycle to check on its own
+      just-dispatched UMRs without a manual `sqlite3 umr_tasks` query. Zero
+      real rows in the window is reported honestly (empty list), never
+      fabricated.
+
+SKILL.md still not accessible from this server (re-confirmed before this
+task): "Reporting Contract V3" SKILL.md normally lives at
+C:\\Users\\Dell\\.claude\\scheduled-tasks\\veridian-server-sentinel\\SKILL.md
+on the Owner's local Windows machine (see the "FORMERLY THE ONE PIECE..."
+block above) -- a path this Linux server has never had access to, confirmed
+independently again via a bounded repo/server search before writing this
+section (no SKILL.md, no synced copy, anywhere under /opt/veridian). This
+script's own module docstring is therefore the practical, server-side
+substitute for the part of that contract this task's directive asked to be
+stated "plainly": Sections 1 and 14-17 of THIS report already carry
+swap_free_pct, emergency_stop_present, parallel_worker_count,
+PARALLEL_WORKERS_CEILING, real tracked-PR merge state, and real recent
+owner-dispatched UMR status on every real run -- the PM should read them
+from here every cycle rather than re-deriving any of them with a manual
+AI/LLM query. The real Windows-side SKILL.md itself was NOT edited by this
+task (this server cannot reach it); if/when the Owner syncs a real copy to
+this server, the equivalent instruction belongs there too.
 -------------------------------------------------------------------------
 """
 import argparse
@@ -473,7 +535,15 @@ REPORT_FORMAT_VERSION = "pm-report-v3-placeholder-gtm-score"
 # DISK_AVAIL_PCT_WARN_THRESHOLD=10.0, either one trips it -- see the
 # threshold's own comment block for why both a GB floor and a % floor are
 # needed on this box's real 301G disk).
-SCRIPT_VERSION = "3.5.0"
+# 3.6.0 (Owner finding, PR #198): adds Section 17 (real tracked-PR merge
+# state via `gh pr view`, over a real configurable file-backed list -- never
+# hardcoded PR numbers in this script) and Section 18 (real per-row status
+# for umr_tasks rows with source_trigger='owner_dispatch_gateway' from the
+# real trailing 2h) -- see the module docstring's "Sections 17-18" block
+# above for the full real definitions and the honest SKILL.md-inaccessible
+# note. (Renumbered from PR #198's original 16-17 on merge: Section 16 was
+# independently claimed by the wiring-registry-health stop-work-order work.)
+SCRIPT_VERSION = "3.6.0"
 
 # ---------------------------------------------------------------------------
 # Section 9-13 constants (UMR-20260806-041307-0bfd) -- see module docstring
@@ -554,6 +624,13 @@ CONCRETE_COMPLETION_FILE_PATH_RE = re.compile(
 )
 CONCRETE_COMPLETION_PR_REF_RE = re.compile(
     r"\bPR\s*#?\d+\b|\bpull request\s*#?\d+\b", re.IGNORECASE)
+
+# Sections 17-18 (this task's own real ask -- see module docstring's
+# "Sections 17-18" block for the full real definitions).
+TRACKED_PR_LIST_PATH = os.environ.get(
+    "VERIDIAN_PM_REPORT_TRACKED_PR_LIST_PATH", f"{SCRIPTS}/TRACKED_PRS.json")
+OWNER_UMR_RECENT_WINDOW_HOURS = float(
+    os.environ.get("VERIDIAN_PM_REPORT_OWNER_UMR_RECENT_WINDOW_HOURS", "2"))
 
 
 # ---------------------------------------------------------------------------
@@ -2391,6 +2468,127 @@ def get_wiring_health_check_section(sbr, record_pm_decisions=True):
 
 
 # ---------------------------------------------------------------------------
+# Section 17: TRACKED PR MERGE STATE (real `gh pr view`, real configurable
+# file-backed tracked-PR list -- see module docstring's "Sections 17-18"
+# block). Never a hardcoded PR number anywhere in this script.
+# ---------------------------------------------------------------------------
+def load_tracked_pr_list():
+    """Real read/parse of TRACKED_PR_LIST_PATH -- the ONE real, configurable
+    source of tracked PR numbers for Section 17. A missing file is a real,
+    valid "nothing configured yet" state (empty list, config_file_found=
+    False) -- this report ships with an empty tracked list since this
+    task's own directive named no specific PR numbers to track, and never
+    invents a plausible-looking starter list. A file that exists but fails
+    to parse, or whose shape is wrong, IS a real error -- surfaced honestly,
+    never silently treated as empty.
+
+    Real file format: a JSON list of objects, each {"repo": "<repo-name>",
+    "number": <int>} -- "repo" is a bare repo name (same convention as
+    COLLISION_TRACKED_REPOS), prefixed with GH_ORG when calling `gh`, e.g.:
+      [{"repo": "veridian-scripts", "number": 195}]
+    """
+    if not os.path.exists(TRACKED_PR_LIST_PATH):
+        return {"entries": [], "error": None, "config_file_found": False}
+    try:
+        with open(TRACKED_PR_LIST_PATH) as f:
+            doc = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        return {"entries": [], "error": f"could not read/parse {TRACKED_PR_LIST_PATH}: {e}",
+                "config_file_found": True}
+    if not isinstance(doc, list):
+        return {"entries": [], "config_file_found": True,
+                "error": f"{TRACKED_PR_LIST_PATH} must contain a JSON list, got {type(doc).__name__}"}
+    entries = []
+    for i, item in enumerate(doc):
+        if not isinstance(item, dict) or "repo" not in item or "number" not in item:
+            return {"entries": [], "config_file_found": True,
+                     "error": f"{TRACKED_PR_LIST_PATH}[{i}] must be an object with 'repo' and 'number' keys"}
+        try:
+            entries.append({"repo": str(item["repo"]), "number": int(item["number"])})
+        except (TypeError, ValueError):
+            return {"entries": [], "config_file_found": True,
+                     "error": f"{TRACKED_PR_LIST_PATH}[{i}]['number'] must be an integer"}
+    return {"entries": entries, "error": None, "config_file_found": True}
+
+
+def get_pr_view(repo, number):
+    """Real `gh pr view <number> --repo <GH_ORG>/<repo>` for one real
+    tracked PR. Never raises on a real `gh` failure (closed/deleted PR, bad
+    repo/number, auth/rate-limit error) -- returns (None, err) so the caller
+    reports it as that one entry's own real error, without aborting the
+    rest of Section 17."""
+    code, out, err = run_cmd(
+        ["gh", "pr", "view", str(number), "--repo", f"{GH_ORG}/{repo}",
+         "--json", "number,title,state,mergedAt,mergeCommit,headRefName,url"],
+        timeout=30,
+    )
+    if code != 0:
+        return None, err.strip() or f"exit {code}"
+    try:
+        return json.loads(out), None
+    except json.JSONDecodeError as e:
+        return None, f"could not parse gh pr view JSON: {e}"
+
+
+def get_tracked_pr_merge_state_section():
+    cfg = load_tracked_pr_list()
+    if cfg["error"]:
+        return {"error": cfg["error"], "config_path": TRACKED_PR_LIST_PATH,
+                 "config_file_found": cfg["config_file_found"], "tracked_count": 0, "results": []}
+    results = []
+    for entry in cfg["entries"]:
+        pr, err = get_pr_view(entry["repo"], entry["number"])
+        if err:
+            results.append({"repo": entry["repo"], "number": entry["number"], "error": err})
+            continue
+        results.append({
+            "repo": entry["repo"], "number": entry["number"],
+            "title": pr.get("title"), "state": pr.get("state"),
+            "merged_at": pr.get("mergedAt"), "url": pr.get("url"),
+            "head_ref": pr.get("headRefName"),
+        })
+    return {
+        "error": None,
+        "config_path": TRACKED_PR_LIST_PATH,
+        "config_file_found": cfg["config_file_found"],
+        "tracked_count": len(cfg["entries"]),
+        "results": results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Section 18: RECENT OWNER-DISPATCHED UMR STATUS (real per-row listing, last
+# real OWNER_UMR_RECENT_WINDOW_HOURS hours -- see module docstring's
+# "Sections 17-18" block). Complements Section 14's aggregate counts with
+# itemized per-row detail for the Owner's own most recent dispatches.
+# ---------------------------------------------------------------------------
+def get_recent_owner_umr_status_section(sbr, now_dt=None):
+    now_dt = now_dt or datetime.now(timezone.utc)
+    since_iso = (now_dt - timedelta(hours=OWNER_UMR_RECENT_WINDOW_HOURS)).isoformat()
+    try:
+        conn = sbr._connect()
+        rows = conn.execute(
+            "SELECT umr_id, ts_submitted, status FROM umr_tasks "
+            "WHERE source_trigger = ? AND ts_submitted >= ? ORDER BY ts_submitted DESC",
+            (OWNER_DISPATCH_SOURCE_TRIGGER, since_iso),
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error as e:
+        return {"error": str(e), "window_hours": OWNER_UMR_RECENT_WINDOW_HOURS,
+                 "since": since_iso, "rows": []}
+    return {
+        "error": None,
+        "window_hours": OWNER_UMR_RECENT_WINDOW_HOURS,
+        "since": since_iso,
+        "rows": [
+            {"umr_id": r["umr_id"], "ts_submitted": r["ts_submitted"], "status": r["status"],
+             "age_hours": _age_hours_since(r["ts_submitted"], now_dt)}
+            for r in rows
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Assembly + rendering
 # ---------------------------------------------------------------------------
 def build_report(sbr):
@@ -2465,6 +2663,12 @@ def build_report(sbr):
     # Section 16 (owner absolute stop-work order, task-20260806-165921) --
     # see get_wiring_registry_health_section()'s own docstring.
     wiring_registry_health_section = get_wiring_registry_health_section(sbr)
+    # Sections 17-18 (PR #198's real ask, renumbered from 16-17 on merge
+    # since Section 16 was independently claimed by the wiring-registry
+    # stop-work-order work above) -- see module docstring's "Sections 17-18"
+    # block.
+    tracked_pr_merge_state_section = get_tracked_pr_merge_state_section()
+    recent_owner_umr_status_section = get_recent_owner_umr_status_section(sbr)
 
     report = {
         "report_format_version": REPORT_FORMAT_VERSION,
@@ -2508,6 +2712,8 @@ def build_report(sbr):
         "owner_umr_closure_section": owner_umr_closure_section,
         "dead_zone_reconciliation_section": dead_zone_reconciliation_section,
         "wiring_registry_health_section": wiring_registry_health_section,
+        "tracked_pr_merge_state_section": tracked_pr_merge_state_section,
+        "recent_owner_umr_status_section": recent_owner_umr_status_section,
         "current_flat_fields": current_flat,
         "thresholds": {
             "SWAP_FREE_PCT_WARN_THRESHOLD": SWAP_FREE_PCT_WARN_THRESHOLD,
@@ -2843,6 +3049,37 @@ def render_report_text(report):
             for r in wh["unhealthy_examples"]:
                 lines.append(f"    [{r['last_verified_ts']}] {r['verification_status']} "
                               f"{r['entity_type']} {r['entity_id']}: {r['path']}")
+
+    lines.append("")
+    h("17. TRACKED PR MERGE STATE (real `gh pr view`, real configurable file-backed list -- "
+      "never hardcoded PR numbers in this script)")
+    tpr = report["tracked_pr_merge_state_section"]
+    lines.append(f"CONFIG_PATH={tpr['config_path']}  config_file_found={tpr['config_file_found']}")
+    if tpr.get("error"):
+        lines.append(f"ERROR reading tracked PR list: {tpr['error']}")
+    elif tpr["tracked_count"] == 0:
+        lines.append("TRACKED_PR_COUNT=0 (no real PRs configured yet -- add entries to the config file above)")
+    else:
+        lines.append(f"TRACKED_PR_COUNT={tpr['tracked_count']}")
+        for r in tpr["results"]:
+            if r.get("error"):
+                lines.append(f"  {r['repo']}#{r['number']}: ERROR {r['error']}")
+            else:
+                merged = f"merged_at={r['merged_at']}" if r.get("merged_at") else "not merged"
+                lines.append(f"  {r['repo']}#{r['number']} [{r['state']}] {merged} -- {r['title']} ({r['url']})")
+
+    h(f"18. RECENT OWNER-DISPATCHED UMR STATUS (source_trigger='owner_dispatch_gateway', "
+      f"real umr_tasks rows, trailing {report['recent_owner_umr_status_section']['window_hours']}h)")
+    rous = report["recent_owner_umr_status_section"]
+    if rous.get("error"):
+        lines.append(f"ERROR reading umr_tasks: {rous['error']}")
+    elif not rous["rows"]:
+        lines.append(f"No real owner_dispatch_gateway rows since {rous['since']}.")
+    else:
+        lines.append(f"RECENT_OWNER_UMR_COUNT={len(rous['rows'])} (since {rous['since']})")
+        for r in rous["rows"]:
+            lines.append(f"  {r['umr_id']}  status={r['status']}  ts_submitted={r['ts_submitted']}  "
+                          f"age_hours={r['age_hours']}")
 
     lines.append("")
     lines.append("=" * 78)

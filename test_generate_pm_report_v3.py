@@ -606,6 +606,9 @@ def test_end_to_end_smoke_run(tmp_path, monkeypatch):
     monkeypatch.setattr(pm, "STUCK_TASKS_HEARTBEAT_PATH", str(heartbeat_path))
     monkeypatch.setattr(pm, "REPORT_LATEST_PATH", str(tmp_path / "pm-report-latest.txt"))
     monkeypatch.setattr(pm, "REPORT_HISTORY_PATH", str(tmp_path / "pm-report-history.log"))
+    # Sections 16-17: point at a real-but-nonexistent tmp path so this test
+    # never reads this repo's own real TRACKED_PRS.json.
+    monkeypatch.setattr(pm, "TRACKED_PR_LIST_PATH", str(tmp_path / "TRACKED_PRS_nonexistent.json"))
 
     def fake_run_cmd(argv, timeout=30):
         if argv[:3] == ["systemctl", "--user", "list-timers"]:
@@ -665,6 +668,8 @@ def test_end_to_end_smoke_run(tmp_path, monkeypatch):
         "6. OPEN ISSUES",
         "7. PM DECISION REQUIRED",
         "8. AI PROPOSALS AWAITING PM DECISION",
+        "17. TRACKED PR MERGE STATE",
+        "18. RECENT OWNER-DISPATCHED UMR STATUS",
         "synthetic failing evidence",
         "synthetic open decision",
         "synthetic real issue",
@@ -690,6 +695,15 @@ def test_end_to_end_smoke_run(tmp_path, monkeypatch):
     assert len(report["owner_proposals_pending"]) == 1
     assert report["owner_proposals_pending"][0]["issue"] == "synthetic real issue"
     assert report["owner_proposals_pending"][0]["child_umr"] == "UMR-20260806-000000-abcd"
+
+    # Section 16: no real config file at this monkeypatched path -> honest
+    # "nothing configured yet" state, never a fabricated result.
+    assert report["tracked_pr_merge_state_section"]["config_file_found"] is False
+    assert report["tracked_pr_merge_state_section"]["tracked_count"] == 0
+    # Section 17: this smoke test's synthetic umr_tasks table (line ~422)
+    # deliberately has no ts_submitted/source_trigger columns -- degrades
+    # to a real, honest error rather than crashing the whole report.
+    assert report["recent_owner_umr_status_section"]["error"] is not None
 
     pm.write_report_files(text)
     pm.write_snapshot_row(fake_sbr, report)
@@ -960,6 +974,13 @@ def test_render_report_text_survives_per_metric_insufficient_data(monkeypatch):
             "total_entities": 0, "verification_status_counts": {}, "unhealthy_count": 0,
             "unhealthy_examples": [], "oldest_last_verified_ts": None,
         },
+        "tracked_pr_merge_state_section": {
+            "error": None, "config_path": "/tmp/TRACKED_PRS.json",
+            "config_file_found": False, "tracked_count": 0, "results": [],
+        },
+        "recent_owner_umr_status_section": {
+            "error": None, "window_hours": 2.0, "since": "t", "rows": [],
+        },
     }
     text = pm.render_report_text(report)  # must not raise
     assert "insufficient_data" in text
@@ -967,6 +988,8 @@ def test_render_report_text_survives_per_metric_insufficient_data(monkeypatch):
     assert "14. OWNER UMR CLOSURE TRACKING" in text
     assert "15. DISPATCHED DEAD-ZONE AUTO-REMEDIATION" in text
     assert "16. WIRING REGISTRY HEALTH" in text
+    assert "17. TRACKED PR MERGE STATE" in text
+    assert "18. RECENT OWNER-DISPATCHED UMR STATUS" in text
 
 
 def test_get_trend_analysis_zero_rows(tmp_path):
@@ -1852,12 +1875,178 @@ def test_wiring_registry_health_section_renders_unhealthy_examples_in_report_tex
         },
         "dead_zone_reconciliation_section": {"recent_auto_remediations": [], "open_escalations": []},
         "wiring_registry_health_section": wiring_section,
+        "tracked_pr_merge_state_section": {
+            "error": None, "config_path": "/tmp/TRACKED_PRS.json",
+            "config_file_found": False, "tracked_count": 0, "results": [],
+        },
+        "recent_owner_umr_status_section": {
+            "error": None, "window_hours": 2.0, "since": "t", "rows": [],
+        },
     }
     text = pm.render_report_text(report)  # must not raise
     assert "16. WIRING REGISTRY HEALTH" in text
     assert "e-missing" in text
     assert "PATH_MISSING" in text
     assert "/opt/veridian/scripts/gone.py" in text
+
+
+# --- Section 17 (this task's own real ask): real tracked-PR merge state
+# over a real configurable file-backed list, `gh pr view` mocked via
+# run_cmd. ------------------------------------------------------------
+def test_load_tracked_pr_list_missing_file_is_honest_empty_not_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm, "TRACKED_PR_LIST_PATH", str(tmp_path / "does_not_exist.json"))
+    cfg = pm.load_tracked_pr_list()
+    assert cfg["error"] is None
+    assert cfg["config_file_found"] is False
+    assert cfg["entries"] == []
+
+
+def test_load_tracked_pr_list_real_shaped_file(tmp_path, monkeypatch):
+    path = tmp_path / "TRACKED_PRS.json"
+    path.write_text(json.dumps([{"repo": "veridian-scripts", "number": 195},
+                                 {"repo": "compliance-tracker", "number": 42}]))
+    monkeypatch.setattr(pm, "TRACKED_PR_LIST_PATH", str(path))
+    cfg = pm.load_tracked_pr_list()
+    assert cfg["error"] is None
+    assert cfg["config_file_found"] is True
+    assert cfg["entries"] == [
+        {"repo": "veridian-scripts", "number": 195},
+        {"repo": "compliance-tracker", "number": 42},
+    ]
+
+
+def test_load_tracked_pr_list_unparseable_json_is_real_error(tmp_path, monkeypatch):
+    path = tmp_path / "TRACKED_PRS.json"
+    path.write_text("not real json {{{")
+    monkeypatch.setattr(pm, "TRACKED_PR_LIST_PATH", str(path))
+    cfg = pm.load_tracked_pr_list()
+    assert cfg["error"] is not None
+    assert cfg["config_file_found"] is True
+    assert cfg["entries"] == []
+
+
+def test_load_tracked_pr_list_wrong_shape_is_real_error(tmp_path, monkeypatch):
+    path = tmp_path / "TRACKED_PRS.json"
+    path.write_text(json.dumps({"not": "a list"}))
+    monkeypatch.setattr(pm, "TRACKED_PR_LIST_PATH", str(path))
+    cfg = pm.load_tracked_pr_list()
+    assert cfg["error"] is not None
+    assert "must contain a JSON list" in cfg["error"]
+
+
+def test_load_tracked_pr_list_missing_required_key_is_real_error(tmp_path, monkeypatch):
+    path = tmp_path / "TRACKED_PRS.json"
+    path.write_text(json.dumps([{"repo": "veridian-scripts"}]))
+    monkeypatch.setattr(pm, "TRACKED_PR_LIST_PATH", str(path))
+    cfg = pm.load_tracked_pr_list()
+    assert cfg["error"] is not None
+    assert "'repo' and 'number'" in cfg["error"]
+
+
+def test_get_pr_view_parses_real_shaped_gh_json(monkeypatch):
+    def fake_run_cmd(argv, timeout=30):
+        assert argv == ["gh", "pr", "view", "195", "--repo", "FChecklist/veridian-scripts",
+                         "--json", "number,title,state,mergedAt,mergeCommit,headRefName,url"]
+        return 0, json.dumps({
+            "number": 195, "title": "real title", "state": "MERGED",
+            "mergedAt": "2026-08-06T12:00:00Z", "headRefName": "worker/foo",
+            "url": "https://github.com/FChecklist/veridian-scripts/pull/195",
+        }), ""
+
+    monkeypatch.setattr(pm, "run_cmd", fake_run_cmd)
+    pr, err = pm.get_pr_view("veridian-scripts", 195)
+    assert err is None
+    assert pr["state"] == "MERGED"
+    assert pr["title"] == "real title"
+
+
+def test_get_pr_view_real_gh_failure_reported_not_raised(monkeypatch):
+    monkeypatch.setattr(pm, "run_cmd", lambda argv, timeout=30: (1, "", "pull request not found"))
+    pr, err = pm.get_pr_view("veridian-scripts", 99999)
+    assert pr is None
+    assert "not found" in err
+
+
+def test_get_tracked_pr_merge_state_section_end_to_end(tmp_path, monkeypatch):
+    path = tmp_path / "TRACKED_PRS.json"
+    path.write_text(json.dumps([{"repo": "veridian-scripts", "number": 195},
+                                 {"repo": "veridian-scripts", "number": 99999}]))
+    monkeypatch.setattr(pm, "TRACKED_PR_LIST_PATH", str(path))
+
+    def fake_run_cmd(argv, timeout=30):
+        if argv[3] == "195":
+            return 0, json.dumps({"number": 195, "title": "real merged PR", "state": "MERGED",
+                                    "mergedAt": "2026-08-06T12:00:00Z", "headRefName": "worker/foo",
+                                    "url": "https://x/195"}), ""
+        return 1, "", "pull request not found"
+
+    monkeypatch.setattr(pm, "run_cmd", fake_run_cmd)
+    section = pm.get_tracked_pr_merge_state_section()
+    assert section["error"] is None
+    assert section["tracked_count"] == 2
+    assert section["results"][0]["state"] == "MERGED"
+    assert section["results"][1]["error"] is not None
+
+
+def test_get_tracked_pr_merge_state_section_no_config_is_honest_zero(tmp_path, monkeypatch):
+    monkeypatch.setattr(pm, "TRACKED_PR_LIST_PATH", str(tmp_path / "nope.json"))
+    section = pm.get_tracked_pr_merge_state_section()
+    assert section["error"] is None
+    assert section["config_file_found"] is False
+    assert section["tracked_count"] == 0
+    assert section["results"] == []
+
+
+# --- Section 18 (this task's own real ask): real per-row status for
+# umr_tasks rows with source_trigger='owner_dispatch_gateway' from the
+# real trailing window. --------------------------------------------------
+def test_get_recent_owner_umr_status_section_windows_correctly(tmp_path):
+    now = pm.datetime(2026, 8, 6, 12, 0, 0, tzinfo=pm.timezone.utc)
+    rows = [
+        # Inside the trailing 2h window (now-2h = 10:00:00).
+        ("UMR-recent-1", "2026-08-06T10:30:00+00:00", "dispatched", "owner_dispatch_gateway"),
+        ("UMR-recent-2", "2026-08-06T11:45:00+00:00", "completed", "owner_dispatch_gateway"),
+        # Outside the window.
+        ("UMR-old", "2026-08-06T09:00:00+00:00", "completed", "owner_dispatch_gateway"),
+        # Different source_trigger -- must never appear.
+        ("UMR-other", "2026-08-06T11:00:00+00:00", "queued", "some_other_trigger"),
+    ]
+    db_path = _make_owner_umr_db(tmp_path, rows)
+    fake_sbr = _make_fake_sbr_module(db_path)
+
+    section = pm.get_recent_owner_umr_status_section(fake_sbr, now_dt=now)
+    assert section["error"] is None
+    assert section["window_hours"] == 2
+    ids = [r["umr_id"] for r in section["rows"]]
+    assert ids == ["UMR-recent-2", "UMR-recent-1"]  # DESC by ts_submitted
+    assert section["rows"][0]["status"] == "completed"
+    assert section["rows"][1]["age_hours"] == 1.5
+
+
+def test_get_recent_owner_umr_status_section_empty_window_is_honest(tmp_path):
+    now = pm.datetime(2026, 8, 6, 12, 0, 0, tzinfo=pm.timezone.utc)
+    rows = [("UMR-old", "2026-08-06T01:00:00+00:00", "completed", "owner_dispatch_gateway")]
+    db_path = _make_owner_umr_db(tmp_path, rows)
+    fake_sbr = _make_fake_sbr_module(db_path)
+
+    section = pm.get_recent_owner_umr_status_section(fake_sbr, now_dt=now)
+    assert section["error"] is None
+    assert section["rows"] == []
+
+
+def test_get_recent_owner_umr_status_section_honest_error_on_missing_columns(tmp_path):
+    """The real umr_tasks schema always has these columns (superboss-
+    register.py), but this section must degrade gracefully -- never crash
+    the whole report -- if a synthetic/older schema lacks them."""
+    db_path = str(tmp_path / "no_cols.sqlite")
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE umr_tasks (umr_id TEXT PRIMARY KEY, status TEXT)")
+    conn.commit()
+    conn.close()
+    fake_sbr = _make_fake_sbr_module(db_path)
+    section = pm.get_recent_owner_umr_status_section(fake_sbr)
+    assert section["error"] is not None
+    assert section["rows"] == []
 
 
 if __name__ == "__main__":

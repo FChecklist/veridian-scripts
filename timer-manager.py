@@ -28,21 +28,48 @@ def get_timer_path(timer_name):
     return None
 
 
+_LISTING_SUMMARY_RE = re.compile(r'^\d+ timers? listed\.$')
+
+
 def list_timers(show_all=False):
-    stdout, stderr, rc = _run(["systemctl", "--user", "list-timers", "--all", "--no-pager"])
+    """Bug fix (reproduced live 2026-08-15 against the real currently-stopped
+    veridian-*.timer units): this used to fetch every timer unconditionally
+    and filter client-side by slicing line.split()[4], on the assumption that
+    the NEXT and LEFT columns are always populated with a real
+    date+time+duration triple. When a timer is currently stopped, systemctl
+    prints a bare "-" for NEXT and LEFT instead of that triple, which shortens
+    the token count for that line and shifts every later column left -- so
+    parts[4] silently landed on a LAST-column token (a time-of-day, never the
+    unit name) instead of UNIT, the "veridian-" prefix check on that wrong
+    token always failed, and the tool printed nothing at all instead of
+    erroring or falling back. Live repro: every real veridian-*.timer unit on
+    this box is currently stopped, so the old code printed zero rows.
+
+    Fixed two ways at once (both suggested by the governing SPEC):
+      1. Filter server-side with an explicit unit-name PATTERN passed
+         straight to systemctl (list-timers accepts unit-glob patterns, same
+         as list-units) -- so which timers come back no longer depends on
+         parsing any column at all.
+      2. Never index into split() columns to find the unit name: matching
+         lines are printed verbatim (after dropping the header and the
+         trailing "N timers listed." summary line), so a stopped timer's
+         bare "-  -" NEXT/LEFT columns never need to be parsed -- the unit
+         name is simply part of the line already being printed.
+    """
+    stdout, stderr, rc = _run([
+        "systemctl", "--user", "list-timers", "--all", "--no-pager", "veridian-*.timer",
+    ])
     if rc != 0:
         print("Error fetching timers", file=sys.stderr)
         return
-    lines = stdout.strip().splitlines()[2:]  # skip header
-    for line in lines:
-        if not line.strip():
+    lines = stdout.strip().splitlines()
+    if not lines:
+        return
+    for line in lines[1:]:  # drop header row
+        line = line.strip()
+        if not line or _LISTING_SUMMARY_RE.match(line):
             continue
-        parts = line.split()
-        if len(parts) < 5:
-            continue
-        name = parts[4]
-        if name.startswith("veridian-"):
-            print(line)
+        print(line)
 
 
 def ctl(cmd, args):

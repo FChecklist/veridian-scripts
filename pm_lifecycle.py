@@ -89,6 +89,22 @@ completion-verification is done via reconcile_owner_dispatch_status.py's
 existing real gh-based primitives (see step 5 above), not a new
 implementation of that not-yet-merged capability.
 
+Related real admin commands (task-20260815-231659, additive -- neither
+replaces dispatch_task()'s own dispatch-owner-task.sh call above, the one
+real dispatch gateway this file uses; both are read/admin tools a PM tier
+or this script's own operator runs directly, alongside the poll_fn's
+resource_governor.py --query-umr calls this file already makes):
+  queue-manager.py list --status queued  -- real queue visibility across
+      BOTH the pre-dispatch umr_tasks backlog this orchestrator's own
+      dispatch_task() writes into (delegates to resource_governor.py
+      --list-queue) and post-dispatch task.yaml files, clearly labeled by
+      source. stop-pending/resume-pending/priority-pending <umr_id>
+      delegate straight to resource_governor.py --stop-task/--resume-task/
+      --set-priority.
+  timer-manager.py list  -- real veridian-*.timer status (server-side
+      systemctl unit-name pattern filter, so currently-stopped timers -- not
+      just active ones -- report correctly).
+
 Usage:
     python3 pm_lifecycle.py run --title "<short title>" --text "<full task text>" \\
         --repo <repo> [--tier N] [--medium claude_code_cli|ssh_session] \\

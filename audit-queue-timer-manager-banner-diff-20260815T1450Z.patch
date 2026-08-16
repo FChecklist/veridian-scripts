@@ -1,0 +1,34 @@
+diff --git a/dispatch-owner-task.sh b/dispatch-owner-task.sh
+index 0808295..30424e4 100755
+--- a/dispatch-owner-task.sh
++++ b/dispatch-owner-task.sh
+@@ -1,3 +1,5 @@
++# QUEUE MANAGER: /opt/veridian/scripts/queue-manager.py can inspect/modify the queue (list, pause, resume, priority, delete, move). Use --help for usage.
++# TIMER MANAGER: /opt/veridian/scripts/timer-manager.py can stop, start, pause, unpause, reschedule, and set one-time runs for timers (list, stop, start, disable, enable, pause, unpause, reschedule, set-once, status). Use --help for usage.
+ #!/usr/bin/env bash
+ # dispatch-owner-task.sh -- single front door for dispatching real Owner-directed
+ # work to the server, whether relayed by a Claude Code CLI laptop session or run
+diff --git a/pm-sentinel-tick.sh b/pm-sentinel-tick.sh
+index 45a3e82..120606c 100755
+--- a/pm-sentinel-tick.sh
++++ b/pm-sentinel-tick.sh
+@@ -1,3 +1,7 @@
++# QUEUE MANAGER: /opt/veridian/scripts/queue-manager.py can inspect/modify the queue (list, pause, resume, priority, delete, move). Use --help for usage.
++# TIMER MANAGER: /opt/veridian/scripts/timer-manager.py can stop, start, pause, unpause, reschedule, and set one-time runs for timers (list, stop, start, disable, enable, pause, unpause, reschedule, set-once, status). Use --help for usage.
++# QUEUE MANAGER: /opt/veridian/scripts/queue-manager.py can inspect/modify the queue (list, pause, resume, priority, delete, move). Use --help for usage.
++# TIMER MANAGER: /opt/veridian/scripts/timer-manager.py can stop, start, pause, unpause, reschedule, and set one-time runs for timers (list, stop, start, disable, enable, pause, unpause, reschedule, set-once, status). Use --help for usage.
+ #!/usr/bin/env bash
+ # pm-sentinel-tick.sh -- ONE integrated deterministic server-native PM tick.
+ #
+diff --git a/pm_lifecycle.py b/pm_lifecycle.py
+index 2ceb8f9..d7fd45e 100644
+--- a/pm_lifecycle.py
++++ b/pm_lifecycle.py
+@@ -1,3 +1,7 @@
++# QUEUE MANAGER: /opt/veridian/scripts/queue-manager.py can inspect/modify the queue (list, pause, resume, priority, delete, move). Use --help for usage.
++# TIMER MANAGER: /opt/veridian/scripts/timer-manager.py can stop, start, pause, unpause, reschedule, and set one-time runs for timers (list, stop, start, disable, enable, pause, unpause, reschedule, set-once, status). Use --help for usage.
++# QUEUE MANAGER: /opt/veridian/scripts/queue-manager.py can inspect/modify the queue (list, pause, resume, priority, delete, move). Use --help for usage.
++# TIMER MANAGER: /opt/veridian/scripts/timer-manager.py can stop, start, pause, unpause, reschedule, and set one-time runs for timers (list, stop, start, disable, enable, pause, unpause, reschedule, set-once, status). Use --help for usage.
+ #!/usr/bin/env python3
+ """pm_lifecycle.py -- single, real, single-command full-lifecycle task
+ orchestrator (task-20260814-183228-build-single-command-full-lifecycle-orch).

@@ -235,12 +235,23 @@ def build_tightened_prompt(objective, scope, success_criteria, expected_output,
     return "\n".join(lines)
 
 
-def dispatch_task(title, prompt, tier, medium, repo, attach=None, no_relay=False):
+def dispatch_task(title, prompt, tier, medium, repo, attach=None, no_relay=False, complexity_tier=None):
     cmd = [title, prompt, str(tier), medium, repo]
     if no_relay:
         cmd.append("--no-relay")
     if attach:
         cmd += ["--attach", attach]
+    # task-20260816-041054 (real tier-aware Haiku routing): real passthrough
+    # of the genuine mechanical/integrative/judgment complexity signal to
+    # dispatch-owner-task.sh's own --complexity-tier flag -- from there it
+    # threads through resource_governor.py's _perform_spawn() into
+    # `veridian-task.py create`, giving task.yaml a genuine complexity_tier
+    # field. Only added when the caller actually provided one, so every
+    # other real call in this module (fix/audit re-dispatch, which never
+    # passes complexity_tier) is a byte-identical dispatch-owner-task.sh
+    # invocation to before this task.
+    if complexity_tier:
+        cmd += ["--complexity-tier", str(complexity_tier)]
     # tier 3/4 (claude_code_cli_headless) run synchronously inside this
     # call -- give it real headroom above tier_execution_config.json's own
     # 900s timeout_seconds so this wrapper is never the thing that kills a
@@ -853,7 +864,8 @@ def run_full_cycle(args):
         known_context=args.known_context, complexity_tier=args.complexity_tier,
     )
     dispatch = dispatch_task(args.title, prompt, args.tier, args.medium, args.repo,
-                              attach=args.attach, no_relay=args.no_relay)
+                              attach=args.attach, no_relay=args.no_relay,
+                              complexity_tier=args.complexity_tier)
     report["dispatch"] = dispatch
     report["dispatched_ai_worker"] = True
     if dispatch["outcome"] in ("refused", "rejected", "unknown"):

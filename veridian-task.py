@@ -548,6 +548,18 @@ def cmd_create(args):
         # block reads this field FIRST, before tier/verdict are even considered.
         "hold_for_owner_signoff": args.hold_for_owner_signoff,
     }
+    # task-20260816-041054 (real tier-aware Haiku routing): only set the key
+    # when a real value was actually passed (resource_governor.py's
+    # _perform_spawn() only passes --complexity-tier when the original
+    # dispatch-owner-task.sh caller set one) -- an absent complexity_tier
+    # key here is the safe default worker-entrypoint.sh's own model-routing
+    # branch relies on (== 'mechanical' -> haiku, everything else including
+    # a wholly absent field -> sonnet, unchanged). Never write a null/empty
+    # placeholder value for the many real dispatch paths (e.g. raw
+    # owner_dispatch_gateway submissions) that have no complexity
+    # classification at all.
+    if getattr(args, "complexity_tier", None):
+        task["complexity_tier"] = args.complexity_tier
     save_task(task_id, task)
     sync_controller_entry(task)
     _auto_log_task_event("create", task, extra_note=f"repo={args.repo}")
@@ -1085,6 +1097,13 @@ if __name__ == "__main__":
     c.add_argument("--repo", required=True)
     c.add_argument("--prompt", required=True)
     c.add_argument("--hold-for-owner-signoff", action="store_true", dest="hold_for_owner_signoff")
+    # task-20260816-041054: OPTIONAL real complexity signal (plan_generator.py's
+    # own mechanical/integrative/judgment enum), threaded from
+    # resource_governor.py's _perform_spawn() when the original dispatch set
+    # one. Not validated against that enum here -- an unrecognized value
+    # just never matches 'mechanical' downstream in worker-entrypoint.sh and
+    # safely falls through to --model sonnet, same as leaving this unset.
+    c.add_argument("--complexity-tier", default=None, dest="complexity_tier")
     c.set_defaults(func=cmd_create)
 
     ad = sub.add_parser("adopt")

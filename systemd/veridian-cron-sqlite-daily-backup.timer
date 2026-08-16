@@ -1,0 +1,16 @@
+# NOT YET INSTALLED -- see the paired .service file's header comment for
+# why (closed-set-of-18 Owner-decision gate + the file_inventory
+# corruption precondition, both independently unresolved as of this
+# commit). Built and tested against synthetic data only; deliberately not
+# copied into ~/.config/systemd/user/, not enabled, not started.
+[Unit]
+Description=Run veridian-cron-sqlite-daily-backup on its scheduled cadence (jittered -- see the paired .service for why)
+
+[Timer]
+OnCalendar=*-*-* 02:45:00
+RandomizedDelaySec=600
+AccuracySec=1min
+Persistent=false
+
+[Install]
+WantedBy=timers.target

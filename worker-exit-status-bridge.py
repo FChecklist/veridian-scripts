@@ -171,6 +171,24 @@ SELF_REPORTED_NEGATIVE_STATUSES = (
 # can never silently drift into meaning the same thing.
 SELF_REPORTED_NO_OP_STATUS = "completed_no_change"
 
+# UMR-20260816-171513-5901 (Owner directive 2026-08-16): the second real
+# self-reported POSITIVE-but-distinct status this hook recognizes --
+# supervisor-entrypoint.sh's own DOCS-ONLY-PR-GUARD-BLOCK writes this,
+# paired with a real docs_only_completion.json evidence marker, when a
+# branch's real diff vs its base contains commits but none that are
+# code/test/config/schema-relevant (progress/documentation only -- see
+# docs_only_diff_guard.py). Deliberately NOT the same constant as
+# SELF_REPORTED_NO_OP_STATUS: that status's own bridge below
+# (_bridge_no_op_completion) trusts its marker's branch_sha as an ancestor
+# of the base branch, which is structurally guaranteed only when
+# AHEAD_COUNT==0 (a true no-op). This status covers the opposite shape --
+# AHEAD_COUNT > 0, a real commit exists, it is just not code-relevant -- so
+# it is bridged to the existing, honest 'completed_unmerged' status instead
+# (a real commit, genuinely not merged -- exactly what completed_unmerged
+# already means, see validate_umr_terminal_completion_evidence()'s own
+# docstring), never conflated with the zero-commits no-op case.
+SELF_REPORTED_DOCS_ONLY_STATUS = "completed_docs_only"
+
 
 def _load_task_yaml(task_id):
     path = f"{AI_OS}/tasks/{task_id}/task.yaml"
@@ -191,6 +209,23 @@ def _load_no_op_marker(task_id):
     already established. Missing/unparseable is a real, safe fail-open (leaves the row at
     'running' for a human or the STEP 3 reconciler), never a guess."""
     path = f"{AI_OS}/tasks/{task_id}/no_op.json"
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _load_docs_only_marker(task_id):
+    """UMR-20260816-171513-5901: real, structured hand-off written by
+    supervisor-entrypoint.sh's own DOCS-ONLY-PR-GUARD-BLOCK immediately
+    before it checkpoints task.yaml status='completed_docs_only' and exits
+    0. Same 'trust the caller's own already-computed real evidence, which
+    the real mark-umr-terminal gate independently re-verifies rather than
+    blindly accepts' posture as _load_no_op_marker() above. Missing/
+    unparseable is a real, safe fail-open (leaves the row at 'running' for
+    a human or the STEP 3 reconciler), never a guess."""
+    path = f"{AI_OS}/tasks/{task_id}/docs_only_completion.json"
     try:
         with open(path) as f:
             return json.load(f)
@@ -270,6 +305,10 @@ def run(task_id, unit_kind="worker"):
 
     if last_status == SELF_REPORTED_NO_OP_STATUS:
         _bridge_no_op_completion(task_id, unit_kind, unit_name, row, task)
+        return
+
+    if last_status == SELF_REPORTED_DOCS_ONLY_STATUS:
+        _bridge_docs_only_completion(task_id, unit_kind, unit_name, row, task)
         return
 
     if last_status not in SELF_REPORTED_NEGATIVE_STATUSES:
@@ -369,6 +408,55 @@ def _bridge_no_op_completion(task_id, unit_kind, unit_name, row, task):
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
         _log(task_id, unit_kind, f"mark-umr-terminal umr={row['umr_id']} status=completed(no-op) rc={result.returncode} "
                                   f"stdout={result.stdout.strip()[:300]} stderr={result.stderr.strip()[:300]}")
+    except Exception as e:
+        _log(task_id, unit_kind, f"mark-umr-terminal call raised (non-fatal): {e}")
+
+
+def _bridge_docs_only_completion(task_id, unit_kind, unit_name, row, task):
+    """UMR-20260816-171513-5901 (Owner directive 2026-08-16): real, distinct
+    handling for status='completed_docs_only' -- see SELF_REPORTED_DOCS_ONLY_STATUS's
+    own comment for why this is deliberately NOT folded into
+    _bridge_no_op_completion() above.
+
+    Requires a real docs_only_completion.json marker with a real branch_sha --
+    written by supervisor-entrypoint.sh's own DOCS-ONLY-PR-GUARD-BLOCK in the
+    same run that wrote this checkpoint status, never guessed here. Unlike the
+    no-op case, that branch_sha is NOT structurally guaranteed to be an
+    ancestor of the base branch (real commits exist on this branch -- they are
+    just not code-relevant), so this bridges to 'completed_unmerged', not
+    'completed' -- the real, honest, pre-existing status for exactly this
+    shape of evidence (a real commit, genuinely not merged --
+    validate_umr_terminal_completion_evidence() requires and independently
+    re-verifies a real, existing, NOT-yet-ancestor commit for this status, the
+    same real git-ancestry check every other real completed_unmerged writer
+    already goes through). --repo is threaded from this task's own real
+    task.yaml repo field, same convention as _bridge_no_op_completion()."""
+    marker = _load_docs_only_marker(task_id)
+    if not marker or not marker.get("branch_sha"):
+        _log(task_id, unit_kind, f"last task.yaml status='{SELF_REPORTED_DOCS_ONLY_STATUS}' for umr {row['umr_id']} "
+                                  f"but no real docs_only_completion.json marker (with a real branch_sha) was "
+                                  f"found -- leaving at running rather than guessing")
+        return
+
+    reason = (
+        f"worker-exit-status-bridge (ExecStopPost, UMR-20260816-171513-5901 docs-only-diff "
+        f"PR guard): unit {unit_name} stopped with task.yaml's own last checkpoint "
+        f"status='{SELF_REPORTED_DOCS_ONLY_STATUS}' -- real docs_only_completion.json evidence: "
+        f"{marker.get('reason', '')}"
+    )
+    cmd = [
+        "python3", SUPERBOSS_REGISTER, "mark-umr-terminal",
+        "--umr-id", row["umr_id"], "--status", "completed_unmerged",
+        "--commit-sha", marker["branch_sha"], "--reason", reason,
+    ]
+    repo = task.get("repo")
+    if repo:
+        cmd += ["--repo", repo]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
+        _log(task_id, unit_kind, f"mark-umr-terminal umr={row['umr_id']} status=completed_unmerged(docs-only) "
+                                  f"rc={result.returncode} stdout={result.stdout.strip()[:300]} "
+                                  f"stderr={result.stderr.strip()[:300]}")
     except Exception as e:
         _log(task_id, unit_kind, f"mark-umr-terminal call raised (non-fatal): {e}")
 

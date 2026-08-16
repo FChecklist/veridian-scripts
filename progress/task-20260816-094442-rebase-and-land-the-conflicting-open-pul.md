@@ -109,16 +109,102 @@ at least one file needing manual read of both sides.
       queue-manager.py/timer-manager.py/pm_lifecycle.py, 13/13 new tests
       passing (`tests/test_queue_manager.py`, `tests/test_timer_manager.py`).
 
-## Remaining
-- [ ] Push bundle-2 branch, open superseding PR, get independent audit,
-      merge on PASS, confirm #419/#429 auto-flip to MERGED.
-- [ ] Process the 18 remaining real-code-conflict PRs: 8, 61, 65, 72, 79,
-      198, 204, 273, 276, 355, 357, 405, 416, 417, 422, 423, 424, 435 --
-      prioritise newest-first per SPEC ("oldest-conflicting last"), read
-      both sides of every real conflict, never discard either wholesale.
-- [ ] Final report table (number, outcome, mergedAt/blocking reason, main
-      SHA per merge); report explicitly which numbers were not reached if
-      budget/time runs out before all 30.
+## Bundle 2 -- LANDED
+- [x] Pushed, opened PR #438, independent AUDIT: PASS at head 6617269
+      (verified #429's queue-manager.py/timer-manager.py are a real strict
+      superset of #419's by reading full files in real worktrees, both
+      bug-fix claims checked against actual code, all other files
+      byte-identical to source PRs). Merged into main: merge commit
+      `b171bd7121272eea38d481c200e6ede3e5deb8a9` (2026-08-16T10:13:19Z).
+      #419 and #429 both auto-flipped to GitHub state=MERGED; traceability
+      comments posted on both.
+
+## Stopped here -- budget constraint (session USD budget), not full coverage
+Reached and landed 12 of the 30 real live conflicting PRs (see report table
+below). The remaining 18 all have a genuine code-level conflict (not just
+the disposable PROGRESS.md stub) in at least one real file -- each needs the
+same full read-both-sides treatment as the #419/#429 pair above (materialize
+both real branch tips in a worktree, diff for real, resolve without
+discarding either side, run tests, open a superseding PR, get a real
+independent audit, merge on PASS). That is real, non-skippable per-PR work;
+continuing would have left no budget margin to land what was already merged
+safely or write this report. Per this task's own SPEC ("if you run out of
+time, report exactly which numbers you did not reach"), stopping here and
+reporting honestly rather than attempting a rushed/shallow pass at the
+remaining 18.
+
+**Not reached (18), in SPEC's stated priority order (newest-conflicting
+first, oldest last):** 435, 424, 423, 422, 417, 416, 405, 357, 355, 276,
+273, 204, 198, 79, 78→wait 78 already landed; corrected list: 435, 424, 423,
+422, 417, 416, 405, 357, 355, 276, 273, 204, 198, 79, 72, 65, 61, 8.
+Each has its real conflicting file(s) already identified in
+`.scratch/triage_results2.json` from this task's own triage run (not
+re-derived by a future task from scratch): 8 (dispatch-owner-task.sh,
+superboss-register.py), 61 (superboss-register.py), 65 (3x add/add GTM
+check scripts), 72 (audit_ocid_canonical_registry.py + its test), 79 (2x
+add/add GTM check scripts), 198 (generate_pm_report_v3.py + test), 204
+(PLATFORM_COMPLETION_CHECKLIST.json/.md), 273 (resource_governor.py,
+superboss-register.py), 276 (resource_governor.py, add/add test), 355
+(test_pm_sentinel_tick.py), 357 (prune_memory_backups.py), 405
+(directive_engine.py), 416 (dispatch-tick.py), 417 (dispatch-tick.py --
+overlaps 416, check pairwise like #419/#429), 422 (pm_lifecycle.py,
+worker-exit-status-bridge.py), 423 (pm_lifecycle.py -- overlaps 422), 424
+(pm-sentinel-tick.sh + test -- may overlap 429's already-landed
+pm-sentinel-tick.sh delta, re-diff against new main first), 435
+(superboss-register.py).
 
 ## Outcome
-In progress -- see Completed/Remaining above.
+12 of the 30 real live conflicting PRs landed on `main`, each via a real
+`git merge --no-ff` conflict resolution (every original commit preserved,
+nothing squashed, nothing discarded wholesale without reading both sides),
+a genuine independent audit (separate agent instance per PR/bundle, cited
+exact head SHA, never self-certified), and a real GitHub merge -- see the
+report table below for per-PR mergedAt/SHA. The other 18 have real
+(non-cosmetic) code conflicts and were not reached this pass; explicitly
+listed above, not implied complete. No PR was closed as
+superseded-by-main -- none of the 30 were pure no-ops against current main
+(triage confirmed genuine new content in all 30). No cleanly-mergeable PR
+was touched (that is a sibling dispatch's scope) and no edit was made to
+any file outside the branches actually being resolved here.
+
+## Report table (SPEC-required)
+
+| PR | Outcome | mergedAt / blocking reason | main SHA |
+|----|---------|------------------------------|----------|
+| 78  | merged (docs+code, via #437) | 2026-08-16T10:01:56Z | 12c12fa6b2acb72f1a913ef8da7e9e9cdd75b37b |
+| 266 | merged (via #437) | 2026-08-16T10:01:56Z | 12c12fa6b2acb72f1a913ef8da7e9e9cdd75b37b |
+| 331 | merged, **docs-only** (via #437) | 2026-08-16T10:01:56Z | 12c12fa6b2acb72f1a913ef8da7e9e9cdd75b37b |
+| 332 | merged, **docs-only** (via #437) | 2026-08-16T10:01:56Z | 12c12fa6b2acb72f1a913ef8da7e9e9cdd75b37b |
+| 370 | merged (via #437) | 2026-08-16T10:01:56Z | 12c12fa6b2acb72f1a913ef8da7e9e9cdd75b37b |
+| 410 | merged (via #437) | 2026-08-16T10:01:56Z | 12c12fa6b2acb72f1a913ef8da7e9e9cdd75b37b |
+| 412 | merged (via #437) | 2026-08-16T10:01:56Z | 12c12fa6b2acb72f1a913ef8da7e9e9cdd75b37b |
+| 415 | merged, **docs-only** (via #437) | 2026-08-16T10:01:56Z | 12c12fa6b2acb72f1a913ef8da7e9e9cdd75b37b |
+| 428 | merged, **docs-only** (via #437) | 2026-08-16T10:01:56Z | 12c12fa6b2acb72f1a913ef8da7e9e9cdd75b37b |
+| 430 | merged, **docs-only** (via #437) | 2026-08-16T10:01:56Z | 12c12fa6b2acb72f1a913ef8da7e9e9cdd75b37b |
+| 419 | merged (via #438) | 2026-08-16T10:13:21Z | b171bd7121272eea38d481c200e6ede3e5deb8a9 |
+| 429 | merged (via #438) | 2026-08-16T10:13:21Z | b171bd7121272eea38d481c200e6ede3e5deb8a9 |
+| 8   | blocked | not reached (budget) -- real conflict: dispatch-owner-task.sh, superboss-register.py | -- |
+| 61  | blocked | not reached (budget) -- real conflict: superboss-register.py | -- |
+| 65  | blocked | not reached (budget) -- real conflict: 3 add/add GTM check scripts | -- |
+| 72  | blocked | not reached (budget) -- real conflict: audit_ocid_canonical_registry.py + test | -- |
+| 79  | blocked | not reached (budget) -- real conflict: 2 add/add GTM check scripts | -- |
+| 198 | blocked | not reached (budget) -- real conflict: generate_pm_report_v3.py + test | -- |
+| 204 | blocked | not reached (budget) -- real conflict: PLATFORM_COMPLETION_CHECKLIST.json/.md | -- |
+| 273 | blocked | not reached (budget) -- real conflict: resource_governor.py, superboss-register.py | -- |
+| 276 | blocked | not reached (budget) -- real conflict: resource_governor.py, add/add test | -- |
+| 355 | blocked | not reached (budget) -- real conflict: test_pm_sentinel_tick.py | -- |
+| 357 | blocked | not reached (budget) -- real conflict: prune_memory_backups.py | -- |
+| 405 | blocked | not reached (budget) -- real conflict: directive_engine.py | -- |
+| 416 | blocked | not reached (budget) -- real conflict: dispatch-tick.py (check overlap with 417) | -- |
+| 417 | blocked | not reached (budget) -- real conflict: dispatch-tick.py (check overlap with 416) | -- |
+| 422 | blocked | not reached (budget) -- real conflict: pm_lifecycle.py, worker-exit-status-bridge.py (check overlap with 423) | -- |
+| 423 | blocked | not reached (budget) -- real conflict: pm_lifecycle.py (check overlap with 422) | -- |
+| 424 | blocked | not reached (budget) -- real conflict: pm-sentinel-tick.sh + test (re-diff vs new main -- 429's pm-sentinel-tick.sh delta already landed) | -- |
+| 435 | blocked | not reached (budget) -- real conflict: superboss-register.py | -- |
+
+Live list re-derived 2026-08-16 ~10:00Z: 30 conflicting (SPEC's 09:35Z
+snapshot said 28; drift expected). All 10 numbers SPEC named explicitly
+(412, 410, 405, 370, 357, 355, 332, 331, 276, 273) are accounted for above:
+6 merged (412, 410, 370, 332, 331 -- landed; wait 405/357/355/276/273 not
+reached) -- explicit: of SPEC's named 10, **merged**: 412, 410, 370, 332,
+331; **not reached**: 405, 357, 355, 276, 273.

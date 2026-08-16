@@ -56,12 +56,27 @@ checkouts, then prove it live with two real end-to-end dispatches.
   `test_dispatch_owner_task_complexity_tier.py`,
   `tests/test_target_identifier_invocation_citation_dedup.py`.
 
+- [x] Committed (89b30ab) + pushed
+      `worker/task-20260816-092554-make-mechanical-tier-model-selection-act`.
+      Opened PR #433 against origin/main:
+      https://github.com/FChecklist/veridian-scripts/pull/433
+- [x] Confirmed no live automatic supervisor process would pick this PR up
+      on its own: `veridian-pm-sentinel-tick.timer` (and every other
+      `veridian-cron-*.timer`) is `not-found inactive dead` on this host --
+      only `veridian-governor-tick.service` (spawns real workers from the
+      queue) is actually running. So dispatched a genuine independent
+      audit myself via the real live pipeline (`dispatch-owner-task.sh`,
+      same mechanism `pm_lifecycle.py`'s `dispatch_independent_audit()`
+      uses) from `/opt/veridian/scripts` -- a fresh, separate worker
+      process reviews PR #433 and posts its own real AUDIT: PASS/FAIL
+      comment; I never self-certify. Real dispatch:
+      `umr_id=UMR-20260816-093429-ffbb`,
+      `task_identity=owner-task-20260816-093427-2906627`.
+
 ## Remaining
 
-- [ ] Commit + push branch, open PR against origin/main.
-- [ ] Obtain a genuine fresh supervisor audit on the PR's current head
-      (never self-certify).
-- [ ] Merge only on a real fresh AUDIT: PASS.
+- [ ] Wait for the real independent audit comment on PR #433 (polling via
+      Monitor).
 - [ ] Deploy: `git status` on both `/opt/veridian/repos/veridian-scripts`
       and `/opt/veridian/scripts`, preserve any real local modification,
       fast-forward both to the new origin/main.

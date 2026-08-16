@@ -545,14 +545,53 @@ def _seed_credit_accountant_plan(task_id, inputs):
     """Best-effort: propose increment 1 for `task_id` so the worker's own
     later `credit-accountant.py report --increment 1` finds a real row
     instead of nothing. Returns the parsed propose JSON (or an error dict)
-    for outputs_json -- never raises."""
+    for outputs_json -- never raises.
+
+    Real fix (UMR-20260816-024755-3698, live-reproduced against 5 real
+    2026-08-15 UMRs -- e80b, 28fc, cb95, 1492, d173 -- every one showing
+    genuine committed work rejected by credit-accountant.py's report-time
+    "no matching approved plan" check): the bug was NOT in that check's own
+    task_id/increment matching (confirmed correct and unchanged, same as
+    the 2026-08-14 UMR this function was originally added for), and NOT in
+    this function failing to run at all -- it runs every real spawn. It was
+    that `search_terms` below used to be a bare, UNQUOTED space-join of
+    extracted keywords (or the raw task title as fallback), which
+    check_existing_capability() passes straight through to
+    superboss-register.py's check-duplicate -- whose _fts_query() OR's
+    every unquoted bare word as its own independent FTS5 match term across
+    system_index/wiring_registry/etc (7,783+ rows). A generic task title
+    like "critical real fix the completion report" (this very task's own
+    title) verified LIVE to false-positive with found=3445 unrelated
+    matches on words like "real"/"fix"/"report" alone -- flooding
+    check_existing_capability() into a false "existing mechanism already
+    covers this" verdict, which rejects propose() outright, which is why
+    report() later finds a row whose plan_verdict is "rejected" (not
+    "approved") and correctly-per-its-own-logic denies the report, even
+    though the work was 100% genuine and on-scope. Quoted, re-verified
+    live: the identical string wrapped as one FTS5 exact phrase
+    ('"critical real fix the completion report"') returns found=0.
+
+    This is the SAME class of false-positive already fixed twice elsewhere
+    in this exact codebase (2026-08-02 and 2026-08-13, both documented at
+    worker-entrypoint.sh's own auto-fix propose call site) -- it just never
+    got propagated to THIS call site, added one day after the 2026-08-13
+    fix landed. Fix: wrap each individually-extracted keyword/phrase in its
+    own FTS5 quoted-phrase clause (never a single big adjacency-required
+    phrase spanning all of them -- that would silently never match anything
+    real, turning the check into a rubber stamp) so check_existing_capability
+    still does a real multi-term OR search, just over exact phrases instead
+    of exploded bare words. The title fallback is quoted the same way."""
     try:
         tg = _task_gateway()
         plan_text = (tg.extract_section(inputs["prompt"], "OBJECTIVE") or inputs["title"])[:500]
-        search_terms = " ".join(tg.extract_keywords_mechanical(inputs["prompt"])) or inputs["title"]
+        keywords = tg.extract_keywords_mechanical(inputs["prompt"])
+        if keywords:
+            search_terms = " ".join(f'"{kw.replace(chr(34), "")}"' for kw in keywords)
+        else:
+            search_terms = f'"{inputs["title"].replace(chr(34), "")}"'
     except Exception:
         plan_text = inputs["title"][:500]
-        search_terms = inputs["title"]
+        search_terms = f'"{inputs["title"].replace(chr(34), "")}"'
     propose_cmd = [
         "python3", os.path.join(SCRIPTS, "credit-accountant.py"), "propose",
         "--task-id", task_id, "--plan", plan_text,

@@ -70,11 +70,46 @@ independently, see memory `veridian-task-prompt-false-premise-pattern`).
       test_pm_sentinel_tick.py (#424). Same bundle-and-supersede pattern as
       the prior wave's #437/#438 required.
 
+## More completed
+- [x] Real `git merge --no-ff` of #61 into this task's branch: real
+      conflict in superboss-register.py's CLI dispatch elif-chain (both
+      main and #61 independently appended distinct subcommands to the same
+      tail) -- resolved by keeping both (concatenation, not a pick).
+      PROGRESS.md resolved `--ours` (established convention). 20/20 real
+      tests (`tests/test_ocid_master_standard_phase2.py`) pass post-merge.
+- [x] Real merge of #198 into the branch: 3 real conflicts in
+      generate_pm_report_v3.py (both main and #198 independently claimed
+      "3.5.0"/Section 16 for different features) -- resolved by keeping
+      both, renumbering #198's Sections 16-17 to 17-18 throughout (version
+      3.5.0->3.6.0, all comments/asserts updated consistently, not just the
+      code). test_generate_pm_report_v3.py conflicts resolved the same way
+      (2 pre-existing tests needed their own stub dict/assertion updates
+      for the new required keys/numbering). 128/128 tests pass post-merge
+      (0 failures, including the previously-known pre-existing
+      test_end_to_end_smoke_run gap, which is unrelated and unaffected).
+- [x] **#424 real merge attempted, then aborted -- reclassified
+      superseded.** `git merge --no-ff pr-424` conflicts in
+      pm-sentinel-tick.sh revealed #424's entire "Check 4: GTM
+      certification Part3+4" block duplicates a functionally-equivalent
+      Check 4 already on main (commit `37d6f89`, 2026-08-15T14:50:29Z, PR
+      #418 "task-20260815-143319-pm-in-server--add-real-part3-4-gtm-cert",
+      merged into main via PR #421-chain well before this). #424's own
+      branch (`task-20260815-114156`, head commit 23:07:56Z the same day)
+      is based on an OLDER main and independently re-implemented the exact
+      same governing directive (UMR-20260815-044235-a5e1) without knowing
+      main already had it -- confirmed via `git merge-base --is-ancestor
+      37d6f89 origin/main`. The re-audit's approve verdict never checked
+      main for this (same systematic gap already caught on #65/#79).
+      **Not merged** -- classified superseded by PR #418 (commit 37d6f89).
+- [x] **#65 already reclassified superseded** (see verdict section above) --
+      not attempted for merge.
+
 ## Remaining
-- [ ] Real conflict-resolution merge of #61, #198, #424 into this task's
-      branch (git merge --no-ff each, preserve all commits), run real tests,
-      push, open a superseding PR, get a genuine independent audit (not
-      self-certified), merge on PASS.
+- [ ] Push #61+#198 bundle, open superseding PR, get a genuine independent
+      audit (not self-certified), merge on PASS.
+- [ ] Close #424 and #65 as superseded with real comments citing exactly
+      what superseded them (PR #418/commit 37d6f89 for #424; commit 8349c1f
+      UMR-20260806-122546-78d6 for #65).
 - [ ] Sweep remaining 14 not-yet-individually-classified open PRs (72, 190,
       204, 213, 273, 276, 400, 401, 405, 416, 417, 422, 423, 435) for any
       existing genuine approve verdict at current head (none found yet in

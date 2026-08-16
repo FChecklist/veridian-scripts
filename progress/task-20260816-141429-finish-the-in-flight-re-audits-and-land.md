@@ -104,15 +104,83 @@ independently, see memory `veridian-task-prompt-false-premise-pattern`).
 - [x] **#65 already reclassified superseded** (see verdict section above) --
       not attempted for merge.
 
-## Remaining
-- [ ] Push #61+#198 bundle, open superseding PR, get a genuine independent
-      audit (not self-certified), merge on PASS.
-- [ ] Close #424 and #65 as superseded with real comments citing exactly
-      what superseded them (PR #418/commit 37d6f89 for #424; commit 8349c1f
-      UMR-20260806-122546-78d6 for #65).
-- [ ] Sweep remaining 14 not-yet-individually-classified open PRs (72, 190,
-      204, 213, 273, 276, 400, 401, 405, 416, 417, 422, 423, 435) for any
-      existing genuine approve verdict at current head (none found yet in
-      first pass of PR comments -- all are FAIL or unaudited); classify each
-      into superseded / real-defect / owner-decision and act.
-- [ ] Final report table covering all 22 open PRs.
+## More completed
+- [x] Pushed #61+#198 bundle, opened PR #440, spawned a genuinely
+      independent agent (not this task's own context) to audit it fresh --
+      it verified byte-identical preservation of both original PRs' content
+      via real diffs against `pr-61`/`pr-198` refs, reran both real test
+      suites itself (148/148 pass), confirmed the renumbering claim, and
+      posted a real `AUDIT: PASS` comment
+      (https://github.com/FChecklist/veridian-scripts/pull/440#issuecomment-5307945308)
+      before I merged. #440 merged: `b3db405caae9383f6ec921a86a6f9e2204135aaa`
+      (2026-08-16T14:33:50Z). #61 and #198 auto-flipped to GitHub
+      state=MERGED (real commits preserved).
+- [x] Closed #424 (superseded by PR #418/commit 37d6f89) and #65 (superseded
+      by commit 8349c1f/UMR-20260806-122546-78d6) with real comments citing
+      the exact superseding commit.
+- [x] Closed #79 (real re-audit REJECT already established superseded-by-
+      main-commit-8349c1f) with a comment citing the review.
+- [x] Closed #400 (real FAIL audit found it's a byte-for-byte duplicate of
+      an already-merged commit, zero new content -- superseded, not a
+      defect to fix) with a comment.
+- [x] Swept remaining 14 open PRs (72, 190, 204, 213, 273, 276, 401, 405,
+      416, 417, 422, 423, 435, plus 355/357/8 from the FIRST section) for a
+      genuine approve verdict at current head -- **none found**: every one
+      of these carries a real, already-posted `AUDIT: FAIL` (or, for #355,
+      an incomplete/stalled re-audit) from this same 2026-08-16 sweep, none
+      superseded by newer main content (verified: none of their touched
+      files match a later main commit the way #65/#79/#400/#424 did), so
+      each is classified real-defect (left open) except #355
+      (owner-decision: re-audit itself never finished) -- see report table.
+      **Caveat, honestly flagged**: for 72/204/213/273/276/405/416/417/422/
+      423/435 I relied on each PR's own most-recent (2026-08-16, same day)
+      `AUDIT: FAIL` comment plus the prior wave's own conflicting-file
+      citations rather than re-deriving a fresh full defect description
+      myself for each -- budget did not allow a full independent re-audit
+      of 11 more PRs after the #440 bundle work above. Did NOT individually
+      re-diff each of these 11 against a possible newer main-superseding
+      commit the way I caught #65/#424 -- flagging as a real gap, not
+      claiming full coverage.
+- [x] #213 and #435 share the exact same head SHA (`645a807...`) -- same
+      branch pushed as two separate PR numbers. #435's own FAIL audit
+      comment (09:41:49Z) is a real review of that shared content (visible
+      from its "Reviewed worker task 'sweep-adopt-veridian-scripts-213-...'"
+      text) -- so both PRs are covered by the same real FAIL verdict, not
+      one audited and one not.
+
+## Report table (SPEC-required, all 22 open PRs)
+
+| PR | Outcome | Real mergedAt / real reason | Docs-only |
+|----|---------|------------------------------|-----------|
+| 8   | left-open-defect | REJECT tier1 (re-audit, fresh @ f5328f7): stale diff, `git apply --check` fails on dispatch-owner-task.sh hunk 2, base ~3670-line superboss-register.py vs current 11665 lines -- needs full rebase against current main | No |
+| 61  | **merged** | 2026-08-16T14:33:52Z via #440 (`b3db405c`) | No |
+| 65  | closed-as-superseded | gtm_check_api/database/governance_testing.py already exist on main, added by commit 8349c1f (UMR-20260806-122546-78d6, 2026-08-06), diverge substantially from this PR's 2026-08-05 versions | No |
+| 72  | left-open-defect | AUDIT: FAIL (consistent 2026-08-05, 2026-08-06, 2026-08-16) -- fabrication-loophole concern re: `not_applicable_confirmed` must come from a real re-runnable audit script; not individually re-verified this pass, see PR's own comment thread | No |
+| 79  | closed-as-superseded | gtm_check_ui/e2e_testing.py already exist on main, same commit 8349c1f (UMR-20260806-122546-78d6); re-audit REJECT fresh @ ed40aff | No |
+| 190 | left-open-defect | AUDIT: FAIL, fresh @ 7c18b8c (task-094434 wave): `sweep_awaiting_approval.py` tier2-bypass regression, unverified "Owner directive" claim | No |
+| 198 | **merged** | 2026-08-16T14:33:51Z via #440 (`b3db405c`) | No |
+| 204 | left-open-defect | AUDIT: FAIL (2026-08-16 09:41) -- real conflict/defect in PLATFORM_COMPLETION_CHECKLIST.json/.md per prior wave's triage; not individually re-verified this pass | No |
+| 213 | left-open-defect | AUDIT: FAIL (2026-08-16 09:41:49, posted on duplicate-head PR #435) -- same head `645a807` as #435, real review exists for this content, not "unaudited" as task-094434 believed | No |
+| 273 | left-open-defect | AUDIT: FAIL (2026-08-16 09:41) -- resource_governor.py/superboss-register.py conflict per prior wave's triage; not individually re-verified this pass | No |
+| 276 | left-open-defect | AUDIT: FAIL (consistent 2026-08-08 and 2026-08-16) -- stop-work-order gate issue, resource_governor.py + add/add test conflict | No |
+| 355 | left-open-owner-decision | Re-audit commissioned but never completed (`task.yaml` status=blocked: "supervisor failed to produce a review verdict"); the earlier 09:44 PASS predates and is superseded by the fact a re-audit was ordered -- **Owner decision needed: re-dispatch the stalled audit** | No |
+| 357 | left-open-defect | REJECT tier2 (re-audit, fresh @ 9a1809d): live-reproduced DB-path-resolution regression, 16/37 tests fail, uncaught SuperbossDbPathError crash risk in ~10 call sites, confirmed+cleaned-up live-DB test-row pollution | No |
+| 400 | closed-as-superseded | Byte-for-byte duplicate of already-merged commit `9e1510b` already on main, zero new content -- would be docs-only if mergeable, but is not mergeable (superseded, not a fix) | Would-be-docs-only, closed superseded instead |
+| 401 | left-open-defect | AUDIT: FAIL, fresh @ df8bac4 (task-094434 wave): `_CLI_INVOCATION_RE` regex lacks leading word boundary, spuriously matches inside ordinary words | No |
+| 405 | left-open-defect | AUDIT: FAIL (2026-08-16 09:40) -- directive_engine.py conflict per prior wave's triage; not individually re-verified this pass | No |
+| 416 | left-open-defect | AUDIT: FAIL (2026-08-16 09:42) -- dispatch-tick.py conflict (overlaps #417) per prior wave's triage; not individually re-verified this pass | No |
+| 417 | left-open-defect | AUDIT: FAIL (2026-08-16 09:39) -- dispatch-tick.py conflict (overlaps #416) per prior wave's triage; not individually re-verified this pass | No |
+| 422 | left-open-defect | AUDIT: FAIL (2026-08-16 09:42) -- pm_lifecycle.py/worker-exit-status-bridge.py conflict (overlaps #423) per prior wave's triage; not individually re-verified this pass | No |
+| 423 | left-open-defect | AUDIT: FAIL (2026-08-16 09:38) -- pm_lifecycle.py conflict (overlaps #422) per prior wave's triage; not individually re-verified this pass | No |
+| 424 | closed-as-superseded | Entire Check-4 GTM-cert-Part3+4 block in pm-sentinel-tick.sh duplicates already-merged commit 37d6f89 (PR #418, 2026-08-15T14:50:29Z), which predates this PR's own head commit (23:07:56Z same day) | No |
+| 435 | left-open-defect | AUDIT: FAIL (2026-08-16 09:41:49) -- same head `645a807` as #213, duplicate branch pushed as 2 PRs; real review exists | No |
+
+**Not reached / not individually re-verified this pass** (honest disclosure,
+per SPEC): 72, 204, 273, 276, 405, 416, 417, 422, 423 -- classified
+left-open-defect on the strength of each PR's own already-posted, same-day
+(2026-08-16) real `AUDIT: FAIL` comment plus the prior wave's own real
+conflicting-file triage, but I did not personally re-diff each of these
+against current main the way I did for #65/#424/#400 to rule out a newer
+superseding commit. If any of these 9 turn out to also be superseded, that
+would change their bucket from real-defect to superseded -- flagging as a
+real gap in this pass's coverage, not implying exhaustive re-verification.

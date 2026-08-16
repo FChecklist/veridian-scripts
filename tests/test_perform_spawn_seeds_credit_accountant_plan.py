@@ -122,6 +122,108 @@ def test_perform_spawn_still_succeeds_when_credit_accountant_propose_is_rejected
     assert result["outputs"]["credit_accountant_propose"]["approved"] is False
 
 
+def test_seed_credit_accountant_plan_quotes_generic_title_fallback():
+    """Real regression test for UMR-20260816-024755-3698 (5 real 2026-08-15
+    UMRs -- e80b, 28fc, cb95, 1492, d173 -- all hit the byte-identical
+    report-time 'no matching approved plan' rejection despite genuine,
+    on-scope committed work). Live-confirmed root cause: ALL FIVE real
+    credit_increments rows for these task_ids show increment 1 REJECTED at
+    propose() time with plan_reasoning "existing software/mechanism already
+    covers this (system_index match)" -- a false positive, not a real
+    duplicate -- because search_terms used to be an unquoted bare-word
+    join, which superboss-register.py's _fts_query() OR's word-by-word
+    across system_index/wiring_registry (7,783+ rows). Live-reproduced:
+    the exact stored search_terms blob for task-20260815-154633's real row
+    false-positived with found=6468 unquoted vs found=0 wrapped as a
+    single FTS5 quoted phrase.
+
+    This test proves _seed_credit_accountant_plan()'s title-fallback path
+    (no quoted-string/file-path/identifier/rule-id keywords extracted from
+    the prompt -- the common case for a plain-prose title like this UMR's
+    own "critical real fix the completion report") now wraps the whole
+    title in one FTS5-quoted phrase clause rather than passing it as
+    unquoted bare words."""
+    rg = _load_rg("rg_credit_seed_quoting")
+
+    row = {
+        "task_kind": "veridian_task_create",
+        "unit_name": None,
+        "inputs_json": json.dumps({
+            "title": "critical real fix the completion report",
+            "prompt": "plain prose with nothing mechanically extractable, forces the title "
+                      "fallback branch to be used instead",
+            "repo": "veridian-scripts",
+        }),
+    }
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        joined = " ".join(cmd)
+        if "veridian-task.py" in joined:
+            return _FakeCompletedProcess(0, "CREATED: task-20260816-fake-quoting-id\n", "")
+        if "credit-accountant.py" in joined:
+            return _FakeCompletedProcess(0, json.dumps({
+                "approved": True, "increment_number": 1, "reason": "test stub", "reviewer": "test",
+            }), "")
+        return _FakeCompletedProcess(0, "", "")
+
+    with mock.patch.object(rg, "_run", side_effect=fake_run):
+        result = rg._perform_spawn(row)
+
+    assert result["status"] == "running", result
+
+    propose_call = next(c for c in calls if "credit-accountant.py" in " ".join(c))
+    search_terms = propose_call[propose_call.index("--search-terms") + 1]
+    assert search_terms == '"critical real fix the completion report"', search_terms
+    # Never a bare, unquoted multi-word string -- that's the exact shape
+    # that false-positived all 5 real UMRs above.
+    assert search_terms.startswith('"') and search_terms.endswith('"'), search_terms
+
+
+def test_seed_credit_accountant_plan_quotes_each_extracted_keyword_individually():
+    """The keyword-extraction branch must wrap EACH extracted keyword/phrase
+    in its own quoted clause -- never one single adjacency-required phrase
+    spanning every keyword (that would silently never match anything real,
+    turning the existing-capability check into a rubber stamp instead of a
+    real duplicate check)."""
+    rg = _load_rg("rg_credit_seed_quoting_keywords")
+
+    row = {
+        "task_kind": "veridian_task_create",
+        "unit_name": None,
+        "inputs_json": json.dumps({
+            "title": "t",
+            "prompt": "## OBJECTIVE\nfix a real bug in resource_governor.py, see item #42\n",
+            "repo": "veridian-scripts",
+        }),
+    }
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        joined = " ".join(cmd)
+        if "veridian-task.py" in joined:
+            return _FakeCompletedProcess(0, "CREATED: task-20260816-fake-quoting-id-2\n", "")
+        if "credit-accountant.py" in joined:
+            return _FakeCompletedProcess(0, json.dumps({
+                "approved": True, "increment_number": 1, "reason": "test stub", "reviewer": "test",
+            }), "")
+        return _FakeCompletedProcess(0, "", "")
+
+    with mock.patch.object(rg, "_run", side_effect=fake_run):
+        rg._perform_spawn(row)
+
+    propose_call = next(c for c in calls if "credit-accountant.py" in " ".join(c))
+    search_terms = propose_call[propose_call.index("--search-terms") + 1]
+    # Every extracted keyword is its own quoted clause, OR'd together --
+    # not one giant phrase, not bare unquoted words.
+    assert '"resource_governor.py"' in search_terms, search_terms
+    assert '"item #42"' in search_terms, search_terms
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

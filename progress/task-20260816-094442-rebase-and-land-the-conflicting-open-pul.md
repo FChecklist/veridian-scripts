@@ -71,12 +71,21 @@ at least one file needing manual read of both sides.
       diff is the disposable PROGRESS.md stub, no code) -- recorded as
       docs-only below, not as fixes.
 
+## Bundle 1 -- LANDED
+- [x] Pushed bundle-1 branch, opened PR #437, got 2 independent AUDIT:PASS
+      (first at head 6d08981, then re-audited fresh after a required
+      origin/main re-merge at head 7f10c83 -- main moved because the
+      sibling cleanly-mergeable dispatch is landing concurrently). Merged
+      #437 into main: merge commit `12c12fa6b2acb72f1a913ef8da7e9e9cdd75b37b`
+      (2026-08-16T10:01:54Z).
+- [x] All 10 originals (#78, #266, #331, #332, #370, #410, #412, #415,
+      #428, #430) auto-flipped to GitHub state=MERGED (real commits
+      preserved via `git merge --no-ff`, so GitHub itself recognizes them
+      as ancestors of main) -- better than the close-with-comment fallback,
+      confirmed via `gh pr view --json state,mergedAt` on all 10. Posted a
+      traceability comment on each pointing at #437 anyway.
+
 ## Remaining
-- [ ] Push bundle-1 branch, open superseding PR, get a real independent
-      audit (separate agent instance, never self-certified) against the
-      exact pushed head SHA, merge only on a genuine PASS citing that SHA.
-- [ ] Close original PRs #78, #266, #331, #332, #370, #410, #412, #415,
-      #428, #430 pointing at the merged replacement.
 - [ ] Process #419 + #429 (mutual file overlap: queue-manager.py,
       timer-manager.py) as their own cycle.
 - [ ] Process the 18 remaining real-code-conflict PRs: 8, 61, 65, 72, 79,

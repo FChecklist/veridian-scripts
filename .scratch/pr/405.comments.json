@@ -1,0 +1,48 @@
+[
+  {
+    "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306793439",
+    "html_url": "https://github.com/FChecklist/veridian-scripts/pull/405#issuecomment-5306793439",
+    "issue_url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/405",
+    "id": 5306793439,
+    "node_id": "IC_kwDOTn5dgs8AAAABPE893w",
+    "user": {
+      "login": "FChecklist",
+      "id": 49814285,
+      "node_id": "MDQ6VXNlcjQ5ODE0Mjg1",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49814285?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/FChecklist",
+      "html_url": "https://github.com/FChecklist",
+      "followers_url": "https://api.github.com/users/FChecklist/followers",
+      "following_url": "https://api.github.com/users/FChecklist/following{/other_user}",
+      "gists_url": "https://api.github.com/users/FChecklist/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/FChecklist/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/FChecklist/subscriptions",
+      "organizations_url": "https://api.github.com/users/FChecklist/orgs",
+      "repos_url": "https://api.github.com/users/FChecklist/repos",
+      "events_url": "https://api.github.com/users/FChecklist/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/FChecklist/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "created_at": "2026-08-16T09:40:37Z",
+    "updated_at": "2026-08-16T09:40:37Z",
+    "body": "AUDIT: FAIL\nObjective Understood: Reviewed worker task 'sweep-adopt-veridian-scripts-405-fix-directive-engine-run-check-duplicate' (risk tier: tier1) by reading the actual diff, not a self-report.\nStandards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.\nScope Confirmed:  directive_engine.py                                |  51 ++++-\n ...rective_engine_fail_closed_duplicate_battery.py | 244 +++++++++++++++++++++\n tests/test_directive_engine_retry_gate.py          |  20 ++\n 3 files changed, 307 insertions(+), 8 deletions(-)\nEvidence Recorded: The code itself is sound (run_check_duplicate_battery() now returns (result, call_failed) and process_one() correctly checks call_failed before ever calling submit_task(), with good test coverage for the happy path, the call-failure path, and the pre-existing duplicate_found path), but this diff is not new work: the current repo HEAD is literally commit 60c8eed, 'fix(directive_engine): run_check_duplicate_battery fails CLOSED, not open', which already contains this exact change (same 51/8 line diff stat, same UMR references, same test files), and `git diff HEAD -- directive_engine.py tests/` against the workspace shows zero differences -- the fix has already been merged to main. Merging this again would be a redundant no-op at best and risks a duplicate/confusing merge commit at worst, directly violating the NO DUPLICATION standing rule (verify real incremental code exists / check task state before assigning or merging scope). Issues found: This diff is byte-identical to already-merged commit 60c8eed on main (workspace HEAD == 60c8eed); there is no incremental change to merge.; Task should be closed as duplicate of already-completed work rather than merged; if the dispatch queue re-surfaced this scope, the underlying no-duplication check (task state vs CONTROLLER.yaml / existing merged commits) needs to be fixed so this doesn't recur.\nSeverity Classified: medium\nVerdict: fail\nCorrective Action Owner: Worker to address the findings listed above and resubmit.\nRe-Audit Scheduled: Required after corrective changes are pushed.",
+    "author_association": "OWNER",
+    "reactions": {
+      "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306793439/reactions",
+      "total_count": 0,
+      "+1": 0,
+      "-1": 0,
+      "laugh": 0,
+      "hooray": 0,
+      "confused": 0,
+      "heart": 0,
+      "rocket": 0,
+      "eyes": 0
+    },
+    "performed_via_github_app": null,
+    "minimized": null
+  }
+]

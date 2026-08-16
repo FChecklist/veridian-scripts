@@ -1,0 +1,51 @@
+=== PR 424 branch worker/task-20260815-114156-pm-in-server--add-real-part3-4-gtm-cert ===
+merge-base: f016373fab11f07c1354e704e25ceeda8605ab57
+3
+CONFLICT (content): Merge conflict in PROGRESS.md
+CONFLICT (content): Merge conflict in pm-sentinel-tick.sh
+CONFLICT (content): Merge conflict in test_pm_sentinel_tick.py
+
+=== PR 357 branch fix/register-path-resolution-decoy-cleanup-umr20260813130245-6a26 ===
+merge-base: 5a862e1acd6eac13d8c5bbb648487bfc9df4027d
+1
+CONFLICT (content): Merge conflict in prune_memory_backups.py
+
+=== PR 355 branch fix/pm-sentinel-tick-real-token-delta-guard-10c3 ===
+merge-base: 5a862e1acd6eac13d8c5bbb648487bfc9df4027d
+2
+CONFLICT (content): Merge conflict in PROGRESS.md
+CONFLICT (content): Merge conflict in test_pm_sentinel_tick.py
+
+=== PR 198 branch worker/task-20260806-165917-extend-deterministic-report-to-cover-pr ===
+merge-base: 59a60a7f7b9a922309493532673f0c980f655f95
+3
+CONFLICT (content): Merge conflict in PROGRESS.md
+CONFLICT (content): Merge conflict in generate_pm_report_v3.py
+CONFLICT (content): Merge conflict in test_generate_pm_report_v3.py
+
+=== PR 79 branch feat/gtm-checks-ui-e2e-testing ===
+merge-base: 87a5b0b2924d9eb4b16e5bf67211a9133cb42300
+3
+CONFLICT (content): Merge conflict in PROGRESS.md
+CONFLICT (add/add): Merge conflict in gtm_check_e2e_testing.py
+CONFLICT (add/add): Merge conflict in gtm_check_ui_testing.py
+
+=== PR 65 branch feat/gtm-checks-db-api-governance-umr20260805153813 ===
+merge-base: c8a147e6ae08f5b35ae9f2d3261d55efe85ab62d
+3
+CONFLICT (add/add): Merge conflict in gtm_check_api_testing.py
+CONFLICT (add/add): Merge conflict in gtm_check_database_testing.py
+CONFLICT (add/add): Merge conflict in gtm_check_governance_testing.py
+
+=== PR 61 branch feat/ocid-master-standard-v6-phase2-lifecycle-registry-integrity ===
+merge-base: 5b1fd3724b4c4f5ab4cfbf578387744b5dc94c0e
+2
+CONFLICT (content): Merge conflict in PROGRESS.md
+CONFLICT (content): Merge conflict in superboss-register.py
+
+=== PR 8 branch feat/coordination-graph-entity-relation ===
+merge-base: 75830c4da4b2c42eaacea8f26d6c0966c593c53c
+2
+CONFLICT (content): Merge conflict in dispatch-owner-task.sh
+CONFLICT (content): Merge conflict in superboss-register.py
+

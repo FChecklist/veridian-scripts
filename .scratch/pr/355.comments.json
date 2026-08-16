@@ -1,0 +1,48 @@
+[
+  {
+    "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306806734",
+    "html_url": "https://github.com/FChecklist/veridian-scripts/pull/355#issuecomment-5306806734",
+    "issue_url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/355",
+    "id": 5306806734,
+    "node_id": "IC_kwDOTn5dgs8AAAABPE9xzg",
+    "user": {
+      "login": "FChecklist",
+      "id": 49814285,
+      "node_id": "MDQ6VXNlcjQ5ODE0Mjg1",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49814285?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/FChecklist",
+      "html_url": "https://github.com/FChecklist",
+      "followers_url": "https://api.github.com/users/FChecklist/followers",
+      "following_url": "https://api.github.com/users/FChecklist/following{/other_user}",
+      "gists_url": "https://api.github.com/users/FChecklist/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/FChecklist/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/FChecklist/subscriptions",
+      "organizations_url": "https://api.github.com/users/FChecklist/orgs",
+      "repos_url": "https://api.github.com/users/FChecklist/repos",
+      "events_url": "https://api.github.com/users/FChecklist/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/FChecklist/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "created_at": "2026-08-16T09:44:27Z",
+    "updated_at": "2026-08-16T09:44:27Z",
+    "body": "AUDIT: PASS\nObjective Understood: Reviewed worker task 'sweep-adopt-veridian-scripts-355-feat-pm-sentinel-tick-real-automated-per' (risk tier: tier1) by reading the actual diff, not a self-report.\nStandards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.\nScope Confirmed:  PROGRESS.md              | 102 ++++++++++++++++++++++++++++++++++++++++++++++-\n pm-sentinel-tick.sh      |  70 +++++++++++++++++++++++++++-----\n test_pm_sentinel_tick.py |  75 ++++++++++++++++++++++++++++++++++\n 3 files changed, 234 insertions(+), 13 deletions(-)\nEvidence Recorded: This diff adds a real, automated per-tick guard (assert_zero_llm_token_usage, backed by a narrow LLM_INVOCATION_PATTERN regex modeled on the existing FINANCIAL_KEYWORDS convention) that enforces pm-sentinel-tick.sh's long-standing but previously only manually-verified 'zero LLM tokens' claim, exposes it as a new Prometheus gauge, and adds two new regression tests plus PROGRESS.md documentation of the independent re-verification work behind this task. I read the full diff and independently re-verified the core mechanism rather than trusting the self-report: the guard's comment-stripping + regex is correctly self-referential-safe (the pattern definitions use backslash-escaped regex fragments that do not literal-match themselves), it is wired in early in the tick via the same TICK_FAILURES/non-zero-exit convention every other real failure in this script already uses, and it does not alter behavior on the real, unmutated script (confirmed 0 hits). I ran both new tests directly (not just trusted PROGRESS.md's claim) and both passed: the real shipped script emits 'TOKEN-ZERO GUARD: PASS' with metric value 0, and a mutated copy with an injected real LLM call site (curl to api.anthropic.com) correctly triggers 'TOKEN-ZERO GUARD: FAIL' and a non-zero exit code, proving the guard is a real detector and not a tautology. The change is purely additive (new function, new regex constant, new metric line, new test class, doc updates) with no modification to existing control flow beyond one new early check-and-increment, no touches to migrations/schema/auth/permission/payment/billing/rls/security paths, and no .github/workflows/** changes, consistent with tier1 classification. A background run of the full 13-test suite was still in progress at review time (each test has real subprocess/sqlite overhead, ~70-130s observed per test) but the tests that had completed showed no regressions, and the two new/modified-behavior tests were independently verified to completion with passing results. Issues found: The LLM_INVOCATION_PATTERN guard is a static grep-based heuristic over the script's own source; it can be evaded by an obfuscated or indirect call site (e.g. a call built from concatenated variables, a wrapper script invoked by name, or a vendor/endpoint not in the current pattern list) -- acceptable as a regression guard against accidental additions but not a hard security boundary, and this limitation is not called out in the code comments.; The full pre-existing 13-test suite (11 tests not touched by this diff) was still running in the background at the time this verdict was written due to real per-test subprocess/sqlite overhead; the tests observed to complete during review passed with no failures, and the new guard was confirmed empirically to add zero TICK_FAILURES on the real unmodified script, so regression risk to the untouched tests is assessed as very low, but the full run was not exhaustively confirmed complete before this verdict.\nSeverity Classified: none\nVerdict: pass\nCorrective Action Owner: Not required -- no issues found in this review.\nRe-Audit Scheduled: Not required -- approved as-is, no follow-up needed.",
+    "author_association": "OWNER",
+    "reactions": {
+      "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306806734/reactions",
+      "total_count": 0,
+      "+1": 0,
+      "-1": 0,
+      "laugh": 0,
+      "hooray": 0,
+      "confused": 0,
+      "heart": 0,
+      "rocket": 0,
+      "eyes": 0
+    },
+    "performed_via_github_app": null,
+    "minimized": null
+  }
+]

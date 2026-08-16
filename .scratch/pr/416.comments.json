@@ -1,0 +1,48 @@
+[
+  {
+    "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306798264",
+    "html_url": "https://github.com/FChecklist/veridian-scripts/pull/416#issuecomment-5306798264",
+    "issue_url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/416",
+    "id": 5306798264,
+    "node_id": "IC_kwDOTn5dgs8AAAABPE9QuA",
+    "user": {
+      "login": "FChecklist",
+      "id": 49814285,
+      "node_id": "MDQ6VXNlcjQ5ODE0Mjg1",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49814285?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/FChecklist",
+      "html_url": "https://github.com/FChecklist",
+      "followers_url": "https://api.github.com/users/FChecklist/followers",
+      "following_url": "https://api.github.com/users/FChecklist/following{/other_user}",
+      "gists_url": "https://api.github.com/users/FChecklist/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/FChecklist/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/FChecklist/subscriptions",
+      "organizations_url": "https://api.github.com/users/FChecklist/orgs",
+      "repos_url": "https://api.github.com/users/FChecklist/repos",
+      "events_url": "https://api.github.com/users/FChecklist/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/FChecklist/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "created_at": "2026-08-16T09:42:00Z",
+    "updated_at": "2026-08-16T09:42:00Z",
+    "body": "AUDIT: FAIL\nObjective Understood: Reviewed worker task 'sweep-adopt-veridian-scripts-416-fix-dispatch-land-next-queued-task-stale' (risk tier: tier1) by reading the actual diff, not a self-report.\nStandards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.\nScope Confirmed:  dispatch-tick.py                                   | 115 +++++++++-\n resource_governor.py                               |  31 ++-\n tests/test_ocid_evidence_supersession.py           |  19 +-\n .../test_resume_stale_task_flagged_not_replayed.py | 253 +++++++++++++++++++++\n 4 files changed, 411 insertions(+), 7 deletions(-)\nEvidence Recorded: The dispatch-tick.py resume-staleness gate is sound and well-tested (3 dedicated tests covering the stale-flag, fresh-resume, and fail-open-no-timestamp paths), but the resource_governor.py change to next_queued_task() introduces a verified permanent-starvation defect for any queued row that crosses MAX_QUEUED_AGE_SECONDS (4h): age is computed from the immutable ts_submitted and only grows, so once a row is skipped for staleness it is skipped on every subsequent tick forever, and the function's own docstring claim that 'a real PM decision (resolve_pm_decision_pending() on its open STALE-QUEUED row)' is what makes it 'eligible again' is false as implemented -- resolving that PM decision never touches the umr_tasks row. Worse, submit()'s pre-existing duplicate-rejection check (find_active_umr_by_identity) treats status='queued' as active, so a fresh resubmission of the same task_identity is rejected as a duplicate for as long as the stale row sits queued, i.e. indefinitely -- the only real recovery path is a human noticing the STALE-QUEUED-AGGREGATE decision and separately running resource_governor.py --stop-task/--delete-task via the CLI before resubmitting, which the code comments never state. This is a real, live-affecting change to the core dispatch-selection path used every tick for every queued task system-wide, and it ships with zero dedicated unit test of its own (the only touched test, test_ocid_evidence_supersession.py, was patched merely to dodge the new gate, not to verify it) -- a sharp asymmetry against the thorough coverage given to the narrower dispatch-tick.py path. No .github/workflows/** files are touched, so the hard workflow-push rule is not implicated. Issues found: resource_governor.py next_queued_task(): a queued row that crosses MAX_QUEUED_AGE_SECONDS is skipped on every tick forever (age is measured from immutable ts_submitted, which only increases) -- there is no code path anywhere in this diff or the surrounding module that resets ts_submitted or moves the row out of status='queued' once flagged, so the row never becomes selectable again through any automated mechanism.; next_queued_task()'s own added docstring asserts resolving the row's STALE-QUEUED pm_decisions_pending entry (resolve_pm_decision_pending()) is what returns it to eligibility -- that is not implemented; resolving the PM decision has zero effect on the umr_tasks row's status or ts_submitted, so the comment is actively misleading to whoever handles that decision.; Because submit()'s find_active_umr_by_identity() dedup check treats status='queued' as active, a human cannot even work around the stuck row by resubmitting the same task_identity -- it will be rejected as rejected_duplicate for as long as the stale row remains queued. The only real recovery is a human manually running resource_governor.py --stop-task or --delete-task on the old row first, which is undocumented in this diff.; No dedicated unit test exercises next_queued_task()'s new stale-skip behavior directly (e.g. stale row is skipped while a fresher lower-priority row is still selected; all-rows-stale returns None; the permanent-skip/no-recovery behavior). The one test touched for this area (test_ocid_evidence_supersession.py) only adjusts a timestamp to avoid tripping the new gate, it does not verify the gate's own behavior.\nSeverity Classified: medium\nVerdict: fail\nCorrective Action Owner: Worker to address the findings listed above and resubmit.\nRe-Audit Scheduled: Required after corrective changes are pushed.",
+    "author_association": "OWNER",
+    "reactions": {
+      "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306798264/reactions",
+      "total_count": 0,
+      "+1": 0,
+      "-1": 0,
+      "laugh": 0,
+      "hooray": 0,
+      "confused": 0,
+      "heart": 0,
+      "rocket": 0,
+      "eyes": 0
+    },
+    "performed_via_github_app": null,
+    "minimized": null
+  }
+]

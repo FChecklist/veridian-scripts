@@ -1,0 +1,48 @@
+[
+  {
+    "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306786904",
+    "html_url": "https://github.com/FChecklist/veridian-scripts/pull/423#issuecomment-5306786904",
+    "issue_url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/423",
+    "id": 5306786904,
+    "node_id": "IC_kwDOTn5dgs8AAAABPE8kWA",
+    "user": {
+      "login": "FChecklist",
+      "id": 49814285,
+      "node_id": "MDQ6VXNlcjQ5ODE0Mjg1",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49814285?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/FChecklist",
+      "html_url": "https://github.com/FChecklist",
+      "followers_url": "https://api.github.com/users/FChecklist/followers",
+      "following_url": "https://api.github.com/users/FChecklist/following{/other_user}",
+      "gists_url": "https://api.github.com/users/FChecklist/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/FChecklist/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/FChecklist/subscriptions",
+      "organizations_url": "https://api.github.com/users/FChecklist/orgs",
+      "repos_url": "https://api.github.com/users/FChecklist/repos",
+      "events_url": "https://api.github.com/users/FChecklist/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/FChecklist/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "created_at": "2026-08-16T09:38:48Z",
+    "updated_at": "2026-08-16T09:38:48Z",
+    "body": "AUDIT: FAIL\nObjective Understood: Reviewed worker task 'sweep-adopt-veridian-scripts-423-fix-pm-lifecycle-reject-invalid-complexi' (risk tier: tier1) by reading the actual diff, not a self-report.\nStandards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.\nScope Confirmed:  pm_lifecycle.py            | 27 +++++++++++++----\n tests/test_pm_lifecycle.py | 73 ++++++++++++++++++++++++++++++++++++++++++++++\n 2 files changed, 95 insertions(+), 5 deletions(-)\nEvidence Recorded: This diff is a byte-identical duplicate of commit 6648bbf already merged to main on 2026-08-15 as task-20260815-225232 ('fix(pm_lifecycle): reject invalid complexity_tier constant') -- verified directly: the checked-out pm_lifecycle.py at HEAD already contains the identical build_tightened_prompt() VALID_TIERS guard, the identical four moderate->judgment call-site substitutions, and tests/test_pm_lifecycle.py already contains the identical three new regression tests (matching line counts, content, and even the same PASS print statements), and both already pass against the current tree. On its own technical merits the change would be sound -- it correctly fails fast on an invalid complexity_tier against the real plan_generator.VALID_TIERS list and adds real regression coverage rather than a stub -- but there is nothing left to merge; applying this PR would be a no-op at best or a needless duplicate/conflicting commit at worst. Per the standing NO-DUPLICATION rule (verify real code exists and check task state before assigning/merging scope), this should be rejected as already-resolved, not merged, and the sweep task (#423) that spawned it should be marked closed as duplicate rather than retried. Issues found: Diff is identical to already-merged commit 6648bbf (task-20260815-225232) on main -- this is duplicate/redundant work, not a new fix; No .github/workflows/** files are touched by this diff, so the workflow hard-rule does not apply here\nSeverity Classified: medium\nVerdict: fail\nCorrective Action Owner: Worker to address the findings listed above and resubmit.\nRe-Audit Scheduled: Required after corrective changes are pushed.",
+    "author_association": "OWNER",
+    "reactions": {
+      "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306786904/reactions",
+      "total_count": 0,
+      "+1": 0,
+      "-1": 0,
+      "laugh": 0,
+      "hooray": 0,
+      "confused": 0,
+      "heart": 0,
+      "rocket": 0,
+      "eyes": 0
+    },
+    "performed_via_github_app": null,
+    "minimized": null
+  }
+]

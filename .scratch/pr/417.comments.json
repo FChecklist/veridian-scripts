@@ -1,0 +1,48 @@
+[
+  {
+    "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306790412",
+    "html_url": "https://github.com/FChecklist/veridian-scripts/pull/417#issuecomment-5306790412",
+    "issue_url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/417",
+    "id": 5306790412,
+    "node_id": "IC_kwDOTn5dgs8AAAABPE8yDA",
+    "user": {
+      "login": "FChecklist",
+      "id": 49814285,
+      "node_id": "MDQ6VXNlcjQ5ODE0Mjg1",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49814285?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/FChecklist",
+      "html_url": "https://github.com/FChecklist",
+      "followers_url": "https://api.github.com/users/FChecklist/followers",
+      "following_url": "https://api.github.com/users/FChecklist/following{/other_user}",
+      "gists_url": "https://api.github.com/users/FChecklist/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/FChecklist/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/FChecklist/subscriptions",
+      "organizations_url": "https://api.github.com/users/FChecklist/orgs",
+      "repos_url": "https://api.github.com/users/FChecklist/repos",
+      "events_url": "https://api.github.com/users/FChecklist/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/FChecklist/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "created_at": "2026-08-16T09:39:46Z",
+    "updated_at": "2026-08-16T09:39:46Z",
+    "body": "AUDIT: FAIL\nObjective Understood: Reviewed worker task 'sweep-adopt-veridian-scripts-417-fix-dispatch-guarantee-owner-dispatch-ga' (risk tier: tier1) by reading the actual diff, not a self-report.\nStandards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.\nScope Confirmed:  dispatch-tick.py                                   |  56 +++++\n resource_governor.py                               |  83 +++++++-\n tests/test_owner_dispatch_starvation_guard.py      | 231 +++++++++++++++++++++\n tests/test_resume_interrupted_workers_batch_cap.py | 221 ++++++++++++++++++++\n 4 files changed, 582 insertions(+), 9 deletions(-)\nEvidence Recorded: This diff is a byte-for-byte duplicate of already-merged work: the resulting dispatch-tick.py and resource_governor.py blob hashes (d98af04 and a8c151e) are identical to commit d9cea1f, which is already the tip of main (same UMR-20260815-105911-a2c9, same diffstat: 56/83/231/221 lines, same 582 insertions/9 deletions) -- the fix (RESUME_SUBMIT_BATCH_LIMIT batch cap in dispatch-tick.py and OWNER_STARVATION_GUARANTEE_SECONDS starvation guard in resource_governor.py's next_queued_task()) was already implemented, tested, and merged before this task's diff was produced. On its own merits the logic is sound (dispatch_core.py itself is untouched, respecting its stop-work order; the starvation guard is narrowly scoped to source_trigger=owner_dispatch_gateway and only overrides selection order, not headroom/concurrency checks; the batch cap correctly defers excess candidates to a later tick without marking them dead/duplicate; tests are real and isolated from the live DB except for a pre-existing schema-copy convention), but that is moot -- this diff's base blobs (e3d1996/7c0a835) are the pre-fix state that no longer exists at HEAD, so applying it now is either a no-op or a merge conflict. This is exactly the NO DUPLICATION scenario SUPERBOSS_DISPATCH_PROMPT.md rule #8 warns against: recommend closing this task as already-complete (point at d9cea1f) rather than merging a redundant PR. No .github/workflows/** files are touched, so the hard workflow-file rule does not apply here. Issues found: Duplicate of already-merged commit d9cea1f (UMR-20260815-105911-a2c9): resulting blob hashes for both changed source files are identical to what is already on main HEAD.; Diff's base blobs (e3d1996 for dispatch-tick.py, 7c0a835 for resource_governor.py) predate d9cea1f and no longer exist at HEAD -- this patch cannot be cleanly applied/merged against current main.; Violates the 'NO DUPLICATION' check (SUPERBOSS_DISPATCH_PROMPT.md step 8) -- existing task/commit state was not checked before this scope was (re)dispatched.\nSeverity Classified: medium\nVerdict: fail\nCorrective Action Owner: Worker to address the findings listed above and resubmit.\nRe-Audit Scheduled: Required after corrective changes are pushed.",
+    "author_association": "OWNER",
+    "reactions": {
+      "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306790412/reactions",
+      "total_count": 0,
+      "+1": 0,
+      "-1": 0,
+      "laugh": 0,
+      "hooray": 0,
+      "confused": 0,
+      "heart": 0,
+      "rocket": 0,
+      "eyes": 0
+    },
+    "performed_via_github_app": null,
+    "minimized": null
+  }
+]

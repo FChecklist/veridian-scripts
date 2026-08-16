@@ -1,0 +1,48 @@
+[
+  {
+    "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306795786",
+    "html_url": "https://github.com/FChecklist/veridian-scripts/pull/204#issuecomment-5306795786",
+    "issue_url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/204",
+    "id": 5306795786,
+    "node_id": "IC_kwDOTn5dgs8AAAABPE9HCg",
+    "user": {
+      "login": "FChecklist",
+      "id": 49814285,
+      "node_id": "MDQ6VXNlcjQ5ODE0Mjg1",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49814285?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/FChecklist",
+      "html_url": "https://github.com/FChecklist",
+      "followers_url": "https://api.github.com/users/FChecklist/followers",
+      "following_url": "https://api.github.com/users/FChecklist/following{/other_user}",
+      "gists_url": "https://api.github.com/users/FChecklist/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/FChecklist/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/FChecklist/subscriptions",
+      "organizations_url": "https://api.github.com/users/FChecklist/orgs",
+      "repos_url": "https://api.github.com/users/FChecklist/repos",
+      "events_url": "https://api.github.com/users/FChecklist/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/FChecklist/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "created_at": "2026-08-16T09:41:17Z",
+    "updated_at": "2026-08-16T09:41:17Z",
+    "body": "AUDIT: FAIL\nObjective Understood: Reviewed worker task 'sweep-adopt-veridian-scripts-204-test-first-real-batch-of-load-bearing-sc' (risk tier: tier1) by reading the actual diff, not a self-report.\nStandards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.\nScope Confirmed:  PLATFORM_COMPLETION_CHECKLIST.json                 | 232 ++++++++++------\n PLATFORM_COMPLETION_CHECKLIST.md                   |  66 ++---\n test_gtm_write_category_result.py                  | 200 ++++++++++++++\n test_metadata_reconciliation.py                    | 147 ++++++++++\n test_owner_status.py                               | 142 ++++++++++\n test_recover_failed_workers.py                     | 151 ++++++++++\n test_resource_governor_tick_loop.py                | 114 ++++++++\n test_supervisor_sweep.py                           | 118 ++++++++\n ...r_entrypoint_and_docworker_entrypoint_guards.py | 303 +++++++++++++++++++++\n 9 files changed, 1359 insertions(+), 114 deletions(-)\nEvidence Recorded: This diff adds 7 new test files covering previously-untested load-bearing scripts (gtm_write_category_result.py, metadata_reconciliation.py, owner_status.py, recover-failed-workers.py, resource_governor_tick_loop.sh, supervisor-sweep.sh, worker-entrypoint.sh/doc-worker-entrypoint.sh) plus a regenerated PLATFORM_COMPLETION_CHECKLIST.json/.md; it is purely additive (no .github/workflows/** changes, no production script logic touched) and 6 of the 7 test files are genuinely meaningful -- they exec the real scripts/bash blocks against real temp SQLite DBs with real schema and assert on real output, not mocked-out rubber-stamping. However, actually running pytest on the new files today (rather than trusting the checklist's embedded 'pytest_summary: 588 passed' self-report) reproduces a real failure: test_owner_status.py::test_hours_filter_excludes_old_rows hardcodes an absolute wall-clock timestamp fixture that has aged past the script's rolling '--hours 48' window since the tests were authored, so the suite as submitted does not currently pass. Per the standing quality-gate rule (evidence must reflect the actual diff, not a self-report, and quality gates must already be passing), this fails the bar for autonomous tier1 merge right now even though the fix is small and well-scoped for a targeted follow-up. Issues found: test_owner_status.py::test_hours_filter_excludes_old_rows hardcodes an absolute timestamp ('2026-08-06T00:00:00Z') as a 'recent' row and asserts it survives a --hours 48 filter against owner_status.py's real datetime('now', '-48 hours') query; verified by actually running pytest today (2026-08-16) that this test now FAILS, contradicting the diff's own checklist claim of tests_pass: true / 'pytest_summary: 588 passed' for owner_status.py -- needs a relative timestamp (e.g. now - 1h) instead of a fixed date before this can be trusted as passing evidence.; Minor: test_owner_status.py calls __import__('tempfile').mkstemp()[1] and discards the returned file descriptor without closing it (harmless fd leak in a test process, but sloppy).\nSeverity Classified: medium\nVerdict: fail\nCorrective Action Owner: Worker to address the findings listed above and resubmit.\nRe-Audit Scheduled: Required after corrective changes are pushed.",
+    "author_association": "OWNER",
+    "reactions": {
+      "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306795786/reactions",
+      "total_count": 0,
+      "+1": 0,
+      "-1": 0,
+      "laugh": 0,
+      "hooray": 0,
+      "confused": 0,
+      "heart": 0,
+      "rocket": 0,
+      "eyes": 0
+    },
+    "performed_via_github_app": null,
+    "minimized": null
+  }
+]

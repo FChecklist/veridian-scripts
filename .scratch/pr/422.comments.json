@@ -1,0 +1,48 @@
+[
+  {
+    "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306800977",
+    "html_url": "https://github.com/FChecklist/veridian-scripts/pull/422#issuecomment-5306800977",
+    "issue_url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/422",
+    "id": 5306800977,
+    "node_id": "IC_kwDOTn5dgs8AAAABPE9bUQ",
+    "user": {
+      "login": "FChecklist",
+      "id": 49814285,
+      "node_id": "MDQ6VXNlcjQ5ODE0Mjg1",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49814285?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/FChecklist",
+      "html_url": "https://github.com/FChecklist",
+      "followers_url": "https://api.github.com/users/FChecklist/followers",
+      "following_url": "https://api.github.com/users/FChecklist/following{/other_user}",
+      "gists_url": "https://api.github.com/users/FChecklist/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/FChecklist/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/FChecklist/subscriptions",
+      "organizations_url": "https://api.github.com/users/FChecklist/orgs",
+      "repos_url": "https://api.github.com/users/FChecklist/repos",
+      "events_url": "https://api.github.com/users/FChecklist/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/FChecklist/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "created_at": "2026-08-16T09:42:46Z",
+    "updated_at": "2026-08-16T09:42:46Z",
+    "body": "AUDIT: FAIL\nObjective Understood: Reviewed worker task 'sweep-adopt-veridian-scripts-422-fix-worker-stop-systemic-2s-worker-fast' (risk tier: tier1) by reading the actual diff, not a self-report.\nStandards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.\nScope Confirmed:  pm_lifecycle.py              | 77 ++++++++++++++++++++++++++++++++++++++++----\n superboss-register.py        | 10 ++++++\n worker-exit-status-bridge.py | 16 ++++++++-\n 3 files changed, 96 insertions(+), 7 deletions(-)\nEvidence Recorded: The diff correctly fixes the root-cause tier bug (default complexity_tier=\"moderate\" was never a member of tight_task_validation.VALID_TIERS = [mechanical, integrative, judgment], causing every worker on that path to hit preflight-guard.py's hard stop ~2s in) and the superboss-register.py/worker-exit-status-bridge.py logs_ref wiring is sound (real column, parameterized write, subprocess called with an argv list so no shell-injection risk, best-effort/non-blocking). However, wiring build_tightened_prompt() to call validate_tight_task() at construction time introduces a second, newly-surfaced defect that breaks the two real callers this diff itself edited: I ran dispatch_audit_fix()'s and dispatch_independent_audit()'s exact, unmodified success_criteria strings through the actual validate_tight_task()/check_success_criteria_has_runnable_command() and both now unconditionally raise ValueError (\"no_runnable_verification_command_in_success_criteria\") because their command text (e.g. \"gh pr view ... --comments -- then fix the real cited issue. Verify with: git -C . log -1 --format=%H\") is embedded mid-sentence rather than on its own line starting with a recognized command word, so _line_is_runnable_command() never matches. verify_with_retries() calls dispatch_fix_fn/dispatch_audit_fn with no try/except around them, so this ValueError now propagates uncaught out of the audit-fail-retry loop and is only caught by main()'s top-level handler, aborting the entire run_full_cycle report with a bare internal_error instead of the real, partial report -- worse than the pre-fix behavior for these two paths (a real dispatch attempt that at least produced a pollable umr row). There is no test_pm_lifecycle.py exercising build_tightened_prompt/dispatch_audit_fix/dispatch_independent_audit, which is how this shipped without being caught. Diff does not touch .github/workflows/**, migrations, schema, auth, or secrets, so tier1 classification is not in question, but the regression is real and reproducible, not speculative. Issues found: dispatch_audit_fix() and dispatch_independent_audit() in pm_lifecycle.py now unconditionally raise ValueError from build_tightened_prompt()'s new validate_tight_task() call, because their real success_criteria text embeds the verification command mid-sentence instead of as its own recognized command line -- confirmed by executing the actual functions' real argument strings against the actual validator, not a hypothetical.; verify_with_retries() has no try/except around dispatch_fix_fn/dispatch_audit_fn, so this ValueError propagates out of the retry loop and is only caught by main()'s generic top-level handler, discarding the run's real partial report instead of failing gracefully or being caught per-dispatch like other outcomes (refused/rejected/unknown) are.; No unit test exists (no test_pm_lifecycle.py) exercising build_tightened_prompt(), dispatch_audit_fix(), or dispatch_independent_audit() with real argument text, which is why this regression was not caught before merge.; Minor: CLI default --complexity-tier changed to \"integrative\", which validate_tight_task() requires known_context for; any `pm_lifecycle.py run` invocation that omits --known-context now fails fast with a ValueError (confirmed) instead of dispatching -- likely an intentional fail-fast tradeoff but worth confirming it doesn't regress any existing caller that relied on omitting both flags for a mechanical-style task.\nSeverity Classified: medium\nVerdict: fail\nCorrective Action Owner: Worker to address the findings listed above and resubmit.\nRe-Audit Scheduled: Required after corrective changes are pushed.",
+    "author_association": "OWNER",
+    "reactions": {
+      "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306800977/reactions",
+      "total_count": 0,
+      "+1": 0,
+      "-1": 0,
+      "laugh": 0,
+      "hooray": 0,
+      "confused": 0,
+      "heart": 0,
+      "rocket": 0,
+      "eyes": 0
+    },
+    "performed_via_github_app": null,
+    "minimized": null
+  }
+]

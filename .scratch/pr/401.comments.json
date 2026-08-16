@@ -1,0 +1,48 @@
+[
+  {
+    "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306794123",
+    "html_url": "https://github.com/FChecklist/veridian-scripts/pull/401#issuecomment-5306794123",
+    "issue_url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/401",
+    "id": 5306794123,
+    "node_id": "IC_kwDOTn5dgs8AAAABPE9Aiw",
+    "user": {
+      "login": "FChecklist",
+      "id": 49814285,
+      "node_id": "MDQ6VXNlcjQ5ODE0Mjg1",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49814285?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/FChecklist",
+      "html_url": "https://github.com/FChecklist",
+      "followers_url": "https://api.github.com/users/FChecklist/followers",
+      "following_url": "https://api.github.com/users/FChecklist/following{/other_user}",
+      "gists_url": "https://api.github.com/users/FChecklist/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/FChecklist/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/FChecklist/subscriptions",
+      "organizations_url": "https://api.github.com/users/FChecklist/orgs",
+      "repos_url": "https://api.github.com/users/FChecklist/repos",
+      "events_url": "https://api.github.com/users/FChecklist/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/FChecklist/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "created_at": "2026-08-16T09:40:48Z",
+    "updated_at": "2026-08-16T09:40:48Z",
+    "body": "AUDIT: FAIL\nObjective Understood: Reviewed worker task 'sweep-adopt-veridian-scripts-401-fix-progress-completion-gate-exclude-pyt' (risk tier: tier1) by reading the actual diff, not a self-report.\nStandards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.\nScope Confirmed:  ...442-stop-the-directive-resubmission-flood-po.md | 82 ++++++++++++++++++++++\n progress_completion_gate.py                        | 55 ++++++++++++++-\n tests/test_progress_completion_gate.py             | 40 +++++++++++\n 3 files changed, 175 insertions(+), 2 deletions(-)\nEvidence Recorded: The investigative work (root-causing the stale directive-resubmission-flood premise) is solid and honestly reported, and the diff correctly stays out of tier2 territory (no migrations/schema/sql/auth/permission/security paths, no .github/workflows/** changes). However the actual code fix in progress_completion_gate.py has a real regex bug: _CLI_INVOCATION_RE's alternation (?:python3?|bash|sh) has no leading word boundary, so it matches \"sh\" as a bare suffix of ordinary English words (smash, polish, finish, establish, wish, publish, refresh, flash, trash, crash, cash, dash, hash, ...) immediately followed by a path ending in .py/.sh -- verified concretely, e.g. \"we need to smash /opt/veridian/scripts/resource_governor.py to fix the bug\" and \"the real fix should establish /opt/veridian/scripts/baz.py new behavior\" both spuriously match as if they were real python3/bash/sh CLI invocations. This makes the new exclusion far broader than intended (a filename genuinely following a real interpreter invocation) and broader than the diff's own three new tests exercise (all use literal 'python3 <path>' forms only, none probe the word-boundary gap). Since extract_named_code_files() feeds directly into check_completion()'s decision to skip gate enforcement entirely when no named code file remains, this bug can cause the completion gate to silently accept a 'no code needed' self-report for a genuinely-required code change whenever the SPEC's only distinguishing mention of the target file happens to sit after a word ending in 'sh' -- a realistic occurrence in this codebase's prose-heavy dispatch SPECs, and a materially larger blind spot than the four prior exclusions in this file (each scoped to a fixed boilerplate-tool allowlist or an unambiguous tool-output/citation format, not an unanchored regex that can match mid-word). This is a correctness defect in a component whose sole job is gating whether an autonomous 'no code needed' self-report is trusted for tier1 auto-merge, so it should be fixed (e.g. anchor the interpreter alternation with a real leading boundary) and re-tested before merge. Issues found: _CLI_INVOCATION_RE in progress_completion_gate.py (added ~line 287) lacks a leading word boundary before the (?:python3?|bash|sh) alternation, so it matches 'sh' as a suffix of ordinary words (smash/polish/finish/establish/wish/publish/refresh/flash/trash/crash/...) immediately followed by a .py/.sh path -- verified live with reproducible examples, e.g. 'please polish /opt/veridian/scripts/foo.py before merging' matches as a fake CLI invocation and would incorrectly exclude foo.py from the completion gate's required-file set.; None of the 3 new tests in tests/test_progress_completion_gate.py probe this word-boundary gap -- all use literal 'python3 <path>' text, so the bug ships undetected by the diff's own test coverage.; Net effect: this change can widen the completion gate's false-negative surface (silently accepting a doc-only diff for an objective that genuinely named a code file) beyond what the PR's stated intent and prior precedent in this file (narrow boilerplate-tool allowlist / unambiguous citation formats) established -- a real regression risk in a tier1-auto-mergeable safety gate.\nSeverity Classified: medium\nVerdict: fail\nCorrective Action Owner: Worker to address the findings listed above and resubmit.\nRe-Audit Scheduled: Required after corrective changes are pushed.",
+    "author_association": "OWNER",
+    "reactions": {
+      "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306794123/reactions",
+      "total_count": 0,
+      "+1": 0,
+      "-1": 0,
+      "laugh": 0,
+      "hooray": 0,
+      "confused": 0,
+      "heart": 0,
+      "rocket": 0,
+      "eyes": 0
+    },
+    "performed_via_github_app": null,
+    "minimized": null
+  }
+]

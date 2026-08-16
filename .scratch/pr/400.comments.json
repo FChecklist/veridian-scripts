@@ -1,0 +1,48 @@
+[
+  {
+    "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306790820",
+    "html_url": "https://github.com/FChecklist/veridian-scripts/pull/400#issuecomment-5306790820",
+    "issue_url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/400",
+    "id": 5306790820,
+    "node_id": "IC_kwDOTn5dgs8AAAABPE8zpA",
+    "user": {
+      "login": "FChecklist",
+      "id": 49814285,
+      "node_id": "MDQ6VXNlcjQ5ODE0Mjg1",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49814285?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/FChecklist",
+      "html_url": "https://github.com/FChecklist",
+      "followers_url": "https://api.github.com/users/FChecklist/followers",
+      "following_url": "https://api.github.com/users/FChecklist/following{/other_user}",
+      "gists_url": "https://api.github.com/users/FChecklist/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/FChecklist/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/FChecklist/subscriptions",
+      "organizations_url": "https://api.github.com/users/FChecklist/orgs",
+      "repos_url": "https://api.github.com/users/FChecklist/repos",
+      "events_url": "https://api.github.com/users/FChecklist/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/FChecklist/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "created_at": "2026-08-16T09:39:53Z",
+    "updated_at": "2026-08-16T09:39:53Z",
+    "body": "AUDIT: FAIL\nObjective Understood: Reviewed worker task 'sweep-adopt-veridian-scripts-400-docs-progress-task-20260806-151357-memor' (risk tier: tier1) by reading the actual diff, not a self-report.\nStandards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.\nScope Confirmed:  ...1357-urgent--real-memory-pressure-escalation.md | 78 ++++++++++++++++++++++\n 1 file changed, 78 insertions(+)\nEvidence Recorded: This diff adds progress/task-20260806-151357-urgent--real-memory-pressure-escalation.md as a brand-new file, but that exact file at that exact path was already committed to this repo's main branch as commit 9e1510b (currently the tip of main, per `git log -- <path>` showing only that one commit ever touching it) with an identical diff stat (78 insertions) and identical content verified line-by-line against the working tree copy; the change is pure duplicate work with nothing new to add, and the underlying investigation content itself (memory-pressure incident on PID 2275852, PR #1000 status) is otherwise plausible and internally consistent, so the defect here is duplication/staleness, not the content of the report itself. Issues found: Diff is a full duplicate of already-merged commit 9e1510b: the target file already exists on main with byte-for-byte identical content, so this PR adds zero new information and should not be merged as-is (either a stale/rebase-needed branch or a re-submission of already-landed work).; Applying this 'new file' diff against current main is not clean since the file already exists at that path -- confirms this PR was generated against a stale base and was never rebased before being queued for review.; No .github/workflows/** paths touched -- hard rule from SUPERBOSS_DISPATCH_PROMPT.md not implicated.\nSeverity Classified: medium\nVerdict: fail\nCorrective Action Owner: Worker to address the findings listed above and resubmit.\nRe-Audit Scheduled: Required after corrective changes are pushed.",
+    "author_association": "OWNER",
+    "reactions": {
+      "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306790820/reactions",
+      "total_count": 0,
+      "+1": 0,
+      "-1": 0,
+      "laugh": 0,
+      "hooray": 0,
+      "confused": 0,
+      "heart": 0,
+      "rocket": 0,
+      "eyes": 0
+    },
+    "performed_via_github_app": null,
+    "minimized": null
+  }
+]

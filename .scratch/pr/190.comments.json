@@ -1,0 +1,48 @@
+[
+  {
+    "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306787569",
+    "html_url": "https://github.com/FChecklist/veridian-scripts/pull/190#issuecomment-5306787569",
+    "issue_url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/190",
+    "id": 5306787569,
+    "node_id": "IC_kwDOTn5dgs8AAAABPE8m8Q",
+    "user": {
+      "login": "FChecklist",
+      "id": 49814285,
+      "node_id": "MDQ6VXNlcjQ5ODE0Mjg1",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49814285?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/FChecklist",
+      "html_url": "https://github.com/FChecklist",
+      "followers_url": "https://api.github.com/users/FChecklist/followers",
+      "following_url": "https://api.github.com/users/FChecklist/following{/other_user}",
+      "gists_url": "https://api.github.com/users/FChecklist/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/FChecklist/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/FChecklist/subscriptions",
+      "organizations_url": "https://api.github.com/users/FChecklist/orgs",
+      "repos_url": "https://api.github.com/users/FChecklist/repos",
+      "events_url": "https://api.github.com/users/FChecklist/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/FChecklist/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "created_at": "2026-08-16T09:38:59Z",
+    "updated_at": "2026-08-16T09:38:59Z",
+    "body": "AUDIT: FAIL\nObjective Understood: Reviewed worker task 'sweep-adopt-veridian-scripts-190-chore-scripts-preserve-session-metadata' (risk tier: tier1) by reading the actual diff, not a self-report.\nStandards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.\nScope Confirmed:  session_metadata_sync.py   | 187 +++++++++++++++++++++++++++++++++++++++++++++\n sweep_awaiting_approval.py | 163 +++++++++++++++++++++++++++++++++++++++\n 2 files changed, 350 insertions(+)\nEvidence Recorded: session_metadata_sync.py is a benign, additive read-only analysis script and is fine as-is, but sweep_awaiting_approval.py is a serious policy/security regression: its process_task() only checks review.get(\"verdict\") == \"approve\" before running gh pr merge -- it never inspects the recorded review's tier, so any task sitting in awaiting_human_approval with a stored approve verdict gets merged autonomously, including tier2 tasks that reached that status specifically because SUPERBOSS_DISPATCH_PROMPT.md's tiered trust model requires human sign-off before merge for tier2 (schema/auth/security-sensitive changes). The script's own docstring justifies this blanket retroactive auto-merge by citing an unverified \"Owner directive... AGENTS.md Rule 12... claude-control PR #118... Owner's full-approval directive\" -- this is exactly the recurring false-premise pattern seen across prior veridian-scripts tasks (confident claims of directives/root-causes that don't match live state) and there is no evidence in this diff that the cited directive was actually verified. Landing this script in the repo makes a tier2-bypass merge tool available for future invocation even though adding the file itself is a low-blast-radius (tier1) diff. Issues found: sweep_awaiting_approval.py never checks review.json's \"tier\" field before calling gh pr merge -- it will autonomously merge tier2-held PRs (schema/auth/security/payment-pattern changes) that were explicitly routed to awaiting_human_approval for human sign-off, directly violating the tier2 hard-hold rule in SUPERBOSS_DISPATCH_PROMPT.md; The script's justification rests on an unverified claimed \"Owner directive\" (AGENTS.md Rule 12 / claude-control PR #118) -- matches the known recurring false-premise pattern in this repo's task specs; should be independently verified before this script is ever run, and the diff gives no evidence that verification happened; load_controller_tasks() reads CONTROLLER.yaml directly via yaml.safe_load, bypassing the file-locking mechanism documented as added for concurrent-writer safety, risking a race with an in-flight writer during the sweep; gh pr merge is invoked without --delete-branch, deviating from the tier1 merge pattern (`gh pr merge --merge --delete-branch`) documented elsewhere in the standing instructions\nSeverity Classified: medium\nVerdict: fail\nCorrective Action Owner: Worker to address the findings listed above and resubmit.\nRe-Audit Scheduled: Required after corrective changes are pushed.",
+    "author_association": "OWNER",
+    "reactions": {
+      "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306787569/reactions",
+      "total_count": 0,
+      "+1": 0,
+      "-1": 0,
+      "laugh": 0,
+      "hooray": 0,
+      "confused": 0,
+      "heart": 0,
+      "rocket": 0,
+      "eyes": 0
+    },
+    "performed_via_github_app": null,
+    "minimized": null
+  }
+]

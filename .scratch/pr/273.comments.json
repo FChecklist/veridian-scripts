@@ -1,0 +1,48 @@
+[
+  {
+    "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306794878",
+    "html_url": "https://github.com/FChecklist/veridian-scripts/pull/273#issuecomment-5306794878",
+    "issue_url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/273",
+    "id": 5306794878,
+    "node_id": "IC_kwDOTn5dgs8AAAABPE9Dfg",
+    "user": {
+      "login": "FChecklist",
+      "id": 49814285,
+      "node_id": "MDQ6VXNlcjQ5ODE0Mjg1",
+      "avatar_url": "https://avatars.githubusercontent.com/u/49814285?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/FChecklist",
+      "html_url": "https://github.com/FChecklist",
+      "followers_url": "https://api.github.com/users/FChecklist/followers",
+      "following_url": "https://api.github.com/users/FChecklist/following{/other_user}",
+      "gists_url": "https://api.github.com/users/FChecklist/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/FChecklist/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/FChecklist/subscriptions",
+      "organizations_url": "https://api.github.com/users/FChecklist/orgs",
+      "repos_url": "https://api.github.com/users/FChecklist/repos",
+      "events_url": "https://api.github.com/users/FChecklist/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/FChecklist/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "created_at": "2026-08-16T09:41:01Z",
+    "updated_at": "2026-08-16T09:41:01Z",
+    "body": "AUDIT: FAIL\nObjective Understood: Reviewed worker task 'sweep-adopt-veridian-scripts-273-feat-superboss-register-permanent-add-is' (risk tier: tier1) by reading the actual diff, not a self-report.\nStandards Reviewed: AGENTS.md Operating Rule 7c structured audit protocol; risk-tier.py's deterministic tier classification.\nScope Confirmed:  resource_governor.py  |  94 +++++++++++++-\n superboss-register.py | 354 ++++++++++++++++++++++++++++++++++++++++++++++++++\n 2 files changed, 447 insertions(+), 1 deletion(-)\nEvidence Recorded: The diff adds a reasonable, additive master_issue_tracker write path (add-issue/close-issue/update-issue/list-issues CLI in superboss-register.py plus a fail-open, dedup-gated recorder wired into resource_governor.py's stop-work-order gate and emergency-stop cascade) that follows this codebase's existing conventions well: idempotent CREATE TABLE IF NOT EXISTS, parameterized SQL throughout, a whitelisted column set for update_master_issue (no injection surface), the established caller-owns-transaction/_write_lock() pattern, and best-effort try/except wrapping so a bookkeeping failure can't crash a real gate. It compiles cleanly and touches no .github/workflows files. However, two of the new code comments explicitly claim this was 'live-verified ... see tests/test_resource_governor.py', and that file does not exist anywhere in the repository -- grepping the whole tree for master_issue_tracker/_record_master_issue_if_new/add_master_issue/cmd_add_issue outside the two changed files returns nothing. There is zero real test coverage for ~450 lines of new functionality, including a new DB schema, four new CLI subcommands, and a new write path integrated into a production safety gate, despite the diff's own comments asserting live verification happened. This is a fabricated verification citation, not just an untested change, and per this review's mandate not to trust a self-report it must be rejected rather than autonomously merged even though the tier1 blast radius and code quality are otherwise acceptable. There is also a minor real connection-leak bug in _record_master_issue_if_new: if add_master_issue() raises inside the with sbr._write_lock() block, the open sqlite conn is never closed (no finally), though this is low-severity given the fail-open design and short-lived governor process. Issues found: Fabricated verification claim: inline comments in resource_governor.py (near _record_master_issue_if_new) assert 'live-verified ... see tests/test_resource_governor.py', but no such file exists in the repo -- a false self-report matching this project's known confident-false-claim pattern.; Zero test coverage anywhere in the repo for the new master_issue_tracker table, add_master_issue/close_master_issue/update_master_issue/query_master_issues, the four new CLI subcommands (add-issue/close-issue/update-issue/list-issues), or _record_master_issue_if_new's dedup/insert logic.; Minor: _record_master_issue_if_new (resource_governor.py) leaks the sqlite connection on the exception path -- if sbr.add_master_issue() raises inside the `with sbr._write_lock():` block, `conn.close()` is skipped since it's only reached on the success path before the outer except.; Recommend a targeted follow-up subtask: add real unit tests exercising add_master_issue/close_master_issue/update_master_issue/query_master_issues and the CLI wrappers against a temp DB fixture, fix the connection-leak with a try/finally, and correct or remove the false test-file citation in the comments before re-submitting for merge.\nSeverity Classified: medium\nVerdict: fail\nCorrective Action Owner: Worker to address the findings listed above and resubmit.\nRe-Audit Scheduled: Required after corrective changes are pushed.",
+    "author_association": "OWNER",
+    "reactions": {
+      "url": "https://api.github.com/repos/FChecklist/veridian-scripts/issues/comments/5306794878/reactions",
+      "total_count": 0,
+      "+1": 0,
+      "-1": 0,
+      "laugh": 0,
+      "hooray": 0,
+      "confused": 0,
+      "heart": 0,
+      "rocket": 0,
+      "eyes": 0
+    },
+    "performed_via_github_app": null,
+    "minimized": null
+  }
+]

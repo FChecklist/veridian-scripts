@@ -29,6 +29,12 @@ and test_dispatch_owner_task_attach.py already establish in this repo:
    complexity_tier=='mechanical' resolves to --model haiku and every other
    real case (absent, empty, 'integrative', 'judgment') resolves to
    --model sonnet.
+4. pm_lifecycle.py's real `run` subcommand argparse default (task-
+   20260816-092554) -- parses a real argv through build_parser(), the
+   actual ArgumentParser the one real live caller invokes, proving the
+   default is genuinely None (never the invalid, truthy "moderate" this
+   module used to ship, which kept mechanical/Haiku routing inert on that
+   caller's real path).
 
 No file outside a pytest tmp_path is ever created or modified, no real
 systemctl/network call is made, and the live production
@@ -356,3 +362,87 @@ def test_dispatch_task_omits_complexity_tier_when_not_given():
         pm.dispatch_task("Title", "Prompt", 2, "claude_code_cli", "some-repo")
 
     assert "--complexity-tier" not in captured["cmd"], captured["cmd"]
+
+
+# ---------------------------------------------------------------------------
+# 5. task-20260816-092554: the REAL `run` subcommand argparse default on the
+#    real live call path -- this is the specific gap the UMR-20260816-041030
+#    merge audit flagged as untested. Every test above (and every test in
+#    tests/test_pm_lifecycle.py) only ever calls build_tightened_prompt()/
+#    dispatch_task() directly with an explicit Python-level keyword
+#    (complexity_tier="mechanical" or omitted entirely, which uses THOSE
+#    functions' own defaults, never build_parser()'s). None of them ever
+#    parsed a real `pm_lifecycle.py run ...` argv the way the one real live
+#    caller (this module's own docstring usage example, which never passes
+#    --complexity-tier) actually does. Before this task's fix, that real
+#    parsed default was the string "moderate" -- truthy, and not a member of
+#    plan_generator.py's VALID_TIERS -- so dispatch_task()'s `if
+#    complexity_tier:` check always fired and every real task.yaml from that
+#    one live caller got a permanently-invalid complexity_tier, keeping
+#    mechanical/Haiku routing inert on the only real production path that
+#    reaches it.
+# ---------------------------------------------------------------------------
+
+def test_run_subcommand_real_argparse_default_is_none_not_invalid_moderate():
+    """Parses a real argv through build_parser() -- the actual
+    ArgumentParser the live `pm_lifecycle.py run ...` CLI invocation goes
+    through -- with no --complexity-tier flag, exactly like the one real
+    live caller. Must resolve to None, never the invalid "moderate" default
+    this module used to ship."""
+    pm = _load_pm_lifecycle()
+    parser = pm.build_parser()
+    args = parser.parse_args([
+        "run", "--title", "Real title", "--text", "Real full task text",
+    ])
+    assert args.complexity_tier is None, args.complexity_tier
+
+
+def test_run_subcommand_real_argparse_default_never_reaches_dispatch_owner_task_argv():
+    """End-to-end real-call-path proof: the actual Namespace produced by
+    parsing a real argv with no --complexity-tier flag, fed into the actual
+    dispatch_task(), must never add --complexity-tier to the real
+    dispatch-owner-task.sh argv -- closing the exact gap the merge audit
+    flagged (a Python-level `complexity_tier=None` keyword default alone
+    does NOT prove this; only parsing the real argparse Namespace does)."""
+    pm = _load_pm_lifecycle()
+    parser = pm.build_parser()
+    args = parser.parse_args([
+        "run", "--title", "Real title", "--text", "Real full task text",
+    ])
+    captured = {}
+
+    def fake_run(cmd, timeout=60, **kw):
+        captured["cmd"] = cmd
+        return 0, "DISPATCHED: umr_id=U instruction_id=I work_item_id=W task_identity=T", ""
+
+    with mock.patch.object(pm, "_run", side_effect=fake_run):
+        pm.dispatch_task("Title", "Prompt", args.tier, args.medium, args.repo,
+                          complexity_tier=args.complexity_tier)
+
+    assert "--complexity-tier" not in captured["cmd"], captured["cmd"]
+    assert "moderate" not in captured["cmd"], captured["cmd"]
+
+
+def test_run_subcommand_real_argparse_explicit_mechanical_still_threads_through():
+    """The real live CLI path can still genuinely request mechanical
+    routing when a caller explicitly passes --complexity-tier mechanical --
+    the fix must not break the working case, only the poisoned default."""
+    pm = _load_pm_lifecycle()
+    parser = pm.build_parser()
+    args = parser.parse_args([
+        "run", "--title", "Real title", "--text", "Real full task text",
+        "--complexity-tier", "mechanical",
+    ])
+    assert args.complexity_tier == "mechanical"
+    captured = {}
+
+    def fake_run(cmd, timeout=60, **kw):
+        captured["cmd"] = cmd
+        return 0, "DISPATCHED: umr_id=U instruction_id=I work_item_id=W task_identity=T", ""
+
+    with mock.patch.object(pm, "_run", side_effect=fake_run):
+        pm.dispatch_task("Title", "Prompt", args.tier, args.medium, args.repo,
+                          complexity_tier=args.complexity_tier)
+
+    assert "--complexity-tier" in captured["cmd"], captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--complexity-tier") + 1] == "mechanical"

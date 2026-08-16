@@ -231,7 +231,14 @@ def build_tightened_prompt(objective, scope, success_criteria, expected_output,
     ]
     if known_context:
         lines += ["## KNOWN_CONTEXT", known_context.strip(), ""]
-    lines += ["## COMPLEXITY_TIER", complexity_tier.strip()]
+    # task-20260816-092554: `run`'s own --complexity-tier CLI flag now
+    # defaults to None (see build_parser()), not the invalid "moderate" this
+    # module used to poison every real task.yaml with, so a real caller that
+    # never classified complexity reaches here with complexity_tier=None --
+    # guarded the same way `known_context` already is above, rather than
+    # crashing on `None.strip()`.
+    if complexity_tier:
+        lines += ["## COMPLEXITY_TIER", complexity_tier.strip()]
     return "\n".join(lines)
 
 
@@ -965,7 +972,24 @@ def build_parser():
     p_run.add_argument("--success-criteria", default=None)
     p_run.add_argument("--expected-output", default=None)
     p_run.add_argument("--known-context", default=None)
-    p_run.add_argument("--complexity-tier", default="moderate")
+    # Real fix (task-20260816-092554, corrects the merge-audit-flagged
+    # inertness gap in UMR-20260816-041030-cdc4): this used to default to
+    # "moderate", a value that is NOT a member of plan_generator.py's own
+    # VALID_TIERS ("mechanical"/"integrative"/"judgment") but IS truthy, so
+    # dispatch_task()'s `if complexity_tier:` check below always added a
+    # real `--complexity-tier moderate` to every real dispatch that didn't
+    # explicitly override it -- the one real live pm_lifecycle.py-run caller
+    # (see this module's own docstring usage example, which never passes
+    # --complexity-tier) always wrote an invalid complexity_tier into every
+    # real task.yaml, keeping the mechanical/Haiku routing permanently
+    # inert on that path. None matches the "safe absent" convention already
+    # established and tested end to end in
+    # tests/test_complexity_tier_haiku_routing.py: no CLI flag -> args.
+    # complexity_tier is None -> dispatch_task() never adds the arg ->
+    # task.yaml has no complexity_tier key at all -> worker-entrypoint.sh's
+    # own routing snippet treats that as non-mechanical and safely selects
+    # sonnet.
+    p_run.add_argument("--complexity-tier", default=None)
     p_run.set_defaults(func=run_full_cycle)
 
     return ap

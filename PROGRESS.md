@@ -1,4 +1,4 @@
-# PROGRESS -- task-20260816-041054-real--corrected-tier-aware-haiku-4-5-rou
+# PROGRESS -- task-20260816-092554-make-mechanical-tier-model-selection-act
 
 ## Completed
 

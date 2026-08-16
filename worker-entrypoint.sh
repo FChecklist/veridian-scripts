@@ -88,6 +88,28 @@ CHECKPOINT_COUNT=$(python3 -c "import yaml; print(len(yaml.safe_load(open('$TASK
 DEFAULT_BRANCH=$(git -C "$WORKSPACE" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
 DEFAULT_BRANCH="${DEFAULT_BRANCH:-master}"
 
+# --- Tier-aware Haiku routing (2026-08-16, task-20260816-041054, real Owner
+# authorization -- see OWNER_DECISION_2026-08-16_MECHANICAL_HAIKU_ROUTING.md)
+# ---
+# task.yaml's own complexity_tier field is the ONLY real signal this reads --
+# NEVER umr_tasks.tier (that is a dispatch-PRIORITY field, 0=highest..
+# 4=lowest, unrelated to task complexity; see resource_governor.py's own
+# DEFAULT_TIER/CHECK constraint/next_queued_task() sort usage) and never the
+# task title or any other proxy. The field is genuinely present ONLY for
+# tasks dispatched through pm_lifecycle.py's `run` command with a real
+# --complexity-tier value threaded all the way into task.yaml at create
+# time (see veridian-task.py's cmd_create) -- every other real dispatch path
+# (e.g. raw owner_dispatch_gateway submissions relayed straight into the
+# interactive session) has no complexity classification at all, and
+# yaml.safe_load(...).get() correctly returns nothing for those, which MUST
+# stay on the safe default (sonnet) below, never haiku.
+COMPLEXITY_TIER=$(python3 -c "import yaml; print(yaml.safe_load(open('$TASK_DIR/task.yaml')).get('complexity_tier') or '')")
+if [ "$COMPLEXITY_TIER" = "mechanical" ]; then
+  CLAUDE_MODEL="haiku"
+else
+  CLAUDE_MODEL="sonnet"
+fi
+
 if [ "$CHECKPOINT_COUNT" -gt 0 ]; then
   IS_RESUME=1
 else
@@ -375,7 +397,7 @@ fi
 
 MAIN_OUT="$TASK_DIR/.claude-out-main.json"
 MAIN_START_EPOCH=$(date -u +%s)
-claude -p "$PROMPT" --model sonnet --effort high --dangerously-skip-permissions --max-budget-usd "$WORKER_BUDGET_CAP_USD" --output-format json > "$MAIN_OUT" 2>>"$TASK_DIR/worker.log"
+claude -p "$PROMPT" --model "$CLAUDE_MODEL" --effort high --dangerously-skip-permissions --max-budget-usd "$WORKER_BUDGET_CAP_USD" --output-format json > "$MAIN_OUT" 2>>"$TASK_DIR/worker.log"
 EXIT_CODE=$?
 cat "$MAIN_OUT" >> "$TASK_DIR/result.json"
 
@@ -835,7 +857,7 @@ $PROGRESS_INSTRUCTION"
   FIX_INCREMENT="${FIX_INCREMENT:-$((GATE_ATTEMPT + 1))}"
   FIX_OUT="$TASK_DIR/.claude-out-fix-$GATE_ATTEMPT.json"
   FIX_START_EPOCH=$(date -u +%s)
-  claude -p "$FIX_PROMPT" --model sonnet --effort high --continue --dangerously-skip-permissions --max-budget-usd "$WORKER_BUDGET_CAP_USD" --output-format json > "$FIX_OUT" 2>>"$TASK_DIR/worker.log"
+  claude -p "$FIX_PROMPT" --model "$CLAUDE_MODEL" --effort high --continue --dangerously-skip-permissions --max-budget-usd "$WORKER_BUDGET_CAP_USD" --output-format json > "$FIX_OUT" 2>>"$TASK_DIR/worker.log"
   cat "$FIX_OUT" >> "$TASK_DIR/result.json"
   FIX_COST=$(real_invocation_cost_usd "$FIX_START_EPOCH")
   python3 /opt/veridian/scripts/credit-accountant.py report --task-id "$TASK_ID" --increment "$FIX_INCREMENT" --actual-spend-usd "$FIX_COST" --outcome "auto-fix attempt $GATE_ATTEMPT/2 completed, real cost \$$FIX_COST" >> "$TASK_DIR/worker.log" 2>&1 || true

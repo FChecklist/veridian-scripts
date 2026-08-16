@@ -2863,6 +2863,17 @@ def _perform_spawn(row):
             cmd = ["python3", os.path.join(SCRIPTS, "veridian-task.py"), "create",
                    "--title", inputs["title"], "--repo", inputs.get("repo", "claude-control"),
                    "--prompt", inputs["prompt"]]
+            # task-20260816-041054 (real tier-aware Haiku routing): thread
+            # the real complexity_tier value through verbatim, only if the
+            # caller (dispatch-owner-task.sh's own --complexity-tier
+            # passthrough) actually set one -- inputs is the same dict
+            # submit() recorded, so an absent key here means genuinely no
+            # caller ever provided one, and veridian-task.py create must
+            # receive no --complexity-tier flag at all so task.yaml ends up
+            # with no complexity_tier field, the safe default
+            # worker-entrypoint.sh's own model-routing branch expects.
+            if inputs.get("complexity_tier"):
+                cmd += ["--complexity-tier", inputs["complexity_tier"]]
             r = _run(cmd)
             m = re.search(r"^CREATED: (\S+)", r.stdout, re.MULTILINE)
             new_task_id = m.group(1) if m else None

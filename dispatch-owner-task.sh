@@ -27,11 +27,19 @@
 #                          preflight-guard.py -> tight_task_validation.py's
 #                          validate_tight_task()
 #
-# Usage: dispatch-owner-task.sh "<short title>" "<full prompt text>" [tier] [medium] [repo] [--no-relay] [--attach <path>]
+# Usage: dispatch-owner-task.sh "<short title>" "<full prompt text>" [tier] [medium] [repo] [--no-relay] [--attach <path>] [--complexity-tier <value>]
 #   tier       - resource_governor.py tier, 0 (highest) .. 4 (lowest); default 2
 #   medium     - "claude_code_cli" (default, laptop-relayed) or "ssh_session"
 #                (Owner running this directly by hand)
 #   repo       - target repo for veridian-task.py create; default compliance-tracker
+#   --complexity-tier <value> - task-20260816-041054: OPTIONAL real complexity
+#                signal (plan_generator.py's own mechanical/integrative/
+#                judgment enum -- pm_lifecycle.py's dispatch_task() is the one
+#                real, live caller today). Threaded through to task.yaml's own
+#                complexity_tier field; worker-entrypoint.sh routes only
+#                complexity_tier == 'mechanical' to --model haiku, everything
+#                else (including this flag simply being omitted) stays
+#                --model sonnet.
 #   --no-relay - register only, do not deliver into the tmux session (e.g. for
 #                pure background-worker dispatch with no interactive session
 #                involvement). Omit this and relay happens by default.
@@ -128,22 +136,48 @@ RELAY=1
 # extraction/hashing/OWNER_ENGINE-gating happens exactly once, in that one
 # real place, never re-implemented here in bash.
 ATTACH=""
+# task-20260816-041054 (real tier-aware Haiku routing): --complexity-tier
+# <value> is an OPTIONAL real passthrough of the genuine mechanical/
+# integrative/judgment complexity signal (plan_generator.py's own
+# VALID_TIERS -- pm_lifecycle.py's dispatch_task() is the one real, live
+# caller today; see that module's own --complexity-tier CLI arg). Folded
+# verbatim into the task_kind='veridian_task_create' spec's inputs below so
+# it survives all the way to resource_governor.py's _perform_spawn(), which
+# threads it into `veridian-task.py create --complexity-tier ...` so
+# task.yaml gains a genuine complexity_tier field -- worker-entrypoint.sh
+# reads that field to decide --model haiku (mechanical only) vs --model
+# sonnet (everything else, INCLUDING this flag simply never being passed,
+# the correct safe default for every other real caller of this script).
+# Deliberately NOT validated against plan_generator.py's VALID_TIERS here --
+# an unrecognized value just never matches 'mechanical' downstream and
+# safely falls through to sonnet, same as omitting it entirely.
+COMPLEXITY_TIER=""
 ARGS=()
 _next_is_attach=0
+_next_is_complexity_tier=0
 for a in "$@"; do
   if [ "$_next_is_attach" -eq 1 ]; then
     ATTACH="$a"
     _next_is_attach=0
+  elif [ "$_next_is_complexity_tier" -eq 1 ]; then
+    COMPLEXITY_TIER="$a"
+    _next_is_complexity_tier=0
   elif [ "$a" = "--no-relay" ]; then
     RELAY=0
   elif [ "$a" = "--attach" ]; then
     _next_is_attach=1
+  elif [ "$a" = "--complexity-tier" ]; then
+    _next_is_complexity_tier=1
   else
     ARGS+=("$a")
   fi
 done
 if [ "$_next_is_attach" -eq 1 ]; then
   echo "Usage: dispatch-owner-task.sh ... --attach <path> -- --attach requires a real file path argument" >&2
+  exit 1
+fi
+if [ "$_next_is_complexity_tier" -eq 1 ]; then
+  echo "Usage: dispatch-owner-task.sh ... --complexity-tier <value> -- --complexity-tier requires a value" >&2
   exit 1
 fi
 set -- "${ARGS[@]}"
@@ -379,12 +413,21 @@ TASK_IDENTITY="owner-task-$(date -u +%Y%m%d-%H%M%S)-$$"
 SPEC_FILE="$(mktemp)"
 python3 -c "
 import json, sys
+inputs = {'title': sys.argv[2], 'prompt': sys.argv[3], 'repo': sys.argv[4]}
+# task-20260816-041054: only set when a real --complexity-tier value was
+# passed in -- an empty/omitted value must stay a genuinely ABSENT key here
+# (never an empty string), so _perform_spawn() and veridian-task.py create
+# see nothing to thread and task.yaml correctly ends up with no
+# complexity_tier field at all, the safe default worker-entrypoint.sh
+# expects for every dispatch that doesn't set this.
+if sys.argv[6]:
+    inputs['complexity_tier'] = sys.argv[6]
 json.dump({
     'task_identity': sys.argv[1],
     'task_kind': 'veridian_task_create',
-    'inputs': {'title': sys.argv[2], 'prompt': sys.argv[3], 'repo': sys.argv[4]},
+    'inputs': inputs,
 }, open(sys.argv[5], 'w'))
-" "$TASK_IDENTITY" "$TITLE" "$PROMPT" "$REPO" "$SPEC_FILE"
+" "$TASK_IDENTITY" "$TITLE" "$PROMPT" "$REPO" "$SPEC_FILE" "$COMPLEXITY_TIER"
 
 SUBMIT_JSON=$(python3 resource_governor.py --submit --spec-file "$SPEC_FILE" --tier "$TIER" --source-trigger owner_dispatch_gateway)
 rm -f "$SPEC_FILE"

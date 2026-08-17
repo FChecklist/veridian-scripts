@@ -755,14 +755,62 @@ except Exception:
               --reason "$EXECUTION_PATH execution path: $CLI_OUTCOME_DETAIL, made a real local commit but git push failed" >/dev/null
           else
             CLI_GH_REPO=$(git -C "$REPO_PATH" remote get-url origin | sed -E 's#^.*github\.com[:/]##; s#\.git$##')
-            # stdout only (never 2>&1) -- gh pr create's own real, harmless
-            # stderr warnings must not pollute the PR URL this script
-            # parses --pr-number and the mark-umr-terminal --reason from.
-            CLI_PR_URL=$(gh pr create --repo "$CLI_GH_REPO" --base "$CLI_DEFAULT_BRANCH" \
-              --head "$CLI_BRANCH" --title "$TITLE" \
-              --body "Real tier-${TIER} dispatch via the $EXECUTION_PATH execution backend (umr_id=${UMR_ID}). $CLI_OUTCOME_DETAIL" 2>/dev/null) || true
-            CLI_PR_NUMBER=$(echo "$CLI_PR_URL" | grep -oE '[0-9]+$' | tail -1)
-            echo "CLAUDE_CODE_CLI_HEADLESS EXECUTED: umr_id=$UMR_ID commit=$CLI_HEAD_SHA pr=$CLI_PR_URL $CLI_OUTCOME_DETAIL"
+
+            # UMR-20260816-171513-5901 (Owner directive 2026-08-16), second
+            # site: this call site is the same latent unconditional-`gh pr
+            # create` defect supervisor-entrypoint.sh's own DOCS-ONLY-PR-
+            # GUARD-BLOCK already closes for the worker/supervisor path --
+            # this claude_code_cli_headless path is a separate, direct
+            # execution branch that never goes through supervisor-
+            # entrypoint.sh at all, so that guard cannot cover it. Governed
+            # by the SAME named switch (never a second, independent flag --
+            # see docs_only_diff_guard.py's own AGENTS.md Search-Reuse
+            # Discipline rationale) so one systemd override
+            # (VERIDIAN_GATE_PR_ON_CODE_CHANGE=0) reverts both sites
+            # together, not just one.
+            VERIDIAN_GATE_PR_ON_CODE_CHANGE="${VERIDIAN_GATE_PR_ON_CODE_CHANGE:-1}"
+            CLI_DOCS_ONLY=0
+            if [ "$VERIDIAN_GATE_PR_ON_CODE_CHANGE" = "1" ]; then
+              set +e
+              CLI_DOCS_ONLY_FILES=$(python3 /opt/veridian/scripts/docs_only_diff_guard.py "$CLI_WORKSPACE" "origin/$CLI_DEFAULT_BRANCH" --head-ref "$CLI_HEAD_SHA" 2>>"$CLI_LOG")
+              CLI_DOCS_ONLY_RC=$?
+              set -e
+              # Real audit finding (PR #444, head 499d1266, 2026-08-17): exit 1
+              # means the guard genuinely TRIPPED (docs-only); exit 2 means the
+              # guard itself CRASHED/could-not-determine and is NOT a
+              # docs-only signal -- treating both as "skip the PR" silently
+              # swallowed real work on nothing but a guard bug. RC >= 2 must
+              # fail OPEN (proceed to create the PR as before), logged loudly.
+              if [ "$CLI_DOCS_ONLY_RC" -eq 1 ]; then
+                CLI_DOCS_ONLY=1
+              elif [ "$CLI_DOCS_ONLY_RC" -ge 2 ]; then
+                echo "DOCS-ONLY PR GUARD ERROR (rc=$CLI_DOCS_ONLY_RC, treated as code-relevant, PR still created): $CLI_DOCS_ONLY_FILES" >> "$CLI_LOG"
+              fi
+            fi
+
+            if [ "$CLI_DOCS_ONLY" -eq 1 ]; then
+              # Real work is preserved: the commit is already pushed to
+              # origin/$CLI_BRANCH above (never discarded) -- just not
+              # shipped as a PR. Durable channel here is the same
+              # mark-umr-terminal record every other real outcome in this
+              # script already goes through (this path has no per-task
+              # progress/*.md checkpoint of its own to bridge from --
+              # unlike the worker/supervisor path -- so the note is
+              # recorded directly in the --reason field instead).
+              CLI_PR_URL=""
+              CLI_PR_NUMBER=""
+              echo "CLAUDE_CODE_CLI_HEADLESS EXECUTED (docs-only, no PR): umr_id=$UMR_ID commit=$CLI_HEAD_SHA branch=$CLI_BRANCH $CLI_OUTCOME_DETAIL"
+              CLI_OUTCOME_DETAIL="$CLI_OUTCOME_DETAIL. Docs-only diff (no genuine source/test/config/schema change; files: $(echo "$CLI_DOCS_ONLY_FILES" | tr '\n' ' ')) -- per Owner directive 2026-08-16 (switch VERIDIAN_GATE_PR_ON_CODE_CHANGE=1, the default), no PR opened. Branch pushed at $CLI_HEAD_SHA, preserved."
+            else
+              # stdout only (never 2>&1) -- gh pr create's own real, harmless
+              # stderr warnings must not pollute the PR URL this script
+              # parses --pr-number and the mark-umr-terminal --reason from.
+              CLI_PR_URL=$(gh pr create --repo "$CLI_GH_REPO" --base "$CLI_DEFAULT_BRANCH" \
+                --head "$CLI_BRANCH" --title "$TITLE" \
+                --body "Real tier-${TIER} dispatch via the $EXECUTION_PATH execution backend (umr_id=${UMR_ID}). $CLI_OUTCOME_DETAIL" 2>/dev/null) || true
+              CLI_PR_NUMBER=$(echo "$CLI_PR_URL" | grep -oE '[0-9]+$' | tail -1)
+              echo "CLAUDE_CODE_CLI_HEADLESS EXECUTED: umr_id=$UMR_ID commit=$CLI_HEAD_SHA pr=$CLI_PR_URL $CLI_OUTCOME_DETAIL"
+            fi
 
             MARK_ARGS=(mark-umr-terminal --umr-id "$UMR_ID" --status completed_unmerged --repo "$REPO" \
               --commit-sha "$CLI_HEAD_SHA" \

@@ -311,8 +311,22 @@ safe_stage_all() {
 # conflict on merge. A rolled-up view (if wanted) is generated
 # deterministically from every progress/*.md file by
 # progress_completion_gate.py's own `rollup` subcommand, never hand-edited.
+# 2026-08-16 (UMR-20260816-171513-5901, Owner directive): a worker's own
+# Claude session was directly observed running `gh pr create` itself
+# mid-task for a diff that was real but progress/documentation-only (real
+# evidence: task-20260815-114035's own result.json; FChecklist/compliance-
+# tracker PRs #1277/#1290/#1291) -- 422 open PRs on that repo as of
+# 2026-08-16, 189 with a "docs" title prefix, against a near-zero real
+# landing rate. supervisor-entrypoint.sh's own DOCS-ONLY-PR-GUARD-BLOCK now
+# closes any such PR deterministically, but telling the agent not to open
+# one in the first place avoids the wasted create-then-close round trip.
+# Soft (a prompt instruction, not itself the real gate -- the real,
+# mechanical enforcement is DOCS-ONLY-PR-GUARD-BLOCK, same "prompt
+# discourages, code enforces" split this file's own COMPLETION-GATE-BLOCK
+# already established for the PROGRESS_FILE-only-fix hole above).
 PROGRESS_FILE="progress/${TASK_ID}.md"
-PROGRESS_INSTRUCTION="PROTOCOL: maintain $PROGRESS_FILE (## Completed / ## Remaining, markdown checkboxes), update after each step. This is YOUR OWN per-task file, not a shared PROGRESS.md -- do not edit any other task's progress/*.md, and do not recreate a shared PROGRESS.md. commit+push after each meaningful unit, not only at the end. COMPLETION GATE: if your task's objective names a specific source file or script, that file MUST be present in your real committed diff -- a diff containing only progress/doc artifacts for a code-named objective will be rejected as a real failure (not marked complete), see progress_completion_gate.py check-completion. on a 2nd consecutive failure of the identical approach: STOP, do not attempt a 3rd time -- this is enforced by a circuit breaker on the next invocation regardless, so stopping yourself first saves a wasted restart."
+PR_INSTRUCTION="Do NOT run 'gh pr create' yourself. If your final diff contains at least one genuine source/test/config/schema change, the automated pipeline opens the PR for you after quality gates + review. If your diff is progress/documentation only (e.g. only $PROGRESS_FILE), the pipeline records your note via this task's own checkpoint instead and intentionally does not open a PR -- that is correct, not a failure."
+PROGRESS_INSTRUCTION="PROTOCOL: maintain $PROGRESS_FILE (## Completed / ## Remaining, markdown checkboxes), update after each step. This is YOUR OWN per-task file, not a shared PROGRESS.md -- do not edit any other task's progress/*.md, and do not recreate a shared PROGRESS.md. commit+push after each meaningful unit, not only at the end. COMPLETION GATE: if your task's objective names a specific source file or script, that file MUST be present in your real committed diff -- a diff containing only progress/doc artifacts for a code-named objective will be rejected as a real failure (not marked complete), see progress_completion_gate.py check-completion. on a 2nd consecutive failure of the identical approach: STOP, do not attempt a 3rd time -- this is enforced by a circuit breaker on the next invocation regardless, so stopping yourself first saves a wasted restart. $PR_INSTRUCTION"
 
 # --- Deterministic pre-work briefing (2026-08-06, direct correction/extension
 # to UMR-20260806-121332-6ba4, see scripts/agent_work_briefing.py) --------

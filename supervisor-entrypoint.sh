@@ -178,6 +178,100 @@ if [ "$GITLINK_GUARD_RC" -ne 0 ]; then
 fi
 # --- GITLINK-GUARD-BLOCK-END ---
 
+# --- DOCS-ONLY-PR-GUARD-BLOCK-START (UMR-20260816-171513-5901, Owner
+# directive 2026-08-16, see tests/test_supervisor_docs_only_pr_guard.py) ---
+# THE PROBLEM, measured, not assumed: FChecklist/compliance-tracker held 422
+# open PRs as of 2026-08-16, 414 authored by this fleet's own shared bot
+# identity, 189 with a "docs" title prefix; of a 500-PR sample, 115 touched
+# nothing but progress/*.md or other prose/doc paths, against a near-zero
+# real landing rate -- 150 arrived in the prior 7 days alone. THE REAL
+# MECHANISM (confirmed live against 3 real examples, not assumed): the
+# worker's own Claude session directly runs `gh pr create` itself mid-task
+# (per AGENTS.md Rule 2, "open a PR against main", with no distinction for a
+# docs-only diff) -- e.g. task-20260815-114035's own result.json shows a
+# literal `gh pr create --title ...` call whose entire real diff was one
+# progress/*.md file, and that task's supervisor.log then shows THIS
+# script's own `gh pr create` call below failing with "a pull request ...
+# already exists", falling through to reuse and then fully review/audit the
+# worker-created PR (FChecklist/compliance-tracker PR #1291; same confirmed
+# shape for PRs #1277 and #1290). This script's own unconditional `gh pr
+# create` further down is the second half of the same real defect: it never
+# checked whether AHEAD_COUNT > 0 meant a genuine code change or just a
+# progress note.
+#
+# THE FIX: gate PR creation (and, since the worker may have already created
+# one itself, close any pre-existing PR for this branch too) on a real,
+# deterministic classification of the diff -- reusing quality-gate.sh's own
+# already-tested DOCS_ONLY allowlist (see docs_only_diff_guard.py's own
+# docstring) rather than inventing a second, competing definition. Preserves
+# the real work: the branch/commit stays pushed, and the note is recorded via
+# this exact same checkpoint mechanism the pre-existing NO-OP-BRANCH-GUARD
+# above already uses for its own real no-op case -- never discarded.
+#
+# Named switch, defaulting to the new (gated) behavior -- set
+# VERIDIAN_GATE_PR_ON_CODE_CHANGE=0 (e.g. a systemd unit override) to revert
+# to the prior unconditional-PR behavior without a redeploy.
+VERIDIAN_GATE_PR_ON_CODE_CHANGE="${VERIDIAN_GATE_PR_ON_CODE_CHANGE:-1}"
+if [ "$VERIDIAN_GATE_PR_ON_CODE_CHANGE" = "1" ]; then
+  DOCS_ONLY_FILES=$(python3 /opt/veridian/scripts/docs_only_diff_guard.py "$WORKSPACE" "origin/$DEFAULT_BRANCH" --head-ref HEAD 2>>"$TASK_DIR/supervisor.log")
+  DOCS_ONLY_GUARD_RC=$?
+  # Real audit finding (PR #444, head 499d1266, 2026-08-17): exit 1 means the
+  # guard genuinely TRIPPED (docs-only); exit 2 means the guard itself
+  # CRASHED/could-not-determine (broken git diff, moved regexes, etc.) and is
+  # NOT a docs-only signal -- treating them the same silently swallowed real
+  # PRs (and, worse, closed pre-existing real ones) on nothing but a guard
+  # bug. RC >= 2 must fail OPEN: log loudly, never close an existing PR, fall
+  # straight through to the normal (pre-guard) review + `gh pr create` path.
+  if [ "$DOCS_ONLY_GUARD_RC" -ge 2 ]; then
+    echo "DOCS-ONLY PR GUARD ERROR (rc=$DOCS_ONLY_GUARD_RC, treated as code-relevant, NOT closing any PR): $DOCS_ONLY_FILES" >> "$TASK_DIR/supervisor.log"
+  elif [ "$DOCS_ONLY_GUARD_RC" -eq 1 ]; then
+    DOCS_ONLY_LIST=$(echo "$DOCS_ONLY_FILES" | tr '\n' ' ')
+    DOCS_ONLY_REASON="branch '$BRANCH' (sha $BRANCH_SHA) diff vs '$DEFAULT_BRANCH' (sha $BASE_SHA) contains no genuine source/test/config/schema change -- only progress/documentation artifact(s) [$DOCS_ONLY_LIST]. Per Owner directive 2026-08-16 (switch VERIDIAN_GATE_PR_ON_CODE_CHANGE=1, the new default): no pull request is opened for a docs/progress-only diff. The real work is preserved -- branch pushed at $BRANCH_SHA, this checkpoint records the note -- never discarded, just not shipped as a PR."
+    echo "DOCS-ONLY PR GUARD TRIPPED: $DOCS_ONLY_REASON" >> "$TASK_DIR/supervisor.log"
+
+    # The worker's own agentic session may already have opened a PR itself
+    # (real, confirmed behavior -- see this block's own header comment).
+    # Close it now rather than let a diff with nothing to ship sit open for a
+    # real Superboss review/audit/merge attempt to be spent on it -- exactly
+    # the volume + correctness problem this guard exists to close.
+    EXISTING_PR_URL=$(gh pr list --repo "FChecklist/$REPO" --head "$BRANCH" --state open --json url -q '.[0].url' 2>>"$TASK_DIR/supervisor.log") || EXISTING_PR_URL=""
+    if [ -n "$EXISTING_PR_URL" ]; then
+      gh pr comment "$EXISTING_PR_URL" --body "Closing: $DOCS_ONLY_REASON" >> "$TASK_DIR/supervisor.log" 2>&1 || true
+      gh pr close "$EXISTING_PR_URL" >> "$TASK_DIR/supervisor.log" 2>&1 || true
+      echo "Closed pre-existing docs-only PR: $EXISTING_PR_URL" >> "$TASK_DIR/supervisor.log"
+    fi
+
+    # Same real, structured evidence hand-off convention as the NO-OP-BRANCH-
+    # GUARD-BLOCK's own no_op.json above -- a distinct marker file/status
+    # (never reusing 'completed_no_change', whose own bridge in
+    # worker-exit-status-bridge.py structurally requires AHEAD_COUNT==0,
+    # which does not hold here: this branch has real commits, just none that
+    # are code-relevant).
+    DOCS_ONLY_TASK_DIR="$TASK_DIR" DOCS_ONLY_BASE_SHA="$BASE_SHA" DOCS_ONLY_BRANCH_SHA="$BRANCH_SHA" \
+    DOCS_ONLY_BASE_BRANCH="$DEFAULT_BRANCH" DOCS_ONLY_BRANCH="$BRANCH" DOCS_ONLY_REASON="$DOCS_ONLY_REASON" \
+    DOCS_ONLY_FILES_LIST="$DOCS_ONLY_LIST" \
+    python3 -c "
+import json, os
+outp = os.path.join(os.environ['DOCS_ONLY_TASK_DIR'], 'docs_only_completion.json')
+with open(outp, 'w') as f:
+    json.dump({
+        'base_sha': os.environ['DOCS_ONLY_BASE_SHA'],
+        'branch_sha': os.environ['DOCS_ONLY_BRANCH_SHA'],
+        'base_branch': os.environ['DOCS_ONLY_BASE_BRANCH'],
+        'branch': os.environ['DOCS_ONLY_BRANCH'],
+        'reason': os.environ['DOCS_ONLY_REASON'],
+        'files': os.environ['DOCS_ONLY_FILES_LIST'].split(),
+    }, f, indent=2)
+" >> "$TASK_DIR/supervisor.log" 2>&1
+    python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status completed_docs_only --note "$DOCS_ONLY_REASON"
+    exit 0
+  fi
+  if [ "$DOCS_ONLY_GUARD_RC" -eq 0 ]; then
+    echo "Docs-only PR guard: diff is code-relevant, proceeding to review ($(echo "$DOCS_ONLY_FILES" | tr '\n' ' '))" >> "$TASK_DIR/supervisor.log"
+  fi
+fi
+# --- DOCS-ONLY-PR-GUARD-BLOCK-END ---
+
 TIER=$(python3 /opt/veridian/scripts/risk-tier.py "$WORKSPACE" "origin/$DEFAULT_BRANCH" 2>>"$TASK_DIR/supervisor.log")
 echo "Risk tier: $TIER" >> "$TASK_DIR/supervisor.log"
 

@@ -93,8 +93,15 @@ def git_repo_pair(tmp_path):
 
     hascommit_branch = "worker/test-no-op-guard-hascommit"
     _git(["checkout", "-b", hascommit_branch], cwd=seed)
-    (seed / "REAL_WORK.md").write_text("a real deliverable\n")
-    _git(["add", "REAL_WORK.md"], cwd=seed)
+    # .py, not .md (UMR-20260816-171513-5901): supervisor-entrypoint.sh's own
+    # DOCS-ONLY-PR-GUARD-BLOCK now runs before this test's own gh-failure
+    # path -- a .md file would be (correctly) classified docs-only and take
+    # that guard's own early-exit, never reaching the PR-URL-RESOLUTION-
+    # GUARD-BLOCK this test exists to exercise. Real code extension keeps
+    # this fixture's own stated intent ("a real deliverable") genuinely true
+    # under the new classifier too.
+    (seed / "REAL_WORK.py").write_text("a real deliverable\n")
+    _git(["add", "REAL_WORK.py"], cwd=seed)
     _git(["commit", "-m", "real work commit"], cwd=seed)
     _git(["push", "origin", hascommit_branch], cwd=seed)
     hascommit_sha = _git(["rev-parse", "HEAD"], cwd=seed)

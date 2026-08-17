@@ -340,6 +340,92 @@ def test_completed_no_change_marker_missing_branch_sha_leaves_running(monkeypatc
     assert row["status"] == "running"
 
 
+# --- UMR-20260816-171513-5901: completed_docs_only (real docs-only-diff PR guard) ---
+
+
+def _write_docs_only_marker(scratch_ai_os, task_id, **fields):
+    task_dir = os.path.join(scratch_ai_os, "tasks", task_id)
+    os.makedirs(task_dir, exist_ok=True)
+    with open(os.path.join(task_dir, "docs_only_completion.json"), "w") as f:
+        json.dump(fields, f)
+
+
+def test_completed_docs_only_without_marker_leaves_running(monkeypatch, scratch_db, scratch_ai_os):
+    """Fail-safe direction, same posture as completed_no_change's own equivalent test: a
+    'completed_docs_only' checkpoint with NO real docs_only_completion.json evidence (should
+    never happen -- supervisor-entrypoint.sh's DOCS-ONLY-PR-GUARD-BLOCK always writes both
+    together) leaves the row at 'running' for a human or the STEP 3 reconciler, never
+    guessed."""
+    mod = _load_module()
+    monkeypatch.setattr(mod, "AI_OS", scratch_ai_os)
+    monkeypatch.setenv("SUPERBOSS_REGISTER_DB", scratch_db)
+
+    task_id = "test-task-docs-only-no-marker"
+    unit_name = "veridian-supervisor@test-task-docs-only-no-marker.service"
+    umr_id = "UMR-TEST-DOCS-ONLY-1"
+    _insert_umr_row(scratch_db, umr_id, unit_name, status="running")
+    _write_task_yaml(scratch_ai_os, task_id, "completed_docs_only")
+    # Deliberately no docs_only_completion.json written.
+
+    mod.run(task_id, "supervisor")
+
+    row = _real_row(scratch_db, umr_id)
+    assert row["status"] == "running"
+
+
+def test_completed_docs_only_marker_missing_branch_sha_leaves_running(monkeypatch, scratch_db, scratch_ai_os):
+    """Same fail-safe direction, real partial-evidence case: a docs_only_completion.json
+    that exists but carries no real branch_sha must not be trusted either."""
+    mod = _load_module()
+    monkeypatch.setattr(mod, "AI_OS", scratch_ai_os)
+    monkeypatch.setenv("SUPERBOSS_REGISTER_DB", scratch_db)
+
+    task_id = "test-task-docs-only-bad-marker"
+    unit_name = "veridian-worker@test-task-docs-only-bad-marker.service"
+    umr_id = "UMR-TEST-DOCS-ONLY-2"
+    _insert_umr_row(scratch_db, umr_id, unit_name, status="running")
+    _write_task_yaml(scratch_ai_os, task_id, "completed_docs_only")
+    _write_docs_only_marker(scratch_ai_os, task_id, base_sha="0" * 40, branch_sha="", reason="missing sha")
+
+    mod.run(task_id, "worker")
+
+    row = _real_row(scratch_db, umr_id)
+    assert row["status"] == "running"
+
+
+def test_completed_docs_only_is_distinct_from_completed_no_change(monkeypatch, scratch_db, scratch_ai_os):
+    """The two positive-but-distinct statuses must never be conflated: a task.yaml last
+    checkpointed 'completed_docs_only' must never be routed through
+    _bridge_no_op_completion (which would read the WRONG marker file and, worse, would
+    bridge to status='completed' -- an ancestor-of-main claim this shape of evidence,
+    AHEAD_COUNT > 0, structurally cannot support)."""
+    mod = _load_module()
+    monkeypatch.setattr(mod, "AI_OS", scratch_ai_os)
+    monkeypatch.setenv("SUPERBOSS_REGISTER_DB", scratch_db)
+
+    task_id = "test-task-docs-only-not-no-op"
+    unit_name = "veridian-supervisor@test-task-docs-only-not-no-op.service"
+    umr_id = "UMR-TEST-DOCS-ONLY-3"
+    _insert_umr_row(scratch_db, umr_id, unit_name, status="running")
+    _write_task_yaml(scratch_ai_os, task_id, "completed_docs_only")
+    # A real no_op.json happens to also exist (e.g. stale from a prior run) -- must be
+    # ignored; only a real docs_only_completion.json (absent here) may bridge this status.
+    _write_no_op_marker(
+        scratch_ai_os, task_id,
+        base_sha="0" * 40, branch_sha=_REAL_VERIDIAN_SCRIPTS_MAIN_SHA,
+        base_branch="main", branch="worker/stale-unrelated",
+        reason="stale, unrelated no_op.json",
+    )
+
+    mod.run(task_id, "supervisor")
+
+    row = _real_row(scratch_db, umr_id)
+    assert row["status"] == "running", (
+        "a completed_docs_only checkpoint must never be bridged via the no-op path, even "
+        "when a stale no_op.json happens to also exist on disk"
+    )
+
+
 def test_row_already_non_running_is_idempotent_noop(monkeypatch, scratch_db, scratch_ai_os):
     mod = _load_module()
     monkeypatch.setattr(mod, "AI_OS", scratch_ai_os)

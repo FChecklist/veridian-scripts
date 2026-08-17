@@ -40,8 +40,16 @@ that would just duplicate what the dispatch code already enforces mechanically.
    `compliance-tracker/AGENTS.md` Operating Rule 9. Extending or tightening a rule never
    requires this.
 
-2. **PR-against-`main` is the required review surface.** Work on a branch, open a PR against
-   `main`.
+2. **PR-against-`main` is the required review surface, for genuine code/test/config/schema
+   changes.** Work on a branch, open a PR against `main`. **[Added 2026-08-16, Owner
+   directive UMR-20260816-171513-5901]** Do NOT run `gh pr create` yourself for a diff that
+   is progress/documentation only (e.g. only your own `progress/<task_id>.md`) — the
+   automated worker/supervisor pipeline (`supervisor-entrypoint.sh`'s DOCS-ONLY-PR-GUARD-
+   BLOCK, switch `VERIDIAN_GATE_PR_ON_CODE_CHANGE`, default on) already preserves that note
+   via the task's own checkpoint record and will not open (or will close, if you already
+   opened one) a PR for it — real, measured evidence: 422 open PRs on
+   `FChecklist/compliance-tracker` as of 2026-08-16, 189 with a "docs" title prefix, against
+   a near-zero real landing rate, largely from exactly this pattern.
 
 3. **No fabricated governance.** Do not add "Authorized Agents" entries, CI job names, or
    enforcement claims to this file that don't correspond to something real in this

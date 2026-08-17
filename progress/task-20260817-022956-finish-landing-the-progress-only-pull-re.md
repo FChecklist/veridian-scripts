@@ -84,12 +84,37 @@ diff) and prove both deployed files carry the switch via grep.
       `_orchestrator_reuse_verdict_gate` docstring already documents for
       task-resume intents, just not yet closed for this title shape). Not
       this task's scope to fix reuse_verdict_engine itself.
-      **Attempt 2** (UMR-20260817-024311-5912, distinctive
-      non-templated title "Real code review + AUDIT verdict needed:
-      veridian-scripts PR #444 (docs-only-PR-guard,
-      UMR-20260816-171513-5901)") -- genuinely queued, position 0, box has
-      free capacity (only this task's own worker running). Awaiting real
-      AUDIT:PASS/FAIL.
+      **Attempt 2** (UMR-20260817-024311-5912, distinctive title) --
+      passed dedup, but hit a SECOND real, pre-existing, unrelated bug at
+      preflight: `PRE-FLIGHT HARD STOP (tight_task_schema_violation):
+      Complexity tier "moderate" is not recognized` --
+      `pm_lifecycle.build_tightened_prompt()`'s own default
+      `complexity_tier="moderate"` (and `dispatch_independent_audit()`'s
+      own hardcoded call site) is not a member of
+      `tight_task_validation.VALID_TIERS` (mechanical/integrative/
+      judgment) -- the exact poisoning this same file's own
+      task-20260816-092554 comment documents fixing for the CLI default,
+      just never applied to this call site. **Attempt 3**
+      (UMR-20260817-024451-221d, `complexity_tier="judgment"`) -- passed
+      both dedup and the complexity-tier gate, reached a real running
+      worker, but hit a THIRD real, pre-existing bug at preflight:
+      `no_runnable_verification_command_in_success_criteria` --
+      `dispatch_independent_audit()`'s own SUCCESS_CRITERIA template folds
+      its real `gh pr view`/`gh pr comment` commands into one flowing
+      prose paragraph with no backticks/line breaks, so
+      `tight_task_validation._line_is_runnable_command()`'s heuristic
+      (first token in a closed COMMAND_WORDS list, or a backtick-quoted
+      command-shaped span) never recognizes it as a real command. None of
+      these 3 are this task's scope to fix in `pm_lifecycle.py` itself
+      (out of scope, would be a 4th, unrelated change) -- routed around
+      them in my own dispatch script instead (`.scratch/dispatch_audit_444_v4.py`):
+      distinctive title (avoids dedup), `complexity_tier="judgment"`,
+      SUCCESS_CRITERIA as two lines, each with a real backtick-quoted `gh`
+      command. **Attempt 4** (UMR-20260817-024638-9154) -- dispatched,
+      verified locally against the real
+      `tight_task_validation.check_success_criteria_has_runnable_command()`
+      function before dispatch this time (returns `None` = valid).
+      Awaiting real AUDIT:PASS/FAIL.
 - [ ] On genuine PASS: merge PR #444. On real findings: fix on this same
       branch (preserve commits), re-audit.
 - [ ] THIRD: deploy live -- fast-forward /opt/veridian/scripts to the

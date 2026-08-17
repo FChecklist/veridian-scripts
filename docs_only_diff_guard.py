@@ -32,10 +32,32 @@ AGENTS.md's Search-Reuse Discipline (Operating Rule 5): a second,
 independently-maintained classification of the same real question is
 exactly the duplication that rule exists to prevent.
 
-Used as a guard at ONE real choke point: supervisor-entrypoint.sh, right
+Used as a guard at TWO real choke points: supervisor-entrypoint.sh, right
 before the (paid) Superboss AI review call and `gh pr create` -- same
 cost-avoidance placement as the pre-existing NO-OP-BRANCH-GUARD-BLOCK and
-GITLINK-GUARD-BLOCK immediately above it in that file.
+GITLINK-GUARD-BLOCK immediately above it in that file -- and
+dispatch-owner-task.sh's own separate claude_code_cli_headless `gh pr
+create` call, a distinct direct-execution path the supervisor never sees.
+
+EXIT CODE CONTRACT (fixed 2026-08-17 after a real audit finding on PR #444,
+head 499d1266: a crashed guard was indistinguishable from a genuine
+docs-only trip, both exiting 1, which both callers treated identically --
+silently refusing a real PR, or in supervisor-entrypoint.sh's case,
+actively CLOSING a pre-existing real PR, on nothing more than a broken
+`git diff` or a moved quality-gate.sh regex):
+    0 -- code-relevant: at least one changed file is a real source/test/
+         config/schema change. Callers should proceed to `gh pr create`.
+    1 -- docs-only: guard TRIPPED as intended, every changed file matches
+         the docs-only allowlist (or there are zero changed files).
+         Callers should skip `gh pr create`.
+    2 -- GUARD ERROR: the guard itself could not determine an answer (the
+         underlying `git diff` failed, quality-gate.sh's allowlist regexes
+         have moved/changed shape, or any other unexpected exception).
+         This is NOT a docs-only signal. Callers MUST NOT treat this the
+         same as exit 1 -- they must fail open (proceed as if code-relevant,
+         never close a pre-existing PR) and log loudly, so a broken guard
+         degrades to the pre-guard unconditional-PR behavior instead of
+         silently swallowing real work.
 """
 import argparse
 import os
@@ -46,19 +68,34 @@ import sys
 SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 QUALITY_GATE = os.path.join(SCRIPTS_DIR, "quality-gate.sh")
 
+EXIT_CODE_RELEVANT = 0
+EXIT_DOCS_ONLY = 1
+EXIT_GUARD_ERROR = 2
+
+
+class GuardError(Exception):
+    """Raised when the guard itself cannot determine an answer -- distinct
+    from a real, intentional docs-only trip. Callers must map this to
+    EXIT_GUARD_ERROR (2), never to EXIT_DOCS_ONLY (1)."""
+
 
 def _docs_only_patterns(quality_gate_path=QUALITY_GATE):
     """Pulls the two exact, live docs-only allowlist regexes out of
-    quality-gate.sh itself, in source order. Raises loudly (never guesses a
-    fallback pattern) if that script's own detection logic has moved or
-    changed shape -- silently falling back to a stale copy here would be
-    exactly the kind of drift Search-Reuse Discipline exists to prevent."""
-    with open(quality_gate_path) as f:
-        src = f.read()
+    quality-gate.sh itself, in source order. Raises GuardError loudly
+    (never guesses a fallback pattern) if that script's own detection
+    logic has moved or changed shape -- silently falling back to a stale
+    copy here would be exactly the kind of drift Search-Reuse Discipline
+    exists to prevent, and silently treating it as "docs-only" would be
+    the exact crash-vs-trip conflation the 2026-08-17 audit found."""
+    try:
+        with open(quality_gate_path) as f:
+            src = f.read()
+    except OSError as exc:
+        raise GuardError(f"could not read {quality_gate_path}: {exc}") from exc
     ext = re.search(r"DOCS_ONLY_EXT_PATTERN='((?:[^'\\]|\\.)*)'", src)
     name = re.search(r"DOCS_ONLY_NAME_PATTERN='((?:[^'\\]|\\.)*)'", src)
     if not (ext and name):
-        raise RuntimeError(
+        raise GuardError(
             f"expected DOCS_ONLY_EXT_PATTERN/DOCS_ONLY_NAME_PATTERN single-quoted "
             f"assignments in {quality_gate_path} -- has the detection logic moved "
             f"or changed shape? Refusing to guess a stale fallback."
@@ -70,11 +107,21 @@ def changed_files(workspace, base_ref, head_ref="HEAD"):
     """Real changed-file list for base_ref...head_ref (three-dot: files
     changed on head_ref since it diverged from base_ref), matching the
     exact same diff range every other guard in this codebase (gitlink_guard,
-    the Superboss review's own DIFF_STAT) already uses."""
+    the Superboss review's own DIFF_STAT) already uses.
+
+    Raises GuardError (never silently returns []) if the underlying `git
+    diff` itself fails -- e.g. an unknown base_ref/head_ref, or workspace
+    not a git repo -- so a broken diff is never misread as "zero files
+    changed" i.e. a false docs-only trip."""
     proc = subprocess.run(
         ["git", "diff", "--name-only", f"{base_ref}...{head_ref}"],
         cwd=workspace, capture_output=True, text=True, check=False,
     )
+    if proc.returncode != 0:
+        raise GuardError(
+            f"git diff --name-only {base_ref}...{head_ref} (cwd={workspace}) "
+            f"failed with exit {proc.returncode}: {proc.stderr.strip()}"
+        )
     return [line for line in proc.stdout.splitlines() if line.strip()]
 
 
@@ -101,8 +148,16 @@ def main(argv=None):
     ap.add_argument("--head-ref", default="HEAD")
     args = ap.parse_args(argv)
 
-    files = changed_files(args.workspace, args.base_ref, args.head_ref)
-    code_relevant = is_code_relevant(files)
+    try:
+        files = changed_files(args.workspace, args.base_ref, args.head_ref)
+        code_relevant = is_code_relevant(files)
+    except GuardError as exc:
+        print(f"docs_only_diff_guard: GUARD ERROR (not a docs-only trip): {exc}", file=sys.stderr)
+        return EXIT_GUARD_ERROR
+    except Exception as exc:  # pragma: no cover - defense in depth, see audit finding
+        print(f"docs_only_diff_guard: unexpected GUARD ERROR (not a docs-only trip): "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return EXIT_GUARD_ERROR
 
     for f in files:
         print(f)
@@ -113,9 +168,11 @@ def main(argv=None):
         file=sys.stderr,
     )
     # Exit 0 ("pass", a PR should be opened) when code-relevant; exit 1
-    # ("guard tripped", no PR) when docs/progress-only -- same nonzero-means-
-    # tripped convention gitlink_guard.py already established.
-    return 0 if code_relevant else 1
+    # ("guard tripped", no PR) when docs/progress-only; exit 2 (see
+    # GuardError above) when the guard itself could not determine an
+    # answer -- callers must treat 1 and 2 differently, never both as
+    # "nonzero means tripped".
+    return EXIT_CODE_RELEVANT if code_relevant else EXIT_DOCS_ONLY
 
 
 if __name__ == "__main__":

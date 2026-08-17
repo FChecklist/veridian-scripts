@@ -773,8 +773,19 @@ except Exception:
             if [ "$VERIDIAN_GATE_PR_ON_CODE_CHANGE" = "1" ]; then
               set +e
               CLI_DOCS_ONLY_FILES=$(python3 /opt/veridian/scripts/docs_only_diff_guard.py "$CLI_WORKSPACE" "origin/$CLI_DEFAULT_BRANCH" --head-ref "$CLI_HEAD_SHA" 2>>"$CLI_LOG")
-              [ $? -ne 0 ] && CLI_DOCS_ONLY=1
+              CLI_DOCS_ONLY_RC=$?
               set -e
+              # Real audit finding (PR #444, head 499d1266, 2026-08-17): exit 1
+              # means the guard genuinely TRIPPED (docs-only); exit 2 means the
+              # guard itself CRASHED/could-not-determine and is NOT a
+              # docs-only signal -- treating both as "skip the PR" silently
+              # swallowed real work on nothing but a guard bug. RC >= 2 must
+              # fail OPEN (proceed to create the PR as before), logged loudly.
+              if [ "$CLI_DOCS_ONLY_RC" -eq 1 ]; then
+                CLI_DOCS_ONLY=1
+              elif [ "$CLI_DOCS_ONLY_RC" -ge 2 ]; then
+                echo "DOCS-ONLY PR GUARD ERROR (rc=$CLI_DOCS_ONLY_RC, treated as code-relevant, PR still created): $CLI_DOCS_ONLY_FILES" >> "$CLI_LOG"
+              fi
             fi
 
             if [ "$CLI_DOCS_ONLY" -eq 1 ]; then

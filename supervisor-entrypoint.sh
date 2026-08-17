@@ -215,7 +215,16 @@ VERIDIAN_GATE_PR_ON_CODE_CHANGE="${VERIDIAN_GATE_PR_ON_CODE_CHANGE:-1}"
 if [ "$VERIDIAN_GATE_PR_ON_CODE_CHANGE" = "1" ]; then
   DOCS_ONLY_FILES=$(python3 /opt/veridian/scripts/docs_only_diff_guard.py "$WORKSPACE" "origin/$DEFAULT_BRANCH" --head-ref HEAD 2>>"$TASK_DIR/supervisor.log")
   DOCS_ONLY_GUARD_RC=$?
-  if [ "$DOCS_ONLY_GUARD_RC" -ne 0 ]; then
+  # Real audit finding (PR #444, head 499d1266, 2026-08-17): exit 1 means the
+  # guard genuinely TRIPPED (docs-only); exit 2 means the guard itself
+  # CRASHED/could-not-determine (broken git diff, moved regexes, etc.) and is
+  # NOT a docs-only signal -- treating them the same silently swallowed real
+  # PRs (and, worse, closed pre-existing real ones) on nothing but a guard
+  # bug. RC >= 2 must fail OPEN: log loudly, never close an existing PR, fall
+  # straight through to the normal (pre-guard) review + `gh pr create` path.
+  if [ "$DOCS_ONLY_GUARD_RC" -ge 2 ]; then
+    echo "DOCS-ONLY PR GUARD ERROR (rc=$DOCS_ONLY_GUARD_RC, treated as code-relevant, NOT closing any PR): $DOCS_ONLY_FILES" >> "$TASK_DIR/supervisor.log"
+  elif [ "$DOCS_ONLY_GUARD_RC" -eq 1 ]; then
     DOCS_ONLY_LIST=$(echo "$DOCS_ONLY_FILES" | tr '\n' ' ')
     DOCS_ONLY_REASON="branch '$BRANCH' (sha $BRANCH_SHA) diff vs '$DEFAULT_BRANCH' (sha $BASE_SHA) contains no genuine source/test/config/schema change -- only progress/documentation artifact(s) [$DOCS_ONLY_LIST]. Per Owner directive 2026-08-16 (switch VERIDIAN_GATE_PR_ON_CODE_CHANGE=1, the new default): no pull request is opened for a docs/progress-only diff. The real work is preserved -- branch pushed at $BRANCH_SHA, this checkpoint records the note -- never discarded, just not shipped as a PR."
     echo "DOCS-ONLY PR GUARD TRIPPED: $DOCS_ONLY_REASON" >> "$TASK_DIR/supervisor.log"
@@ -257,7 +266,9 @@ with open(outp, 'w') as f:
     python3 /opt/veridian/scripts/veridian-task.py checkpoint "$TASK_ID" --status completed_docs_only --note "$DOCS_ONLY_REASON"
     exit 0
   fi
-  echo "Docs-only PR guard: diff is code-relevant, proceeding to review ($(echo "$DOCS_ONLY_FILES" | tr '\n' ' '))" >> "$TASK_DIR/supervisor.log"
+  if [ "$DOCS_ONLY_GUARD_RC" -eq 0 ]; then
+    echo "Docs-only PR guard: diff is code-relevant, proceeding to review ($(echo "$DOCS_ONLY_FILES" | tr '\n' ' '))" >> "$TASK_DIR/supervisor.log"
+  fi
 fi
 # --- DOCS-ONLY-PR-GUARD-BLOCK-END ---
 

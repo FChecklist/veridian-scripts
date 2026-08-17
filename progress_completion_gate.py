@@ -177,6 +177,48 @@ _BOILERPLATE_TOOL_NAME_EXCLUDED = {
     "check_live_scripts_drift.py", "sync-repos.sh",
 }
 
+# Real fix (task-20260817-091427-repair-the-execution-harness-so-worker-r,
+# SPEC item 3, real 2026-08-17 incident): a SIXTH instance of the same
+# false-positive class as _BOILERPLATE_TOOL_NAME_EXCLUDED above -- a task's
+# own objective/scope prose that names a JS/TS *framework or library* whose
+# own conventional name happens to end in a code-file extension (a naming
+# convention several real, common ones use: "Vue.js", "Next.js",
+# "Express.js", "Ember.js", "Backbone.js", "Chart.js", "Three.js", "p5.js",
+# "D3.js", "Node.js"). FILENAME_RE's own path-shaped match
+# ([A-Za-z0-9_\-./]+\.(?:...)\b) matches these exactly the same as a real
+# repo-relative filename -- "the framework Vue.js" reads identically to
+# FILENAME_RE as "the file Vue.js" -- but naming a framework in prose is
+# never an instruction to create/edit a file of that literal name, and no
+# real diff in this codebase has ever contained one. Bare (no path prefix)
+# only, same as _BOILERPLATE_TOOL_NAME_EXCLUDED -- a path-prefixed mention
+# (e.g. "vendor/Chart.js" or "static/js/vue.js") is a real, distinguishing
+# reference to an actual vendored file and is NOT excluded.
+_FRAMEWORK_NAME_EXCLUDED = {
+    "Vue.js", "Next.js", "Nuxt.js", "Express.js", "Ember.js", "Backbone.js",
+    "Chart.js", "Three.js", "p5.js", "D3.js", "Node.js", "React.js", "Ext.js",
+}
+# Compared case-insensitively (a prompt may write "vue.js"/"VUE.JS") -- the
+# set above keeps the conventional capitalization for readability.
+_FRAMEWORK_NAME_EXCLUDED_LOWER = {n.lower() for n in _FRAMEWORK_NAME_EXCLUDED}
+
+# Real fix (task-20260817-091427-repair-the-execution-harness-so-worker-r,
+# SPEC item 3, real 2026-08-17 incident): a correct fix for a file under a
+# real, standing stop-work order can never land IN that file -- this
+# codebase's own established pattern (see resource_governor.py's
+# STOP_WORK_ORDER_TASK_IDS gate on dispatch_core.py) is to land the real
+# fix as a wrapper/override in the paired file instead. Before this fix,
+# an objective naming the frozen file as "the bug is in X" had its real,
+# correct fix -- landed in the paired override file exactly as the
+# standing order requires -- rejected for not touching X. This is a small,
+# explicit, reviewable allow-list (never a free-text "any different file
+# is fine" loophole -- that would defeat the whole point of this gate): a
+# named file is only ever treated as satisfied by a DIFFERENT file when
+# that exact pairing is listed here, and the override file is really
+# present in the diff.
+FROZEN_FILE_OVERRIDES = {
+    "dispatch_core.py": "resource_governor.py",
+}
+
 
 def is_progress_artifact(path):
     base = path.rsplit("/", 1)[-1]
@@ -258,6 +300,90 @@ def _reason_citation_spans(text):
     return [m.span("list") for m in _REASON_CITATION_RE.finditer(text or "")]
 
 
+# Real fix (RCA of UMR-20260806-092209-7a2e, re-dispatched 2026-08-15 as
+# task-20260815-032442): a FIFTH instance of the same false-positive class
+# as _BOILERPLATE_TOOL_NAME_EXCLUDED/_EVIDENCE_LIST_RE/_REASON_CITATION_RE
+# above. This SPEC's own "Real reproduction command" line reads literally
+# "python3 /opt/veridian/scripts/resource_governor.py --query-umr --limit
+# 14" -- an absolute-path CLI invocation of the standing query front door,
+# quoted verbatim (as every dispatch prompt in this codebase gives repro
+# commands with the full /opt/veridian/scripts/... path, never a bare
+# filename). _BOILERPLATE_TOOL_NAME_EXCLUDED only strips the BARE form
+# ("resource_governor.py"); the "path-prefixed mention is NOT excluded"
+# rule that governs it was designed for a prose reference to the file's own
+# code (e.g. "the bug is in scripts/resource_governor.py"), not for a
+# `python3 <path>` shell invocation -- but FILENAME_RE's match text for
+# both is a path-prefixed string, so the bare-form exclusion never fired
+# here. Live evidence this task independently gathered: re-running that
+# exact command returned 0/14 DIRECTIVE rejected_duplicate rows for the two
+# named identities (the SPEC's claimed 12/14 was a stale, already-fixed
+# 2026-08-06 burst -- 87 total such rows exist, all with ts_submitted
+# before 2026-08-06T10:17:52Z, zero since), the actual root cause
+# (directive_engine.py's in-memory retry-once flag) was already fixed
+# same-day by UMR-20260806-090229-f2a7 and is confirmed byte-identical
+# between the live checkout and this repo's HEAD, and neither underlying
+# row is stuck -- a genuinely no-code-needed disposition this module's own
+# docstring already anticipates. Without this fix, the gate would reject
+# that honest finding for not touching resource_governor.py, which this
+# task never had a real reason to edit.
+_CLI_INVOCATION_RE = re.compile(
+    # Real fix (independent audit of task-20260816-171304-continue-landing-
+    # and-disposing-the-remai, RCA task-20260817-091427-repair-the-
+    # execution-harness-so-worker-r): the leading \b is load-bearing -- the
+    # bare alternation (?:python3?|bash|sh) with no boundary in front of it
+    # matched "sh" as a SUFFIX of an ordinary English word ("smash",
+    # "polish", "finish", "flush", ...) whenever that word happened to be
+    # followed by whitespace and something filename-shaped, e.g. "finish
+    # tests/foo.py" mis-detected "sh tests/foo.py" as a real interpreter
+    # invocation and silently excluded tests/foo.py as if it were only a
+    # CLI-invocation citation, not a real named objective. \b requires a
+    # real word-boundary immediately before the interpreter token, which a
+    # mid-word "sh"/"bash" substring never has.
+    r"\b(?:python3?|bash|sh)\s+(?P<list>[A-Za-z0-9_\-./]*\.(?:py|sh))\b",
+    re.IGNORECASE,
+)
+
+
+def _cli_invocation_spans(text):
+    """Character spans of a filename immediately following a real
+    interpreter invocation (`python3 <path>`, `bash <path>`, `sh <path>`)
+    -- see _CLI_INVOCATION_RE's own comment. Same 'excluded only when the
+    filename appears NOWHERE else in the text' rule _evidence_list_spans/
+    _reason_citation_spans above already establish -- a filename that is
+    ALSO named as a real, distinguishing objective elsewhere in the prompt
+    (e.g. "fix the bug in scripts/resource_governor.py") is still kept."""
+    return [m.span("list") for m in _CLI_INVOCATION_RE.finditer(text or "")]
+
+
+# Real fix (task-20260817-091427-repair-the-execution-harness-so-worker-r,
+# SPEC item 3, real 2026-08-17 incident): a task's own CONSTRAINTS section
+# frequently names a real file only to forbid touching it ("Do not touch
+# resource_governor.py", "Never modify dispatch_core.py -- standing
+# stop-work order"). Before this fix, extract_named_code_files() had no way
+# to tell that citation apart from a real, affirmative objective naming the
+# same file -- a task correctly obeying the prohibition (leaving that file
+# alone) then had its honest, real diff rejected for not touching a file it
+# was explicitly told not to touch. Same span-extraction convention as
+# _evidence_list_spans/_reason_citation_spans/_cli_invocation_spans above:
+# capture from the prohibition trigger phrase to the end of that sentence,
+# and exclude a filename found ONLY inside such a span (a filename ALSO
+# named elsewhere, outside any prohibition, is still a real objective and
+# is kept).
+_PROHIBITION_RE = re.compile(
+    r"(?:do\s+not|don't|does\s+not|must\s+not|should\s+not|shall\s+not|never)\s+"
+    r"(?:touch|modify|edit|change|alter|update|delete|remove|rewrite)\s+"
+    r"(?P<list>.*?)(?:\.(?:\s|$)|\n|$)",
+    re.IGNORECASE,
+)
+
+
+def _prohibition_spans(text):
+    """Character spans of a filename cited only inside a real "do not
+    touch/modify/edit X" prohibition clause -- see _PROHIBITION_RE's own
+    comment."""
+    return [m.span("list") for m in _PROHIBITION_RE.finditer(text or "")]
+
+
 def extract_named_code_files(text):
     """Real source/script filenames referenced in a task's own spec text
     (prompt.txt). Order-preserving de-dup; progress/doc artifacts excluded
@@ -279,9 +405,25 @@ def extract_named_code_files(text):
     A filename that appears ONLY inside a quoted `reason:` citation (a
     target row's own historical `reason` field, quoted verbatim into an RCA
     dispatch prompt) is excluded the same way -- see
-    _REASON_CITATION_RE's own comment."""
+    _REASON_CITATION_RE's own comment.
+
+    A filename that appears ONLY immediately after a real interpreter
+    invocation (`python3 <path>`, e.g. a "Real reproduction command" line)
+    is excluded the same way -- see _CLI_INVOCATION_RE's own comment.
+
+    A filename that appears ONLY inside a "do not touch/modify/edit X"
+    prohibition clause is excluded the same way -- see _PROHIBITION_RE's
+    own comment. A bare mention of a well-known JS/TS framework/library
+    whose own name ends in a code-file extension (e.g. "Vue.js") is
+    excluded outright, path-prefixed mentions aside -- see
+    _FRAMEWORK_NAME_EXCLUDED's own comment."""
     text = text or ""
-    evidence_spans = _evidence_list_spans(text) + _reason_citation_spans(text)
+    evidence_spans = (
+        _evidence_list_spans(text)
+        + _reason_citation_spans(text)
+        + _cli_invocation_spans(text)
+        + _prohibition_spans(text)
+    )
     all_matches = list(FILENAME_RE.finditer(text))
     outside_evidence = {
         m.group(0) for m in all_matches
@@ -294,6 +436,8 @@ def extract_named_code_files(text):
         if is_progress_artifact(candidate):
             continue
         if candidate in _BOILERPLATE_TOOL_NAME_EXCLUDED:
+            continue
+        if candidate.lower() in _FRAMEWORK_NAME_EXCLUDED_LOWER:
             continue
         in_evidence_only = (
             any(lo <= m.start() and m.end() <= hi for lo, hi in evidence_spans)
@@ -553,6 +697,19 @@ def check_completion(task_dir, workspace, default_branch):
             f"objective-named file(s) {named} not in the task branch diff, "
             f"but {cross_repo_desc} -- accepted as real cross-repo "
             f"completion evidence"
+        )
+
+    overridden = {
+        n: FROZEN_FILE_OVERRIDES[n] for n in named
+        if n in FROZEN_FILE_OVERRIDES and FROZEN_FILE_OVERRIDES[n] in diff_files
+    }
+    if overridden:
+        return True, (
+            f"objective named {named}, a real diff-only mismatch, but "
+            f"{list(overridden.keys())} is under a standing stop-work order "
+            f"and this diff contains its documented override file(s) "
+            f"{list(overridden.values())} instead -- accepted per "
+            f"FROZEN_FILE_OVERRIDES"
         )
 
     non_progress = sorted(f for f in diff_files if not is_progress_artifact(f))

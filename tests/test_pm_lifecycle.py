@@ -567,14 +567,74 @@ def test_checks_evidence_treats_real_pending_check_as_not_tested():
 
 def test_build_tightened_prompt_has_labeled_sections():
     mod = _load_module()
+    # task-20260815-215959-rca-and-resume--gtm-certification-worker: success_criteria
+    # must contain a real runnable command line per tight_task_validation.py's own
+    # check_success_criteria_has_runnable_command() -- build_tightened_prompt() now
+    # validates the assembled prompt against that same gate before returning it, so
+    # a prose-only "run: ..." line (no backticks, doesn't start with a COMMAND_WORDS
+    # token) is correctly rejected. `python3 -m pytest tests/` is the real form.
     prompt = mod.build_tightened_prompt(
-        "do the thing", "only this repo", "run: python3 -m pytest tests/",
+        "do the thing", "only this repo", "Verify with:\n`python3 -m pytest tests/`",
         "a real merged PR", known_context="read X first",
     )
     for header in ("## OBJECTIVE", "## SCOPE", "## SUCCESS_CRITERIA",
                    "## EXPECTED_OUTPUT", "## KNOWN_CONTEXT", "## COMPLEXITY_TIER"):
         assert header in prompt
     print("PASS: test_build_tightened_prompt_has_labeled_sections")
+
+
+def test_build_tightened_prompt_rejects_prose_only_success_criteria():
+    """Real regression coverage for the exact defect a prior independent audit
+    found in this fix (task-20260815-215959-rca-and-resume--gtm-certification-
+    worker): build_tightened_prompt() now runs the assembled prompt through
+    preflight-guard.py's own tight_task_schema_violation gate, so a
+    success_criteria that only describes an outcome in prose (no real,
+    detectable command line) must raise ValueError, not silently pass through
+    to a live dispatch that then dies ~2s later."""
+    mod = _load_module()
+    try:
+        mod.build_tightened_prompt(
+            "do the thing", "only this repo",
+            "Read the real full comment thread first, then fix the real cited issue.",
+            "a real merged PR", known_context="read X first",
+        )
+        raise AssertionError("expected ValueError for prose-only success_criteria")
+    except ValueError as e:
+        assert "no_runnable_verification_command_in_success_criteria" in str(e)
+    print("PASS: test_build_tightened_prompt_rejects_prose_only_success_criteria")
+
+
+def test_dispatch_audit_fix_and_independent_audit_success_criteria_pass_gate():
+    """Real regression test for the exact bug a prior independent audit found
+    on this PR (task-20260815-215959-rca-and-resume--gtm-certification-worker):
+    dispatch_audit_fix() and dispatch_independent_audit() both build a
+    success_criteria that embeds real `gh pr ...`/`git ...` commands inline in
+    prose sentences (no backticks, doesn't start with a COMMAND_WORDS token) --
+    once build_tightened_prompt() started validating via tight_task_validation.
+    validate_tight_task(), every real call to either function raised an
+    uncaught ValueError, aborting the whole audit-fix/independent-audit cycle.
+    Both must build a prompt without raising."""
+    mod = _load_module()
+    evidence = {
+        "repo": "veridian-scripts",
+        "pr_match": {"number": 401, "headRefName": "worker/some-branch"},
+        "audit": {"verdict": {"verdict": "AUDIT: FAIL", "createdAt": "2026-08-16T00:00:00Z"}},
+    }
+
+    captured = {}
+
+    def fake_dispatch_task(title, prompt, tier, medium, repo, attach=None, no_relay=False):
+        captured["prompt"] = prompt
+        return {"rc": 0}
+
+    mod.dispatch_task = fake_dispatch_task
+
+    mod.dispatch_audit_fix(evidence, tier=1, medium="claude_code_cli", repo="veridian-scripts")
+    assert "## SUCCESS_CRITERIA" in captured["prompt"]
+
+    mod.dispatch_independent_audit(evidence, tier=1, medium="claude_code_cli", repo="veridian-scripts")
+    assert "## SUCCESS_CRITERIA" in captured["prompt"]
+    print("PASS: test_dispatch_audit_fix_and_independent_audit_success_criteria_pass_gate")
 
 
 def test_check_deterministic_path_never_auto_executes_unlisted_capability():

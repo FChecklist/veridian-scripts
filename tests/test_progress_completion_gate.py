@@ -184,6 +184,101 @@ class TestExtractNamedCodeFiles(unittest.TestCase):
             gate.extract_named_code_files(text), ["pm-sentinel-tick.sh"]
         )
 
+    def test_excludes_absolute_path_cli_invocation_filenames(self):
+        """Real fix (UMR-20260806-092209-7a2e, re-dispatched 2026-08-15):
+        a SPEC's own "Real reproduction command" line quotes an absolute-
+        path `python3 /opt/veridian/scripts/resource_governor.py ...`
+        invocation verbatim -- a path-prefixed CLI-tool citation, not a
+        prose reference to the file's own code, and not covered by
+        _BOILERPLATE_TOOL_NAME_EXCLUDED (which only strips the bare form)."""
+        text = (
+            "Real reproduction command, python3 /opt/veridian/scripts/"
+            "resource_governor.py --query-umr --limit 14, which currently "
+            "returns twelve of fourteen rows as DIRECTIVE rejected "
+            "duplicate rows."
+        )
+        self.assertEqual(gate.extract_named_code_files(text), [])
+
+    def test_cli_invocation_filename_also_named_elsewhere_still_counts(self):
+        """A filename cited only as a `python3 <path>` CLI invocation AND
+        named again elsewhere (a distinct exact-string mention) as a real,
+        distinguishing objective is NOT excluded for that other mention --
+        only the CLI-invocation-only occurrence is."""
+        text = (
+            "Real reproduction command, python3 /opt/veridian/scripts/"
+            "resource_governor.py --query-umr --limit 14. The real fix "
+            "belongs in scripts/resource_governor.py's own dedup path."
+        )
+        self.assertEqual(
+            gate.extract_named_code_files(text), ["scripts/resource_governor.py"]
+        )
+
+    def test_path_prefixed_boilerplate_tool_name_without_interpreter_still_counts(self):
+        """A path-prefixed mention that is NOT preceded by a real
+        interpreter invocation (`python3`/`bash`/`sh`) is unaffected by the
+        CLI-invocation exclusion and still counts, exactly as
+        test_path_prefixed_boilerplate_tool_name_still_counts already
+        covers for the pre-existing exclusions."""
+        text = "Fix the --query-umr filter in scripts/resource_governor.py"
+        self.assertEqual(
+            gate.extract_named_code_files(text), ["scripts/resource_governor.py"]
+        )
+
+    def test_cli_invocation_regex_does_not_match_sh_mid_word(self):
+        """Real defect (independently audited task-20260816-171304, RCA
+        task-20260817-091427-repair-the-execution-harness-so-worker-r):
+        _CLI_INVOCATION_RE's alternation (?:python3?|bash|sh) had no leading
+        word boundary, so it matched "sh" as a bare SUFFIX of an ordinary
+        English word ("finish", "polish", "smash", ...) followed by
+        whitespace and a filename-shaped token -- silently mis-excluding a
+        real objective file as if it were only a CLI-invocation citation."""
+        text = "Please finish tests/foo.py before you polish tests/bar.sh."
+        self.assertEqual(
+            gate.extract_named_code_files(text), ["tests/foo.py", "tests/bar.sh"]
+        )
+
+    def test_excludes_framework_name_ending_in_code_extension(self):
+        """Real 2026-08-17 incident (SPEC item 3 of task-20260817-091427-
+        repair-the-execution-harness-so-worker-r): a prompt naming a real
+        JS framework whose own conventional name ends in a code-file
+        extension ("Vue.js") is matched by FILENAME_RE exactly like a real
+        filename, but naming a framework in prose is not an instruction to
+        create/edit a file of that literal name."""
+        text = "Rebuild the dashboard's chart panel using Vue.js and Chart.js."
+        self.assertEqual(gate.extract_named_code_files(text), [])
+
+    def test_framework_name_path_prefixed_still_counts(self):
+        """A path-prefixed mention of the same name is a real, distinguishing
+        reference to an actual vendored file and is NOT excluded -- same
+        rule as the bare-boilerplate-tool-name exclusion above."""
+        text = "Patch the bundled copy at vendor/Chart.js directly."
+        self.assertEqual(gate.extract_named_code_files(text), ["vendor/Chart.js"])
+
+    def test_excludes_filename_named_only_in_prohibition_clause(self):
+        """Real 2026-08-17 incident (SPEC item 3): a task's own CONSTRAINTS
+        section names a real file only to forbid touching it. Before this
+        fix, a task correctly obeying "Do not touch resource_governor.py"
+        (leaving it alone) had its honest, real diff rejected for not
+        touching a file it was explicitly told not to touch."""
+        text = (
+            "Fix the retry-storm bug in directive_engine.py. "
+            "Constraints: do not touch queue-manager.py -- it is owned "
+            "by a separate, in-flight PR."
+        )
+        self.assertEqual(
+            gate.extract_named_code_files(text), ["directive_engine.py"]
+        )
+
+    def test_prohibition_filename_also_named_elsewhere_still_counts(self):
+        """A filename named inside a prohibition clause AND named again
+        elsewhere as a real, distinguishing objective is NOT excluded --
+        only a mention that appears exclusively inside a prohibition is."""
+        text = (
+            "Do not touch dispatch_core.py directly. The real fix belongs "
+            "in dispatch_core.py's own swap gate -- land it there instead."
+        )
+        self.assertEqual(gate.extract_named_code_files(text), ["dispatch_core.py"])
+
 
 class TestCompletionGateConcurrentProgressFiles(unittest.TestCase):
     """(a) two simulated workers, two branches, two progress/<task_id>.md
@@ -374,6 +469,39 @@ class TestCompletionGateRejectsDocOnlyDiff(unittest.TestCase):
                 "--default-branch", "main",
             ])
             self.assertEqual(rc, 0)
+
+    def test_correct_fix_landed_in_documented_override_file_is_accepted(self):
+        """Real 2026-08-17 incident (SPEC item 3, task-20260817-091427-
+        repair-the-execution-harness-so-worker-r): dispatch_core.py is under
+        a real, standing stop-work order (resource_governor.py's
+        STOP_WORK_ORDER_TASK_IDS gate) -- this codebase's own established
+        pattern is that a real fix for it lands as a wrapper override in
+        resource_governor.py instead, never inside dispatch_core.py itself.
+        An objective naming dispatch_core.py as "the bug is in X" whose real
+        diff correctly lands in resource_governor.py (never touching
+        dispatch_core.py) must be ACCEPTED, not rejected as a diff/objective
+        mismatch."""
+        with tempfile.TemporaryDirectory() as tmp:
+            task_dir = self._make_task(
+                tmp,
+                "Unwedge dispatch: swap gate vetoes on STATIC occupancy "
+                "(dispatch_core.py, in the swap gate).",
+            )
+            ws = self._make_workspace(tmp)
+            with open(os.path.join(ws, "resource_governor.py"), "w") as f:
+                f.write("def swap_gate_override():\n    return True  # real wrapper fix\n")
+            with open(os.path.join(ws, "PROGRESS.md"), "w") as f:
+                f.write(
+                    "## Completed\n- [x] fixed the swap gate via resource_governor.py "
+                    "wrapper (dispatch_core.py is frozen, standing stop-work order)\n"
+                    "## Remaining\n"
+                )
+            run(ws, "add", "-A")
+            run(ws, "commit", "-q", "-m", "real fix landed in the documented override file")
+
+            ok, reason = gate.check_completion(task_dir, ws, "main")
+            self.assertTrue(ok, reason)
+            self.assertIn("FROZEN_FILE_OVERRIDES", reason)
 
     def test_no_code_named_objective_gate_does_not_apply(self):
         with tempfile.TemporaryDirectory() as tmp:

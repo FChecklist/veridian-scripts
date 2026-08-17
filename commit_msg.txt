@@ -1,0 +1,6 @@
+Revert worker-exit-status-bridge regression
+
+Per independent audit: new --logs-ref argument not supported by live
+superboss-register.py. All tests passing.
+
+Co-Authored-By: Claude Haiku 4.5 <noreply@anthropic.com>

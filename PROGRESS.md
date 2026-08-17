@@ -1,4 +1,4 @@
-# PROGRESS -- task-20260817-024644-real-code-review---audit-verdict-needed
+# PROGRESS -- task-20260817-091427-repair-the-execution-harness-so-worker-r
 
 ## Completed
 

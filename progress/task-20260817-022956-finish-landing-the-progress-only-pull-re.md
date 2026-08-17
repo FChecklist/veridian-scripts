@@ -115,6 +115,22 @@ diff) and prove both deployed files carry the switch via grep.
       `tight_task_validation.check_success_criteria_has_runnable_command()`
       function before dispatch this time (returns `None` = valid).
       Awaiting real AUDIT:PASS/FAIL.
+
+## Status at session budget limit (2026-08-17 ~02:56Z)
+Attempt 4 (UMR-20260817-024638-9154,
+`veridian-worker@task-20260817-024644-real-code-review---audit-verdict-needed.service`)
+is genuinely `status=running` (confirmed via `resource_governor.py
+--query-umr`, polled repeatedly over ~13 real minutes) -- past all 3
+preflight gates, a real independent reviewer actively working. No PR #444
+comment yet (`gh pr view 444 --comments`, polled, count=0 each time). This
+session is stopping here on real session budget exhaustion, NOT because the
+audit finished -- do not treat this as a PASS, and do not merge PR #444
+without a real, independently-posted AUDIT:PASS comment against its current
+head SHA (4b3374e / 23df58e / 2c26b1f, whichever is HEAD when checked).
+A follow-up task/turn should: poll UMR-20260817-024638-9154 to a real
+terminal status, read the actual posted verdict, merge PR #444 only on a
+genuine PASS (fix-on-branch + re-audit on a real FAIL), then do THIRD (live
+deploy + grep proof) below -- none of that is done yet.
 - [ ] On genuine PASS: merge PR #444. On real findings: fix on this same
       branch (preserve commits), re-audit.
 - [ ] THIRD: deploy live -- fast-forward /opt/veridian/scripts to the

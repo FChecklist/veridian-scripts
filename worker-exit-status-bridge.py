@@ -352,24 +352,10 @@ def run(task_id, unit_kind="worker"):
             f"outcome) -- bridging to umr_tasks so the row does not stay at 'running' forever with "
             f"no further exit ever coming."
         )
-    # task-20260815-215959-rca-and-resume--gtm-certification-worker: real fix
-    # for logs_ref staying NULL on every terminal row this hook ever wrote.
-    # journalctl alone is not diagnostic for a unit like this (StandardOutput/
-    # StandardError are redirected to a per-task append: file, not journald --
-    # a fast-dying worker showed only "Started"/"Consumed Ns CPU time" with no
-    # real output visible from journalctl at all). worker.log is the real,
-    # always-present file this same script's own _log() calls write to
-    # (task.yaml/systemd.log are the other two real per-task artifacts, but
-    # worker.log is worker-entrypoint.sh's own primary diagnostic stream --
-    # see that script's own `>> "$TASK_DIR/worker.log"` redirects throughout).
-    # Best-effort: a bad task_id/AI_OS path must never block the real
-    # mark-umr-terminal call above it guards.
-    logs_ref = f"{AI_OS}/tasks/{task_id}/{UNIT_KIND_CONFIG[unit_kind]['log_name']}"
     try:
         result = subprocess.run(
             ["python3", SUPERBOSS_REGISTER, "mark-umr-terminal",
-             "--umr-id", row["umr_id"], "--status", "failed", "--reason", reason,
-             "--logs-ref", logs_ref],
+             "--umr-id", row["umr_id"], "--status", "failed", "--reason", reason],
             capture_output=True, text=True, timeout=35,
         )
         _log(task_id, unit_kind, f"mark-umr-terminal umr={row['umr_id']} status=failed rc={result.returncode} "
